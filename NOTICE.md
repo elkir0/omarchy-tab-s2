@@ -22,7 +22,13 @@ from your own tablet, and those files stay on your machine:
 - the modem's BOOT and MAIN images, read from the RADIO partition at run time, on the tablet;
 - the NV data, read from EFS, on the tablet.
 
-For the same reason this project publishes no root image: one would carry Samsung's two files.
+The released root image carries neither of the first two and no SSH key: the initramfs copies them
+from the tablet's own SYSTEM partition at boot (`image/tools/build-rootfs --public`).
+
+The released images hold free software from Arch Linux ARM, Omarchy, omarchy-mobile, Debian (Chromium)
+and this repository. Their sources are at those projects. The kernel is `v6.12.114` plus the patches
+in `kernel/patches/` (`t715-bringup`, `t715-modem`, `t715-parity`), built with
+`gts28ltexx_modem.config`.
 
 The notes in `research/` and `docs/hardware/` describe what we observed, for interoperability, by
 reading public sources and by static analysis of Samsung's binaries, decompilation included:

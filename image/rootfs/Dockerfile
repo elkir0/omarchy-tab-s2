@@ -115,8 +115,9 @@ RUN --mount=type=bind,from=t715repo,target=/repo \
 #     brcm/BCM.<board compatible>.hcd.
 # ---------------------------------------------------------------------------
 RUN --mount=type=bind,source=firmware/bt,target=/t715/firmware/bt \
-    install -Dm0644 /t715/firmware/bt/bcm4358A3_V0086.0144.hcd /usr/lib/firmware/brcm/BCM4358A3.hcd && \
-    install -m0644 /t715/firmware/bt/bcm4358A3_V0086.0144.hcd /usr/lib/firmware/brcm/bcm4358A3_V0086.0144.hcd && \
+    install -d /usr/lib/firmware/brcm && \
+    { [ ! -f /t715/firmware/bt/bcm4358A3_V0086.0144.hcd ] || install -m0644 /t715/firmware/bt/bcm4358A3_V0086.0144.hcd /usr/lib/firmware/brcm/BCM4358A3.hcd; } && \
+    { [ ! -f /t715/firmware/bt/bcm4358A3_V0086.0144.hcd ] || install -m0644 /t715/firmware/bt/bcm4358A3_V0086.0144.hcd /usr/lib/firmware/brcm/bcm4358A3_V0086.0144.hcd; } && \
     ln -sfn BCM4358A3.hcd '/usr/lib/firmware/brcm/BCM.samsung,gts28ltexx.hcd'
 
 # ---------------------------------------------------------------------------

@@ -499,6 +499,11 @@ md5 -q image/out/rootfs-omarchy.img          # needed by the push script
   20 %, 4032 MiB on 2026-10-29), its `.sha256` and
   `image/out/rootfs-omarchy.MANIFEST`. Log: `image/cache/rootfs-omarchy-build.log`.
   Options: `--size MiB`, `--keep-image`, `--no-cache`.
+- `image/tools/build-rootfs --public` builds the image for a release: no SSH key
+  and neither vendor file. At boot the initramfs copies the NVRAM and the patch
+  RAM from the tablet's SYSTEM partition, read-only, and installs
+  `media/0/linux/authorized_keys` if the root has no key. Check it with
+  `image/tests/verify-rootfs.sh IMAGE none`.
 - `image/tests/verify-rootfs.sh` reads the image read-only in a helper container
   and prints `PASS`/`FAIL` per check and `RESULT: PASS|FAIL` (247 checks
   on 2026-10-29). It also compares the USB link, Bluetooth and Wi-Fi files
@@ -514,9 +519,9 @@ images `t715-omarchy:base-*`, `t715-omarchy:dev-*`,
 `t715-omarchy-rootfs-helper`, volumes `t715-omarchy-*`, BuildKit cache
 (`docker builder prune` drops it).
 
-The image has fixed settings: hostname `gts28lte-omarchy`, `LANG=fr_FR.UTF-8`,
-time zone UTC, French AZERTY first on the on-screen keyboard. No build option
-changes them; they are set in
+The image has fixed settings: hostname `gts28lte-omarchy`, `LANG=en_US.UTF-8`,
+time zone UTC, US QWERTY first on the on-screen keyboard, French AZERTY second.
+No build option changes them; they are set in
 `image/rootfs/configure-system.sh` and `image/rootfs/omarchy-user-setup.sh` and
 asserted by `image/rootfs/smoke-check.sh` and `image/tests/verify-rootfs.sh`.
 
@@ -1117,7 +1122,7 @@ Most important first.
 11. **`T715_ADB_WIFI`** is required: nothing finds the tablet's address.
 12. **The case-sensitive volume** for `src/` and its creation are
     not documented.
-13. **Fixed settings** (French locale, AZERTY first, UTC, hostname) have no build option and are asserted by the
+13. **Fixed settings** (US English, QWERTY first, UTC, hostname) have no build option and are asserted by the
     checks.
 14. **Docker resources** (disk, memory) for the Omarchy build are not
     measured; the Phosh builder notes about 10 GB inside Docker.

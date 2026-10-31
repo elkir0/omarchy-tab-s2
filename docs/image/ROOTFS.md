@@ -96,7 +96,7 @@ records; it prints `PASS`/`FAIL` per check and `RESULT: PASS|FAIL`.
 
 - **Arch Linux ARM armv7h**, fully upgraded at build time, without kernel,
   modules or firmware. Hostname `gts28lte-omarchy`, time zone
-  UTC, locales en_US.UTF-8 and fr_FR.UTF-8, `LANG=fr_FR.UTF-8`. Documentation
+  UTC, locales en_US.UTF-8 and fr_FR.UTF-8, `LANG=en_US.UTF-8`. Documentation
   and translations other than English and French are removed, as in the
   Phosh image.
 - **The RTC is Android's**: nothing in the image writes it (no `hwclock`

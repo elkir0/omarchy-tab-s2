@@ -36,11 +36,11 @@ chmod 0440 /etc/sudoers.d/10-wheel
 visudo -c >/dev/null || die "sudoers do not parse"
 
 # --- locale, time zone ------------------------------------------------------
-log "locales en_US.UTF-8 fr_FR.UTF-8, LANG=fr_FR.UTF-8, UTC"
+log "locales en_US.UTF-8 fr_FR.UTF-8, LANG=en_US.UTF-8, UTC"
 sed -i -e 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' \
        -e 's/^#fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen
 locale-gen
-echo 'LANG=fr_FR.UTF-8' > /etc/locale.conf
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
 [ -e /usr/share/zoneinfo/UTC ] || die "no zoneinfo for UTC"
 ln -sfn /usr/share/zoneinfo/UTC /etc/localtime
 printf 'UTC\n' > /etc/timezone
@@ -63,12 +63,14 @@ chown -R "$U:$U" "/home/$U"
 # --- SSH --------------------------------------------------------------------
 log "SSH key for root and $U"
 key=/t715/ssh/authorized_keys
-[ "$(grep -c . "$key")" -ge 1 ] || die "empty SSH key"
 ! grep -q 'PRIVATE KEY' "$key" || die "the SSH key file is a private key"
 install -d -m 0700 -o root -g root /root/.ssh
-install -m 0600 -o root -g root "$key" /root/.ssh/authorized_keys
 install -d -m 0700 -o "$U" -g "$U" "/home/$U/.ssh"
-install -m 0600 -o "$U" -g "$U" "$key" "/home/$U/.ssh/authorized_keys"
+# A public image has no key: the initramfs installs media/0/linux/authorized_keys.
+if [ -s "$key" ]; then
+    install -m 0600 -o root -g root "$key" /root/.ssh/authorized_keys
+    install -m 0600 -o "$U" -g "$U" "$key" "/home/$U/.ssh/authorized_keys"
+fi
 
 # --- display ----------------------------------------------------------------
 # card0 = exynos-drm (panel), card1 = panfrost (render only): aquamarine must

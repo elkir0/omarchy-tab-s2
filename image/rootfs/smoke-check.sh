@@ -213,8 +213,8 @@ if [ "$osk" = true ]; then
 else
     fail "alarm's gsetting screen-keyboard-enabled: ${osk:-unreadable}, not true"
 fi
-# Its layout: the first input source, French AZERTY.
-want="[('xkb', 'fr'), ('xkb', 'us')]"
+# Its layout: the first input source, US QWERTY.
+want="[('xkb', 'us'), ('xkb', 'fr')]"
 src="$(run env HOME=/home/alarm gsettings get org.gnome.desktop.input-sources sources 2>/dev/null)"
 if [ "$src" = "$want" ]; then
     pass "alarm's gsetting org.gnome.desktop.input-sources sources: $src"
@@ -340,7 +340,13 @@ else fail "omamobile plugins not linked for alarm:$bad"; fi
 
 echo "== Bluetooth (docs/image/ROOTFS.md) =="
 fw=/usr/lib/firmware/brcm
-if [ -f "$fw/BCM4358A3.hcd" ] && [ "$(readlink "$fw/BCM.samsung,gts28ltexx.hcd")" = BCM4358A3.hcd ]; then
+if [ -e /usr/share/t715-omarchy/build/public-image ]; then
+    if [ ! -e "$fw/BCM4358A3.hcd" ] && [ "$(readlink "$fw/BCM.samsung,gts28ltexx.hcd")" = BCM4358A3.hcd ]; then
+        pass "public image: no patch RAM, BCM.samsung,gts28ltexx.hcd ready for the one copied at boot"
+    else
+        fail "public image: a patch RAM in $fw, or no BCM.samsung,gts28ltexx.hcd link"
+    fi
+elif [ -f "$fw/BCM4358A3.hcd" ] && [ "$(readlink "$fw/BCM.samsung,gts28ltexx.hcd")" = BCM4358A3.hcd ]; then
     pass "BCM4358 patch RAM: $fw/BCM4358A3.hcd ($(wc -c < "$fw/BCM4358A3.hcd") bytes), BCM.samsung,gts28ltexx.hcd -> BCM4358A3.hcd"
 else
     fail "no BCM4358 patch RAM in $fw, or no BCM.samsung,gts28ltexx.hcd link"
@@ -361,7 +367,14 @@ fi
 
 echo "== Wi-Fi (docs/image/ROOTFS.md) =="
 # The NVRAM holds the tablet's MAC address: only its presence and size here.
-if [ -f "$fw/brcmfmac4358-pcie.bin" ] && [ -s "$fw/samsung-gts28/nvram_net.txt" ] \
+if [ -e /usr/share/t715-omarchy/build/public-image ]; then
+    if [ -f "$fw/brcmfmac4358-pcie.bin" ] && [ ! -e "$fw/samsung-gts28/nvram_net.txt" ] \
+            && [ "$(readlink "$fw/brcmfmac4358-pcie.txt")" = samsung-gts28/nvram_net.txt ]; then
+        pass "public image: brcmfmac4358-pcie.bin, no NVRAM, the link ready for the one copied at boot"
+    else
+        fail "public image: no brcmfmac4358-pcie.bin, an NVRAM, or no brcmfmac4358-pcie.txt link"
+    fi
+elif [ -f "$fw/brcmfmac4358-pcie.bin" ] && [ -s "$fw/samsung-gts28/nvram_net.txt" ] \
         && [ "$(readlink "$fw/brcmfmac4358-pcie.txt")" = samsung-gts28/nvram_net.txt ]; then
     pass "BCM4358 Wi-Fi: $fw/brcmfmac4358-pcie.bin ($(wc -c < "$fw/brcmfmac4358-pcie.bin") bytes), brcmfmac4358-pcie.txt -> samsung-gts28/nvram_net.txt ($(wc -c < "$fw/samsung-gts28/nvram_net.txt") bytes)"
 else

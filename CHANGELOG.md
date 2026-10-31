@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.1, pre-release
+
+A ROM to flash.
+
+- `boot.img`, `recovery.img` and `rootfs-omarchy.img.xz` in the release.
+- The image holds no SSH key and no Samsung file. At boot the initramfs copies the Wi-Fi NVRAM and
+  the Bluetooth patch RAM from the tablet's own SYSTEM partition, and installs
+  `media/0/linux/authorized_keys` if you put one there.
+- `image/tools/build-rootfs --public` builds it.
+- English and QWERTY by default, AZERTY one tap away, UTC.
+
+The first boot was tested on the reference tablet from RECOVERY. The Android steps and the Heimdall
+flash of this ROM were never run: that tablet has no Android left.
+
 ## 0.9.0, pre-release
 
 The first public version. Omarchy runs daily on one SM-T715, on Linux 6.12 with a 32-bit userland.
@@ -26,4 +40,3 @@ The first public version. Omarchy runs daily on one SM-T715, on Linux 6.12 with 
 - One tablet tested. Nobody has followed the install guide from a clean clone yet.
 - No emergency calls, suspend, hardware video decoding, frequency scaling or fingerprint reader.
 - The rear camera wants the screen lit, and neither camera has a preview or autofocus.
-- No root image is published: it would carry Samsung's files. You build yours.

@@ -5,7 +5,7 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 0.9.0, pre-release.** It runs daily on one tablet. Nobody else has installed it yet.
+**Version 0.9.1, pre-release.** It runs daily on one tablet. Nobody else has installed it yet.
 
 An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
@@ -45,25 +45,114 @@ models are not covered.
 
 ## Install Omarchy
 
-From a stock tablet to the first boot. This is the short path; [docs/DEPLOY.md](docs/DEPLOY.md) has
-each step in full, with what can go wrong. These steps ran on the reference tablet, but nobody has
-followed them from a clean clone yet: expect rough edges, and please report them.
+Two ways: flash the prebuilt ROM, or build everything from source.
 
 > **Read this first.**
-> - The first image Samsung did not sign blows the tablet's Knox warranty bit for good.
+> - Both blow the tablet's Knox warranty bit for good.
+> - **The ROM replaces Android.** Your Android data stays on the tablet, unused.
 > - **Never write** BOOTLOADER, EFS, m9kefs1-3, RADIO, CDMA-RADIO, PARAM or BOTA. EFS holds your
 >   IMEI, and the modem's boot code programs eFuses.
 > - Leave Linux with `systemctl reboot`. Do not hold hardware keys down to force a restart.
 > - This comes with no warranty. You can lose your data and your tablet.
 
-### What you need
+### Flash the ROM
+
+**Status:** the ROM's first boot, its copy to internal storage, Wi-Fi, Bluetooth and the modem were
+tested on the reference tablet, booted from RECOVERY. That tablet has no Android left, so the Android
+steps below and the Heimdall flash of this ROM were never run. You would be the first: expect rough
+edges, and report them.
+
+You need an SM-T715 on Android 7.0, firmware `T715XXU2CRH1`, hardware revision 9, not encrypted, with
+9 GB free. Another firmware may boot, but the modem only accepts this exact RADIO image. You also
+need `adb`, [Heimdall](https://git.sr.ht/~grimler/Heimdall), `xz` and a USB cable.
+
+1. On the tablet, turn on Developer options, USB debugging and OEM unlocking, and connect it to the
+   same Wi-Fi network as your computer. Back up what you care about, ideally with a TWRP backup of
+   EFS ([docs/DEPLOY.md, 5.3](docs/DEPLOY.md#53-the-stock-boot-image-twrp)).
+2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download `boot.img`,
+   `recovery.img`, `rootfs-omarchy.img.xz` and `SHA256SUMS`, then unpack and check them:
+
+   ```bash
+   xz -dk rootfs-omarchy.img.xz
+   ```
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+3. Copy the image over Wi-Fi: Android 7 drops big files over USB.
+
+   ```bash
+   adb tcpip 5555
+   ```
+
+   ```bash
+   adb connect <tablet-ip>:5555
+   ```
+
+   ```bash
+   adb -s <tablet-ip>:5555 shell mkdir -p /sdcard/linux
+   ```
+
+   ```bash
+   adb -s <tablet-ip>:5555 push rootfs-omarchy.img /sdcard/linux/rootfs-omarchy.img
+   ```
+
+   To log in over SSH later, also copy your public key. The image has none, so without it SSH stays
+   closed:
+
+   ```bash
+   adb -s <tablet-ip>:5555 push ~/.ssh/id_ed25519.pub /sdcard/linux/authorized_keys
+   ```
+
+   Let Android finish writing:
+
+   ```bash
+   adb -s <tablet-ip>:5555 shell 'sync; sleep 45; sync'
+   ```
+
+4. Check that the size matches your local file, then flash:
+
+   ```bash
+   adb -s <tablet-ip>:5555 shell ls -l /sdcard/linux/rootfs-omarchy.img
+   ```
+
+   ```bash
+   adb reboot download
+   ```
+
+   ```bash
+   heimdall flash --BOOT boot.img --RECOVERY recovery.img
+   ```
+
+5. The tablet restarts. **The screen stays dark for 3 to 4 minutes on the first boot** while the
+   system copies itself to internal storage: leave it alone. It also takes the Wi-Fi and Bluetooth
+   files from your tablet's own Android system partition, then Omarchy starts.
+
+Then:
+- **Wi-Fi:** quick settings, Wi-Fi tile.
+- **Mobile data and LTE:** open `Réseau mobile` in the app drawer and set your operator's APN.
+- **Password:** hold Power, then the PIN row. The default password is `alarm`. Choosing yours turns
+  on the screen lock, and `sudo` asks for it from then on.
+- **Touch:** tap or pull down the top bar for quick settings. Swipe up from the home pill for home,
+  swipe in from a side edge for back. Power: screen off and on.
+
+To go back to Android, flash the stock firmware for your tablet.
+
+### Build from source
+
+From a stock tablet to the first boot, keeping Android at first. This is the short path;
+[docs/DEPLOY.md](docs/DEPLOY.md) has each step in full, with what can go wrong. These steps ran on
+the reference tablet, but nobody has followed them from a clean clone yet.
+
+#### What you need
 
 - An SM-T715 on Android 7.0, firmware `T715XXU2CRH1`, hardware revision 9, not encrypted.
 - A Mac on Apple silicon. Linux hosts are untested, and a few scripts use macOS commands.
 - Docker with arm/v7 emulation, `adb`, `dtc`, `python3`, `cmake`, `libusb`, `nc`, and an SSH key.
 - A USB cable, and one to two hours of build time.
 
-### 1. Prepare the tablet
+#### 1. Prepare the tablet
 
 On the tablet, turn on Developer options, USB debugging and OEM unlocking, and accept the RSA
 prompt. Connect it to the same Wi-Fi network as your Mac. Then check it:
@@ -78,7 +167,7 @@ for p in ro.product.model ro.boot.hw_rev ro.bootloader ro.crypto.state; do print
 
 Expect `SM-T715`, `9` or more, `T715XXU2CRH1`, `unencrypted`.
 
-### 2. Get the sources
+#### 2. Get the sources
 
 The kernel tree needs a case-sensitive volume on macOS.
 
@@ -109,7 +198,7 @@ for s in bringup modem parity; do git -C src/linux-6.12 am "$PWD"/kernel/patches
 Then build Heimdall into `src/heimdall`, as in
 [docs/DEPLOY.md, 3.4](docs/DEPLOY.md#34-heimdall).
 
-### 3. Save what is unique to your tablet
+#### 3. Save what is unique to your tablet
 
 The vendor files are not in this repository: they are Samsung's, so the build takes them from your
 own tablet. This script writes nothing to the tablet:
@@ -123,7 +212,7 @@ from its touch interface. USB does not work under TWRP on this tablet: copy the 
 Android. **Keep it: it is the only way back if EFS is ever damaged.** Put `boot.emmc.win` at
 `dumps/stock/boot.img` ([docs/DEPLOY.md, 5.3](docs/DEPLOY.md#53-the-stock-boot-image-twrp)).
 
-### 4. Keep Android from rewriting RECOVERY
+#### 4. Keep Android from rewriting RECOVERY
 
 ```bash
 bash boot/patch-stock-boot.sh
@@ -137,7 +226,7 @@ adb -s "$S" reboot download
 src/heimdall/build/bin/heimdall flash --BOOT out/stock-patched/boot.img
 ```
 
-### 5. Build everything
+#### 5. Build everything
 
 The kernel, first without the modem:
 
@@ -179,7 +268,7 @@ image/tests/verify-rootfs.sh "$PWD/image/out/rootfs-omarchy.img" ~/.ssh/id_ed255
 
 The last line must say `RESULT: PASS`.
 
-### 6. Flash and boot
+#### 6. Flash and boot
 
 ```bash
 adb -s "$S" shell mkdir -p /sdcard/linux
@@ -197,7 +286,7 @@ Push the image, which then boots it. Keep the USB cable in:
 T715_ADB_WIFI=<tablet-ip>:5555 bash device/push-rootfs-image.sh --select image/out/rootfs-omarchy.img rootfs-omarchy.img "$(md5 -q image/out/rootfs-omarchy.img)"
 ```
 
-### 7. First boot
+#### 7. First boot
 
 The Samsung logo, then Omarchy's session, which logs in by itself. SSH answers on the USB cable:
 
@@ -211,17 +300,18 @@ device/tssh
   a reboot, and `systemctl reboot` goes back to Android.
 - **Check it:** `systemctl --failed`, and `/usr/lib/t715-omarchy/smoke-check` on the tablet.
 
-The image starts in French with AZERTY first, on UTC. To change that on the tablet:
+The image starts in English with QWERTY first and AZERTY in the keyboard's layout menu, on UTC. To
+change that on the tablet:
 
 ```bash
-sudo localectl set-locale LANG=en_US.UTF-8
+sudo localectl set-locale LANG=fr_FR.UTF-8
 ```
 
 ```bash
 sudo timedatectl set-timezone Region/City
 ```
 
-### 8. Make it permanent
+#### 8. Make it permanent
 
 Three steps, each in the guide. The second one replaces Android, and removing its data cannot be
 undone:

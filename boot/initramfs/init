@@ -874,6 +874,62 @@ install_modules() {
     fi
 }
 
+# import_device_files: a public image carries neither the Wi-Fi NVRAM nor
+# the Bluetooth patch RAM, which are Samsung's, and no SSH key.  The first two
+# are copied here from this tablet's own SYSTEM partition, read-only, before
+# anything asks for them; the same redaction as the dump script keeps the
+# NVRAM's shared macaddr line out.  A key in media/0/linux/authorized_keys is
+# installed if the root has none: without Android nothing else writes there,
+# and ufw only lets SSH in on the USB cable.  Never fatal: without them there
+# is no Wi-Fi, Bluetooth or SSH, and the session still starts.
+import_device_files() {
+    _if_fw=$NEWROOT/usr/lib/firmware/brcm
+    if [ -d "$_if_fw" ] && { [ ! -f "$_if_fw/samsung-gts28/nvram_net.txt" ] || [ ! -f "$_if_fw/BCM4358A3.hcd" ]; }; then
+        _if_dev=$(list_partnames | while read -r _if_d _if_n; do
+            if [ "$_if_n" = SYSTEM ]; then
+                printf '%s' "$_if_d"
+            fi
+        done)
+        if [ -n "$_if_dev" ] && [ -b "/dev/$_if_dev" ]; then
+            run blockdev --setro "/dev/$_if_dev"
+            mkdir -p /system-ro
+            if run mount -t ext4 -o ro,noload,nosuid,nodev,noexec "/dev/$_if_dev" /system-ro; then
+                mkdir -p "$_if_fw/samsung-gts28"
+                if [ -f /system-ro/etc/wifi/nvram_net.txt ]; then
+                    sed 's/^macaddr=.*/macaddr=<REDACTED>/' /system-ro/etc/wifi/nvram_net.txt \
+                        >"$_if_fw/samsung-gts28/nvram_net.txt" &&
+                        chmod 0644 "$_if_fw/samsung-gts28/nvram_net.txt" &&
+                        log "device files: Wi-Fi NVRAM copied from SYSTEM"
+                else
+                    warn "device files: no NVRAM on SYSTEM"
+                fi
+                if [ -f /system-ro/vendor/firmware/bcm4358A3_V0086.0144.hcd ]; then
+                    cp /system-ro/vendor/firmware/bcm4358A3_V0086.0144.hcd "$_if_fw/BCM4358A3.hcd" &&
+                        chmod 0644 "$_if_fw/BCM4358A3.hcd" &&
+                        log "device files: Bluetooth patch RAM copied from SYSTEM"
+                else
+                    warn "device files: no Bluetooth patch RAM on SYSTEM"
+                fi
+                run umount /system-ro
+            else
+                warn "device files: could not mount SYSTEM"
+            fi
+        else
+            warn "device files: no partition named SYSTEM"
+        fi
+    fi
+    _if_key=$UD_MNT/media/0/linux/authorized_keys
+    if [ -s "$_if_key" ] && [ ! -s "$NEWROOT/root/.ssh/authorized_keys" ]; then
+        mkdir -p "$NEWROOT/root/.ssh" "$NEWROOT/home/alarm/.ssh"
+        cp "$_if_key" "$NEWROOT/root/.ssh/authorized_keys"
+        cp "$_if_key" "$NEWROOT/home/alarm/.ssh/authorized_keys"
+        chmod 0700 "$NEWROOT/root/.ssh" "$NEWROOT/home/alarm/.ssh"
+        chmod 0600 "$NEWROOT/root/.ssh/authorized_keys" "$NEWROOT/home/alarm/.ssh/authorized_keys"
+        chown -R 1000:1000 "$NEWROOT/home/alarm/.ssh"
+        log "device files: SSH key installed from media/0/linux/authorized_keys"
+    fi
+}
+
 # write_modblacklist: t715.modblacklist, see the knob list at the top.
 # Into /run/modprobe.d (moved into the new root with /run, read by kmod):
 # a knob must not outlive its boot on a persistent root.
@@ -1099,6 +1155,7 @@ prepare_root() {
     elif [ -n "$PERSIST" ]; then
         if persist_root; then
             install_modules
+            import_device_files
             write_modblacklist
             write_autotest
             return 0
@@ -1108,6 +1165,7 @@ prepare_root() {
     attach_image || return 1
     mount_newroot || return 1
     install_modules
+    import_device_files
     write_modblacklist
     write_autotest
 }

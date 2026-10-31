@@ -4,6 +4,7 @@
 # (docs/image/ROOTFS.md), without booting it.
 #
 # Usage: tests/verify-rootfs.sh IMAGE PUBKEY
+#        tests/verify-rootfs.sh IMAGE none     an image built with --public
 #   IMAGE   out/rootfs-omarchy.img
 #   PUBKEY  the public key given to tools/build-rootfs --ssh-pubkey
 #
@@ -44,6 +45,11 @@ CTR="t715-omarchy-rootfs-verify"
 
 setup_error() { echo "SETUP ERROR: $*" >&2; exit 2; }
 [ -f "$IMG" ] || setup_error "image not found: $IMG"
+PUBLIC=0
+if [ "$KEY" = none ]; then
+    PUBLIC=1
+    KEY=$(mktemp); BT_FIRMWARE=$KEY; WIFI_NVRAM=$KEY
+fi
 [ -r "$KEY" ] || setup_error "cannot read SSH public key: $KEY"
 [ -f "$BT_FIRMWARE" ] || setup_error "no $BT_FIRMWARE (set T715_DUMPS_DIR)"
 [ -f "$WIFI_NVRAM" ] || setup_error "no $WIFI_NVRAM (set T715_DUMPS_DIR)"
@@ -189,12 +195,16 @@ for u in usb-rndis.service sshd.service; do
 done
 
 echo "== SSH =="
+if [ "$PUBLIC" = 1 ]; then
+    check "public image: no SSH key" sh -c '! debugfs -R "stat /root/.ssh/authorized_keys" /img/rootfs.img 2>/dev/null | grep -q "^Inode:" && ! debugfs -R "stat /home/alarm/.ssh/authorized_keys" /img/rootfs.img 2>/dev/null | grep -q "^Inode:"'
+else
 get /root/.ssh/authorized_keys
 check "/root/.ssh/authorized_keys == PUBKEY" cmp -s "$W/f" /img/key.pub
 check "/root/.ssh mode 0700, owner 0:0" \
     test "$(fmode /root/.ssh) $(fuid /root/.ssh):$(fgid /root/.ssh)" = "0700 0:0"
 check "/root/.ssh/authorized_keys mode 0600, owner 0:0" \
     test "$(fmode /root/.ssh/authorized_keys) $(fuid /root/.ssh/authorized_keys):$(fgid /root/.ssh/authorized_keys)" = "0600 0:0"
+fi
 get /etc/ssh/sshd_config.d/10-t715.conf; cp "$W/f" "$W/sshd.conf"
 check "sshd: PermitRootLogin prohibit-password, PasswordAuthentication no" \
     sh -c 'grep -qx "PermitRootLogin prohibit-password" "$1" && grep -qx "PasswordAuthentication no" "$1"' _ "$W/sshd.conf"
@@ -642,6 +652,7 @@ check "/usr/local/sbin/t715-bt-addr mode 0755" test "$(fmode /usr/local/sbin/t71
 BTFW=/usr/lib/firmware/brcm
 fwsha="$(sha256sum < /bt-firmware.hcd | cut -d' ' -f1)"
 for f in BCM4358A3.hcd bcm4358A3_V0086.0144.hcd; do
+    if [ "$PUBLIC" = 1 ]; then check "public image: no $BTFW/$f" absent "$BTFW/$f"; continue; fi
     get "$BTFW/$f"
     check "$BTFW/$f: the vendor dump bcm4358A3_V0086.0144.hcd (sha256 ${fwsha:0:16}...), mode 0644" \
         sh -c '[ "$(sha256sum < "$1" | cut -d" " -f1)" = "$2" ] && [ "$3" = 0644 ]' _ "$W/f" "$fwsha" "$(fmode "$BTFW/$f")"
@@ -651,9 +662,14 @@ check "$BTFW/BCM.samsung,gts28ltexx.hcd -> BCM4358A3.hcd (btbcm's board-specific
 fwls="$(dfs "ls -p /usr/lib/firmware" | awk -F/ '$6 != "" && $6 != "." && $6 != ".." {print $6}' | tr '\n' ' ')"
 brls="$(dfs "ls -p $BTFW" | awk -F/ '$6 != "" && $6 != "." && $6 != ".." {print $6}' | sort | tr '\n' ' ')"
 gtls="$(dfs "ls -p $BTFW/samsung-gts28" | awk -F/ '$6 != "" && $6 != "." && $6 != ".." {print $6}' | sort | tr '\n' ' ')"
+if [ "$PUBLIC" = 1 ]; then
+    check "public image: brcm/ holds no vendor file (${brls:-empty}; samsung-gts28/: ${gtls:-empty})" \
+        sh -c '[ "$1" = "BCM.samsung,gts28ltexx.hcd brcmfmac4358-pcie.bin brcmfmac4358-pcie.txt samsung-gts28 " ] && [ -z "$2" ]' _ "$brls" "$gtls"
+else
 check "brcm/ holds the Bluetooth and Wi-Fi entries only (${brls:-empty}; samsung-gts28/: ${gtls:-empty}; /usr/lib/firmware: ${fwls:-empty}), no Samsung bcmdhd firmware" \
     sh -c '[ "$1" = "BCM.samsung,gts28ltexx.hcd BCM4358A3.hcd bcm4358A3_V0086.0144.hcd brcmfmac4358-pcie.bin brcmfmac4358-pcie.txt samsung-gts28 " ] &&
            [ "$3" = "nvram_net.txt " ] && ! printf "%s\n" "$2" | grep -qiE "brcmfmac|samsung-gts28|bcmdhd"' _ "$brls" "$fwls" "$gtls"
+fi
 for p in bluez bluez-utils; do
     check "$p installed ($(pkg_ver "$p"))" has_pkg "$p"
 done
@@ -713,11 +729,15 @@ check "$BTFW/brcmfmac4358-pcie.bin: the linux-firmware build for the 4358 A3 ROM
 check "  linux-firmware-broadcom itself not installed (one file taken from it)" sh -c '! grep -qx "linux-firmware-broadcom" "$1"' _ "$W/pkgs"
 nvsha="$(sha256sum < /wifi-nvram.txt | cut -d' ' -f1)"
 NV=$BTFW/samsung-gts28/nvram_net.txt
+if [ "$PUBLIC" = 1 ]; then
+    check "public image: no $NV" absent "$NV"
+else
 get $NV
 check "$NV: the dump's nvram_net.txt (sha256 ${nvsha:0:16}...), mode 0644, owner 0:0" \
     sh -c '[ "$(sha256sum < "$1" | cut -d" " -f1)" = "$2" ] && [ "$3" = "0644 0:0" ]' _ "$W/f" "$nvsha" \
     "$(fmode $NV) $(fuid $NV):$(fgid $NV)"
 rm -f "$W/f"
+fi
 check "$BTFW/brcmfmac4358-pcie.txt -> samsung-gts28/nvram_net.txt (the NVRAM name brcmfmac asks for)" \
     test "$(linkto "$BTFW/brcmfmac4358-pcie.txt" 2>/dev/null)" = samsung-gts28/nvram_net.txt
 while IFS=$'\t' read -r f mode; do
@@ -799,7 +819,7 @@ echo "== identity and tablet settings =="
 check "/etc/hostname = gts28lte-omarchy" test "$(cat_ /etc/hostname | tr -d '\n')" = gts28lte-omarchy
 check "time zone UTC (/etc/localtime)" \
     sh -c 'case "$1" in */zoneinfo/UTC) exit 0 ;; *) exit 1 ;; esac' _ "$(linkto /etc/localtime || true)"
-check "/etc/locale.conf: LANG=fr_FR.UTF-8" grep -qx 'LANG=fr_FR.UTF-8' <(cat_ /etc/locale.conf)
+check "/etc/locale.conf: LANG=en_US.UTF-8" grep -qx 'LANG=en_US.UTF-8' <(cat_ /etc/locale.conf)
 get /usr/lib/locale/locale-archive
 check "locales generated: fr_FR.UTF-8 and en_US.UTF-8" sh -c 'grep -aq fr_FR.utf8 "$1" && grep -aq en_US.utf8 "$1"' _ "$W/f"
 check "/etc/resolv.conf -> systemd-resolved stub" \
@@ -845,6 +865,7 @@ docker run --rm --name "$CTR" --platform linux/arm64 \
     -v "$WIFI_NVRAM:/wifi-nvram.txt:ro" \
     -v "$MODES_DIR:/modes:ro" \
     -e WIFI_FILES="$WIFI_FILES" \
+    -e PUBLIC="$PUBLIC" \
     "$HELPER_IMAGE" bash -c "$INNER" </dev/null
 rc=$?
 set -e

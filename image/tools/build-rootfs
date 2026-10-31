@@ -15,8 +15,11 @@
 # ext4 image: the tree is never extracted on macOS. See docs/image/ROOTFS.md.
 #
 # Usage:
-#   tools/build-rootfs --ssh-pubkey FILE [--size MiB] [--keep-image] [--no-cache]
-#     --ssh-pubkey FILE  OpenSSH public key for root (and alarm); required
+#   tools/build-rootfs --ssh-pubkey FILE|--public [--size MiB] [--keep-image] [--no-cache]
+#     --ssh-pubkey FILE  OpenSSH public key for root (and alarm)
+#     --public           an image to publish: no SSH key and neither of the
+#                        tablet's two vendor files; the initramfs copies those
+#                        from the tablet's own SYSTEM partition at boot
 #     --size MiB         file system size (default: content + 20 %)
 #     --keep-image       keep the final Docker image t715-omarchy:rootfs
 #     --no-cache         rebuild every layer (fresh package sync)
@@ -48,6 +51,7 @@ IMG_NAME="rootfs-omarchy.img"
 BUILD_LOG="$ALARM_CACHE_DIR/rootfs-omarchy-build.log"
 
 SSH_PUBKEY=""
+PUBLIC=0
 SIZE_MIB=0
 KEEP_IMAGE=0
 NO_CACHE=0
@@ -61,6 +65,7 @@ die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --ssh-pubkey) SSH_PUBKEY="${2:?--ssh-pubkey needs a file}"; shift 2 ;;
+        --public) PUBLIC=1; shift ;;
         --size)       SIZE_MIB="${2:?--size needs a value in MiB}"; shift 2 ;;
         --keep-image) KEEP_IMAGE=1; shift ;;
         --no-cache)   NO_CACHE=1; shift ;;
@@ -72,7 +77,9 @@ done
 # ---------------------------------------------------------------------------
 log "1/7 preflight"
 # ---------------------------------------------------------------------------
-[ -n "$SSH_PUBKEY" ] || usage
+[ -n "$SSH_PUBKEY" ] || [ "$PUBLIC" = 1 ] || usage
+[ -z "$SSH_PUBKEY" ] || [ "$PUBLIC" = 0 ] || die "--public takes no SSH key"
+if [ "$PUBLIC" = 0 ]; then
 [ -r "$SSH_PUBKEY" ] || die "cannot read SSH public key: $SSH_PUBKEY"
 ! grep -q 'PRIVATE KEY' "$SSH_PUBKEY" || die "$SSH_PUBKEY is a private key: pass the .pub file"
 [ "$(grep -c . "$SSH_PUBKEY")" -ge 1 ] || die "$SSH_PUBKEY is empty"
@@ -92,6 +99,7 @@ grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecds
 [ -f "$WIFI_NVRAM" ] || die "no Wi-Fi NVRAM $WIFI_NVRAM (the tablet's dumps, etc_wifi/; set T715_DUMPS_DIR)"
 [ "$(wc -c < "$WIFI_NVRAM" | tr -d ' ')" = "$WIFI_NVRAM_SIZE" ] \
     || die "$WIFI_NVRAM is not $WIFI_NVRAM_SIZE bytes"
+fi
 alarm_setup armv7h
 alarm_ensure_base_image
 alarm_ensure_dev_image    # compiles rootfs/shim/ (Dockerfile stage "shim")
@@ -113,17 +121,22 @@ log "2/7 build context"
 mkdir -p "$CTX/ssh"
 cp -a "$REPO_DIR/rootfs/." "$CTX/"
 cp -a "$SCRIPT_DIR/omarchy-trusted.fpr" "$CTX/omarchy-trusted.fpr"
+mkdir -p "$CTX/firmware/bt" "$CTX/firmware/wifi"
+if [ "$PUBLIC" = 1 ]; then
+    : > "$CTX/ssh/authorized_keys"
+    BT_FIRMWARE_SHA="none (public image)"
+    WIFI_NVRAM_SHA="none (public image)"
+else
 cp "$SSH_PUBKEY" "$CTX/ssh/authorized_keys"
 chmod 0644 "$CTX/ssh/authorized_keys"
-mkdir -p "$CTX/firmware/bt"
 cp "$BT_FIRMWARE" "$CTX/firmware/bt/bcm4358A3_V0086.0144.hcd"
 chmod 0444 "$CTX/firmware/bt/bcm4358A3_V0086.0144.hcd"
 BT_FIRMWARE_SHA="$(shasum -a 256 "$BT_FIRMWARE" | cut -d' ' -f1)"
-mkdir -p "$CTX/firmware/wifi"
 cp "$WIFI_NVRAM" "$CTX/firmware/wifi/nvram_net.txt"
 chmod 0444 "$CTX/firmware/wifi/nvram_net.txt"
 WIFI_NVRAM_SHA="$(shasum -a 256 "$WIFI_NVRAM" | cut -d' ' -f1)"
-log "context: rootfs/, ssh/authorized_keys ($(cut -d' ' -f1,3 "$SSH_PUBKEY" | head -n1)), firmware/bt (sha256 $BT_FIRMWARE_SHA), firmware/wifi (NVRAM sha256 $WIFI_NVRAM_SHA), local repository $LOCAL_REPO"
+fi
+log "context: rootfs/, ssh/authorized_keys ($([ "$PUBLIC" = 1 ] && echo none || cut -d' ' -f1,3 "$SSH_PUBKEY" | head -n1)), firmware/bt (sha256 $BT_FIRMWARE_SHA), firmware/wifi (NVRAM sha256 $WIFI_NVRAM_SHA), local repository $LOCAL_REPO"
 
 # ---------------------------------------------------------------------------
 log "3/7 docker build $FINAL_IMAGE (armv7h under qemu; log: $BUILD_LOG)"
@@ -240,4 +253,4 @@ if [ "$KEEP_IMAGE" -eq 0 ]; then
 else
     log "kept $FINAL_IMAGE"
 fi
-log "done: $IMG (check with tests/verify-rootfs.sh $IMG $SSH_PUBKEY)"
+log "done: $IMG (check with tests/verify-rootfs.sh $IMG ${SSH_PUBKEY:-none})"

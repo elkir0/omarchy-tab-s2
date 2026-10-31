@@ -26,7 +26,6 @@ B=/usr/share/t715-omarchy/build
 die() { printf 'install-wifi: %s\n' "$*" >&2; exit 1; }
 
 mkdir -p "$B"
-[ -s "$NVRAM" ] || die "no $NVRAM (staged by tools/build-rootfs)"
 
 # --- firmware, from the signed package ------------------------------------------
 # -w: download only (the signature is checked); -dd: without its
@@ -50,8 +49,16 @@ printf 'firmware: brcm/%s\tok\tfrom %s/%s %s (signed; the package is not install
     "$FW_NAME" "$repo" "$FW_PKG" "$ver" "$sha" > "$B/wifi.tsv"
 
 # --- NVRAM ------------------------------------------------------------------------
-install -D -m 0644 "$NVRAM" "$BRCM/samsung-gts28/nvram_net.txt"
+install -d -m 0755 "$BRCM/samsung-gts28"
 ln -sfn samsung-gts28/nvram_net.txt "$BRCM/brcmfmac4358-pcie.txt"
+if [ ! -f "$NVRAM" ]; then
+    # A public image: the initramfs copies it from the tablet's SYSTEM partition.
+    printf 'nvram: brcm/samsung-gts28/nvram_net.txt\tok\tnot in a public image, copied at boot\n' >> "$B/wifi.tsv"
+    : > "$B/public-image"
+    echo "install-wifi: $FW_NAME ($FW_PKG $ver, sha256 ok); no NVRAM, a public image"
+    exit 0
+fi
+install -m 0644 "$NVRAM" "$BRCM/samsung-gts28/nvram_net.txt"
 printf 'nvram: brcm/samsung-gts28/nvram_net.txt\tok\tthe Phosh session'"'"'s dump (its sha256: the MANIFEST header); brcm/brcmfmac4358-pcie.txt -> samsung-gts28/nvram_net.txt\n' >> "$B/wifi.tsv"
 
 echo "install-wifi: $FW_NAME ($FW_PKG $ver, sha256 ok) and the NVRAM installed"

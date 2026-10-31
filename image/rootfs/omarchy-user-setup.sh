@@ -24,7 +24,7 @@
 #    "suspend-off" toggle (no Suspend entry in the system menu).
 #    Touch layer P1: the tablet block at the end of ~/.config/hypr/hyprland.lua
 #    (rootfs/t715-tablet.lua: keys, cover, on-screen keyboard layers, window
-#    sizes), the on-screen keyboard's gsettings (shown at all, French AZERTY
+#    sizes), the on-screen keyboard's gsettings (shown at all, US QWERTY
 #    first; through a private D-Bus session, as in step 1), squeekboard's
 #    terminal layouts with Esc, and no Lock entry in the system menu (nothing
 #    could unlock it without a keyboard).
@@ -64,7 +64,7 @@ as_user() {
     runuser -u "$U" -- env -i \
         HOME="$H" USER="$U" LOGNAME="$U" SHELL=/bin/bash \
         PATH="$OMARCHY_PATH/bin:/usr/local/bin:/usr/bin" \
-        LANG=fr_FR.UTF-8 XDG_RUNTIME_DIR="$RUNDIR" \
+        LANG=en_US.UTF-8 XDG_RUNTIME_DIR="$RUNDIR" \
         OMARCHY_PATH="$OMARCHY_PATH" OMARCHY_INSTALL="$ADAPTED" \
         OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log \
         OMARCHY_USER_NAME= OMARCHY_USER_EMAIL= \
@@ -248,12 +248,12 @@ else
 fi
 
 # squeekboard's layout is the first input source (GNOME's setting, which it
-# follows): French AZERTY, then US QWERTY one tap away in its layout menu.
+# follows): US QWERTY, then French AZERTY one tap away in its layout menu.
 src=(org.gnome.desktop.input-sources sources)
-want="[('xkb', 'fr'), ('xkb', 'us')]"
+want="[('xkb', 'us'), ('xkb', 'fr')]"
 as_user "${runner[@]}" gsettings set "${src[@]}" "$want" >> "$LOG" 2>&1
 if [ "$(as_user "${runner[@]}" gsettings get "${src[@]}" 2>>"$LOG")" = "$want" ]; then
-    record "gsettings: input-sources" ok "${src[*]} $want (squeekboard: AZERTY)"
+    record "gsettings: input-sources" ok "${src[*]} $want (squeekboard: QWERTY)"
 else
     record "gsettings: input-sources" failed "${src[*]} is not $want; see $LOG"
 fi
