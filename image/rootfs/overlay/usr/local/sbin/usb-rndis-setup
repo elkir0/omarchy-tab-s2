@@ -1,0 +1,161 @@
+#!/bin/bash
+# usb-rndis-setup: bring up a USB RNDIS gadget early in boot so the tablet
+# can be reached headless at 172.16.42.1 over the USB cable.
+#
+# Preferred path: configfs gadget (/sys/kernel/config/usb_gadget), with a
+# fallback to the legacy Android gadget driver interface
+# (/sys/class/android_usb/android0) used by the downstream Samsung kernels.
+#
+# Idempotent: safe to re-run. Logs to the journal when available.
+
+set -u
+
+GADGET_DIR="/sys/kernel/config/usb_gadget"
+LEGACY_DIR="/sys/class/android_usb/android0"
+IP="172.16.42.1/24"
+UDC_WAIT_SECS=30
+DNSMASQ_CONF="/etc/usb-rndis/dnsmasq.conf"
+# USB function: "ecm" (CDC-ECM, native on macOS and Linux; default) or
+# "rndis" (Windows), from /etc/usb-rndis/function.  macOS has no RNDIS
+# driver: with rndis the Mac sees the device but no network interface.
+FUNCTION="$(cat /etc/usb-rndis/function 2>/dev/null || echo ecm)"
+case "$FUNCTION" in ecm|rndis) ;; *) FUNCTION=ecm ;; esac
+
+log() {
+    if command -v systemd-cat >/dev/null 2>&1; then
+        systemd-cat -t usb-rndis-setup -p info -- echo "$*"
+    else
+        echo "usb-rndis-setup: $*"
+    fi
+}
+
+first_udc() {
+    ls /sys/class/udc/ 2>/dev/null | head -n1
+}
+
+# The gadget only enumerates once it is bound to a USB Device Controller.
+wait_for_udc() {
+    local waited=0 udc
+    while [ "$waited" -lt "$UDC_WAIT_SECS" ]; do
+        udc="$(first_udc)"
+        if [ -n "$udc" ]; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+setup_configfs() {
+    local g="$GADGET_DIR/g1" udc
+    modprobe libcomposite 2>/dev/null || true
+
+    mkdir -p "$g" || return 1
+    if [ ! -e "$g/idVendor" ]; then
+        echo 0x05ac  > "$g/idVendor"     # presents as Apple RNDIS (well-supported)
+        echo 0x0a14  > "$g/idProduct"    # generic RNDIS function
+        echo 0x0100  > "$g/bcdDevice"
+        echo 0x0200  > "$g/bcdUSB"
+    fi
+    mkdir -p "$g/strings/0x409"
+    echo "0123456789ABCDEF" > "$g/strings/0x409/serialnumber"
+    echo "Samsung"          > "$g/strings/0x409/manufacturer"
+    echo "SM-T715 RNDIS"    > "$g/strings/0x409/product"
+
+    mkdir -p "$g/functions/$FUNCTION.0"
+    mkdir -p "$g/configs/b.1/strings/0x409"
+    echo "RNDIS" > "$g/configs/b.1/strings/0x409/configuration"
+    ln -sfn "$g/functions/$FUNCTION.0" "$g/configs/b.1/$FUNCTION.0"
+
+    udc="$(first_udc)"
+    [ -n "$udc" ] || return 1
+    echo "$udc" > "$g/UDC"
+    return 0
+}
+
+setup_legacy() {
+    [ -d "$LEGACY_DIR" ] || return 1
+    if [ "$(cat "$LEGACY_DIR/enable" 2>/dev/null)" != "0" ]; then
+        echo 0 > "$LEGACY_DIR/enable"
+    fi
+    echo rndis > "$LEGACY_DIR/functions"
+    echo 1 > "$LEGACY_DIR/enable"
+    return 0
+}
+
+# Echo the name of the network interface the gadget created (usb0 or rndis0).
+detect_iface() {
+    local ifname
+    for ifname in usb0 rndis0; do
+        if [ -e "/sys/class/net/$ifname" ]; then
+            echo "$ifname"
+            return 0
+        fi
+    done
+    # Configfs RNDIS: the kernel-picked name is exported here.
+    ifname="$(cat "$GADGET_DIR/g1/functions/$FUNCTION.0/ifname" 2>/dev/null || true)"
+    if [ -n "$ifname" ] && [ -e "/sys/class/net/$ifname" ]; then
+        echo "$ifname"
+        return 0
+    fi
+    # Last resort: newest interface whose driver is an rndis one.
+    for ifname in /sys/class/net/*; do
+        ifname="${ifname##*/}"
+        if [ "$(readlink -f "/sys/class/net/$ifname/device/driver" 2>/dev/null)" != "" ] \
+           && readlink "/sys/class/net/$ifname" 2>/dev/null | grep -q rndis; then
+            echo "$ifname"
+            return 0
+        fi
+    done
+    return 1
+}
+
+start_dnsmasq() {
+    if pgrep -f "dnsmasq.*$DNSMASQ_CONF" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -x /usr/bin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1; then
+        dnsmasq --conf-file="$DNSMASQ_CONF" >/dev/null 2>&1 \
+            && log "dnsmasq started (DHCP 172.16.42.2-10 on $1)"
+    fi
+    return 0
+}
+
+# --- main -----------------------------------------------------------------
+log "starting (configfs preferred, legacy Android gadget as fallback)"
+
+if ! wait_for_udc; then
+    log "ERROR: no UDC appeared in /sys/class/udc within ${UDC_WAIT_SECS}s, giving up"
+    exit 1
+fi
+log "UDC found: $(first_udc)"
+
+if setup_configfs; then
+    log "configfs gadget configured"
+elif setup_legacy; then
+    log "legacy android_usb gadget configured"
+else
+    log "ERROR: neither configfs nor legacy gadget could be configured"
+    exit 1
+fi
+
+# The interface can take a moment to appear after binding.
+iface=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    iface="$(detect_iface)"
+    [ -n "$iface" ] && break
+    sleep 1
+done
+if [ -z "$iface" ]; then
+    log "ERROR: no RNDIS network interface appeared"
+    exit 1
+fi
+log "using interface $iface"
+
+ip link set dev "$iface" up
+ip addr add "$IP" dev "$iface" 2>/dev/null || true   # already configured
+start_dnsmasq "$iface"
+
+log "RNDIS up: $iface $IP (DHCP 172.16.42.2-172.16.42.10)"
+exit 0

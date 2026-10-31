@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Starts the SS333 modem at boot: loads the modules (only on a kernel that
+# has them), sets allow_hw, waits for the battery gate, then starts
+# shannon-loader.service and shannond.service. Type=simple, so that a long
+# battery wait never holds a boot target or leaves a job queued. On a kernel
+# without the modem series the condition skips everything.
+
+[Unit]
+Description=Shannon SS333 modem: modules, hardware access, battery gate
+ConditionPathExistsGlob=/usr/lib/modules/%v/kernel/drivers/misc/modem_v1/sec_modem_v1.ko*
+After=systemd-udevd.service systemd-modules-load.service local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/shannond/shannon-modem-prepare 0 --start
+
+[Install]
+WantedBy=multi-user.target

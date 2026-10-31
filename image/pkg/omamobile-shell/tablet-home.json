@@ -1,0 +1,32 @@
+{
+ "version": 1,
+ "grid": {
+  "columns": 6,
+  "rows": 8
+ },
+ "home": 0,
+ "nextId": 14,
+ "pages": [
+  {
+   "items": [
+    { "id": "w1", "kind": "widget", "type": "clock", "x": 1, "y": 0, "w": 4, "h": 2, "config": { "timeFormat": "", "dateFormat": "dddd d MMMM" } },
+    { "id": "w2", "kind": "widget", "type": "toggles", "x": 1, "y": 2, "w": 4, "h": 1, "config": {} },
+    { "id": "a11", "kind": "app", "app": "org.omamobile.Phone", "x": 0, "y": 6, "w": 1, "h": 1 },
+    { "id": "a12", "kind": "app", "app": "org.omamobile.Messages", "x": 1, "y": 6, "w": 1, "h": 1 },
+    { "id": "a13", "kind": "app", "app": "chromium", "x": 2, "y": 6, "w": 1, "h": 1 },
+    { "id": "a3", "kind": "app", "app": "firefox", "x": 0, "y": 7, "w": 1, "h": 1 },
+    { "id": "a4", "kind": "app", "app": "org.gnome.Nautilus", "x": 1, "y": 7, "w": 1, "h": 1 },
+    { "id": "a5", "kind": "app", "app": "foot", "x": 2, "y": 7, "w": 1, "h": 1 },
+    { "id": "a6", "kind": "app", "app": "btop", "x": 3, "y": 7, "w": 1, "h": 1 },
+    { "id": "a7", "kind": "app", "app": "org.gnome.Papers", "x": 4, "y": 7, "w": 1, "h": 1 },
+    { "id": "a8", "kind": "app", "app": "mpv", "x": 5, "y": 7, "w": 1, "h": 1 }
+   ]
+  },
+  {
+   "items": [
+    { "id": "w9", "kind": "widget", "type": "media", "x": 1, "y": 0, "w": 4, "h": 1, "config": {} },
+    { "id": "w10", "kind": "widget", "type": "battery", "x": 2, "y": 1, "w": 2, "h": 1, "config": {} }
+   ]
+  }
+ ]
+}

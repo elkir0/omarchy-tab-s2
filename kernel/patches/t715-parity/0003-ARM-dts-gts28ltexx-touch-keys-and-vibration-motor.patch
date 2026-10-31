@@ -1,0 +1,126 @@
+From 7d34675d8cf1c1a320611521f3de57646ca17dc5 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 3/6] ARM: dts: gts28ltexx: touch keys and vibration motor
+
+TC350K on HSI2C9 with its interrupt on gpa3-2 (not gpf2-2: phandle 0x4c of the stock
+tree is the gpa3 bank), and the ISA1000A on timer 0.  Modules only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-keys.dtsi   | 58 +++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |  6 ++
+ arch/arm/configs/gts28ltexx_defconfig         |  4 ++
+ 3 files changed, 68 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-keys.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-keys.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-keys.dtsi
+new file mode 100644
+index 000000000..b21f6f082
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-keys.dtsi
+@@ -0,0 +1,58 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Back and Recent touch keys, and the vibration motor.
++ *
++ * Keys: Coreriver TC350K on HSI2C9, stock node at live_fdt.dts:1883-1905.  The
++ * interrupt is gpa3-2 (phandle 0x4c is the gpa3 bank), and the rails are LDO32
++ * for the chip and LDO33 for its LEDs.  KEY_SCALE stands for the Recent key:
++ * mainline has no such key code, and only t715-keys reads it.  tc300k.ko has
++ * no firmware path, on purpose.
++ *
++ * Motor: ISA1000A driven by timer 0 on gpd2-4, enable on gpc0-1, LDO35, stock
++ * node at live_fdt.dts:4749-4761 (33238 ns, full drive at 24872 ns).  It is a
++ * bidirectional driver, so half the period is rest: see the ISA1000A note in
++ * pwm-vibra.c.
++ */
++#include <dt-bindings/input/linux-event-codes.h>
++
++/ {
++	vibrator: vibrator {
++		compatible = "pwm-vibrator";
++		pwms = <&pwm 0 33238 0>;
++		pwm-names = "enable";
++		vcc-supply = <&ldo35_reg>;
++		enable-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
++		rest-duty-cycle-ns = <16619>;
++		full-duty-cycle-ns = <24872>;
++	};
++};
++
++&hsi2c_9 {
++	status = "okay";
++
++	touchkey@20 {
++		compatible = "coreriver,tc300-keypad";
++		reg = <0x20>;
++		interrupts-extended = <&gpa3 2 IRQ_TYPE_EDGE_FALLING>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&touchkey_irq>;
++		vdd-supply = <&ldo32_reg>;
++		vled-supply = <&ldo33_reg>;
++		linux,keycodes = <KEY_SCALE KEY_BACK>;
++	};
++};
++
++&pinctrl_alive {
++	touchkey_irq: touchkey-irq-pins {
++		samsung,pins = "gpa3-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR1>;
++	};
++};
++
++&pwm {
++	pinctrl-names = "default";
++	pinctrl-0 = <&pwm0_out>;
++	status = "okay";
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 45b25e8e7..78851c6f8 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -904,6 +904,12 @@ &framebuffer {
+  */
+ #include "exynos5433-gts28ltexx-sensors.dtsi"
+ 
++/*
++ * Touch keys and vibration motor (exynos5433-gts28ltexx-keys.dtsi): modules
++ * only, tc300k.ko has no firmware path.
++ */
++#include "exynos5433-gts28ltexx-keys.dtsi"
++
+ /* ==================================================================== */
+ /* 17. Battery fuel gauge (SM5703 on HSI2C7)                            */
+ /* ==================================================================== */
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 7d882cc0c..76ebca049 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -88,6 +88,8 @@ CONFIG_WATCHDOG=y
+ CONFIG_S3C2410_WATCHDOG=y
+ CONFIG_MFD_SEC_CORE=y
+ CONFIG_REGULATOR=y
++CONFIG_PWM=y
++CONFIG_PWM_SAMSUNG=m
+ CONFIG_REGULATOR_S2MPS11=y
+ CONFIG_DRM=y
+ CONFIG_DRM_FBDEV_EMULATION=y
+@@ -162,6 +164,7 @@ CONFIG_RTC_DRV_S5M=y
+ CONFIG_INPUT=y
+ CONFIG_INPUT_KEYBOARD=y
+ CONFIG_KEYBOARD_GPIO=y
++CONFIG_KEYBOARD_TC300K=m
+ CONFIG_RMI4_CORE=y
+ CONFIG_RMI4_I2C=y
+ CONFIG_RMI4_F11=y
+@@ -226,6 +229,7 @@ CONFIG_ZRAM_BACKEND_ZSTD=y
+ # Pressure stall information, virtual input devices
+ CONFIG_PSI=y
+ CONFIG_INPUT_MISC=y
++CONFIG_INPUT_PWM_VIBRA=m
+ CONFIG_INPUT_UINPUT=y
+ # IIO core, and the sensor drivers (LSM6DS3 IMU, YAS537 magnetometer,
+ # docs/SENSORS_M7.md) as modules: udev loads them after the initramfs

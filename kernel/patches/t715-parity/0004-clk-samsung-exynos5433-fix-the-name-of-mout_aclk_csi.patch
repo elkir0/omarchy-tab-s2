@@ -1,0 +1,26 @@
+From c8e34c977060ef91c350d8b412aceacd6f47b25a Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 4/6] clk: samsung: exynos5433: fix the name of
+ mout_aclk_csis0_a's second parent
+
+A dash for an underscore: CSIS0 could not take the 400 MHz branch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/samsung/clk-exynos5433.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/clk/samsung/clk-exynos5433.c b/drivers/clk/samsung/clk-exynos5433.c
+index 77de57919..f895c436e 100644
+--- a/drivers/clk/samsung/clk-exynos5433.c
++++ b/drivers/clk/samsung/clk-exynos5433.c
+@@ -4776,7 +4776,7 @@ PNAME(mout_aclk_csis1_a_p)		= { "mout_aclk_cam0_552_user",
+ PNAME(mout_aclk_csis0_b_p)		= { "mout_aclk_csis0_a",
+ 					    "mout_aclk_cam0_333_user", };
+ PNAME(mout_aclk_csis0_a_p)		= { "mout_aclk_cam0_552_user",
+-					    "mout_aclk-cam0_400_user", };
++					    "mout_aclk_cam0_400_user", };
+ PNAME(mout_aclk_3aa1_b_p)		= { "mout_aclk_3aa1_a",
+ 					    "mout_aclk_cam0_333_user", };
+ PNAME(mout_aclk_3aa1_a_p)		= { "mout_aclk_cam0_552_user",

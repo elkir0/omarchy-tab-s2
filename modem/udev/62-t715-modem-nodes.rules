@@ -1,0 +1,3 @@
+# Modem mission: boot/dump/DIAG/AT/loopback nodes root only (kernel_boot_review.md rule 25)
+KERNEL=="umts_boot0|umts_ramdump0|umts_dm0|umts_router|ipc_loopback0", MODE="0600", OWNER="root", GROUP="root"
+KERNEL=="umts_ipc0|umts_rfs0|umts_csd|multipdp", MODE="0600", OWNER="root", GROUP="root"

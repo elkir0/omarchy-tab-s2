@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+# repack-omarchy — reuse Omarchy's architecture-independent packages on
+# armv7h: download them from the upstream aarch64 repository
+# (pkgs.omarchy.org), verify the upstream signatures, copy the arch = any
+# ones unchanged, retag the aarch64-labelled ones that contain no ELF file
+# (arch = armv7h, pkgrel + ".1"), and index everything into the local pacman
+# repository out/repo/armv7h (t715-omarchy.db). See docs/image/REPACK.md.
+#
+# Usage:
+#   repack-omarchy [--channel NAME] [--list FILE] [--force] [-h|--help]
+#
+#     --channel NAME  upstream channel (default stable)
+#     --list FILE     package list, one name per line (default
+#                     tools/repack.list); it must contain omarchy-keyring,
+#                     whose keys verify every signature
+#     --force         re-download and rebuild everything
+#
+# Downloads are cached in cache/omarchy-upstream/<channel>/aarch64/ (re-used
+# when their SHA-256 still matches the database), retagged packages in
+# cache/repacked/<channel>/. Signature verification, extraction, retagging
+# and repo-add all happen inside t715-omarchy:dev-aarch64: nothing is ever
+# extracted on the macOS host, only whole archive files are moved. Idempotent:
+# without --force and without upstream changes, a rerun downloads nothing and
+# leaves out/repo/armv7h byte-identical. Packages built by tools/build-pkg
+# (out/repo/armv7h/MANIFEST-built.tsv) are kept and indexed, never removed.
+#
+# Prints the repository directory on stdout (logs go to stderr).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/alarm.sh
+. "$SCRIPT_DIR/../lib/alarm.sh"
+
+CHANNEL=stable
+LIST_FILE="$SCRIPT_DIR/repack.list"
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --channel) CHANNEL="${2:?}"; shift 2 ;;
+        --list)    LIST_FILE="${2:?}"; shift 2 ;;
+        --force)   FORCE=1; shift ;;
+        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        *)         alarm_die "unknown option: $1 (see --help)" ;;
+    esac
+done
+[[ "$CHANNEL" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || alarm_die "invalid channel name: $CHANNEL"
+
+alarm_setup aarch64
+alarm_ensure_dev_image
+
+UPSTREAM_ARCH=aarch64
+BASE_URL="https://pkgs.omarchy.org/$CHANNEL/$UPSTREAM_ARCH"
+UPSTREAM_DIR="$ALARM_CACHE_DIR/omarchy-upstream/$CHANNEL/$UPSTREAM_ARCH"
+REPACK_CACHE="$ALARM_CACHE_DIR/repacked/$CHANNEL"
+REPO_OUT="$ALARM_REPO_DIR/out/repo/armv7h"
+WORK="$ALARM_CACHE_DIR/repack-work"
+mkdir -p "$UPSTREAM_DIR" "$REPACK_CACHE" "$WORK"
+rm -rf "$WORK"/*
+
+# ---------------------------------------------------------------- read list
+[ -f "$LIST_FILE" ] || alarm_die "package list not found: $LIST_FILE"
+NAMES=()
+while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [ -n "$line" ] || continue
+    case "$line" in
+        *[!a-z0-9@._+-]*) alarm_die "invalid package name in $LIST_FILE: $line" ;;
+    esac
+    NAMES+=("$line")
+done < "$LIST_FILE"
+[ "${#NAMES[@]}" -gt 0 ] || alarm_die "empty package list: $LIST_FILE"
+
+have_keyring=0
+for n in "${NAMES[@]}"; do
+    if [ "$n" = omarchy-keyring ]; then have_keyring=1; fi
+done
+[ "$have_keyring" -eq 1 ] \
+    || alarm_die "$LIST_FILE must list omarchy-keyring: signature verification uses its keys"
+
+# ------------------------------------------------------------------- database
+DB="$UPSTREAM_DIR/omarchy.db"
+if [ "$FORCE" -eq 1 ]; then rm -f "$DB"; fi
+if [ -f "$DB" ]; then
+    # Ask the server whether anything changed since our copy (If-Modified-Since):
+    # a 304 keeps the file untouched, so unchanged reruns download nothing.
+    code="$(curl -fsS --retry 5 --retry-delay 3 -z "$DB" \
+                 -o "$DB.part" -w '%{http_code}' "$BASE_URL/omarchy.db")" \
+        || alarm_die "download of omarchy.db failed"
+    case "$code" in
+        304) rm -f "$DB.part"; alarm_log "omarchy.db unchanged upstream (304)" ;;
+        200) mv -f "$DB.part" "$DB"; alarm_log "omarchy.db updated upstream" ;;
+        *)   rm -f "$DB.part"; alarm_die "unexpected HTTP status $code for omarchy.db" ;;
+    esac
+else
+    alarm_log "downloading omarchy.db"
+    curl -fL --retry 8 --retry-delay 5 --retry-all-errors \
+         -o "$DB.part" "$BASE_URL/omarchy.db" || alarm_die "download of omarchy.db failed"
+    mv -f "$DB.part" "$DB"
+fi
+
+# name<TAB>filename<TAB>sha256 for every package in the database (the desc
+# entries are read straight to stdout; nothing is extracted on the host).
+DBMAP="$WORK/dbmap.tsv"
+tar -xOf "$DB" | awk '
+    function emit() {
+        if (have && ("NAME" in f) && ("FILENAME" in f) && ("SHA256SUM" in f))
+            printf "%s\t%s\t%s\n", f["NAME"], f["FILENAME"], f["SHA256SUM"]
+        split("", f); have = 0
+    }
+    /^%FILENAME%$/ { emit(); have = 1 }
+    /^%[A-Z0-9_]+%$/ { tag = substr($0, 2, length($0) - 2); next }
+    have && tag != "" && $0 != "" { f[tag] = $0 }
+    END { emit() }
+' > "$DBMAP"
+
+# ------------------------------------------------------------- download phase
+sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+fetch() { # URL DEST
+    curl -fL --retry 8 --retry-delay 5 --retry-all-errors -o "$2.part" "$1" \
+        || alarm_die "download of $1 failed"
+    mv -f "$2.part" "$2"
+}
+
+UPSTREAM_FNS=() UPSTREAM_SHAS=()
+downloaded=0
+for name in "${NAMES[@]}"; do
+    if ! entry="$(awk -F'\t' -v n="$name" '$1 == n { print $2 "\t" $3; f = 1; exit }
+                                            END { exit f ? 0 : 3 }' "$DBMAP")"; then
+        alarm_die "$name: not found in $BASE_URL/omarchy.db"
+    fi
+    fn="${entry%%$'\t'*}"; sha="${entry#*$'\t'}"
+    [ -n "$fn" ] && [ -n "$sha" ] || alarm_die "$name: incomplete database entry"
+    UPSTREAM_FNS+=("$fn"); UPSTREAM_SHAS+=("$sha")
+
+    f="$UPSTREAM_DIR/$fn"
+    if [ "$FORCE" -eq 1 ]; then rm -f "$f" "$f.sig"; fi
+    if [ ! -f "$f" ]; then
+        alarm_log "$name: downloading $fn"
+        fetch "$BASE_URL/$fn" "$f"
+        downloaded=$((downloaded + 1))
+    fi
+    got="$(sha256_of "$f")"
+    [ "$got" = "$sha" ] \
+        || alarm_die "$name: sha256 mismatch for $fn (database: $sha, file: $got); refusing"
+    if [ ! -f "$f.sig" ]; then
+        fetch "$BASE_URL/$fn.sig" "$f.sig"
+    fi
+done
+if [ "$downloaded" -eq 0 ]; then
+    alarm_log "all ${#NAMES[@]} packages already cached (sha256 verified against the db)"
+else
+    alarm_log "downloaded $downloaded package(s), rest cached"
+fi
+
+# ----------------------------------- verify signatures, retag, produce a plan
+# Inside the aarch64 dev container: import the keys shipped in the downloaded
+# omarchy-keyring package, verify every cached package's detached signature,
+# then copy (arch = any) or retag (arch = aarch64, ELF-free) each one. stdout
+# carries the plan: name<TAB>action<TAB>output-filename.
+if [ "$FORCE" -eq 1 ]; then rm -rf "$REPACK_CACHE"; mkdir -p "$REPACK_CACHE"; fi
+keyring_fn=""
+for i in "${!NAMES[@]}"; do
+    if [ "${NAMES[$i]}" = omarchy-keyring ]; then keyring_fn="${UPSTREAM_FNS[$i]}"; fi
+done
+
+PINNED_FPRS="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$SCRIPT_DIR/omarchy-trusted.fpr" | grep -E '^[0-9A-F]{40}$' || true)"
+[ -n "$PINNED_FPRS" ] || alarm_die "no pinned fingerprint in $SCRIPT_DIR/omarchy-trusted.fpr"
+
+PLAN="$WORK/plan.tsv"
+PLAN_IN="$UPSTREAM_DIR/.repack-plan.tsv"   # read-only input of the container stage
+: > "$PLAN_IN"
+for i in "${!NAMES[@]}"; do
+    printf '%s\t%s\t%s\n' "${NAMES[$i]}" "${UPSTREAM_FNS[$i]}" "${UPSTREAM_SHAS[$i]}" \
+        >> "$PLAN_IN"
+done
+
+alarm_log "verifying signatures and retagging in $ALARM_DEV_IMAGE"
+docker run --rm -i --platform "$ALARM_PLATFORM" \
+    -v "$UPSTREAM_DIR:/upstream:ro" \
+    -v "$REPACK_CACHE:/repacked" \
+    -e KEYRING_FN="$keyring_fn" \
+    -e PINNED_FPRS="$PINNED_FPRS" \
+    "$ALARM_DEV_IMAGE" bash -s > "$PLAN" <<'EOS' || alarm_die "verify/retag stage failed"
+set -euo pipefail
+UP=/upstream
+WORK=/tmp/repack
+rm -rf "$WORK"; mkdir -p "$WORK"
+
+# Keys come from the downloaded omarchy-keyring package itself, the same
+# bootstrap pacman-key --populate uses on a real system.
+GHOME=/tmp/gnupg
+mkdir -m 700 -p "$GHOME" "$WORK/kr"
+bsdtar -xf "$UP/$KEYRING_FN" -C "$WORK/kr" usr/share/pacman/keyrings
+krd="$WORK/kr/usr/share/pacman/keyrings"
+gpg --homedir "$GHOME" --batch --quiet --import "$krd/omarchy.gpg"
+trusted="$(cat "$krd/omarchy-trusted")"
+# The keyring vouches for itself, so pin it: every key it trusts must be one
+# of tools/omarchy-trusted.fpr.
+while IFS=: read -r fpr _; do
+    [ -n "$fpr" ] || continue
+    if ! printf '%s\n' "$PINNED_FPRS" | grep -qx "$fpr"; then
+        echo "UNPINNED KEY: omarchy-keyring trusts $fpr, not listed in tools/omarchy-trusted.fpr" >&2
+        exit 1
+    fi
+done <<< "$trusted"
+
+verify_sig() { # PKG: 0 iff it has a good signature by a key omarchy-trusted lists
+    local st fpr
+    st="$(gpg --homedir "$GHOME" --status-fd 1 --verify "$1.sig" "$1" 2>/dev/null || true)"
+    if printf '%s\n' "$st" | grep -q 'EXPKEYSIG\|REVKEYSIG'; then return 1; fi
+    if ! printf '%s\n' "$st" | grep -q '^\[GNUPG:\] GOODSIG'; then return 1; fi
+    fpr="$(printf '%s\n' "$st" | sed -n 's/^\[GNUPG:\] VALIDSIG \([0-9A-F]\{40\}\) .*/\1/p' | head -n1)"
+    [ -n "$fpr" ] || return 1
+    printf '%s\n' "$trusted" | grep -q "^$fpr:" || return 1
+}
+
+retag() { # NAME FILENAME SHA256 -> /repacked/<name>-<pkgver>.1-armv7h.pkg.tar.zst
+    local name="$1" fn="$2" sha="$3"
+    local d="$WORK/$name" root="$WORK/$name/root" pv out f
+    rm -rf "$d"; mkdir -p "$root"
+    bsdtar -xf "$UP/$fn" -C "$root"          # as root: owners, modes, mtimes kept
+
+    # A package reused on armv7h must contain no compiled code: refuse it if
+    # any extracted regular file starts with the ELF magic \x7fELF.
+    while IFS= read -r -d '' f; do
+        if [ "$(head -c 4 -- "$f" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ]; then
+            echo "REFUSED: $fn contains an ELF file: ${f#$root/}" >&2
+            exit 1
+        fi
+    done < <(find "$root" -type f -print0)
+
+    pv="$(sed -n 's/^pkgver = //p' "$root/.PKGINFO" | head -n1)"
+    [ -n "$pv" ] || { echo "no pkgver in $fn" >&2; exit 1; }
+    out="$name-${pv}.1-armv7h.pkg.tar.zst"
+
+    sed -i \
+        -e 's/^arch = aarch64$/arch = armv7h/' \
+        -e 's/^pkgver = \(.*\)-\([^-]*\)$/pkgver = \1-\2.1/' \
+        -e 's/^packager = .*$/packager = SM-T715 omarchy repack <noreply@localhost>/' \
+        "$root/.PKGINFO"
+    grep -qx 'arch = armv7h' "$root/.PKGINFO" \
+        || { echo "arch rewrite failed in $fn" >&2; exit 1; }
+    grep -qx "pkgver = ${pv}.1" "$root/.PKGINFO" \
+        || { echo "pkgver rewrite failed in $fn" >&2; exit 1; }
+    grep -qx 'packager = SM-T715 omarchy repack <noreply@localhost>' "$root/.PKGINFO" \
+        || { echo "packager rewrite failed in $fn" >&2; exit 1; }
+
+    # .MTREE exactly the way makepkg writes it, over the unchanged file set:
+    # .PKGINFO .BUILDINFO [.INSTALL] then every extracted entry, sorted.
+    local list=(.PKGINFO)
+    if [ -f "$root/.BUILDINFO" ]; then list+=(".BUILDINFO"); fi
+    if [ -f "$root/.INSTALL" ]; then list+=(".INSTALL"); fi
+    while IFS= read -r -d '' f; do list+=("$f"); done \
+        < <(cd "$root" && find . -mindepth 1 ! -name .PKGINFO ! -name .BUILDINFO \
+                ! -name .INSTALL ! -name .MTREE -printf '%P\0' | sort -z)
+    rm -f "$root/.MTREE"
+    (cd "$root" && bsdtar -czf .MTREE --format=mtree \
+        --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
+        "${list[@]}")
+
+    # Final archive, makepkg member order: metadata first (.PKGINFO at the
+    # very front), then every entry sorted. Owners and permissions come from
+    # the root extraction.
+    local members=(.PKGINFO)
+    if [ -f "$root/.BUILDINFO" ]; then members+=(".BUILDINFO"); fi
+    if [ -f "$root/.INSTALL" ]; then members+=(".INSTALL"); fi
+    members+=(".MTREE")
+    while IFS= read -r -d '' f; do members+=("$f"); done \
+        < <(cd "$root" && find . -mindepth 1 ! -name .PKGINFO ! -name .BUILDINFO \
+                ! -name .INSTALL ! -name .MTREE -printf '%P\0' | sort -z)
+    printf '%s\0' "${members[@]}" > "$d/members.list"
+    (cd "$root" && bsdtar --no-fflags --no-read-sparse -cnf "$d/pkg.tar" \
+        --null -T "$d/members.list")
+    zstd -q -19 -T0 -f "$d/pkg.tar" -o "/repacked/$out"
+    printf '%s\n' "$sha" > "/repacked/$out.upstream-sha256"
+
+    [ "$(bsdtar -tf "/repacked/$out" | head -n1)" = ".PKGINFO" ] \
+        || { echo "$out does not start with .PKGINFO" >&2; exit 1; }
+    bsdtar -xOf "/repacked/$out" .PKGINFO | grep -qx 'arch = armv7h' \
+        || { echo "$out .PKGINFO is not armv7h" >&2; exit 1; }
+    echo "retagged $name: ${pv} (aarch64) -> ${pv}.1 (armv7h), no ELF found" >&2
+}
+
+n=0
+while IFS=$'\t' read -r name fn sha; do
+    [ -n "$name" ] || continue
+    pkg="$UP/$fn"
+    if ! verify_sig "$pkg"; then
+        echo "SIGNATURE VERIFICATION FAILED: $fn (against omarchy-keyring)" >&2
+        exit 1
+    fi
+    arch="$(bsdtar -xOf "$pkg" .PKGINFO | sed -n 's/^arch = //p' | head -n1)"
+    case "$arch" in
+        any)
+            echo "$name: arch = any, signature verified" >&2
+            printf '%s\tcopied\t%s\n' "$name" "$fn"
+            ;;
+        aarch64)
+            pv="$(bsdtar -xOf "$pkg" .PKGINFO | sed -n 's/^pkgver = //p' | head -n1)"
+            out="$name-${pv}.1-armv7h.pkg.tar.zst"
+            if [ -s "/repacked/$out" ] \
+               && [ "$(cat "/repacked/$out.upstream-sha256" 2>/dev/null)" = "$sha" ]; then
+                echo "$name: signature verified, $out already cached" >&2
+            else
+                retag "$name" "$fn" "$sha"
+            fi
+            printf '%s\tretagged\t%s\n' "$name" "$out"
+            ;;
+        *)
+            echo "$fn: unexpected arch '$arch' (neither any nor aarch64)" >&2
+            exit 1
+            ;;
+    esac
+    n=$((n + 1))
+done < /upstream/.repack-plan.tsv
+echo "verified $n signature(s) against the omarchy-keyring keys" >&2
+EOS
+
+ACTIONS=() OUTFILES=()
+i=0
+while IFS=$'\t' read -r n act outf; do
+    [ "$n" = "${NAMES[$i]}" ] || alarm_die "plan mismatch: expected ${NAMES[$i]}, got $n"
+    case "$act" in copied|retagged) ;; *) alarm_die "plan: bad action '$act' for $n" ;; esac
+    ACTIONS+=("$act"); OUTFILES+=("$outf")
+    i=$((i + 1))
+done < "$PLAN"
+[ "$i" -eq "${#NAMES[@]}" ] || alarm_die "plan has $i entries, expected ${#NAMES[@]}"
+
+# ------------------------------------------------- build out/repo/armv7h
+mkdir -p "$REPO_OUT"
+CHANGED=0
+sync_file() { # SRC DST: copy unless already there, byte-identical
+    local src="$1" dst="$2"
+    if [ "$FORCE" -eq 0 ] && [ -f "$dst" ] \
+       && [ "$(sha256_of "$dst")" = "$(sha256_of "$src")" ]; then
+        return 0
+    fi
+    cp -f "$src" "$dst"
+    CHANGED=1
+}
+
+expected=""
+expected_entries=""
+
+# Packages that tools/build-pkg built from pkg/ (MANIFEST-built.tsv) belong
+# to that tool: they are kept, and expected in the db. A package name comes
+# from one of the two tools only.
+BUILT_MANIFEST="$REPO_OUT/MANIFEST-built.tsv"
+nbuilt=0
+if [ -f "$BUILT_MANIFEST" ]; then
+    while IFS=$'\t' read -r _ bpkg _ _ bfile _; do
+        [ -n "$bfile" ] || continue
+        for n in "${NAMES[@]}"; do
+            [ "$n" != "$bpkg" ] \
+                || alarm_die "$bpkg is in $LIST_FILE and built by tools/build-pkg (MANIFEST-built.tsv): keep it in one place"
+        done
+        if [ ! -f "$REPO_OUT/$bfile" ]; then
+            alarm_log "WARNING: $bfile (MANIFEST-built.tsv) is missing: rerun tools/build-pkg"
+            continue
+        fi
+        expected="$expected$bfile
+"
+        expected_entries="$expected_entries$(printf '%s' "$bfile" | sed -E 's/-(any|armv7h)\.pkg\.tar\.zst$//')
+"
+        nbuilt=$((nbuilt + 1))
+    done < <(tail -n +2 "$BUILT_MANIFEST")
+fi
+
+for i in "${!NAMES[@]}"; do
+    name="${NAMES[$i]}"; act="${ACTIONS[$i]}"; outf="${OUTFILES[$i]}"
+    if [ "$act" = copied ]; then
+        sync_file "$UPSTREAM_DIR/$outf" "$REPO_OUT/$outf"
+        sync_file "$UPSTREAM_DIR/$outf.sig" "$REPO_OUT/$outf.sig"
+        expected="$expected$outf
+$outf.sig
+"
+    else
+        sync_file "$REPACK_CACHE/$outf" "$REPO_OUT/$outf"
+        expected="$expected$outf
+"
+    fi
+    expected_entries="$expected_entries$(printf '%s' "$outf" | sed -E 's/-(any|armv7h)\.pkg\.tar\.zst$//')
+"
+done
+
+# Stale packages of earlier versions have no place in the repository.
+for f in "$REPO_OUT"/*.pkg.tar.zst "$REPO_OUT"/*.pkg.tar.zst.sig; do
+    [ -e "$f" ] || continue
+    b="${f##*/}"
+    if ! printf '%s' "$expected" | grep -qxF "$b"; then
+        rm -f "$f"; CHANGED=1
+        alarm_log "removed stale $b"
+    fi
+done
+
+MANIFEST="$REPO_OUT/MANIFEST.tsv"
+{
+    printf 'name\tupstream_filename\tupstream_sha256\tupstream_signature\taction\toutput_filename\toutput_sha256\n'
+    for i in "${!NAMES[@]}"; do
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "${NAMES[$i]}" "${UPSTREAM_FNS[$i]}" "${UPSTREAM_SHAS[$i]}" \
+            verified "${ACTIONS[$i]}" "${OUTFILES[$i]}" \
+            "$(sha256_of "$REPO_OUT/${OUTFILES[$i]}")"
+    done
+} > "$WORK/MANIFEST.tsv"
+if ! cmp -s "$WORK/MANIFEST.tsv" "$MANIFEST"; then
+    cp -f "$WORK/MANIFEST.tsv" "$MANIFEST"
+    CHANGED=1
+fi
+
+db_ok=0
+if [ -f "$REPO_OUT/t715-omarchy.db.tar.gz" ] && [ -f "$REPO_OUT/t715-omarchy.files.tar.gz" ] \
+   && [ -L "$REPO_OUT/t715-omarchy.db" ] && [ -L "$REPO_OUT/t715-omarchy.files" ]; then
+    # The db must list exactly the expected packages (guards a stale db left
+    # by an interrupted run or by hand).
+    printf '%s' "$expected_entries" | sort > "$WORK/db.expect"
+    if tar -tzf "$REPO_OUT/t715-omarchy.db.tar.gz" | sed -n 's|^\(.*\)/desc$|\1|p' | sort \
+       | diff -q - "$WORK/db.expect" >/dev/null; then
+        db_ok=1
+    else
+        alarm_log "t715-omarchy.db does not match the package set: rebuilding it"
+    fi
+fi
+
+if [ "$CHANGED" -eq 1 ] || [ "$db_ok" -eq 0 ]; then
+    alarm_log "running repo-add (fresh t715-omarchy.db)"
+    docker run --rm -i --platform "$ALARM_PLATFORM" \
+        -v "$REPO_OUT:/repo" \
+        "$ALARM_DEV_IMAGE" bash -s >&2 <<'EOS' || alarm_die "repo-add failed"
+set -euo pipefail
+shopt -s nullglob
+cd /repo
+pkgs=( *.pkg.tar.zst )
+[ "${#pkgs[@]}" -gt 0 ] || { echo "no packages in /repo" >&2; exit 1; }
+rm -f t715-omarchy.db t715-omarchy.db.tar.gz t715-omarchy.files t715-omarchy.files.tar.gz
+repo-add -q t715-omarchy.db.tar.gz "${pkgs[@]}"
+echo "repo-add: ${#pkgs[@]} package(s) indexed (t715-omarchy.db + t715-omarchy.files)" >&2
+EOS
+else
+    alarm_log "repository already up to date: db left untouched"
+fi
+
+alarm_log "$REPO_OUT ready: ${#NAMES[@]} packages + $nbuilt built by tools/build-pkg ($(printf '%s' "$expected" | grep -c . ) files) + t715-omarchy.db + MANIFEST.tsv"
+printf '%s\n' "$REPO_OUT"

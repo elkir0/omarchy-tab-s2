@@ -1,0 +1,753 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+# t715-keys — the SM-T715's Power and Home keys in the Omarchy session
+# (omarchy-tab-s2, rootfs/overlay/usr/local/bin/t715-keys; docs/image/ROOTFS.md,
+# "Touch layer P1" and "Touch layer P2"). Run by the t715-keys.service user
+# unit.
+#
+# Forked from omarchy-mobile's bin/omamobile-keys (commit 5f7ba48; MIT,
+# Copyright (c) 2026 Derek Ross), adapted for a tablet:
+#
+#   Power, short       lit: screen off (DPMS off) and touchscreen off
+#                      dark: screen on and touchscreen on
+#   Power, held 0.6 s  Omarchy's system menu, while the key is still down
+#                      (a press on a dark screen lights it first)
+#   Home, short        lit: home, as the touch shell's own Home does
+#                      (omamobile.switcher): an open Omarchy menu, recent
+#                      apps, app drawer or quick settings closes, an empty
+#                      workspace takes the screen (unless the current one is
+#                      empty already) and the home screens go back to their
+#                      home page (omamobile.home goHome)
+#                      dark: screen on, nothing else (as Samsung's Home key)
+#   Home, held 0.6 s   recent apps (omamobile.switcher), or closes them when
+#                      they are open; an open Omarchy menu closes first
+#   Cover closed       lit: screen off and touchscreen off, as Power
+#   Cover opened       dark: screen on and touchscreen on
+#                      (the cover's Hall sensor as a lid switch, SW_LID;
+#                      rootfs/t715-tablet.lua removes Omarchy's lid binds,
+#                      logind ignores the switch)
+#   Back, Recent       lit and unlocked: back, and recent apps. Dark or locked:
+#                      nothing. Back closes an open menu or sheet, as Home, or
+#                      else is the previous page in a browser and Escape in any
+#                      other app. The touch keys (tc300k.ko, "sec_touchkey")
+#                      report KEY_BACK and KEY_SCALE, bound to nothing in Hyprland
+#
+# Once the owner has set a PIN (omamobile-set-pin, the lock-on-start toggle),
+# everything that turns the screen off locks the session first, and lighting it
+# again shows the PIN pad. Without a PIN nothing locks: a lock could not be left.
+#
+# No gesture waits for a key held longer than 0.6 s: holding a hardware key
+# for long on this tablet risks a reset that ends in a boot loop
+# (docs/journal/COORDINATION.md). No Power + Volume chord: the volume keys stay with
+# Omarchy's own bindings.
+#
+# omamobile-keys is run by Hyprland binds at each press and release. This
+# reads the gpio-keys input device itself (alarm is in the input group): one
+# process times every press, so the long press fires while the key is held
+# with no state files or background timers per event, and the gestures can be
+# tested off the device with fake input (tests/test_t715_keys.sh).
+# rootfs/t715-tablet.lua binds both keys to nothing in Hyprland, so that
+# neither Omarchy nor the focused app acts on them too.
+#
+# The touchscreen goes off with the screen: Hyprland keeps delivering touches
+# to apps while the panel is off, and nothing locks the session.
+#
+# The screen's state comes from Hyprland (dpmsStatus) at each press. Only a
+# positive "off" counts: a Hyprland that does not answer reads as lit, so a
+# press never wakes the screen blind (as omamobile-keys).
+#
+# Environment:
+#   T715_KEYS_DEVICES     input devices, colon-separated (default: every
+#                         /dev/input/event* named "gpio-keys", and any that
+#                         reports a lid switch)
+#   T715_KEYS_SCREEN_OFF  "dpms" (default) or "backlight": brightness 0 (the
+#                         panel's dimmest level) instead of DPMS off, should
+#                         the panel not come back from DPMS off
+#   T715_KEYS_RESYNC      seconds between screen checks while dark (default
+#                         5): if something else lit the screen, the
+#                         touchscreen comes back on
+#
+# SIGUSR1 turns the screen off as a short Power press does (touch first):
+# t715-idle.service (hypridle) sends it after two minutes without input, and
+# the Power key wakes the screen as usual.
+#
+# SIGUSR2 lights a dark screen for a glance (omatel-agent, for a new message).
+# A screen lit from outside gets the same glance, a ringing call among them:
+# hypridle has already fired and sees no input, so it would never turn the
+# screen off again. A touch or a key ends the glance and hypridle takes over;
+# otherwise the screen goes off after T715_KEYS_GLANCE seconds (default 20),
+# or later while something holds logind's idle inhibitor, as a call does.
+#
+# SIGHUP is the Back key: omamobile.back's edge swipe sends it.
+#
+# Usage: t715-keys [--device PATH]...    watch the keys (the service)
+#        t715-keys --check               check the set-up and exit (smoke check)
+
+import glob
+import json
+import os
+import select
+import signal
+import shutil
+import struct
+import subprocess
+import sys
+import time
+
+HOLD = 0.6
+
+INHIBITED = ["busctl", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1",
+             "org.freedesktop.login1.Manager", "BlockInhibited"]
+GLANCE_RECHECK = 5.0
+
+EV_SYN, EV_KEY, EV_SW = 0, 1, 5
+SYN_DROPPED = 3
+SW_LID = 0
+KEY_POWER, KEY_HOMEPAGE = 116, 172
+KEY_BACK, KEY_SCALE = 158, 120
+KEY_NAMES = {KEY_POWER: "power", KEY_HOMEPAGE: "home"}
+LOCK_TOGGLE = "~/.local/state/omarchy/toggles/lock-on-start"
+LOCK_CHECKS = 5
+
+# struct input_event: a struct timeval (two C longs), __u16 type, __u16 code,
+# __s32 value. 16 bytes on armv7h, as the 32-bit kernel writes it.
+EVENT = struct.Struct("@llHHi")
+
+# The dispatch strings Omarchy and omarchy-mobile use (omarchy-brightness-
+# display, omarchy-toggle-input-device, omamobile.switcher).
+DPMS_OFF = 'hl.dsp.dpms({ action = "disable" })'
+DPMS_ON = 'hl.dsp.dpms({ action = "enable" })'
+GO_HOME = 'hl.dsp.focus({ workspace = "empty" })'
+TOUCH = "hl.config({ input = { touchdevice = { enabled = %s } } })"
+MENU_SYSTEM = ["omarchy-menu", "toggle", "system"]
+MENU_CLOSE = ["omarchy-menu", "close"]
+# The touch shell (omamobile-shell) through the Omarchy shell's IPC, as its
+# switcher and launcher call each other: the home screens' home page, and
+# recent apps.
+HOME_PAGE = ["omarchy-shell", "shell", "call", "omamobile.home", "goHome", ""]
+RECENTS = ["omarchy-shell", "shell", "toggle", "omamobile.switcher", "{}"]
+
+
+def key_tap(mods, code):
+    """A key down then up, in one sh so the up can't overtake the down, as
+    omamobile.back does. By xkb keycode: Hyprland looks a name up in the main
+    keyboard's keymap, which is squeekboard's, with neither of these keys."""
+    state = 'hl.dsp.send_key_state({ mods = "%s", key = "code:%d", state = "%s" })'
+    return ["sh", "-c", 'hyprctl dispatch "$1" >/dev/null; sleep 0.05; hyprctl dispatch "$2" >/dev/null',
+            "sh", state % (mods, code, "down"), state % (mods, code, "up")]
+
+
+# Back is Escape, which a browser ignores: XF86Back is its previous page. By
+# window class: Chromium, its web apps (chrome-<site>-Default) and Firefox.
+ESCAPE = key_tap("", 9)
+BROWSER_BACK = key_tap("", 166)
+BROWSERS = ("chromium", "chrome-", "firefox")
+
+
+# The touch shell's sheets that Home closes, by layer namespace (each one's
+# window is mapped only while it is open).
+SHEETS = (("omamobile-switcher", "omamobile.switcher"),
+          ("omamobile-launcher", "omamobile.launcher"),
+          ("omamobile-quicksettings", "omamobile.quicksettings"))
+WAKE_BRIGHTNESS = "40%"
+
+COMMANDS = ("hyprctl", "omarchy-menu", "omarchy-shell", "omarchy-system-lock", "brightnessctl", "omarchy-hw-display")
+
+
+def log(message):
+    print("t715-keys: " + message, file=sys.stderr, flush=True)
+
+
+def runtime_dir():
+    return os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+
+
+def session_env():
+    """The environment for hyprctl and Omarchy's tools.
+
+    hyprctl needs HYPRLAND_INSTANCE_SIGNATURE; the user manager may not have
+    it yet when graphical-session.target starts this service, and a new
+    session brings a new one: take the newest instance when the one in the
+    environment has no socket.
+    """
+    env = dict(os.environ)
+    env.setdefault("OMARCHY_PATH", "/usr/share/omarchy")
+    hypr = os.path.join(runtime_dir(), "hypr")
+    sig = env.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if not sig or not os.path.exists(os.path.join(hypr, sig, ".socket.sock")):
+        newest, newest_time = None, -1.0
+        for sock in glob.glob(os.path.join(hypr, "*", ".socket.sock")):
+            try:
+                mtime = os.stat(sock).st_mtime
+            except OSError:
+                continue
+            if mtime > newest_time:
+                newest, newest_time = sock, mtime
+        if newest:
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = os.path.basename(os.path.dirname(newest))
+    return env
+
+
+def run(argv, timeout=3):
+    """Run a command, wait for it; returns (exit status, stdout)."""
+    try:
+        done = subprocess.run(argv, env=session_env(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as err:
+        log("%s: %s" % (argv[0], err))
+        return 127, ""
+    return done.returncode, done.stdout.decode("utf-8", "replace")
+
+
+class Spawner:
+    """Commands that may take a while (the Omarchy shell's IPC): started
+    without waiting, so the keys keep being read, and reaped later."""
+
+    def __init__(self):
+        self.children = []
+
+    def __call__(self, argv):
+        log("run: " + " ".join(argv))
+        try:
+            self.children.append(subprocess.Popen(
+                argv, env=session_env(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True))
+        except OSError as err:
+            log("%s: %s" % (argv[0], err))
+
+    def reap(self):
+        self.children = [c for c in self.children if c.poll() is None]
+
+
+def hypr_json(*args):
+    rc, out = run(["hyprctl"] + list(args) + ["-j"])
+    if rc != 0:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        return None
+
+
+def namespaces(tree):
+    """Every layer namespace in `hyprctl layers -j`'s answer."""
+    found = set()
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if isinstance(node.get("namespace"), str):
+                found.add(node["namespace"])
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
+class Screen:
+    def __init__(self, mode, state_dir):
+        self.mode = mode
+        self.state_dir = state_dir
+        self.touch_flag = os.path.join(state_dir, "touch-off")
+        self.saved_flag = os.path.join(state_dir, "saved-brightness")
+        self._device = None
+
+    def device(self):
+        if self._device is None:
+            rc, out = run(["omarchy-hw-display"])
+            name = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+            if name:
+                self._device = name
+        return self._device
+
+    def brightness(self):
+        device = self.device()
+        if not device:
+            return None
+        rc, out = run(["brightnessctl", "-d", device, "get"])
+        try:
+            return int(out.strip()) if rc == 0 else None
+        except ValueError:
+            return None
+
+    def set_brightness(self, value):
+        device = self.device()
+        if device:
+            run(["brightnessctl", "-q", "-d", device, "set", value])
+
+    def backlight_mode(self):
+        return self.mode == "backlight" and self.device() is not None
+
+    def dark(self):
+        if self.backlight_mode():
+            return self.brightness() == 0
+        monitors = hypr_json("monitors")
+        if not isinstance(monitors, list):
+            return False
+        return any(isinstance(m, dict) and m.get("dpmsStatus") is False for m in monitors)
+
+    def touch_off_by_us(self):
+        return os.path.exists(self.touch_flag)
+
+    def touch(self, enabled):
+        # The flag says what Hyprland was told: left as it was on a failure, so
+        # that the resync of a lit screen tries again.
+        rc, _ = run(["hyprctl", "eval", TOUCH % ("true" if enabled else "false")])
+        if rc != 0:
+            log("the touchscreen did not follow: hyprctl says %d" % rc)
+            return
+        try:
+            if enabled:
+                os.unlink(self.touch_flag)
+            else:
+                open(self.touch_flag, "w").close()
+        except OSError:
+            pass
+
+    def lock_wanted(self):
+        return os.path.exists(os.path.expanduser(LOCK_TOGGLE))
+
+    def locked(self):
+        rc, out = run(["omarchy-shell", "lock", "isLocked"])
+        return rc == 0 and out.strip() == "true"
+
+    def lock(self):
+        """Lock the session, and say whether it is: the shell takes the request
+        and locks a moment later."""
+        if self.locked():
+            return True
+        run(["omarchy-system-lock"], timeout=5)
+        for _ in range(LOCK_CHECKS):
+            if self.locked():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def off(self):
+        # Touch first: no tap reaches an app on a panel that is going dark.
+        self.touch(False)
+        # With a PIN set, a dark screen is a locked one: it would wake on the open
+        # session with nothing to say so. A shell that cannot lock shows by staying lit.
+        if self.lock_wanted() and not self.lock():
+            log("the lock did not come up: the screen stays on")
+            self.touch(True)
+            return
+        if self.backlight_mode():
+            level = self.brightness()
+            if level:
+                try:
+                    with open(self.saved_flag, "w") as f:
+                        f.write("%d\n" % level)
+                except OSError:
+                    pass
+            self.set_brightness("0")
+        else:
+            run(["hyprctl", "dispatch", DPMS_OFF])
+
+    def on(self):
+        if self.backlight_mode():
+            try:
+                with open(self.saved_flag) as f:
+                    level = f.read().strip()
+            except OSError:
+                level = ""
+            self.set_brightness(level if level.isdigit() and level != "0" else WAKE_BRIGHTNESS)
+        else:
+            run(["hyprctl", "dispatch", DPMS_ON])
+            # A saved brightness of 0 would light the panel at its dimmest.
+            if self.brightness() == 0:
+                self.set_brightness(WAKE_BRIGHTNESS)
+        if self.lock_wanted() and self.locked():
+            run(["omarchy-shell", "lock", "wake"])
+        self.touch(True)
+
+
+class Key:
+    def __init__(self):
+        self.down = None     # monotonic time of the press, while held
+        self.woke = False    # this press lit the screen
+        self.long = False    # the long press fired (or was used up)
+
+
+class TouchWatch:
+    """The touchscreen, open only during a glance: reading it all the time would
+    wake this process for every finger movement."""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = None
+
+    def open(self):
+        if self.path and self.fd is None:
+            try:
+                self.fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError as err:
+                log("cannot open %s: %s" % (self.path, err))
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+class Keys:
+    def __init__(self, screen, spawn, resync=5.0, touch=None, glance=20.0):
+        self.screen = screen
+        self.spawn = spawn
+        self.resync = resync
+        self.keys = {code: Key() for code in KEY_NAMES}
+        self.next_resync = None
+        self.touch = touch or TouchWatch(None)
+        self.glance_for = glance
+        self.glance_end = None
+        self.cover_closed = False
+
+    def reset(self):
+        for key in self.keys.values():
+            key.down = None
+
+    def glance(self, now):
+        self.glance_end = now + self.glance_for
+        self.touch.open()
+
+    def end_glance(self):
+        self.glance_end = None
+        self.touch.close()
+
+    def message(self, now):
+        if self.screen.dark() and not self.cover_closed:
+            log("message: screen on for a glance")
+            self.screen.on()
+            self.glance(now)
+
+    def press(self, code, now):
+        self.end_glance()
+        key = self.keys[code]
+        key.down, key.woke, key.long = now, False, False
+        if self.screen.dark():
+            log("%s: pressed on a dark screen: screen on" % KEY_NAMES[code])
+            self.screen.on()
+            key.woke = True
+            # Home only wakes; Power's long press still opens the menu.
+            key.long = code == KEY_HOMEPAGE
+
+    def release(self, code, now):
+        key = self.keys[code]
+        if key.down is None:
+            return
+        key.down = None
+        if key.long or key.woke:
+            return
+        if code == KEY_POWER:
+            log("power: short press: screen off")
+            self.screen.off()
+        else:
+            self.home()
+
+    def touch_key(self, code):
+        if self.screen.dark() or self.screen.locked():
+            return
+        self.end_glance()
+        if code == KEY_BACK:
+            self.back()
+        else:
+            log("recent")
+            self.recents()
+
+    def idle(self):
+        if not self.screen.dark():
+            log("idle: screen off")
+            self.screen.off()
+
+    def cover(self, closed):
+        # Only a change of the screen's state: a cover closed on a dark
+        # screen, or opened on a lit one, does nothing.
+        self.cover_closed = closed
+        self.end_glance()
+        dark = self.screen.dark()
+        if closed and not dark:
+            log("cover closed: screen off")
+            self.screen.off()
+        elif not closed and dark:
+            log("cover opened: screen on")
+            self.screen.on()
+
+    def open_layers(self):
+        layers = hypr_json("layers")
+        return namespaces(layers) if layers is not None else set()
+
+    def close_sheets(self):
+        """Close an open Omarchy menu and the touch shell's sheets; True if
+        one was open."""
+        shown = self.open_layers()
+        closed = "omarchy-menu" in shown
+        if closed:
+            self.spawn(MENU_CLOSE)
+        for namespace, plugin in SHEETS:
+            if namespace in shown:
+                self.spawn(["omarchy-shell", "shell", "hide", plugin])
+                closed = True
+        return closed
+
+    def home(self):
+        self.close_sheets()
+        workspace = hypr_json("activeworkspace")
+        windows = workspace.get("windows", 1) if isinstance(workspace, dict) else 1
+        if not isinstance(windows, int) or windows > 0:
+            log("home: short press: an empty workspace, the home page")
+            run(["hyprctl", "dispatch", GO_HOME])
+        else:
+            log("home: short press: the home page (on an empty workspace already)")
+        self.spawn(HOME_PAGE)
+
+    def back(self):
+        if self.close_sheets():
+            log("back: what was open closes")
+            return
+        window = hypr_json("activewindow")
+        name = window.get("class") if isinstance(window, dict) else None
+        if isinstance(name, str) and name.lower().startswith(BROWSERS):
+            log("back: the browser's previous page")
+            self.spawn(BROWSER_BACK)
+        else:
+            log("back")
+            self.spawn(ESCAPE)
+
+    def recents(self):
+        if "omarchy-menu" in self.open_layers():
+            self.spawn(MENU_CLOSE)
+        self.spawn(RECENTS)
+
+    def tick(self, now):
+        for code, key in self.keys.items():
+            if key.down is not None and not key.long and now - key.down >= HOLD:
+                key.long = True
+                log("%s: held %.1f s" % (KEY_NAMES[code], HOLD))
+                if code == KEY_POWER:
+                    self.spawn(MENU_SYSTEM)
+                else:
+                    self.recents()
+        if self.screen.touch_off_by_us():
+            if self.next_resync is None:
+                self.next_resync = now + self.resync
+            elif now >= self.next_resync:
+                self.next_resync = now + self.resync
+                if not self.screen.dark():
+                    log("the screen was lit by something else: touchscreen on")
+                    self.screen.touch(True)
+                    self.next_resync = None
+                    self.glance(now)
+        else:
+            self.next_resync = None
+        if self.glance_end is not None and now >= self.glance_end:
+            rc, out = run(INHIBITED)
+            if rc == 0 and "idle" in out:
+                self.glance_end = now + GLANCE_RECHECK
+            else:
+                self.end_glance()
+                self.idle()
+
+    def timeout(self, now):
+        due = [key.down + HOLD for key in self.keys.values()
+               if key.down is not None and not key.long]
+        if self.screen.touch_off_by_us():
+            due.append(self.next_resync if self.next_resync is not None else now)
+        if self.glance_end is not None:
+            due.append(self.glance_end)
+        return max(0.0, min(due) - now) if due else None
+
+    def event(self, etype, code, value, now):
+        if etype == EV_SYN and code == SYN_DROPPED:
+            self.reset()
+        elif etype == EV_KEY and code in self.keys:
+            if value == 1:
+                self.press(code, now)
+            elif value == 0:
+                self.release(code, now)
+        elif etype == EV_KEY and code in (KEY_BACK, KEY_SCALE):
+            if value == 1:
+                self.touch_key(code)
+        elif etype == EV_SW and code == SW_LID:
+            self.cover(value != 0)
+
+
+def read_sysfs(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def has_lid(event_dir):
+    """The device reports SW_LID (bit 0 of its switch bitmap, in hex words)."""
+    words = read_sysfs(os.path.join(event_dir, "device", "capabilities", "sw")).split()
+    try:
+        return bool(words) and int(words[-1], 16) & (1 << SW_LID) != 0
+    except ValueError:
+        return False
+
+
+def find_devices(sysfs="/sys/class/input"):
+    listed = os.environ.get("T715_KEYS_DEVICES", "")
+    if listed:
+        return [p for p in listed.split(":") if p]
+    found = []
+    for event_dir in sorted(glob.glob(os.path.join(sysfs, "event*"))):
+        name = read_sysfs(os.path.join(event_dir, "device", "name"))
+        if name in ("gpio-keys", "gpio_keys", "sec_touchkey") or has_lid(event_dir):
+            found.append("/dev/input/" + os.path.basename(event_dir))
+    return found
+
+
+def find_touchscreen(sysfs="/sys/class/input"):
+    path = os.environ.get("T715_KEYS_TOUCH")
+    if path:
+        return path
+    for event in sorted(glob.glob(os.path.join(sysfs, "event*"))):
+        if "synaptics" in read_sysfs(os.path.join(event, "device/name")).lower():
+            return "/dev/input/" + os.path.basename(event)
+    return None
+
+
+def check():
+    ok = True
+    machine = os.uname().machine
+    print("t715-keys: input_event is %d bytes (%s)" % (EVENT.size, machine))
+    if machine.startswith("armv7") and EVENT.size != 16:
+        print("t715-keys: FAIL: a 32-bit ARM kernel writes 16-byte events")
+        ok = False
+    for command in COMMANDS:
+        if not shutil.which(command):
+            print("t715-keys: FAIL: %s not found" % command)
+            ok = False
+    devices = find_devices()
+    print("t715-keys: key devices: %s" % (" ".join(devices) or "none here"))
+    return 0 if ok else 1
+
+
+def main(argv):
+    devices = []
+    args = argv[1:]
+    while args:
+        arg = args.pop(0)
+        if arg == "--check":
+            return check()
+        if arg == "--device" and args:
+            devices.append(args.pop(0))
+        elif arg in ("-h", "--help"):
+            print("usage: t715-keys [--device PATH]...   watch the keys (the service)\n"
+                  "       t715-keys --check              check the set-up and exit")
+            return 0
+        else:
+            log("unknown argument: %s" % arg)
+            return 2
+    devices = devices or find_devices()
+    if not devices:
+        log("no gpio-keys input device: nothing to do")
+        return 0
+
+    mode = os.environ.get("T715_KEYS_SCREEN_OFF", "dpms")
+    if mode not in ("dpms", "backlight"):
+        log("T715_KEYS_SCREEN_OFF=%s: using dpms" % mode)
+        mode = "dpms"
+    try:
+        resync = max(0.2, float(os.environ.get("T715_KEYS_RESYNC", "5")))
+    except ValueError:
+        resync = 5.0
+    state_dir = os.path.join(runtime_dir(), "t715-keys")
+    os.makedirs(state_dir, exist_ok=True)
+
+    try:
+        glance = max(1.0, float(os.environ.get("T715_KEYS_GLANCE", "20")))
+    except ValueError:
+        glance = 20.0
+
+    spawn = Spawner()
+    screen = Screen(mode, state_dir)
+    touch = TouchWatch(find_touchscreen())
+    keys = Keys(screen, spawn, resync, touch, glance)
+
+    fds = {}
+    for path in devices:
+        try:
+            fds[os.open(path, os.O_RDONLY | os.O_CLOEXEC)] = b""
+        except OSError as err:
+            log("cannot open %s: %s" % (path, err))
+    if not fds:
+        return 1
+
+    # A previous run turned the touchscreen off with the screen; if the screen
+    # is lit now, give the touchscreen back.
+    if screen.touch_off_by_us() and not screen.dark():
+        log("the screen is lit: touchscreen on")
+        screen.touch(True)
+    log("reading %s (screen off: %s)" % (" ".join(devices), mode))
+
+    # SIGUSR1 (idle), SIGUSR2 (message) and SIGHUP wake the select below through this
+    # pipe, which carries the signal numbers.
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+    signal.set_wakeup_fd(wake_w)
+    signal.signal(signal.SIGUSR1, lambda signum, frame: None)
+    signal.signal(signal.SIGUSR2, lambda signum, frame: None)
+    signal.signal(signal.SIGHUP, lambda signum, frame: None)
+    watched = list(fds) + [wake_r]
+
+    def inputs():
+        return watched + ([touch.fd] if touch.fd is not None else [])
+
+    while True:
+        ready, _, _ = select.select(inputs(), [], [], keys.timeout(time.monotonic()))
+        # Every event that is waiting is handled before the hold timer is
+        # looked at: a press whose handling was slow (hyprctl under load)
+        # must not read as held when its release is already queued.
+        while ready:
+            for fd in ready:
+                # A key can end the glance whose touch fd was ready with it.
+                if fd not in inputs():
+                    continue
+                if fd == wake_r:
+                    try:
+                        signums = os.read(wake_r, 64)
+                    except OSError:
+                        signums = b""
+                    if signal.SIGUSR1 in signums:
+                        keys.idle()
+                    if signal.SIGUSR2 in signums:
+                        keys.message(time.monotonic())
+                    if signal.SIGHUP in signums:
+                        keys.touch_key(KEY_BACK)
+                    continue
+                if fd == touch.fd:
+                    log("touch: the glance ends, hypridle takes over")
+                    try:
+                        os.read(fd, EVENT.size * 64)
+                    except OSError:
+                        pass
+                    keys.end_glance()
+                    continue
+                try:
+                    data = os.read(fd, EVENT.size * 64)
+                except OSError as err:
+                    log("read: %s" % err)
+                    return 1
+                if not data:
+                    log("input device closed")
+                    return 1
+                buf = fds[fd] + data
+                whole = len(buf) - len(buf) % EVENT.size
+                for offset in range(0, whole, EVENT.size):
+                    _, _, etype, code, value = EVENT.unpack_from(buf, offset)
+                    keys.event(etype, code, value, time.monotonic())
+                fds[fd] = buf[whole:]
+            ready, _, _ = select.select(inputs(), [], [], 0)
+        keys.tick(time.monotonic())
+        spawn.reap()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

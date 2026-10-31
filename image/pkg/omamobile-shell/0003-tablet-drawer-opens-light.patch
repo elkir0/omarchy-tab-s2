@@ -1,0 +1,38 @@
+SM-T715 tablet: the app drawer opens without an icon rescan or the keyboard.
+
+Each opening ran AppLibrary.refreshIcons(): two `find` passes over every
+icon directory, parsed line by line in QML, then an iconIndex swap that
+re-resolves every icon. The image's icons never change after the build,
+and the start-up scan and the debounced rescan on app-list changes stay.
+Each opening also focused the search field, which unfolded the on-screen
+keyboard; it now takes focus when tapped, as Android's drawer does.
+Measured on the tablet (5 openings, means): quickshell 1336 -> 660 ms CPU
+and 1115 -> 748 ms GPU, Hyprland 429 -> 299 ms GPU, and no keyboard layer
+(sm-t715-omarchy docs/ONDEVICE-2026-10-29.md). Against omarchy-mobile
+5f7ba48, packages/omamobile-shell (applied with patch -p1 in that
+directory, after 0001 and 0002).
+
+diff --git a/plugins/omamobile.launcher/Launcher.qml b/plugins/omamobile.launcher/Launcher.qml
+index 71f525d..adeda30 100644
+--- a/plugins/omamobile.launcher/Launcher.qml
++++ b/plugins/omamobile.launcher/Launcher.qml
+@@ -178,7 +178,6 @@ Item {
+     var payload = ({})
+     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+     query = typeof payload.query === "string" ? payload.query : ""
+-    if (appLibrary) appLibrary.refreshIcons()
+     refreshApps()
+     opened = true
+   }
+@@ -521,8 +520,9 @@ Item {
+     WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+ 
+     onVisibleChanged: {
+-      if (visible) Qt.callLater(function() { input.forceActiveFocus() })
+-      else root.pull = 0
++      // The search field takes focus when tapped, not on open: focusing it
++      // here unfolded the on-screen keyboard at every opening.
++      if (!visible) root.pull = 0
+     }
+ 
+     Rectangle {

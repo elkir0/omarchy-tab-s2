@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# User unit: "Voice Call" PipeWire profile during calls, and the CallAudio service
+# (mute, speaker) for omatel-agent (modem/audio/t715-call-profile).
+# Install in /usr/lib/systemd/user/ and enable for the desktop user:
+#   systemctl --user enable --now t715-call-profile.service
+
+[Unit]
+Description=Call audio: Voice Call profile and CallAudio service
+After=pipewire.service wireplumber.service
+# Enabled globally, and a root login over SSH has a user manager too.
+ConditionUser=!root
+
+[Service]
+ExecStart=/usr/lib/shannond/t715-call-profile
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

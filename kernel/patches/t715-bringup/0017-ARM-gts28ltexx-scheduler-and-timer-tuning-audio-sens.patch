@@ -1,0 +1,433 @@
+From 12380c45170565f58cf393931b5e765de7cc424d Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 17/24] ARM: gts28ltexx: scheduler and timer tuning; audio,
+ sensors, battery in the board
+
+Kernel tuning (gts28ltexx_defconfig), asked for by the Omarchy work:
+HZ_250, PREEMPT, NO_HZ_IDLE, HIGH_RES_TIMERS, SCHED_MC and MGLRU, with
+capacity-dmips-mhz from the vendor kernel (A53 2048, A57 3575,
+kernel_universal5433 arch/arm/kernel/topology.c:72-78) so the scheduler
+tells the clusters apart.  RTC_SYSTOHC is off: Android keeps its own
+reference on the RTC.
+
+The milestone fragments move into the board file and the defconfig:
+- section 15, audio (exynos5433-gts28ltexx-audio.dtsi, was -m6.dtsi):
+  WM1814 on HSI2C3, I2S0, the gts28-wm1814 card; sound core, Arizona,
+  the codec, I2S, PL330 and the card driver are modules;
+- section 16, sensors (exynos5433-gts28ltexx-sensors.dtsi, was
+  -m7.dtsi): LSM6DS3 and YAS537 on HSI2C10 (their drivers now modules),
+  the cover Hall switch as gpio-keys SW_LID;
+- section 17, battery (exynos5433-gts28ltexx-battery.dtsi): the SM5703
+  fuel gauge on HSI2C7; POWER_SUPPLY on, the driver a module.
+The -m6/-m7 wrappers and their config fragments are removed.
+
+Checked on the SM-T715 (same build): timer resolution 1 ns, CPU
+capacities 586/1024, no vblank timeout, Phosh, Wi-Fi and Bluetooth up;
+speaker-to-microphone loopback at 1 kHz; battery 99 % in UPower;
+gyroscope and YAS537 readable, iio-sensor-proxy sees the accelerometer;
+hall-sensor watched by logind; no failed unit, no kernel warning.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/Makefile            |  2 -
+ ....dtsi => exynos5433-gts28ltexx-audio.dtsi} | 33 +++++++---
+ .../exynos5433-gts28ltexx-battery.dtsi        | 27 +++++++++
+ .../dts/samsung/exynos5433-gts28ltexx-m6.dts  | 15 -----
+ .../dts/samsung/exynos5433-gts28ltexx-m7.dts  | 14 -----
+ ...tsi => exynos5433-gts28ltexx-sensors.dtsi} |  0
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 60 ++++++++++++++++---
+ arch/arm/configs/gts28ltexx_defconfig         | 48 +++++++++++++--
+ arch/arm/configs/gts28ltexx_m6.config         | 58 ------------------
+ arch/arm/configs/gts28ltexx_m7.config         | 29 ---------
+ 10 files changed, 149 insertions(+), 137 deletions(-)
+ rename arch/arm/boot/dts/samsung/{exynos5433-gts28ltexx-m6.dtsi => exynos5433-gts28ltexx-audio.dtsi} (76%)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
+ delete mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
+ delete mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
+ rename arch/arm/boot/dts/samsung/{exynos5433-gts28ltexx-m7.dtsi => exynos5433-gts28ltexx-sensors.dtsi} (100%)
+ delete mode 100644 arch/arm/configs/gts28ltexx_m6.config
+ delete mode 100644 arch/arm/configs/gts28ltexx_m7.config
+
+diff --git a/arch/arm/boot/dts/samsung/Makefile b/arch/arm/boot/dts/samsung/Makefile
+index 84ccaa416..5b588d609 100644
+--- a/arch/arm/boot/dts/samsung/Makefile
++++ b/arch/arm/boot/dts/samsung/Makefile
+@@ -44,8 +44,6 @@ dtb-$(CONFIG_ARCH_EXYNOS5) += \
+ 	exynos5422-odroidxu4.dtb \
+ 	exynos5422-samsung-k3g.dtb \
+ 	exynos5433-gts28ltexx.dtb \
+-	exynos5433-gts28ltexx-m6.dtb \
+-	exynos5433-gts28ltexx-m7.dtb \
+ 	exynos5800-peach-pi.dtb
+ dtb-$(CONFIG_ARCH_S3C64XX) += \
+ 	s3c6410-mini6410.dtb \
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-audio.dtsi
+similarity index 76%
+rename from arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi
+rename to arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-audio.dtsi
+index 923afffff..a4983ab8f 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-audio.dtsi
+@@ -3,19 +3,38 @@
+  * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 6a
+  *
+  * Audio hardware description: the Cirrus/Wolfson WM1814 codec on HSI2C
+- * channel 3 (0x14e70000) plus the Exynos5433 I2S0 controller that the
+- * (future) machine driver will bind it to.  This milestone only
+- * describes the hardware - there is deliberately no sound node, so
+- * nothing binds yet.  All values are transcribed from the device's
+- * live device tree (01_dumps/live_fdt.dts) and mapped onto the
+- * mainline bindings; see docs/AUDIO_M6.md for the value-by-value
+- * source table and the machine-driver specification.
++ * channel 3 (0x14e70000) plus the Exynos5433 I2S0 controller, and
++ * (milestone 6b) the sound node that binds them through the
++ * samsung,gts28-wm1814 machine driver (sound/soc/samsung/gts28_wm1814.c).
++ * All values are transcribed from the device's live device tree
++ * (01_dumps/live_fdt.dts) and mapped onto the mainline bindings; see
++ * docs/AUDIO_M6.md for the value-by-value source table, the
++ * machine-driver specification and the 6b notes.
+  */
+ 
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/mfd/arizona.h>
+ 
++/*
++ * Sound card: I2S0 <-> WM1814 AIF1.  Stock node: live_fdt.dts:5344-5352
++ * (compatible "samsung,pacific-arizona", clocks = CLKOUT as "mclk",
++ * samsung,audio-cpu = I2S0, samsung,audio-codec = the WM1814 once per
++ * downstream DAI link).  Only the primary link exists in mainline, so
++ * the codec is listed once.  The model string follows the TM2 precedent
++ * (model = "wm5110", exynos5433-tm2-common.dtsi:126).
++ */
++/ {
++	sound {
++		compatible = "samsung,gts28-wm1814";
++		samsung,model = "wm1814";
++		samsung,audio-cpu = <&i2s0>;
++		samsung,audio-codec = <&wm1814>;
++		clocks = <&pmu_system_controller 0>;
++		clock-names = "mclk";
++	};
++};
++
+ /*
+  * HSI2C channel 3 carries the WM1814 audio codec.
+  * live_fdt.dts: hsi2c@14E70000 (lines 1959-1972, compatible
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
+new file mode 100644
+index 000000000..c18e783cc
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): SM5703 fuel gauge.
++ *
++ * From the stock device tree read from the device (01_dumps/live_fdt.dts):
++ *   lines 1617-1643: hsi2c@14EF0000 (mainline hsi2c_7, i2c@14ef0000),
++ *     pins gpd2-7/gpd2-6 function 4 (same as mainline hs_i2c7_bus),
++ *     no clock-frequency (100 kHz), child sm5703-fuelgauge@71,
++ *     compatible "samsung,sm5703-fuelgauge".
++ *   line 1638: fuelgauge,fuel_int = <&gpa1 4 0> (pins in "fuel-irq",
++ *     lines 350-357).  Not wired here: the mainline driver polls.
++ *   lines 1636-1641: capacity_calculation_type 0x0c, capacity_max 990,
++ *     capacity_max_margin 60, capacity_min 0.  The driver uses the
++ *     990/0 pair as constants (see docs/BATTERY.md).
++ *
++ * The driver is read-only: the gauge keeps the battery model the stock
++ * Android driver loaded into it.
++ */
++
++&hsi2c_7 {
++	status = "okay";
++
++	fuel-gauge@71 {
++		compatible = "siliconmitus,sm5703-fuel-gauge";
++		reg = <0x71>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
+deleted file mode 100644
+index 07c27eed5..000000000
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
++++ /dev/null
+@@ -1,15 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 6a
+- *
+- * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus the
+- * audio hardware description (WM1814 codec on hsi2c_3, I2S0) from
+- * exynos5433-gts28ltexx-m6.dtsi.  No sound node yet: this milestone
+- * documents the hardware the machine driver will need, it does not
+- * instantiate a card.  See docs/AUDIO_M6.md.
+- */
+-
+-/dts-v1/;
+-
+-#include "exynos5433-gts28ltexx.dts"
+-#include "exynos5433-gts28ltexx-m6.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
+deleted file mode 100644
+index ff188ef02..000000000
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
++++ /dev/null
+@@ -1,14 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 7
+- *
+- * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus the
+- * motion sensors and cover Hall switch (LSM6DS3 IMU, YAS537 magnetometer
+- * on hsi2c_10, gpio-keys SW_LID) from exynos5433-gts28ltexx-m7.dtsi.
+- * See docs/SENSORS_M7.md.
+- */
+-
+-/dts-v1/;
+-
+-#include "exynos5433-gts28ltexx.dts"
+-#include "exynos5433-gts28ltexx-m7.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sensors.dtsi
+similarity index 100%
+rename from arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi
+rename to arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sensors.dtsi
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index d0ff21970..eb98f4780 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -274,14 +274,22 @@ firmware@207b000 {
+ 	};
+ };
+ 
+-&cpu0 { /delete-property/ enable-method; };
+-&cpu1 { /delete-property/ enable-method; };
+-&cpu2 { /delete-property/ enable-method; };
+-&cpu3 { /delete-property/ enable-method; };
+-&cpu4 { /delete-property/ enable-method; };
+-&cpu5 { /delete-property/ enable-method; };
+-&cpu6 { /delete-property/ enable-method; };
+-&cpu7 { /delete-property/ enable-method; };
++/*
++ * capacity-dmips-mhz: relative per-MHz capacity for the scheduler
++ * (SCHED_MC).  The vendor 32-bit kernel describes the clusters as
++ * cortex-a7 (cpu0-3, A53) and cortex-a15 (cpu4-7, A57) with efficiencies
++ * 2048 and 3575 under CONFIG_SOC_EXYNOS5433 (kernel_universal5433
++ * arch/arm/kernel/topology.c:72-78); mainline's arm32 table knows neither
++ * A53 nor A57 and would treat all eight cores as equal.
++ */
++&cpu0 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
++&cpu1 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
++&cpu2 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
++&cpu3 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
++&cpu4 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
++&cpu5 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
++&cpu6 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
++&cpu7 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
+ 
+ &soc {
+ 	/*
+@@ -838,3 +846,39 @@ &framebuffer {
+  * docs/WIFI_BT_M5.md section 7.7, validated on the tablet on 2026-10-28.
+  */
+ #include "exynos5433-gts28ltexx-wifi.dtsi"
++
++/* ==================================================================== */
++/* 15. Audio (WM1814 codec on I2S0, gts28-wm1814 sound card)            */
++/* ==================================================================== */
++
++/*
++ * WM1814 (driven as WM8998) on HSI2C3 with MCLK1 from the PMU CLKOUT,
++ * FLL1 at 49.152 MHz, I2S0 with the codec as clock master: speaker,
++ * headphones and main microphone.  docs/AUDIO_M6.md, validated on the
++ * tablet on 2026-10-29.  Arizona, the codec, I2S, PL330 and the card
++ * driver are modules installed by the initramfs.
++ */
++#include "exynos5433-gts28ltexx-audio.dtsi"
++
++/* ==================================================================== */
++/* 16. Sensors: LSM6DS3 IMU, YAS537 magnetometer, cover Hall switch     */
++/* ==================================================================== */
++
++/*
++ * Both sensors on HSI2C10 with stock mount matrices; the cover magnet is a
++ * gpio-keys SW_LID switch (logind is told to ignore it: no suspend yet).
++ * docs/SENSORS_M7.md, validated on the tablet on 2026-10-29.  The IIO
++ * drivers are modules installed by the initramfs.
++ */
++#include "exynos5433-gts28ltexx-sensors.dtsi"
++
++/* ==================================================================== */
++/* 17. Battery fuel gauge (SM5703 on HSI2C7)                            */
++/* ==================================================================== */
++
++/*
++ * Read-only power_supply driver: Linux never writes the gauge, Android
++ * keeps its model and calibration.  docs/BATTERY.md, validated on the
++ * tablet on 2026-10-29.
++ */
++#include "exynos5433-gts28ltexx-battery.dtsi"
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 92d75aa67..d42856ce2 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -227,11 +227,17 @@ CONFIG_ZRAM_BACKEND_ZSTD=y
+ CONFIG_PSI=y
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_UINPUT=y
+-# IIO and the milestone-7 sensor drivers (auto-rotation); the sensor DT
+-# nodes are still in exynos5433-gts28ltexx-m7.dtsi, untested on the device.
++# IIO core, and the sensor drivers (LSM6DS3 IMU, YAS537 magnetometer,
++# docs/SENSORS_M7.md) as modules: udev loads them after the initramfs
++# watchdog guard, so a probe that stalls on the I2C bus cannot loop the
++# board.  iio-sensor-proxy reads them for auto-rotation.
+ CONFIG_IIO=y
+-CONFIG_IIO_ST_LSM6DSX=y
+-CONFIG_YAMAHA_YAS530=y
++CONFIG_IIO_ST_LSM6DSX=m
++CONFIG_YAMAHA_YAS530=m
++# Battery fuel gauge (SM5703 on HSI2C7, read-only, docs/BATTERY.md):
++# the power_supply class that UPower reads, and the driver as a module.
++CONFIG_POWER_SUPPLY=y
++CONFIG_BATTERY_SM5703=m
+ 
+ # Milestone 5, Wi-Fi and Bluetooth (BCM4358, docs/WIFI_BT_M5.md).  Every
+ # driver that talks to the radios stays a MODULE, like panfrost: a
+@@ -261,3 +267,37 @@ CONFIG_SERIAL_SAMSUNG=m
+ CONFIG_MFD_EXYNOS_LPASS=m
+ # debugfs: gpio, pinctrl, clk and regulator summaries for board bring-up.
+ CONFIG_DEBUG_FS=y
++
++# Timers and scheduler, as exynos_defconfig plus HZ 250.  Without
++# high-resolution timers every timeout was rounded to 10 ms jiffies
++# (uneven frame pacing in Hyprland and Phosh).  SCHED_MC with the
++# board's capacity-dmips-mhz (A53 2048, A57 3575).
++CONFIG_NO_HZ_IDLE=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_HZ_250=y
++CONFIG_PREEMPT=y
++CONFIG_SCHED_MC=y
++# Multi-gen LRU: better reclaim with zram swap (the Omarchy image).
++CONFIG_LRU_GEN=y
++CONFIG_LRU_GEN_ENABLED=y
++# Never write the PMIC RTC from Linux: Android keeps its own reference on it.
++# The RTC is still read at boot; NTP corrects the system time.
++# boot; NTP (systemd-timesyncd over Wi-Fi) corrects the system time.
++# CONFIG_RTC_SYSTOHC is not set
++
++# Milestone 6, audio: I2S0 + WM1814 (driven as WM8998) with the gts28_wm1814
++# machine driver (docs/AUDIO_M6.md).  Everything that probes hardware is a
++# module, loaded by udev after the initramfs watchdog guard.
++CONFIG_SOUND=y
++CONFIG_SND=m
++CONFIG_SND_SOC=m
++CONFIG_SND_SOC_SAMSUNG=m
++CONFIG_SND_SAMSUNG_I2S=m
++CONFIG_MFD_ARIZONA_I2C=m
++CONFIG_MFD_WM8998=y
++CONFIG_REGULATOR_ARIZONA_LDO1=m
++CONFIG_REGULATOR_ARIZONA_MICSUPP=m
++CONFIG_GPIO_ARIZONA=m
++CONFIG_DMADEVICES=y
++CONFIG_PL330_DMA=m
++CONFIG_SND_SOC_SAMSUNG_GTS28_WM1814=m
+diff --git a/arch/arm/configs/gts28ltexx_m6.config b/arch/arm/configs/gts28ltexx_m6.config
+deleted file mode 100644
+index 4a749e422..000000000
+--- a/arch/arm/configs/gts28ltexx_m6.config
++++ /dev/null
+@@ -1,58 +0,0 @@
+-# SPDX-License-Identifier: GPL-2.0
+-#
+-# Milestone 6a (audio hardware) config fragment for the gts28ltexx
+-# board.  Merged on top of gts28ltexx_defconfig (see
+-# scripts/kbuild-mainline.sh --fragment), which already carries the
+-# milestone-2 base (PMIC, eMMC, USB gadget).  Adds the audio chain:
+-# Samsung I2S, the Arizona MFD/codec stack for the WM1814 (driven as
+-# WM8998) and its internal regulators.  There is no machine driver
+-# yet, so no sound card is instantiated; these options only make the
+-# codec MFD and its ASoC component probe.  See docs/AUDIO_M6.md for the
+-# rationale.
+-#
+-# All symbols set here hold (=y): SND_SOC_SAMSUNG and SND_SAMSUNG_I2S
+-# have no user-visible blocker, and MFD_ARIZONA_I2C/MFD_WM8998 are
+-# tristates with prompts.  The one deliberate omission is the codec's
+-# ASoC component itself: CONFIG_SND_SOC_WM8998 is a promptless
+-# tristate (sound/soc/codecs/Kconfig:2414-2416) whose only in-tree
+-# activators are imply from SND_SOC_ALL_CODECS (needs COMPILE_TEST,
+-# unacceptable on a device config) and select from a machine driver -
+-# and mainline has no WM8998 machine driver.  A fragment line is
+-# silently dropped for such symbols (olddefconfig ignores user values
+-# without a prompt; verified by hand-appending the line to .config).
+-# Mainline's own pattern is SND_SOC_SAMSUNG_TM2_WM5110
+-# (sound/soc/samsung/Kconfig:118-125) selecting SND_SOC_WM5110; the
+-# machine-driver milestone must do the same with SND_SOC_WM8998, which
+-# also flips the promptless SND_SOC_ARIZONA helper (codec glue +
+-# arizona-jack) to y via its defaults (sound/soc/codecs/Kconfig:366-377).
+-
+-# --- milestone 6a: audio ---
+-# Sound core; SND selects SND_JACK/REGMAP_I2C as needed.
+-CONFIG_SOUND=y
+-CONFIG_SND=y
+-CONFIG_SND_SOC=y
+-CONFIG_SND_SOC_SAMSUNG=y
+-# Exynos5433 I2S0 controller (sound/soc/samsung/i2s.c).
+-CONFIG_SND_SAMSUNG_I2S=y
+-# Arizona MFD over I2C (drivers/mfd/arizona-i2c.c matches
+-# "wlf,wm1814") and the WM8998 cell set (WM1814 shares it).  The
+-# wm8998-codec ASoC cell itself stays unbuilt (see header): its
+-# SND_SOC_WM8998 symbol is promptless and needs the machine driver's
+-# select.
+-CONFIG_MFD_ARIZONA_I2C=y
+-CONFIG_MFD_WM8998=y
+-# Internal LDO1 (DCVDD) and MICSUPP (MICVDD) regulator cells of the
+-# Arizona MFD (drivers/mfd/arizona-core.c: early_devs/wm8998_devs).
+-CONFIG_REGULATOR_ARIZONA_LDO1=y
+-CONFIG_REGULATOR_ARIZONA_MICSUPP=y
+-# Arizona GPIO block (wm8998_devs "arizona-gpio" cell); also needed
+-# because the codec node is a gpio-controller.
+-CONFIG_GPIO_ARIZONA=y
+-# Extcon: arizona-jack.c (linked into snd-soc-arizona) registers an
+-# extcon device for jack detection.
+-CONFIG_EXTCON=y
+-# LPASS MFD (audio-subsystem@11400000) parents I2S0 and its ADMA.
+-CONFIG_MFD_EXYNOS_LPASS=y
+-# ADMA (arm,pl330) provides the I2S0 DMA channels.
+-CONFIG_DMADEVICES=y
+-CONFIG_PL330_DMA=y
+diff --git a/arch/arm/configs/gts28ltexx_m7.config b/arch/arm/configs/gts28ltexx_m7.config
+deleted file mode 100644
+index 8a87eaaf1..000000000
+--- a/arch/arm/configs/gts28ltexx_m7.config
++++ /dev/null
+@@ -1,29 +0,0 @@
+-# SPDX-License-Identifier: GPL-2.0
+-#
+-# Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433) - milestone 7
+-#
+-# Fragment merged on top of gts28ltexx_defconfig by
+-#   make gts28ltexx_defconfig gts28ltexx_m7.config
+-# (run by scripts/kbuild-mainline.sh --fragment gts28ltexx_m7.config).
+-#
+-# The defconfig already carries the milestone-2 base (PMIC +
+-# regulators, eMMC, USB gadget).  This fragment adds the milestone-7
+-# sensor drivers: the IIO core, the st_lsm6dsx IMU driver (covers the
+-# LSM6DS3), the yamaha-yas530 magnetometer driver (covers the YAS537)
+-# and the gpio-keys Hall switch, all built-in (=y) so
+-# iio-sensor-proxy can read orientation and cover state from an
+-# initramfs.
+-#
+-# I2C_EXYNOS5 (=y in the defconfig) is the hsi2c_10 controller driver
+-# the two sensors sit on.
+-
+-# --- milestone 7 ---
+-CONFIG_IIO=y
+-CONFIG_IIO_BUFFER=y
+-CONFIG_IIO_TRIGGERED_BUFFER=y
+-CONFIG_IIO_ST_LSM6DSX=y
+-CONFIG_IIO_ST_LSM6DSX_I2C=y
+-CONFIG_YAMAHA_YAS530=y
+-
+-CONFIG_INPUT_EVDEV=y
+-CONFIG_KEYBOARD_GPIO=y

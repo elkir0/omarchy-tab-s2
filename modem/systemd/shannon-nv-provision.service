@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Makes the verified NV copy in /var/lib/shannon/nv from EFS, read only,
+# once per device (modem/systemd/shannon-nv-provision). Skipped when the
+# copy exists or on a kernel without the modem series.
+
+[Unit]
+Description=Shannon SS333 modem: verified NV copy from EFS (read only)
+ConditionPathExists=!/var/lib/shannon/nv/manifest.sha256
+ConditionPathExistsGlob=/usr/lib/modules/%v/kernel/drivers/misc/modem_v1/sec_modem_v1.ko*
+After=local-fs.target systemd-udevd.service
+Before=shannon-modem-prepare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/shannond/shannon-nv-provision
+
+[Install]
+WantedBy=multi-user.target

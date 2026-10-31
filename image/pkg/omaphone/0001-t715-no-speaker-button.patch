@@ -1,0 +1,17 @@
+SM-T715: no Speaker button in the call screen. The tablet has no earpiece, so the
+button had nothing to switch: it read "off" while the sound came from the speaker.
+Against omaphone 0.2.2.
+
+diff -ruN a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1647,6 +1647,9 @@
+         .build();
+     let (mute_box, mute) = round_toggle("microphone-sensitivity-high-symbolic", "Mute");
+     let (speaker_box, speaker) = round_toggle("audio-volume-high-symbolic", "Speaker");
++    // SM-T715: no earpiece. A call is on the speaker, or on the headset when one
++    // is plugged in, and there is nothing to switch.
++    speaker_box.set_visible(false);
+     let (keypad_box, keypad) = round_toggle("input-dialpad-symbolic", "Keypad");
+     let row = gtk::Box::builder()
+         .orientation(gtk::Orientation::Horizontal)

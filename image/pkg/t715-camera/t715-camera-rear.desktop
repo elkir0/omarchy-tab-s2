@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Photo
+Name[fr]=Photo
+Comment=Take a photograph with the rear camera
+Comment[fr]=Prendre une photo avec la caméra arrière
+Exec=t715-camera rear
+Icon=camera-photo
+Categories=Graphics;Photography;
+Terminal=false

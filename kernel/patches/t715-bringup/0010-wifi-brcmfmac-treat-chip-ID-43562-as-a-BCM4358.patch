@@ -1,0 +1,61 @@
+From 5798a5a0c9bf3a27c42f872c6a96c511753e92f5 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 10/24] wifi: brcmfmac: treat chip ID 43562 as a BCM4358
+
+The SM-T715's BCM4358 (rev 3, PCI 14e4:43ec) reports chipcommon ID
+0xAA2A = 43562, unknown to brcmfmac ("unknown chip: BCM43562/3"). The
+vendor bcmdhd folds it into the 4358/43569 class (si_chipid_fixup) and
+loads the 4358 A3 firmware.
+
+Add BRCM_CC_43562_CHIP_ID, give it the 0x180000 TCM base of the 4358
+group and map it to brcmfmac4358-pcie.
+
+The download works (RAM 0xc0000 at 0x180000, readback OK); the chip
+still stalls when its ARM is released on this board, see
+docs/WIFI_BT_M5.md of the bring-up repo.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c       | 1 +
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c       | 2 ++
+ drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h | 1 +
+ 3 files changed, 4 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+index e3a01a28a..d2189c951 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+@@ -720,6 +720,7 @@ static u32 brcmf_chip_tcm_rambase(struct brcmf_chip_priv *ci)
+ 	case BRCM_CC_4356_CHIP_ID:
+ 	case BRCM_CC_43567_CHIP_ID:
+ 	case BRCM_CC_43569_CHIP_ID:
++	case BRCM_CC_43562_CHIP_ID:
+ 	case BRCM_CC_43570_CHIP_ID:
+ 	case BRCM_CC_4358_CHIP_ID:
+ 	case BRCM_CC_43602_CHIP_ID:
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 48224588c..f95640542 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -93,6 +93,8 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
+ 	BRCMF_FW_ENTRY(BRCM_CC_43569_CHIP_ID, 0xFFFFFFFF, 43570),
+ 	BRCMF_FW_ENTRY(BRCM_CC_43570_CHIP_ID, 0xFFFFFFFF, 43570),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4358_CHIP_ID, 0xFFFFFFFF, 4358),
++	/* The SM-T715 BCM4358 (rev 3) reports this ID; Samsung bcmdhd treats it as a 4358 */
++	BRCMF_FW_ENTRY(BRCM_CC_43562_CHIP_ID, 0xFFFFFFFF, 4358),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0x000001FF, 4359),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0xFFFFFE00, 4359C),
+ 	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0x0000000F, 4364B2), /* 3 */
+diff --git a/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h b/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
+index 2f886af06..6c3d44a2b 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
++++ b/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h
+@@ -39,6 +39,7 @@
+ #define BRCM_CC_4354_CHIP_ID		0x4354
+ #define BRCM_CC_4355_CHIP_ID		0x4355
+ #define BRCM_CC_4356_CHIP_ID		0x4356
++#define BRCM_CC_43562_CHIP_ID		43562
+ #define BRCM_CC_43566_CHIP_ID		43566
+ #define BRCM_CC_43567_CHIP_ID		43567
+ #define BRCM_CC_43569_CHIP_ID		43569

@@ -1,0 +1,46 @@
+From c756b027ce0279a042f1d4e32b7c4a90ad1d6e32 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH] ARM: gts28ltexx: include the GPU devfreq dtsi (test branch)
+
+Include exynos5433-gts28ltexx-gpufreq.dtsi in the board, after
+exynos5433-gts28ltexx-gpu.dtsi (which deletes the GPU's
+operating-points-v2; the gpufreq dtsi sets it again), as docs/GPU.md
+section 10.1 describes.  The board now has the full GPU OPP table
+(160-700 MHz, all 8 OPPs, so the cooling states keep their numbers),
+panfrost as a devfreq cooling device and the GPU passive trips.  Build
+with scripts/kbuild-mainline.sh --fragment gts28ltexx_gpufreq.config.
+
+Test branch for the on-device validation: the frequency is capped at
+run time through the devfreq max_freq knob, not by removing OPPs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 6f8ec3153..9e383e1fd 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -847,12 +847,19 @@ &framebuffer {
+ /* ==================================================================== */
+ 
+ /*
+- * No OPP table: Linux never changes the GPU voltage or clock (docs/GPU.md).
+  * Validated on the tablet on 2026-10-28: Mali-T760 id 0x750 r0p1, 6 shader
+  * cores, boot clock 266 MHz with vdd_g3d (BUCK6) at 937 500 uV, Mesa
+  * "Mali-T760 MC6 (Panfrost)" GLES 3.1 renderer in phoc, no GPU faults.
++ *
++ * Frequency scaling: the OPP table (8 OPPs, 160-700 MHz), panfrost as a
++ * devfreq cooling device and the GPU passive trips come from
++ * exynos5433-gts28ltexx-gpufreq.dtsi, built with gts28ltexx_gpufreq.config
++ * (docs/GPU.md section 10).  It must come after
++ * exynos5433-gts28ltexx-gpu.dtsi: that file deletes the GPU's
++ * operating-points-v2 property, the gpufreq one sets it again.
+  */
+ #include "exynos5433-gts28ltexx-gpu.dtsi"
++#include "exynos5433-gts28ltexx-gpufreq.dtsi"
+ 
+ /* ==================================================================== */
+ /* 13. Bluetooth (BCM4358 on UART3, hci_bcm)                            */

@@ -1,0 +1,57 @@
+# Packages added to Omarchy's list for the SM-T715 (armv7h), one per line,
+# "name  # why". A line is MANDATORY (the build fails when pacman cannot
+# install it) unless the name starts with '?': best-effort packages are
+# skipped when unavailable on armv7h and listed in the MANIFEST.
+
+# --- Headless access over the USB debug link (usb-rndis.service) ---
+openssh                 # sshd, root@172.16.42.1 with the --ssh-pubkey key
+dnsmasq                 # DHCP for the Mac on usb0 (/etc/usb-rndis/dnsmasq.conf)
+sudo                    # alarm administers the tablet (wheel, no password)
+
+# --- Display and input ---
+mesa                    # panfrost (Mali-T760) and the exynos kmsro loader
+squeekboard             # on-screen keyboard for a touch-only device (touch layer P1, docs/image/ROOTFS.md)
+hypridle                # idle timer: screen off after 2 min through t715-keys (t715-idle.service)
+
+# --- Memory ---
+zram-generator          # compressed swap in RAM (/etc/systemd/zram-generator.conf)
+
+# --- Audio ---
+pipewire-audio          # PipeWire's BlueZ SPA plugin (spa-0.2/bluez5): Bluetooth audio
+pipewire-pulse          # the PulseAudio server on PipeWire: Firefox (libpulse) had no sound without it (2026-10-29)
+rtkit                   # realtime priority for PipeWire (its RTKit calls failed: ServiceUnknown)
+
+# --- Wireless tools (the Wi-Fi firmware comes from rootfs/install-wifi.sh) ---
+iw
+wireless-regdb
+
+# --- Console tools ---
+usbutils
+htop
+vim                     # Neovim is not installable on armv7h (see docs/image/ROOTFS.md)
+
+# --- Diagnostics (GPU and power checks over SSH, docs/journal/ONDEVICE-2026-10-29.md) ---
+glmark2                 # reproducible GLES load with --validate (GPU frequency tests)
+mesa-utils              # eglinfo, es2_info
+i2c-tools               # i2cget: read-only PMIC checks
+busybox                 # devmem: read-only SoC register checks
+
+# --- Best effort ---
+iio-sensor-proxy        # the accelerometer's orientation, for t715-rotate
+?firefox                # kept next to Chromium, the default browser (pkg/t715-chromium)
+
+# --- Apps of omamobile-apps, left out with it because it needs neard ---
+# Not gnome-maps: gjs dies on an alignment fault in ALARM's libmozjs on this CPU, before
+# any window. The Google Maps web app takes its place.
+gnome-calculator
+gnome-clocks
+geoclue                 # location service
+
+# --- Tiles and audio clients ---
+wf-recorder             # the Screen record tile (omamobile-screenrecord)
+pipewire-alsa           # ALSA-only clients go through PipeWire
+
+# --- Modem (docs/hardware/MODEM.md) ---
+modemmanager            # mmcli only (configuration, SIM PIN): the daemon is masked, shannond's facade owns the bus name
+feedbackd               # ring and vibration for omatel-agent
+sound-theme-freedesktop # ring tone for omatel-agent

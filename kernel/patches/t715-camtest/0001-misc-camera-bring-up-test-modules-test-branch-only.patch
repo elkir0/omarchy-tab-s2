@@ -1,0 +1,958 @@
+From 57a9c40cdbf928218d52795ee8340bc7c7d0568b Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 1/4] misc: camera bring-up test modules (test branch only)
+
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 151 ++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |   2 +
+ arch/arm/configs/gts28ltexx_camtest.config    |  39 ++
+ drivers/misc/Kconfig                          |   6 +
+ drivers/misc/Makefile                         |   2 +
+ drivers/misc/t715-cam-capture.c               | 347 ++++++++++++++++++
+ drivers/misc/t715-cam-probe.c                 | 338 +++++++++++++++++
+ 7 files changed, 885 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+ create mode 100644 arch/arm/configs/gts28ltexx_camtest.config
+ create mode 100644 drivers/misc/t715-cam-capture.c
+ create mode 100644 drivers/misc/t715-cam-probe.c
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+new file mode 100644
+index 000000000..e4d4d345d
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -0,0 +1,151 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Camera stage (a). See docs/hardware/CAMERA.md. */
++
++/ {
++	aliases {
++		i2c4 = &hsi2c_4;
++		i2c21 = &i2c_cam_rear;
++		i2c22 = &i2c_cam_front;
++	};
++
++	/* Stock: live_fdt.dts:6057 pins; bit-banging ch0 is not proven by stock. */
++	i2c_cam_rear: i2c-cam-rear {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc2 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc2 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	/* Stock i2c@35: live_fdt.dts:3329-3335. */
++	i2c_cam_front: i2c-cam-front {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc2 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc2 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	cam-probe {
++		compatible = "samsung,t715-cam-probe";
++		power-domains = <&pd_cam0>;
++
++		a28-supply = <&ldo29_reg>;	/* CAM_SEN_A2.8V_AP */
++		core-supply = <&ldo23_reg>;	/* 1.30 V, as stock */
++		af-supply = <&ldo26_reg>;	/* CAM_AF_2.8V_AP */
++		io-supply = <&ldo22_reg>;	/* CAM_IO_1.8V_AP */
++		vt28-supply = <&ldo27_reg>;	/* VT_CAM_2.8V */
++		vt18-supply = <&ldo21_reg>;	/* VT_CAM_1.8V */
++
++		rear-reset-gpios = <&gpc0 4 GPIO_ACTIVE_LOW>;
++		front-reset-gpios = <&gpc0 3 GPIO_ACTIVE_LOW>;
++		front-stby-gpios = <&gpc0 0 GPIO_ACTIVE_HIGH>;
++
++		clocks = <&cmu_top CLK_SCLK_ISP_SENSOR0>,
++			 <&cmu_top CLK_SCLK_ISP_SENSOR2>;
++		clock-names = "mclk0", "mclk2";
++		assigned-clocks = <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR0>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_A>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_B>,
++				  <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR2>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_A>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_B>;
++		assigned-clock-parents = <&xxti>, <0>, <0>, <&xxti>, <0>, <0>;
++		assigned-clock-rates = <0>, <24000000>, <24000000>,
++				       <0>, <24000000>, <24000000>;
++
++		pinctrl-names = "default", "rear", "front";
++		pinctrl-0 = <&t715_cam0_mclk_off &t715_cam2_mclk_off>;
++		pinctrl-1 = <&t715_cam0_mclk &t715_cam2_mclk_off>;
++		pinctrl-2 = <&t715_cam0_mclk_off &t715_cam2_mclk>;
++	};
++};
++
++&hsi2c_4 {
++	status = "okay";
++};
++
++/* Stock pin-pud = 0, live_fdt.dts:5277-5284. */
++&hs_i2c4_bus {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++};
++
++&pinctrl_peric {
++	/* Raw drive strengths from live_fdt.dts:5892, 6923. */
++	t715_cam0_mclk: t715-cam0-mclk-pins {
++		samsung,pins = "gpd7-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <1>;
++	};
++
++	t715_cam0_mclk_off: t715-cam0-mclk-off-pins {
++		samsung,pins = "gpd7-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++		samsung,pin-drv = <0>;
++		samsung,pin-val = <0>;
++	};
++
++	t715_cam2_mclk: t715-cam2-mclk-pins {
++		samsung,pins = "gpd7-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <2>;
++	};
++
++	t715_cam2_mclk_off: t715-cam2-mclk-off-pins {
++		samsung,pins = "gpd7-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++		samsung,pin-drv = <0>;
++		samsung,pin-val = <0>;
++	};
++};
++
++/* Stages (b) and (c): t715-cam-capture.ko, front sensor, CSIS1 to FIMC-LITE B. */
++&soc {
++	cam-capture@12130000 {
++		compatible = "samsung,t715-cam-capture";
++		reg = <0x12130000 0x1000>, <0x12110000 0x1000>, <0x12160000 0x1000>;
++		phys = <&mipi_phy 2>;
++		phy-names = "csis";
++		power-domains = <&pd_cam0>;
++
++		clocks = <&cmu_cam0 CLK_ACLK_CSIS1>, <&cmu_cam0 CLK_PCLK_CSIS1>,
++			 <&cmu_cam0 CLK_ACLK_LITE_B>, <&cmu_cam0 CLK_PCLK_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_AXIUS_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_ASYNCAPBM_LITE_B>, <&cmu_cam0 CLK_ACLK_ASYNCAPBS_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_ASYNCAXIM_LITE_B>, <&cmu_cam0 CLK_ACLK_ASYNCAXIS_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_SMMU_LITE_B>, <&cmu_cam0 CLK_PCLK_SMMU_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_BTS_LITE_B>, <&cmu_cam0 CLK_PCLK_BTS_LITE_B>,
++			 <&cmu_cam0 CLK_PCLK_ASYNCAXI_LITE_B>,
++			 <&cmu_cam0 CLK_ACLK_XIU_IS0X>, <&cmu_cam0 CLK_ACLK_XIU_ISP0EX>,
++			 <&cmu_cam0 CLK_ACLK_CAM0ND_400>, <&cmu_cam0 CLK_ACLK_CAM0NP_276>,
++			 <&cmu_cam0 CLK_ACLK_AHBSYNCDN>, <&cmu_cam0 CLK_PCLK_SYSREG_CAM0>,
++			 <&cmu_cam0 CLK_PCLK_PMU_CAM0>,
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
++
++		/* setup-fimc-is-sensor.c, channel 1. */
++		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S2A_USER>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_B>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_B>,
++				  <&cmu_cam0 CLK_DIV_ACLK_CSIS1>,
++				  <&cmu_cam0 CLK_DIV_ACLK_LITE_B>,
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_B>;
++		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
++					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S2A_PHY>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_A>,
++					 <0>, <0>, <0>;
++		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
++				       <400000000>, <400000000>, <200000000>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 78851c6f8..d160b3af6 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -909,6 +909,8 @@ &framebuffer {
+  * only, tc300k.ko has no firmware path.
+  */
+ #include "exynos5433-gts28ltexx-keys.dtsi"
++/* Camera stage (a), test builds only: docs/hardware/CAMERA.md. */
++#include "exynos5433-gts28ltexx-camera.dtsi"
+ 
+ /* ==================================================================== */
+ /* 17. Battery fuel gauge (SM5703 on HSI2C7)                            */
+diff --git a/arch/arm/configs/gts28ltexx_camtest.config b/arch/arm/configs/gts28ltexx_camtest.config
+new file mode 100644
+index 000000000..770e2f7b5
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_camtest.config
+@@ -0,0 +1,39 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# SS333 modem (MIPI-LLI + SPI boot link) for the gts28ltexx board.  Merged
++# on top of gts28ltexx_defconfig (kernel/kbuild-mainline.sh --fragment
++# gts28ltexx_modem.config), together with
++# arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi.
++# research/modem/research/SYNTHESIS.md D1 (patch 6) has the rationale.
++#
++# Every modem driver is a module and stays blocklisted until the bring-up
++# gates pass (SYNTHESIS section 5, rule 15): a probe that can touch an
++# unclocked CPIF block must never run at boot behind the tester's back.
++
++# SPI core, built in: the SS333 BootROM receives the BOOT image over SPI4
++# (0x14d00000, SYNTHESIS 2.1).  Not set in gts28ltexx_defconfig.  Checked
++# against the merged .config: besides SPI_MASTER=y it only brings
++# REGMAP_SPI=m and IIO_ST_LSM6DSX_SPI=m (the SPI front end of the IMU
++# driver, a module with no SPI device to bind; the IMU stays on HSI2C10)
++# and two menu symbols (NET_VENDOR_ADI, SND_SPI); every other new SPI
++# symbol is "not set".  No SPI controller is enabled by the board DT
++# outside the modem dtsi.
++CONFIG_SPI=y
++
++# Samsung SPI controller (spi-s3c64xx, the 5433 SPI block) as a module, so
++# that nothing touches SPI4 or its gpv7 pins before the modem module asks
++# for it.
++CONFIG_SPI_S3C64XX=m
++
++# MIPI-LLI controller + M-PHY (drivers/misc/mipi-lli, exynos5433-mipi-lli.ko).
++# Loads with allow_hw=0: no clock, LLI, M-PHY or PMU access until root sets
++# /sys/module/exynos5433_mipi_lli/parameters/allow_hw to 1.
++CONFIG_MIPI_LLI=m
++
++# SS333 control, memory link and SPI boot link (drivers/misc/modem_v1,
++# sec_modem_v1.ko).  Provided by the modem_v1 patch of the same series;
++# ignored by olddefconfig until that patch is applied.
++CONFIG_SEC_MODEM_V1=m
++
++# Camera stage (a): test builds only, docs/hardware/CAMERA.md.
++CONFIG_T715_CAM_PROBE=m
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index c4ec4a88a..981d5a57a 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -610,6 +610,12 @@ config MARVELL_CN10K_DPI
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called mrvl_cn10k_dpi.
+ 
++config T715_CAM_PROBE
++	tristate "SM-T715 camera power sequence test"
++	depends on ARCH_EXYNOS && OF && REGULATOR && COMMON_CLK && DEBUG_FS && PM
++	help
++	  Test code for the camera bring-up, never in a daily kernel.
++
+ source "drivers/misc/c2port/Kconfig"
+ source "drivers/misc/eeprom/Kconfig"
+ source "drivers/misc/cb710/Kconfig"
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index ce59a111c..935c3add1 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -74,3 +74,5 @@ obj-$(CONFIG_MARVELL_CN10K_DPI)	+= mrvl_cn10k_dpi.o
+ obj-y				+= keba/
+ obj-$(CONFIG_MIPI_LLI)		+= mipi-lli/
+ obj-$(CONFIG_SEC_MODEM_V1)	+= modem_v1/
++obj-$(CONFIG_T715_CAM_PROBE)	+= t715-cam-probe.o
++obj-$(CONFIG_T715_CAM_PROBE)	+= t715-cam-capture.o
+diff --git a/drivers/misc/t715-cam-capture.c b/drivers/misc/t715-cam-capture.c
+new file mode 100644
+index 000000000..727636f6d
+--- /dev/null
++++ b/drivers/misc/t715-cam-capture.c
+@@ -0,0 +1,347 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SM-T715 camera bring-up, stages (b) and (c): frames from the front sensor
++ * through MIPI CSIS1 and FIMC-LITE B into memory, with no ISP.  Test code, never
++ * in a daily kernel.  docs/hardware/CAMERA.md.
++ *
++ * The sensor is powered by t715-cam-probe and driven from user space over
++ * /dev/i2c-22.  Here, in order of use: write "arm" to debugfs t715-capture/ctl,
++ * start the sensor, read t715-capture/status, write "stop", read
++ * t715-capture/frame.  No hardware access until allow_hw=1.
++ *
++ * The register sequences follow stock's fimc-is-hw-csi.c (the s5pcsis variant)
++ * and fimc-is-device-flite.c.  Polled: no interrupt is requested.
++ */
++#include <linux/clk.h>
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++static bool allow_hw;
++module_param(allow_hw, bool, 0644);
++MODULE_PARM_DESC(allow_hw, "must be 1 before any register is touched");
++
++static unsigned int width = 1936, height = 1090, settle = 16;
++module_param(width, uint, 0644);
++module_param(height, uint, 0644);
++module_param(settle, uint, 0644);
++
++#define CSIS_CTRL		0x00
++#define  CSIS_CTRL_ALIGN_32BIT		BIT(20)
++#define  CSIS_CTRL_UPDATE_SHADOW0	BIT(16)
++#define  CSIS_CTRL_WCLK_EXTCLK		BIT(8)
++#define  CSIS_CTRL_RESET		BIT(4)
++#define  CSIS_CTRL_LANES_MASK		(3 << 2)
++#define  CSIS_CTRL_ENABLE		BIT(0)
++#define CSIS_DPHYCTRL		0x04
++#define  CSIS_DPHY_HSS_MASK		(0xff << 24)
++#define  CSIS_DPHY_ON_1LANE		0x03
++#define CSIS_CONFIG		0x08
++#define  CSIS_CFG_FMT_MASK		(0x3f << 2)
++#define  CSIS_CFG_FMT_RAW10		(0x2b << 2)
++#define  CSIS_CFG_END_INTERVAL(x)	((x) << 8)
++#define CSIS_INTMSK		0x10
++#define  CSIS_INTMSK_ALL		0xf1101117
++#define CSIS_INTSRC		0x14
++#define CSIS_RESOL		0x2c
++
++#define LITE_CISRCSIZE		0x00
++#define LITE_CIGCTRL		0x04
++#define  LITE_FMT_MASK			(0x3f << 24)
++#define  LITE_FMT_RAW10			(0x2b << 24)
++#define  LITE_OLOCAL_DISABLE		BIT(22)
++#define  LITE_ODMA_DISABLE		BIT(20)
++#define  LITE_SWRST_REQ			BIT(19)
++#define  LITE_SWRST_RDY			BIT(18)
++#define  LITE_SWRST			BIT(17)
++#define  LITE_POLARITY_MASK		(7 << 12)
++#define  LITE_IRQ_DISABLE_MASK		(BIT(8) | BIT(7) | BIT(6) | BIT(5))
++#define  LITE_SELCAM_MIPI		BIT(3)
++#define LITE_CIIMGCPT		0x08
++#define  LITE_IMGCPTEN			BIT(31)
++#define LITE_CIWDOFST		0x10
++#define  LITE_WINOFSEN			BIT(31)
++#define LITE_CIWDOFST2		0x14
++#define LITE_CIODMAFMT		0x18
++#define LITE_CIOCAN		0x20
++#define LITE_CIOSA		0x30
++#define LITE_CISTATUS		0x40
++#define LITE_CISTATUS2		0x44
++#define LITE_CISTATUS3		0x48
++#define LITE_CIGENERAL		0xfc
++#define LITE_CIFCNTSEQ		0x100
++#define LITE_CIOSAN(n)		(0x200 + 4 * (n))
++
++#define T715_CAP_BUF_SIZE	(8 * SZ_1M)
++
++struct t715_cap {
++	struct device *dev;
++	void __iomem *csis, *lite, *smmu;
++	struct phy *phy;
++	struct clk_bulk_data *clks;
++	int nclks;
++	void *buf;
++	dma_addr_t dma;
++	struct debugfs_blob_wrapper blob;
++	struct dentry *dir;
++	struct mutex lock;
++	bool armed;
++};
++
++static void t715_mask(void __iomem *reg, u32 clear, u32 set)
++{
++	writel((readl(reg) & ~clear) | set, reg);
++}
++
++static void t715_csis_on(struct t715_cap *c)
++{
++	void __iomem *b = c->csis;
++
++	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_RESET);
++	udelay(10);
++	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_HSS_MASK, settle << 24);
++	t715_mask(b + CSIS_CONFIG, CSIS_CFG_FMT_MASK,
++		  CSIS_CFG_FMT_RAW10 | CSIS_CFG_END_INTERVAL(1));
++	writel(width << 16 | height, b + CSIS_RESOL);
++	t715_mask(b + CSIS_CTRL, CSIS_CTRL_ALIGN_32BIT | CSIS_CTRL_LANES_MASK |
++		  CSIS_CTRL_WCLK_EXTCLK, 0);
++	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_UPDATE_SHADOW0);
++	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_ENABLE | CSIS_CTRL_WCLK_EXTCLK);
++	t715_mask(b + CSIS_DPHYCTRL, 0, CSIS_DPHY_ON_1LANE);
++	t715_mask(b + CSIS_INTMSK, 0, CSIS_INTMSK_ALL);
++}
++
++static void t715_csis_off(struct t715_cap *c)
++{
++	void __iomem *b = c->csis;
++
++	t715_mask(b + CSIS_INTMSK, CSIS_INTMSK_ALL, 0);
++	t715_mask(b + CSIS_CTRL, CSIS_CTRL_ENABLE, 0);
++	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_ON_1LANE, 0);
++}
++
++static void t715_lite_on(struct t715_cap *c)
++{
++	void __iomem *b = c->lite;
++	int i, retry = 100;
++
++	t715_mask(b + LITE_CIGCTRL, 0, LITE_SWRST_REQ);
++	while (retry-- && !(readl(b + LITE_CIGCTRL) & LITE_SWRST_RDY))
++		udelay(10);
++	t715_mask(b + LITE_CIGCTRL, 0, LITE_SWRST);
++	udelay(10);
++
++	writel(0, b + LITE_CIFCNTSEQ);
++	writel(0xffffffff, b + LITE_CIOSA);
++	for (i = 0; i < 31; i++)
++		writel(0xffffffff, b + LITE_CIOSAN(i));
++
++	writel(lower_32_bits(c->dma), b + LITE_CIOSA);
++	writel(BIT(0), b + LITE_CIFCNTSEQ);
++
++	/* Output to memory, 2D, one 16-bit word per pixel; nothing to the 3AA. */
++	t715_mask(b + LITE_CIGCTRL, LITE_ODMA_DISABLE, LITE_OLOCAL_DISABLE);
++	writel(0, b + LITE_CIODMAFMT);
++
++	writel(0, b + LITE_CIGENERAL);
++	writel(width << 16 | height, b + LITE_CISRCSIZE);
++	writel(height << 16 | width, b + LITE_CIOCAN);
++	t715_mask(b + LITE_CIGCTRL, LITE_FMT_MASK | LITE_POLARITY_MASK | LITE_IRQ_DISABLE_MASK,
++		  LITE_FMT_RAW10 | LITE_SELCAM_MIPI);
++	writel(LITE_WINOFSEN, b + LITE_CIWDOFST);
++	writel(0, b + LITE_CIWDOFST2);
++	t715_mask(b + LITE_CISTATUS2, BIT(1), 0);
++	t715_mask(b + LITE_CIIMGCPT, 0, LITE_IMGCPTEN);
++}
++
++static int t715_arm(struct t715_cap *c)
++{
++	int ret;
++
++	if (c->armed)
++		return -EBUSY;
++	ret = pm_runtime_resume_and_get(c->dev);
++	if (ret)
++		return ret;
++	ret = clk_bulk_prepare_enable(c->nclks, c->clks);
++	if (ret)
++		goto put;
++	ret = phy_power_on(c->phy);
++	if (ret)
++		goto clks;
++
++	dev_info(c->dev, "smmu ctrl 0x%08x cfg 0x%08x status 0x%08x\n",
++		 readl(c->smmu), readl(c->smmu + 4), readl(c->smmu + 8));
++
++	memset(c->buf, 0x5a, T715_CAP_BUF_SIZE);
++	t715_csis_on(c);
++	t715_lite_on(c);
++	c->armed = true;
++	return 0;
++
++clks:
++	clk_bulk_disable_unprepare(c->nclks, c->clks);
++put:
++	pm_runtime_put_sync(c->dev);
++	return ret;
++}
++
++static void t715_stop(struct t715_cap *c)
++{
++	if (!c->armed)
++		return;
++	t715_mask(c->lite + LITE_CIIMGCPT, LITE_IMGCPTEN, 0);
++	msleep(60);
++	t715_csis_off(c);
++	phy_power_off(c->phy);
++	clk_bulk_disable_unprepare(c->nclks, c->clks);
++	pm_runtime_put_sync(c->dev);
++	c->armed = false;
++}
++
++static ssize_t ctl_write(struct file *f, const char __user *ubuf, size_t len, loff_t *pos)
++{
++	struct t715_cap *c = file_inode(f)->i_private;
++	char buf[16] = {};
++	int ret = 0;
++
++	if (!allow_hw)
++		return -EPERM;
++	if (len >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++
++	mutex_lock(&c->lock);
++	if (sysfs_streq(buf, "arm"))
++		ret = t715_arm(c);
++	else if (sysfs_streq(buf, "stop"))
++		t715_stop(c);
++	else
++		ret = -EINVAL;
++	mutex_unlock(&c->lock);
++	return ret ? ret : len;
++}
++
++static const struct file_operations ctl_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = ctl_write,
++	.llseek = default_llseek,
++};
++
++static int status_show(struct seq_file *s, void *unused)
++{
++	struct t715_cap *c = s->private;
++	u32 intsrc;
++
++	mutex_lock(&c->lock);
++	if (c->armed) {
++		intsrc = readl(c->csis + CSIS_INTSRC);
++		writel(intsrc, c->csis + CSIS_INTSRC);
++		seq_printf(s, "csis ctrl %08x dphy %08x config %08x resol %08x intsrc %08x\n",
++			   readl(c->csis + CSIS_CTRL), readl(c->csis + CSIS_DPHYCTRL),
++			   readl(c->csis + CSIS_CONFIG), readl(c->csis + CSIS_RESOL), intsrc);
++		seq_printf(s, "lite gctrl %08x imgcpt %08x status %08x %08x %08x seq %08x\n",
++			   readl(c->lite + LITE_CIGCTRL), readl(c->lite + LITE_CIIMGCPT),
++			   readl(c->lite + LITE_CISTATUS), readl(c->lite + LITE_CISTATUS2),
++			   readl(c->lite + LITE_CISTATUS3), readl(c->lite + LITE_CIFCNTSEQ));
++		writel(0, c->lite + LITE_CISTATUS);
++	} else {
++		seq_puts(s, "off\n");
++	}
++	mutex_unlock(&c->lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(status);
++
++static int t715_cap_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct t715_cap *c;
++	int ret;
++
++	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
++	if (!c)
++		return -ENOMEM;
++	c->dev = dev;
++	mutex_init(&c->lock);
++
++	c->csis = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(c->csis))
++		return PTR_ERR(c->csis);
++	c->lite = devm_platform_ioremap_resource(pdev, 1);
++	if (IS_ERR(c->lite))
++		return PTR_ERR(c->lite);
++	c->smmu = devm_platform_ioremap_resource(pdev, 2);
++	if (IS_ERR(c->smmu))
++		return PTR_ERR(c->smmu);
++
++	c->phy = devm_phy_get(dev, "csis");
++	if (IS_ERR(c->phy))
++		return dev_err_probe(dev, PTR_ERR(c->phy), "no phy\n");
++	c->nclks = devm_clk_bulk_get_all(dev, &c->clks);
++	if (c->nclks < 0)
++		return dev_err_probe(dev, c->nclks, "no clocks\n");
++
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++	c->buf = dmam_alloc_coherent(dev, T715_CAP_BUF_SIZE, &c->dma, GFP_KERNEL);
++	if (!c->buf)
++		return -ENOMEM;
++	dev_info(dev, "buffer at %pad, %d clocks\n", &c->dma, c->nclks);
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, c);
++	c->blob.data = c->buf;
++	c->blob.size = T715_CAP_BUF_SIZE;
++	c->dir = debugfs_create_dir("t715-capture", NULL);
++	debugfs_create_file("ctl", 0200, c->dir, c, &ctl_fops);
++	debugfs_create_file("status", 0400, c->dir, c, &status_fops);
++	debugfs_create_blob("frame", 0400, c->dir, &c->blob);
++	return 0;
++}
++
++static void t715_cap_remove(struct platform_device *pdev)
++{
++	struct t715_cap *c = platform_get_drvdata(pdev);
++
++	debugfs_remove_recursive(c->dir);
++	mutex_lock(&c->lock);
++	t715_stop(c);
++	mutex_unlock(&c->lock);
++}
++
++static const struct of_device_id t715_cap_of_match[] = {
++	{ .compatible = "samsung,t715-cam-capture" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, t715_cap_of_match);
++
++static struct platform_driver t715_cap_driver = {
++	.probe = t715_cap_probe,
++	.remove_new = t715_cap_remove,
++	.driver = {
++		.name = "t715-cam-capture",
++		.of_match_table = t715_cap_of_match,
++	},
++};
++module_platform_driver(t715_cap_driver);
++
++MODULE_DESCRIPTION("SM-T715 camera capture test");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/misc/t715-cam-probe.c b/drivers/misc/t715-cam-probe.c
+new file mode 100644
+index 000000000..dc5133fdb
+--- /dev/null
++++ b/drivers/misc/t715-cam-probe.c
+@@ -0,0 +1,338 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SM-T715 camera bring-up, stage (a).  Test code, never in a daily kernel.
++ * Runs the stock power sequences only; register reads happen from /dev/i2c-N.
++ * No hardware access until allow_hw=1 and a write to debugfs t715-cam/stage.
++ */
++#include <linux/clk.h>
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++static bool allow_hw;
++module_param(allow_hw, bool, 0644);
++MODULE_PARM_DESC(allow_hw, "must be 1 before any power sequence runs");
++
++enum cam_state { CAM_OFF, CAM_EEPROM, CAM_FRONT, CAM_REAR };
++static const char * const cam_names[] = { "off", "eeprom", "front", "rear" };
++
++struct t715_cam {
++	struct device *dev;
++	struct regulator *a28, *core, *af, *io, *vt28, *vt18;
++	struct clk *mclk0, *mclk2;
++	struct gpio_desc *rear_reset, *front_reset, *front_stby;
++	struct pinctrl *pins;
++	struct pinctrl_state *st_off, *st_rear, *st_front;
++	enum cam_state state;
++	struct mutex lock;
++	struct dentry *dir;
++};
++
++static int t715_eeprom_on(struct t715_cam *c)
++{
++	int ret = regulator_enable(c->io);
++
++	if (ret)
++		return ret;
++	ret = regulator_enable(c->af);
++	if (ret) {
++		regulator_disable(c->io);
++		return ret;
++	}
++	usleep_range(2000, 3000);
++	return 0;
++}
++
++static void t715_eeprom_off(struct t715_cam *c)
++{
++	regulator_disable(c->af);
++	regulator_disable(c->io);
++}
++
++/* fimc-is-device-6b2.c:609-627 */
++static int t715_front_on(struct t715_cam *c)
++{
++	int ret = pm_runtime_resume_and_get(c->dev);
++
++	if (ret)
++		return ret;
++	ret = clk_prepare_enable(c->mclk2);
++	if (ret)
++		goto put;
++	gpiod_set_value_cansleep(c->front_stby, 0);
++	ret = regulator_enable(c->vt28);
++	if (ret)
++		goto clk;
++	ret = regulator_enable(c->vt18);
++	if (ret)
++		goto vt28;
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(c->front_reset, 0);	/* physical high */
++	ret = pinctrl_select_state(c->pins, c->st_front);
++	if (ret)
++		goto vt18;
++	usleep_range(10000, 11000);
++	return 0;
++
++vt18:
++	gpiod_set_value_cansleep(c->front_reset, 1);
++	regulator_disable(c->vt18);
++vt28:
++	regulator_disable(c->vt28);
++clk:
++	clk_disable_unprepare(c->mclk2);
++put:
++	pm_runtime_put_sync(c->dev);
++	return ret;
++}
++
++/* fimc-is-device-6b2.c:630-650 */
++static void t715_front_off(struct t715_cam *c)
++{
++	gpiod_set_value_cansleep(c->front_stby, 0);
++	pinctrl_select_state(c->pins, c->st_off);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(c->front_reset, 1);	/* physical low */
++	regulator_disable(c->vt18);
++	regulator_disable(c->vt28);
++	clk_disable_unprepare(c->mclk2);
++	pm_runtime_put_sync(c->dev);
++}
++
++/* fimc-is-device-4h5.c:126-139 */
++static int t715_rear_on(struct t715_cam *c)
++{
++	int ret = pm_runtime_resume_and_get(c->dev);
++
++	if (ret)
++		return ret;
++	ret = clk_prepare_enable(c->mclk0);
++	if (ret)
++		goto put;
++	ret = regulator_enable(c->a28);
++	if (ret)
++		goto clk;
++	ret = regulator_enable(c->core);
++	if (ret)
++		goto a28;
++	ret = regulator_enable(c->af);
++	if (ret)
++		goto core;
++	usleep_range(2000, 3000);
++	ret = regulator_enable(c->io);
++	if (ret)
++		goto af;
++	usleep_range(2000, 3000);
++	ret = pinctrl_select_state(c->pins, c->st_rear);
++	if (ret)
++		goto io;
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(c->rear_reset, 0);	/* physical high */
++	usleep_range(10000, 11000);
++	return 0;
++
++io:
++	regulator_disable(c->io);
++af:
++	regulator_disable(c->af);
++core:
++	regulator_disable(c->core);
++a28:
++	regulator_disable(c->a28);
++clk:
++	clk_disable_unprepare(c->mclk0);
++put:
++	pm_runtime_put_sync(c->dev);
++	return ret;
++}
++
++/* fimc-is-device-4h5.c:142-152 */
++static void t715_rear_off(struct t715_cam *c)
++{
++	regulator_disable(c->af);
++	usleep_range(2000, 3000);
++	pinctrl_select_state(c->pins, c->st_off);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(c->rear_reset, 1);	/* physical low */
++	regulator_disable(c->io);
++	regulator_disable(c->core);
++	regulator_disable(c->a28);
++	clk_disable_unprepare(c->mclk0);
++	pm_runtime_put_sync(c->dev);
++}
++
++static void t715_all_off(struct t715_cam *c)
++{
++	switch (c->state) {
++	case CAM_EEPROM:
++		t715_eeprom_off(c);
++		break;
++	case CAM_FRONT:
++		t715_front_off(c);
++		break;
++	case CAM_REAR:
++		t715_rear_off(c);
++		break;
++	default:
++		break;
++	}
++	c->state = CAM_OFF;
++}
++
++static ssize_t stage_write(struct file *f, const char __user *ubuf,
++			   size_t len, loff_t *pos)
++{
++	struct t715_cam *c = file_inode(f)->i_private;
++	char buf[16] = {};
++	int want, ret = 0;
++
++	if (!allow_hw)
++		return -EPERM;
++	if (len >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++	want = sysfs_match_string(cam_names, buf);
++	if (want < 0)
++		return want;
++
++	mutex_lock(&c->lock);
++	if (want == CAM_OFF) {
++		t715_all_off(c);
++	} else if (c->state != CAM_OFF) {
++		ret = -EBUSY;
++	} else {
++		if (want == CAM_EEPROM)
++			ret = t715_eeprom_on(c);
++		else if (want == CAM_FRONT)
++			ret = t715_front_on(c);
++		else
++			ret = t715_rear_on(c);
++		if (!ret)
++			c->state = want;
++	}
++	mutex_unlock(&c->lock);
++	return ret ? ret : len;
++}
++
++static ssize_t stage_read(struct file *f, char __user *ubuf,
++			  size_t len, loff_t *pos)
++{
++	struct t715_cam *c = file_inode(f)->i_private;
++	char buf[16];
++	int n = scnprintf(buf, sizeof(buf), "%s\n", cam_names[c->state]);
++
++	return simple_read_from_buffer(ubuf, len, pos, buf, n);
++}
++
++static const struct file_operations stage_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.read = stage_read,
++	.write = stage_write,
++	.llseek = default_llseek,
++};
++
++static int t715_cam_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct t715_cam *c;
++	int ret;
++
++	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
++	if (!c)
++		return -ENOMEM;
++	c->dev = dev;
++	mutex_init(&c->lock);
++
++#define GET_REG(field, name) do {					\
++		c->field = devm_regulator_get(dev, name);		\
++		if (IS_ERR(c->field))					\
++			return PTR_ERR(c->field);			\
++	} while (0)
++	GET_REG(a28, "a28");
++	GET_REG(core, "core");
++	GET_REG(af, "af");
++	GET_REG(io, "io");
++	GET_REG(vt28, "vt28");
++	GET_REG(vt18, "vt18");
++
++	c->mclk0 = devm_clk_get(dev, "mclk0");
++	if (IS_ERR(c->mclk0))
++		return PTR_ERR(c->mclk0);
++	c->mclk2 = devm_clk_get(dev, "mclk2");
++	if (IS_ERR(c->mclk2))
++		return PTR_ERR(c->mclk2);
++
++	/* Logical high = reset asserted = pin physically low. */
++	c->rear_reset = devm_gpiod_get(dev, "rear-reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(c->rear_reset))
++		return PTR_ERR(c->rear_reset);
++	c->front_reset = devm_gpiod_get(dev, "front-reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(c->front_reset))
++		return PTR_ERR(c->front_reset);
++	c->front_stby = devm_gpiod_get(dev, "front-stby", GPIOD_OUT_LOW);
++	if (IS_ERR(c->front_stby))
++		return PTR_ERR(c->front_stby);
++
++	c->pins = devm_pinctrl_get(dev);
++	if (IS_ERR(c->pins))
++		return PTR_ERR(c->pins);
++	c->st_off = pinctrl_lookup_state(c->pins, PINCTRL_STATE_DEFAULT);
++	if (IS_ERR(c->st_off))
++		return PTR_ERR(c->st_off);
++	c->st_rear = pinctrl_lookup_state(c->pins, "rear");
++	if (IS_ERR(c->st_rear))
++		return PTR_ERR(c->st_rear);
++	c->st_front = pinctrl_lookup_state(c->pins, "front");
++	if (IS_ERR(c->st_front))
++		return PTR_ERR(c->st_front);
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, c);
++	c->dir = debugfs_create_dir("t715-cam", NULL);
++	debugfs_create_file("stage", 0600, c->dir, c, &stage_fops);
++	return 0;
++}
++
++static void t715_cam_remove(struct platform_device *pdev)
++{
++	struct t715_cam *c = platform_get_drvdata(pdev);
++
++	debugfs_remove_recursive(c->dir);
++	mutex_lock(&c->lock);
++	t715_all_off(c);
++	mutex_unlock(&c->lock);
++}
++
++static const struct of_device_id t715_cam_of_match[] = {
++	{ .compatible = "samsung,t715-cam-probe" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, t715_cam_of_match);
++
++static struct platform_driver t715_cam_driver = {
++	.probe = t715_cam_probe,
++	.remove_new = t715_cam_remove,
++	.driver = {
++		.name = "t715-cam-probe",
++		.of_match_table = t715_cam_of_match,
++	},
++};
++module_platform_driver(t715_cam_driver);
++
++MODULE_DESCRIPTION("SM-T715 camera power sequence test");
++MODULE_LICENSE("GPL");

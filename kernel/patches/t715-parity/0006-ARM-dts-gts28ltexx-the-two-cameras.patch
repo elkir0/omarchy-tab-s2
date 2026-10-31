@@ -1,0 +1,220 @@
+From 5f46affb9cb91332809082b50d1a3a442d987eb2 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 6/6] ARM: dts: gts28ltexx: the two cameras
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 169 ++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |   3 +
+ arch/arm/configs/gts28ltexx_defconfig         |   7 +
+ 3 files changed, 179 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+new file mode 100644
+index 000000000..1ca93b25b
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The two cameras: S5K6B2 in front on CSIS1 and FIMC-LITE B, S5K4H5 at the back on CSIS0
++ * and FIMC-LITE A, 4 lanes, both on the 400 MHz branch, with no ISP.  t715-camera.ko
++ * drives them; docs/hardware/CAMERA.md has the path and the proofs.  The bit-banged buses
++ * are stock's i2c@35 for the front and the same thing on ch0 for the rear, proved on the
++ * tablet: 0x35 answers model 0x6b20, 0x37 answers 0x485b.
++ */
++
++/ {
++	aliases {
++		i2c21 = &i2c_cam_rear;
++		i2c22 = &i2c_cam_front;
++	};
++
++	i2c_cam_rear: i2c-cam-rear {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc2 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc2 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	i2c_cam_front: i2c-cam-front {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc2 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc2 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++};
++
++&pinctrl_peric {
++	/* Raw drive strengths from live_fdt.dts:5892, 6923. */
++	t715_cam0_mclk: t715-cam0-mclk-pins {
++		samsung,pins = "gpd7-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <1>;
++	};
++
++	t715_cam0_mclk_off: t715-cam0-mclk-off-pins {
++		samsung,pins = "gpd7-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++		samsung,pin-drv = <0>;
++		samsung,pin-val = <0>;
++	};
++
++	t715_cam2_mclk: t715-cam2-mclk-pins {
++		samsung,pins = "gpd7-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <2>;
++	};
++
++	t715_cam2_mclk_off: t715-cam2-mclk-off-pins {
++		samsung,pins = "gpd7-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++		samsung,pin-drv = <0>;
++		samsung,pin-val = <0>;
++	};
++};
++
++&soc {
++	camera@12130000 {
++		compatible = "samsung,t715-camera-front";
++		firmware-name = "t715/s5k6b2.seq";
++		t715,lanes = <1>;
++		t715,settle = <16>;
++		t715,width = <1936>;
++		t715,height = <1090>;
++		t715,i2c-bus = <&i2c_cam_front>;
++		t715,i2c-addr = <0x35>;
++		reg = <0x12130000 0x1000>, <0x12110000 0x1000>;
++		interrupts = <GIC_SPI 141 IRQ_TYPE_LEVEL_HIGH>;
++		phys = <&mipi_phy 2>;
++		phy-names = "csis";
++		power-domains = <&pd_cam0>;
++		avdd-supply = <&ldo27_reg>;
++		iovdd-supply = <&ldo21_reg>;
++		reset-gpios = <&gpc0 3 GPIO_ACTIVE_LOW>;
++		standby-gpios = <&gpc0 0 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default", "active";
++		pinctrl-0 = <&t715_cam2_mclk_off>;
++		pinctrl-1 = <&t715_cam2_mclk>;
++		clocks = <&cmu_cam0 CLK_ACLK_CSIS1>, <&cmu_cam0 CLK_PCLK_CSIS1>,
++			 <&cmu_cam0 CLK_ACLK_LITE_B>, <&cmu_cam0 CLK_PCLK_LITE_B>,
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>,
++			 <&cmu_top CLK_SCLK_ISP_SENSOR2>;
++		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy", "mclk";
++		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S2A_USER>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_B>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_B>,
++				  <&cmu_cam0 CLK_DIV_ACLK_CSIS1>,
++				  <&cmu_cam0 CLK_DIV_ACLK_LITE_B>,
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_B>,
++				  <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR2>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_A>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_B>;
++		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
++					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S2A_PHY>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_A>,
++					 <0>, <0>, <0>, <&xxti>, <0>, <0>;
++		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
++				       <400000000>, <400000000>, <200000000>,
++				       <0>, <24000000>, <24000000>;
++	};
++
++	camera@12120000 {
++		compatible = "samsung,t715-camera-rear";
++		firmware-name = "t715/s5k4h5.seq";
++		t715,lanes = <4>;
++		t715,settle = <15>;
++		t715,width = <3280>;
++		t715,height = <2458>;
++		t715,i2c-bus = <&i2c_cam_rear>;
++		t715,i2c-addr = <0x37>;
++		reg = <0x12120000 0x1000>, <0x12100000 0x1000>;
++		interrupts = <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>;
++		phys = <&mipi_phy 0>;
++		phy-names = "csis";
++		power-domains = <&pd_cam0>;
++		avdd-supply = <&ldo29_reg>;
++		dvdd-supply = <&ldo23_reg>;
++		af-supply = <&ldo26_reg>;
++		iovdd-supply = <&ldo22_reg>;
++		reset-gpios = <&gpc0 4 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default", "active";
++		pinctrl-0 = <&t715_cam0_mclk_off>;
++		pinctrl-1 = <&t715_cam0_mclk>;
++		clocks = <&cmu_cam0 CLK_ACLK_CSIS0>, <&cmu_cam0 CLK_PCLK_CSIS0>,
++			 <&cmu_cam0 CLK_ACLK_LITE_A>, <&cmu_cam0 CLK_PCLK_LITE_A>,
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>,
++			 <&cmu_top CLK_SCLK_ISP_SENSOR0>;
++		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy", "mclk";
++		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S4_USER>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_B>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_B>,
++				  <&cmu_cam0 CLK_DIV_ACLK_CSIS0>,
++				  <&cmu_cam0 CLK_DIV_ACLK_LITE_A>,
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_A>,
++				  <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR0>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_A>,
++				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_B>;
++		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
++					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S4_PHY>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_A>,
++					 <0>, <0>, <0>, <&xxti>, <0>, <0>;
++		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
++				       <400000000>, <400000000>, <200000000>,
++				       <0>, <24000000>, <24000000>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 78851c6f8..e20db146f 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -910,6 +910,9 @@ &framebuffer {
+  */
+ #include "exynos5433-gts28ltexx-keys.dtsi"
+ 
++/* The cameras (exynos5433-gts28ltexx-camera.dtsi): t715-camera.ko, no ISP. */
++#include "exynos5433-gts28ltexx-camera.dtsi"
++
+ /* ==================================================================== */
+ /* 17. Battery fuel gauge (SM5703 on HSI2C7)                            */
+ /* ==================================================================== */
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 76ebca049..54c49e0f2 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -90,6 +90,13 @@ CONFIG_MFD_SEC_CORE=y
+ CONFIG_REGULATOR=y
+ CONFIG_PWM=y
+ CONFIG_PWM_SAMSUNG=m
++CONFIG_MEDIA_SUPPORT=m
++CONFIG_MEDIA_SUPPORT_FILTER=y
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_PLATFORM_SUPPORT=y
++CONFIG_MEDIA_PLATFORM_DRIVERS=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_VIDEO_T715_CAMERA=m
+ CONFIG_REGULATOR_S2MPS11=y
+ CONFIG_DRM=y
+ CONFIG_DRM_FBDEV_EMULATION=y

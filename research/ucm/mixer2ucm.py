@@ -1,0 +1,763 @@
+#!/usr/bin/env python3
+"""Convert an Android mixer_paths XML into ALSA UCM2 profiles.
+
+Target: Samsung Galaxy Tab S2 8.0 LTE (SM-T715, "gts28lte") with the
+Wolfson/Cirrus WM5110 (Arizona) codec, converted from the stock Android
+``mixer_paths_0.xml``.
+
+Design rules (all enforced by this converter):
+
+* Every ``cset`` value comes verbatim from the XML.  Nothing is invented:
+  when a reset value is unknown (control absent from the top-level
+  initial settings) a ``# TODO no default for '...'`` comment is emitted
+  instead.  When an Android path is empty (placeholder with a TODO
+  comment), the UCM device gets a ``# TODO: empty in Android mixer_paths``
+  comment and no control, and the path is listed in REPORT.md.
+* Paths are resolved recursively; nested ``<path name="..."/>`` references
+  are expanded in place, reference cycles are rejected with an error.
+* A control repeated by several sub-paths keeps the position of its first
+  occurrence and the value of its last assignment (Android HAL
+  semantics: paths are applied in order).
+* Output is deterministic: no timestamps, no set/dict iteration hazards;
+  two runs on the same input produce byte-identical trees.
+
+Path -> UCM device mapping table
+--------------------------------
+
+HiFi verb (media playback / capture through AIF1, application processor):
+
+=================  =============================================  ==========  =====
+UCM device         Android paths (resolved in order)              Playback    Capture
+=================  =============================================  ==========  =====
+Speaker            ``speaker``                                    yes         no
+                   (= media-speaker + gain-media-speaker)
+Headphones         ``headphones``                                 yes         no
+                   (= media-headset + gain-media-headset)
+Earpiece           ``earpiece``                                   yes         no
+                   (= media-handset + gain-media-handset; both
+                   empty in the stock XML -> TODO device)
+Mic                ``media-mic``                                  no          yes
+                   (= capture_channel_left + main-mic)
+Headset            ``media-headset-mic``                          no          yes
+                   (= capture_channel_left + headset-mic +
+                   gain-media-headset-mic)
+=================  =============================================  ==========  =====
+
+The composite Android HAL paths (``speaker``, ``headphones``, ...) are
+used rather than the bare ``media-*`` paths because they are exactly the
+media path plus its ``gain-*`` path, which is what the HAL applies.
+
+Voice Call verb (modem bridged inside the codec: AP on AIF1, baseband on
+AIF2, Bluetooth SCO on AIF3; no PCM through the CPU).  Each UCM device
+enables the downlink *and* the uplink route, as the Android HAL does
+during a call.  ``--band wb`` selects the ``*-wb`` paths (wideband,
+default), ``--band nb`` the narrowband ones:
+
+=================  ==========================================================  ====
+UCM device         Android paths                                                band
+=================  ==========================================================  ====
+Speaker            ``voice-speaker[-wb]`` + ``voice-speaker-mic[-wb]``         nb/wb
+Headphones         ``voice-headphones[-wb]`` + ``voice-headset-mic[-wb]``      nb/wb
+Earpiece           ``voice-earpiece[-wb]`` + ``voice-earpiece-mic[-wb]``       nb/wb
+                   (all empty in the stock XML -> TODO device)
+BluetoothSCO       ``voice-bt-sco-headset`` + ``voice-bt-sco-mic``             both
+=================  ==========================================================  ====
+
+VoiceCall.conf carries the band selected by ``--band`` (default wb);
+VoiceCallNB.conf always carries the other band, so one run emits both
+files.
+
+Value formatting
+----------------
+
+* Controls whose name ends in ``" Switch"`` with a 0/1 value are
+  emitted as ``off``/``on`` (ALSA boolean switches, UCM convention).
+* Everything else (integer volumes, enumerations, multi-value
+  coefficient blobs) is emitted verbatim.
+
+Usage
+-----
+
+::
+
+    mixer2ucm.py --xml mixer_paths_0.xml --card gts28lte --out out [--band wb|nb]
+
+Output tree::
+
+    <out>/REPORT.md
+    <out>/ucm2/<Vendor>/<card>/<card>.conf     (SectionUseCase + BootSequence)
+    <out>/ucm2/<Vendor>/<card>/HiFi.conf
+    <out>/ucm2/<Vendor>/<card>/VoiceCall.conf
+    <out>/ucm2/<Vendor>/<card>/VoiceCallNB.conf
+    <out>/ucm2/conf.d/<card>/<card>.conf       (Include stub for card lookup)
+"""
+
+import argparse
+import os
+import xml.etree.ElementTree as ET
+from collections import OrderedDict
+
+DEFAULT_VENDOR = "Samsung"
+DEFAULT_CARD = "gts28lte"
+DEFAULT_BAND = "wb"
+SYNTAX = 4
+
+MACHINE_COMMENT = "Samsung Galaxy Tab S2 8.0 LTE (WM5110 / Arizona codec)"
+
+UCM_HEADER = """\
+# ALSA UCM2 profiles for the {machine}.
+# Vendor: {vendor} -- Card: {card}
+# Generated by mixer2ucm.py from the Android mixer_paths_0.xml.
+# Do not edit by hand: regenerate (see REPORT.md for the path mapping).
+"""
+
+IND = "\t"
+
+VALIDATION_LEVELS_DOC = """\
+1. structural  - validate_ucm.py: balanced braces/quotes, known keywords,
+   cset argument shape.
+2. alsa-lib grammar - every generated file loaded with snd_config_load()
+   from libasound (Docker debian:trixie, libasound2).
+3. full UCM import - alsaucm against a real or snd-dummy card; requires a
+   kernel ALSA driver, impossible inside a plain container.
+"""
+
+
+# --------------------------------------------------------------------------
+# XML model
+# --------------------------------------------------------------------------
+
+class MixerError(Exception):
+    """Fatal conversion error (bad XML structure, cycle, ...)."""
+
+
+class Resolution(object):
+    """Result of resolving one path.
+
+    seq          -- OrderedDict control name -> raw value (document order,
+                    first occurrence position, last assignment value)
+    visited      -- ordered list of every path name expanded (incl. self)
+    empty_leaves -- ordered list of visited paths that set no control
+    """
+
+    def __init__(self, seq, visited, empty_leaves):
+        self.seq = seq
+        self.visited = visited
+        self.empty_leaves = empty_leaves
+
+
+class MixerModel(object):
+    """Parsed mixer_paths XML: initial settings + named paths."""
+
+    def __init__(self, initial, paths, pcmdai, unhandled, source_path):
+        self.initial = initial          # OrderedDict name -> raw value
+        self.paths = paths              # OrderedDict name -> element list
+        self.pcmdai = pcmdai            # list of attrib dicts (link hints)
+        self.unhandled = unhandled      # list of (context, tag, attrib)
+        self.source_path = source_path
+
+    @classmethod
+    def from_xml(cls, xml_path):
+        try:
+            root = ET.parse(xml_path).getroot()
+        except ET.ParseError as exc:
+            raise MixerError("cannot parse %s: %s" % (xml_path, exc))
+        if root.tag != "mixer":
+            raise MixerError("%s: root element is <%s>, expected <mixer>"
+                             % (xml_path, root.tag))
+
+        initial = OrderedDict()
+        paths = OrderedDict()
+        pcmdai = []
+        unhandled = []
+
+        for el in root:
+            if el.tag == "ctl":
+                name = _attr(el, "name")
+                initial[name] = _attr(el, "value")
+            elif el.tag == "pcmdai":
+                pcmdai.append(dict((k, v.strip()) for k, v in el.attrib.items()))
+            elif el.tag == "path":
+                name = _attr(el, "name")
+                if name in paths:
+                    raise MixerError("duplicate path definition: %r" % name)
+                paths[name] = _path_elements(el, unhandled)
+            else:
+                unhandled.append(("<mixer>", el.tag, dict(el.attrib)))
+
+        return cls(initial, paths, pcmdai, unhandled, xml_path)
+
+    def resolve(self, name, _stack=()):
+        """Resolve a path (and its nested references) to a control list."""
+        if name in _stack:
+            chain = " -> ".join(list(_stack) + [name])
+            raise MixerError("path reference cycle detected: %s" % chain)
+        if name not in self.paths:
+            raise MixerError("reference to unknown path %r" % name)
+
+        seq = OrderedDict()
+        visited = []
+        empty_leaves = []
+
+        if not self.paths[name]:
+            empty_leaves.append(name)
+        visited.append(name)
+
+        for kind, a, b in self.paths[name]:
+            if kind == "ctl":
+                seq[a] = b                      # update value / keep position
+            else:  # nested <path name="..."/> reference
+                sub = self.resolve(a, _stack + (name,))
+                for key, val in sub.seq.items():
+                    seq[key] = val
+                visited.extend(sub.visited)
+                empty_leaves.extend(sub.empty_leaves)
+
+        return Resolution(seq, visited, empty_leaves)
+
+    def format_disable(self, seq):
+        """DisableSequence lines resetting every control to its initial value.
+
+        Controls without a known initial value produce a TODO comment
+        instead of a guessed reset.
+        """
+        lines = []
+        for name in seq:
+            if name in self.initial:
+                lines.append(_cset(name, format_value(name, self.initial[name])))
+            else:
+                lines.append("# TODO no default for '%s'" % name)
+        return lines
+
+    def controls_without_initial(self):
+        """Sorted union of path controls missing from the initial settings."""
+        missing = set()
+        for name in self.paths:
+            if not self.paths[name]:
+                continue
+            for ctrl in self.resolve(name).seq:
+                if ctrl not in self.initial:
+                    missing.add(ctrl)
+        return sorted(missing)
+
+
+def _attr(el, key):
+    val = el.get(key)
+    if val is None:
+        raise MixerError("<%s> element without %s= at line %s"
+                         % (el.tag, key, getattr(el, "sourceline", "?")))
+    val = val.strip()
+    if not val:
+        raise MixerError("<%s> with empty %s= at line %s"
+                         % (el.tag, key, getattr(el, "sourceline", "?")))
+    return val
+
+
+def _path_elements(el, unhandled):
+    items = []
+    for child in el:
+        if child.tag == "ctl":
+            items.append(("ctl", _attr(child, "name"), _attr(child, "value")))
+        elif child.tag == "path":
+            items.append(("ref", _attr(child, "name"), None))
+        else:
+            unhandled.append(("<path %s>" % el.get("name"), child.tag,
+                              dict(child.attrib)))
+    return items
+
+
+# --------------------------------------------------------------------------
+# Value formatting
+# --------------------------------------------------------------------------
+
+def format_value(name, value):
+    """Format a raw XML value for a cset line.
+
+    Boolean switches ("... Switch" with 0/1) become off/on; everything
+    else is passed through verbatim (integers, enumerations like
+    ``AIF1RX1``/``Slave``/``High-pass``, multi-value blobs like
+    ``192 0``).
+    """
+    val = value.strip()
+    if '"' in val or "\n" in val:
+        raise MixerError("unrepresentable value %r for control %r" % (value, name))
+    if name.endswith(" Switch") and val in ("0", "1"):
+        return "on" if val == "1" else "off"
+    return val
+
+
+def _cset(name, formatted):
+    return 'cset "name=\'%s\' %s"' % (name, formatted)
+
+
+# --------------------------------------------------------------------------
+# Path -> device mapping (explicit, documented table)
+# --------------------------------------------------------------------------
+
+def hifi_device_table():
+    """HiFi verb devices (see module docstring for the rationale)."""
+    return [
+        dict(name="Speaker",
+             comment="Built-in speaker",
+             paths=["speaker"],
+             playback=True, capture=False,
+             playback_priority=100, capture_priority=None,
+             conflicts=["Headphones", "Earpiece"]),
+        dict(name="Headphones",
+             comment="Wired headphones / headset output",
+             paths=["headphones"],
+             playback=True, capture=False,
+             playback_priority=200, capture_priority=None,
+             conflicts=["Speaker", "Earpiece"]),
+        dict(name="Earpiece",
+             comment="Handset earpiece (empty in the Android mixer_paths)",
+             paths=["earpiece"],
+             playback=True, capture=False,
+             playback_priority=300, capture_priority=None,
+             conflicts=["Speaker", "Headphones"]),
+        dict(name="Mic",
+             comment="Main microphone (left channel)",
+             paths=["media-mic"],
+             playback=False, capture=True,
+             playback_priority=None, capture_priority=100,
+             conflicts=["Headset"]),
+        dict(name="Headset",
+             comment="Headset microphone",
+             paths=["media-headset-mic"],
+             playback=False, capture=True,
+             playback_priority=None, capture_priority=200,
+             conflicts=["Mic"]),
+    ]
+
+
+def voice_device_table(band):
+    """Voice Call verb devices; ``band`` is 'nb' or 'wb'."""
+    suffix = "-wb" if band == "wb" else ""
+    conflicts = ["Speaker", "Headphones", "Earpiece", "BluetoothSCO"]
+
+    def dev(name, comment, paths, play_pri, cap_pri, conflict):
+        return dict(name=name, comment=comment, paths=paths,
+                    playback=True, capture=True,
+                    playback_priority=play_pri, capture_priority=cap_pri,
+                    conflicts=conflict)
+
+    return [
+        dev("Speaker", "Built-in speaker during a call",
+            ["voice-speaker" + suffix, "voice-speaker-mic" + suffix],
+            100, 100, [c for c in conflicts if c != "Speaker"]),
+        dev("Headphones", "Wired headphones during a call",
+            ["voice-headphones" + suffix, "voice-headset-mic" + suffix],
+            200, 200, [c for c in conflicts if c != "Headphones"]),
+        dev("Earpiece",
+            "Earpiece during a call (empty in the Android mixer_paths)",
+            ["voice-earpiece" + suffix, "voice-earpiece-mic" + suffix],
+            300, 300, [c for c in conflicts if c != "Earpiece"]),
+        dev("BluetoothSCO", "Bluetooth SCO headset during a call",
+            ["voice-bt-sco-headset", "voice-bt-sco-mic"],
+            150, 150, [c for c in conflicts if c != "BluetoothSCO"]),
+    ]
+
+
+# --------------------------------------------------------------------------
+# UCM2 rendering
+# --------------------------------------------------------------------------
+
+def _sequence_block(title, lines, indent=IND):
+    out = ["%s%s [" % (indent, title)]
+    out.extend("%s%s" % (indent + IND, line) for line in lines)
+    out.append("%s]" % indent)
+    return out
+
+
+def _device_enable_lines(model, dev):
+    """EnableSequence lines for one device."""
+    lines = []
+    for path_name in dev["paths"]:
+        res = model.resolve(path_name)
+        for ctrl, val in res.seq.items():
+            lines.append(_cset(ctrl, format_value(ctrl, val)))
+        for empty in res.empty_leaves:
+            lines.append("# TODO: empty in Android mixer_paths (path '%s')"
+                         % empty)
+    return lines
+
+
+def _device_disable_lines(model, dev):
+    """DisableSequence lines: merged reset of every control the device sets."""
+    merged = OrderedDict()
+    todo_paths = []
+    for path_name in dev["paths"]:
+        res = model.resolve(path_name)
+        for ctrl, val in res.seq.items():
+            merged[ctrl] = val
+        todo_paths.extend(res.empty_leaves)
+    lines = model.format_disable(merged)
+    for empty in todo_paths:
+        lines.append("# TODO: empty in Android mixer_paths (path '%s')" % empty)
+    return lines
+
+
+def _value_block(dev):
+    lines = ["%sValue {" % IND]
+    if dev["playback"]:
+        lines.append("%s%sPlaybackPriority %d" % (IND, IND, dev["playback_priority"]))
+        lines.append('%s%sPlaybackPCM "hw:${CardId},0"' % (IND, IND))
+    if dev["capture"]:
+        lines.append("%s%sCapturePriority %d" % (IND, IND, dev["capture_priority"]))
+        lines.append('%s%sCapturePCM "hw:${CardId},0"' % (IND, IND))
+    lines.append("%s}" % IND)
+    return lines
+
+
+def render_verb_conf(model, card, vendor, devices, title_comment, tq, band_note):
+    """Render a verb file: SectionVerb + one SectionDevice per entry."""
+    out = []
+    out.append(UCM_HEADER.format(vendor=vendor, card=card,
+                                 machine=MACHINE_COMMENT))
+    out.append("# %s" % title_comment)
+    if band_note:
+        out.append("# %s" % band_note)
+    out.append("")
+    out.append("Syntax %d" % SYNTAX)
+    out.append("")
+    baseline = [(name, format_value(name, val))
+                for name, val in model.initial.items()]
+    out = []
+    out.append(UCM_HEADER.format(vendor=vendor, card=card,
+                                 machine=MACHINE_COMMENT))
+    out.append("# %s" % title_comment)
+    if band_note:
+        out.append("# %s" % band_note)
+    out.append("")
+    out.append("Syntax %d" % SYNTAX)
+    out.append("")
+    out.append("SectionVerb {")
+    out.append("%sEnableSequence [" % IND)
+    out.append("%s%s# Baseline: top-level initial mixer settings" % (IND, IND))
+    for name, val in baseline:
+        out.append("%s%s%s" % (IND, IND, _cset(name, val)))
+    out.append("%s]" % IND)
+    out.append("")
+    out.append("%sDisableSequence [" % IND)
+    out.append("%s%s# The baseline is re-applied so the card returns to the"
+               % (IND, IND))
+    out.append("%s%s# initial state defined by the Android HAL." % (IND, IND))
+    for name, val in baseline:
+        out.append("%s%s%s" % (IND, IND, _cset(name, val)))
+    out.append("%s]" % IND)
+    out.append("")
+    out.append("%sValue {" % IND)
+    out.append('%s%sTQ "%s"' % (IND, IND, tq))
+    out.append("%s}" % IND)
+    out.append("}")
+
+    for dev in devices:
+        out.append("")
+        out.append('SectionDevice."%s" {' % dev["name"])
+        out.append("%sComment \"%s\"" % (IND, dev["comment"]))
+        out.append("")
+        out.append("%sConflictingDevice [" % IND)
+        for other in dev["conflicts"]:
+            out.append('%s%s"%s"' % (IND, IND, other))
+        out.append("%s]" % IND)
+        out.append("")
+        out.extend(_sequence_block("EnableSequence",
+                                   _device_enable_lines(model, dev)))
+        out.append("")
+        out.extend(_sequence_block("DisableSequence",
+                                   _device_disable_lines(model, dev)))
+        out.append("")
+        out.extend(_value_block(dev))
+        out.append("}")
+
+    out.append("")
+    return "\n".join(out)
+
+
+def render_card_conf(model, card, vendor):
+    """Top-level card file: SectionUseCase entries + BootSequence."""
+    out = []
+    out.append(UCM_HEADER.format(vendor=vendor, card=card,
+                                 machine=MACHINE_COMMENT))
+    out.append("# The machine driver for this device is not settled yet; bind")
+    out.append("# this profile through ucm2/conf.d/<driver>/%s.conf." % card)
+    out.append("")
+    out.append("Syntax %d" % SYNTAX)
+    out.append("")
+    out.append('SectionUseCase."HiFi" {')
+    out.append('%sFile "/%s/%s/HiFi.conf"' % (IND, vendor, card))
+    out.append('%sComment "Media playback and capture"' % IND)
+    out.append("}")
+    out.append("")
+    out.append('SectionUseCase."Voice Call" {')
+    out.append('%sFile "/%s/%s/VoiceCall.conf"' % (IND, vendor, card))
+    out.append('%sComment "Call audio bridged inside the codec (wideband)"'
+               % IND)
+    out.append("}")
+    out.append("")
+    out.append('SectionUseCase."Voice Call NB" {')
+    out.append('%sFile "/%s/%s/VoiceCallNB.conf"' % (IND, vendor, card))
+    out.append('%sComment "Call audio bridged inside the codec (narrowband)"'
+               % IND)
+    out.append("}")
+    out.append("")
+    out.append("BootSequence [")
+    out.append("%s# Initial mixer settings from the top-level <ctl> list." % IND)
+    for name, val in model.initial.items():
+        out.append("%s%s" % (IND, _cset(name, format_value(name, val))))
+    out.append("]")
+    out.append("")
+    return "\n".join(out)
+
+
+def render_confd_stub(card, vendor):
+    """conf.d lookup stub, same role as the symlinks in alsa-ucm-conf."""
+    out = []
+    out.append(UCM_HEADER.format(vendor=vendor, card=card,
+                                 machine=MACHINE_COMMENT))
+    out.append("# Lookup stub: alsa-lib scans ucm2/conf.d/<driver>/<card>.conf")
+    out.append("# when the machine driver registers its card.  This stub pulls")
+    out.append("# in the real top-level configuration from the vendor directory.")
+    out.append("")
+    out.append("Syntax %d" % SYNTAX)
+    out.append("")
+    out.append('Include.card.File "/%s/%s/%s.conf"' % (vendor, card, card))
+    out.append("")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# REPORT.md
+# --------------------------------------------------------------------------
+
+def render_report(model, card, vendor, band, tables,
+                  validation_level, command_line):
+    referrers = {}          # path -> [paths referencing it]
+    for name, elements in model.paths.items():
+        for kind, a, _b in elements:
+            if kind == "ref":
+                referrers.setdefault(a, []).append(name)
+
+    device_sources = {}
+    for verb, table in tables:
+        for dev in table:
+            label = "%s/%s" % (verb, dev["name"])
+            for path_name in dev["paths"]:
+                res = model.resolve(path_name)
+                for visited in res.visited:
+                    sources = device_sources.setdefault(visited, set())
+                    sources.add(label)
+
+    lines = []
+    lines.append("# UCM2 generation report - %s %s" % (vendor, card))
+    lines.append("")
+    lines.append("- Source XML: `%s`" % model.source_path)
+    lines.append("- Converter command: `%s`" % command_line)
+    lines.append("- Voice Call band split: VoiceCall.conf = `%s`, "
+                 "VoiceCallNB.conf = `%s`" % (band, "nb" if band == "wb" else "wb"))
+    lines.append("- Deterministic generator: no timestamps, stable ordering.")
+    lines.append("")
+    lines.append("## Path -> device mapping")
+    lines.append("")
+    lines.append("All paths of the XML, in file order.  `controls` is the "
+                 "number of distinct mixer controls after resolving nested "
+                 "references.")
+    lines.append("")
+    lines.append("| Android path | controls | UCM device | status |")
+    lines.append("|---|---|---|---|")
+    for name in model.paths:
+        empty = not model.paths[name]
+        count = 0 if empty else len(model.resolve(name).seq)
+        targets = device_sources.get(name)
+        refs = referrers.get(name, [])
+        statuses = []
+        if empty:
+            statuses.append("**EMPTY**")
+        if targets:
+            statuses.append("feeds device: " + ", ".join(sorted(targets)))
+        elif refs:
+            statuses.append("expanded into: " + ", ".join(refs))
+        if not statuses:
+            statuses.append("unused")
+        lines.append("| `%s` | %d | %s | %s |"
+                     % (name, count,
+                       ", ".join(sorted(targets)) if targets else "-",
+                       "; ".join(statuses)))
+    lines.append("")
+
+    lines.append("## Empty paths (TODO)")
+    lines.append("")
+    lines.append("These Android paths only contain a TODO comment.  The UCM "
+                 "devices that reference them carry a "
+                 "`# TODO: empty in Android mixer_paths` comment instead of "
+                 "a sequence; they must be filled in by hand:")
+    lines.append("")
+    empties = [n for n in model.paths if not model.paths[n]]
+    for name in empties:
+        targets = device_sources.get(name)
+        refs = referrers.get(name, [])
+        via = ("referenced by: " + ", ".join(refs)) if refs else "unreferenced"
+        dev = ("feeds device: " + ", ".join(sorted(targets))) \
+            if targets else ""
+        lines.append("- `%s` (%s%s)"
+                     % (name, dev + "; " if dev else "", via))
+    lines.append("")
+
+    lines.append("## Controls without initial value")
+    lines.append("")
+    lines.append("Controls set inside paths but absent from the top-level "
+                 "initial settings; their reset value is unknown, so the "
+                 "generated DisableSequences carry a "
+                 "`# TODO no default for '...'` comment:")
+    lines.append("")
+    for ctrl in model.controls_without_initial():
+        lines.append("- `%s`" % ctrl)
+    lines.append("")
+
+    lines.append("## Initial settings (BootSequence)")
+    lines.append("")
+    lines.append("%d controls applied at card boot; first control: `%s`."
+                 % (len(model.initial),
+                    next(iter(model.initial)) if model.initial else "-"))
+    lines.append("")
+
+    lines.append("## Unhandled XML elements")
+    lines.append("")
+    if model.unhandled:
+        for ctx, tag, attrib in model.unhandled:
+            lines.append("- %s: <%s %s>" % (ctx, tag,
+                                            " ".join("%s=%r" % kv
+                                                     for kv in attrib.items())))
+    else:
+        lines.append("None (only `<ctl>`, `<path>` and `<pcmdai>` were "
+                     "present).")
+    lines.append("")
+    if model.pcmdai:
+        lines.append("### pcmdai link hints (recorded, not converted)")
+        lines.append("")
+        for attrib in model.pcmdai:
+            lines.append("- %s" % ", ".join("%s=%s" % kv
+                                            for kv in attrib.items()))
+        lines.append("")
+
+    lines.append("## Validation")
+    lines.append("")
+    lines.append("Levels of validation possible for generated UCM2 files:")
+    lines.append("")
+    lines.append(VALIDATION_LEVELS_DOC.rstrip())
+    lines.append("")
+    lines.append("**Achieved for this generation: %s**" % validation_level)
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Driver
+# --------------------------------------------------------------------------
+
+def generate(model, card, vendor, band, out_dir, validation_level):
+    """Generate the whole tree; returns the list of written paths."""
+    if band not in ("nb", "wb"):
+        raise MixerError("band must be 'nb' or 'wb', got %r" % band)
+
+    # The command line is recorded with a <DIR> placeholder so that two
+    # runs into different directories produce byte-identical reports.
+    command_line = ("mixer2ucm.py --xml %s --card %s --out <DIR> --band %s"
+                    % (model.source_path, card, band))
+
+    vendor_dir = os.path.join(out_dir, "ucm2", vendor, card)
+    confd_dir = os.path.join(out_dir, "ucm2", "conf.d", card)
+    for d in (vendor_dir, confd_dir):
+        os.makedirs(d, exist_ok=True)
+
+    hifi_devices = hifi_device_table()
+    voice_devices = voice_device_table(band)
+    other_band = "nb" if band == "wb" else "wb"
+    other_devices = voice_device_table(other_band)
+
+    files = OrderedDict()
+    files["ucm2/%s/%s/%s.conf" % (vendor, card, card)] = (
+        render_card_conf(model, card, vendor))
+    files["ucm2/%s/%s/HiFi.conf" % (vendor, card)] = render_verb_conf(
+        model, card, vendor, hifi_devices,
+        "HiFi verb: media playback/capture through AIF1 (application "
+        "processor).", "HiFi", None)
+    files["ucm2/%s/%s/VoiceCall.conf" % (vendor, card)] = render_verb_conf(
+        model, card, vendor, voice_devices,
+        "Voice Call verb: modem audio bridged inside the WM5110 "
+        "(baseband on AIF2, AP on AIF1, Bluetooth SCO on AIF3); "
+        "no PCM goes through the CPU.", "Voice",
+        "Band: %s (wideband)." % band if band == "wb"
+        else "Band: %s (narrowband)." % band)
+    files["ucm2/%s/%s/VoiceCallNB.conf" % (vendor, card)] = render_verb_conf(
+        model, card, vendor, other_devices,
+        "Voice Call verb: modem audio bridged inside the WM5110 "
+        "(baseband on AIF2, AP on AIF1, Bluetooth SCO on AIF3); "
+        "no PCM goes through the CPU.", "Voice",
+        "Band: %s (%s)." % (other_band,
+                            "wideband" if other_band == "wb" else "narrowband"))
+    files["ucm2/conf.d/%s/%s.conf" % (card, card)] = render_confd_stub(card,
+                                                                       vendor)
+    files["REPORT.md"] = render_report(model, card, vendor, band,
+                                       [("HiFi", hifi_devices),
+                                        ("Voice Call", voice_devices),
+                                        ("Voice Call NB", other_devices)],
+                                       validation_level, command_line)
+
+    written = []
+    for rel, content in files.items():
+        path = os.path.join(out_dir, rel.replace("/", os.sep))
+        with open(path, "w", newline="\n") as fh:
+            fh.write(content)
+        written.append(path)
+    return written
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Convert an Android mixer_paths XML into ALSA UCM2 "
+                    "profiles (WM5110 / gts28lte).")
+    parser.add_argument("--xml", required=True, help="mixer_paths XML file")
+    parser.add_argument("--card", default=DEFAULT_CARD,
+                        help="ALSA card name (default: %(default)s)")
+    parser.add_argument("--vendor", default=DEFAULT_VENDOR,
+                        help="UCM2 vendor directory (default: %(default)s)")
+    parser.add_argument("--out", required=True,
+                        help="output directory (created, ucm2/ tree inside)")
+    parser.add_argument("--band", choices=("nb", "wb"), default=DEFAULT_BAND,
+                        help="band for the primary VoiceCall.conf "
+                             "(default: %(default)s); VoiceCallNB.conf "
+                             "always carries the other band")
+    parser.add_argument(
+        "--validation-level",
+        default="not assessed by the generator; run "
+                "'validate_ucm.py <out-dir> [--docker]' and record the "
+                "result there",
+        help="free-form validation note recorded in REPORT.md")
+    args = parser.parse_args(argv)
+
+    try:
+        model = MixerModel.from_xml(args.xml)
+        # Resolve everything up-front so cycles are caught even in
+        # paths that are not mapped to a device.
+        for name in model.paths:
+            if model.paths[name]:
+                model.resolve(name)
+        written = generate(model, args.card, args.vendor, args.band,
+                           args.out, args.validation_level)
+    except MixerError as exc:
+        parser.exit(1, "mixer2ucm: error: %s\n" % exc)
+
+    for path in written:
+        print("wrote %s" % path)
+    empties = [n for n in model.paths if not model.paths[n]]
+    print("paths: %d total, %d empty, %d initial controls, "
+          "%d controls without initial value"
+          % (len(model.paths), len(empties), len(model.initial),
+             len(model.controls_without_initial())))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

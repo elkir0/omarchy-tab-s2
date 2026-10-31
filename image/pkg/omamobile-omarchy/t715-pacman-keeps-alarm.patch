@@ -1,0 +1,45 @@
+# SM-T715: omarchy-channel-set and omarchy-refresh-pacman refuse on this tablet.
+# Both copy Omarchy's x86_64 pacman.conf and mirrorlist over ALARM's, losing the
+# armv7h repositories and IgnorePkg (Hyprland is held at the version this tablet
+# runs), then upgrade everything from them. Upstream's 0016 does the same but
+# tests for omamobile-update, which this image does not have: here the test is
+# ALARM's repository itself. The menu rows are hidden already; this keeps
+# `omarchy channel` and omarchy-reinstall-pkgs from doing it from a terminal.
+#
+# Against Omarchy 4.0.6.
+diff --git i/bin/omarchy-channel-set w/bin/omarchy-channel-set
+--- i/bin/omarchy-channel-set
++++ w/bin/omarchy-channel-set
+@@ -6,6 +6,14 @@
+ 
+ set -euo pipefail
+ 
++# SM-T715: /etc/pacman.conf carries Arch Linux ARM's repositories, which the
++# channel's x86_64 pacman.conf (omarchy-refresh-pacman) would drop.
++if grep -q '^\[alarm\]' /etc/pacman.conf; then
++  echo "omarchy-channel-set: not on this tablet. It would replace Arch Linux ARM's" >&2
++  echo "pacman.conf with Omarchy's x86_64 one. Update with 'omarchy update'." >&2
++  exit 1
++fi
++
+ usage() { echo "Usage: omarchy-channel-set [stable|rc|edge|dev]"; }
+ fail() { echo "Error: $*" >&2; exit 1; }
+ 
+diff --git i/bin/omarchy-refresh-pacman w/bin/omarchy-refresh-pacman
+--- i/bin/omarchy-refresh-pacman
++++ w/bin/omarchy-refresh-pacman
+@@ -3,6 +3,14 @@
+ # omarchy:summary=Overwrite the package configuration for /etc/pacman with the Omarchy default of using its dedicated mirrors and repositories, then update all packages.
+ # omarchy:requires-sudo=true
+ 
++# SM-T715: /etc/pacman.conf carries Arch Linux ARM's repositories and IgnorePkg,
++# which Omarchy's x86_64 pacman.conf and mirrorlist would replace.
++if grep -q '^\[alarm\]' /etc/pacman.conf; then
++  echo "omarchy-refresh-pacman: not on this tablet. It would replace Arch Linux ARM's" >&2
++  echo "pacman.conf and mirrorlist with Omarchy's x86_64 ones. Update with 'omarchy update'." >&2
++  exit 1
++fi
++
+ sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
+ sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
+ 

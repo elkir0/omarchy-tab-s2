@@ -1,0 +1,216 @@
+From c092961971ef900dd30c1e4ff82edf548ad14e8e Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 04/16] ARM: dts: gts28ltexx: MIPI-LLI link to the SS333 modem
+
+New exynos5433-gts28ltexx-modem.dtsi, included by the board as section
+18, with the AP side of the modem link (design: research/modem/research/
+analysis/kernel_port_design.md 3.1, 3.2, 3.6; SYNTHESIS.md D3;
+kernel_boot_review.md 5.1).  Every value cites its source.
+
+ - reserved-memory cp-shmem@de000000, 8 MiB, no-map: the stock size
+   (MIPI_LLI_RESERVE_SIZE) at the address the stock top-down allocation
+   gives, the hole the stock and board ION carveouts leave between
+   0xde000000 and 0xde800000.  No overlap: ion-carveout@cf900000 ends at
+   0xde000000, ion-carveout@de800000 starts at its end.
+ - reserved-memory cp-guard@de920000 (0x60000, no-map): the last
+   ordinary RAM of the last bank, so that all DRAM from 0xde000000 to the
+   end of DRAM (0xde980000) is no-map and a CP access beyond the 8 MiB
+   region cannot reach kernel memory.
+ - mipi-lli@10f24000, compatible "samsung,exynos5433-mipi-lli": the
+   stock node's registers with the M-PHY child folded in as reg[3] and the
+   PMU word replaced by the PMU syscon, SPI 184 (link) and 185 (doorbell)
+   level-high, the stock gates, the stock clock setup as assigned-clocks
+   (100 MHz div_aclk_cpif_200, symbol muxes on the PHY clocks), the
+   memory-region, and the stock M-PHY setting (HS-G2 series A, shared
+   reference clock).
+
+The modem node, SPI4 and the modem pins come separately
+(exynos5433-gts28ltexx-modem-ss333.dtsi).  The driver is a module that
+is never autoloaded; nothing on the LLI side runs unless it is loaded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-modem.dtsi  | 150 ++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |  14 ++
+ 2 files changed, 164 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi
+new file mode 100644
+index 000000000..16ecd9157
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): MIPI-LLI link to the Shannon
++ * SS333 modem, AP side: shared memory and the LLI controller with its
++ * M-PHY.  The modem node, SPI4 and the modem pins live in
++ * exynos5433-gts28ltexx-modem-ss333.dtsi.
++ *
++ * Design: research/modem/research/analysis/kernel_port_design.md
++ * (KP) 3.1, 3.2, 3.6; SYNTHESIS.md D3; kernel_boot_review.md 5.1.
++ * Sources: K = kernel_universal5433 (Samsung 3.10 tree), LIVE = the stock
++ * device tree read from the device (dumps/live_fdt.dts), CLK = the stock
++ * clock driver (K drivers/clk/samsung/clk-exynos5433.c).
++ *
++ * The driver (drivers/misc/mipi-lli, exynos5433-mipi-lli.ko) is a module
++ * that is never autoloaded and binds with allow_hw=0: it touches no LLI,
++ * M-PHY or PMU register until root sets allow_hw=1.  Binding does apply
++ * the assigned-clocks below (CMU only), as the stock probe did.
++ */
++
++/ {
++	reserved-memory {
++		/*
++		 * Shared memory of the CP link.  Size: MIPI_LLI_RESERVE_SIZE =
++		 * SZ_8M (K include/linux/mipi-lli.h:23).  Alignment = size: the
++		 * IAL remap register needs a power-of-two size on a size-aligned
++		 * base (K drivers/misc/mipi-lli/exynos-mipi-lli.c:68-90).
++		 * Address: stock allocates it top-down at boot
++		 * (K arch/arm/mach-exynos/mach-universal5433.c:62-63), before
++		 * the ION carveouts; the highest free 8 MiB block under the end
++		 * of DRAM (0xde980000) is 0xde000000, the hole between ION
++		 * "common" (0xdda00000 + 0x600000) and "mfc_sh" (0xde800000)
++		 * (LIVE:1909-1911).  The board's ion-carveout@cf900000 (ends at
++		 * 0xde000000) and ion-carveout@de800000 leave the same hole.
++		 * The driver programs remap 0x0001BC97 for it and refuses any
++		 * other region (KP 2.6, SYNTHESIS D3).
++		 * no-map: no cacheable linear alias of memory the CP writes over
++		 * LLI (KP 2.4).
++		 */
++		cp_shmem: cp-shmem@de000000 {
++			reg = <0xde000000 0x800000>;
++			no-map;
++		};
++
++		/*
++		 * Guard: the last ordinary RAM of the last bank, 0xde920000 up to
++		 * the end of DRAM 0xde980000 (memory node of the board:
++		 * 0xc0000000 + 0x1e980000), above ion-carveout@de800000
++		 * (0xde800000 + 0x120000).  With it all DRAM from 0xde000000 to
++		 * the end of DRAM is no-map, so a CP access beyond the 8 MiB
++		 * region cannot reach kernel memory there (the CP window is
++		 * 256 MiB, radio_image.md 2.4; kernel_boot_review.md D3-c).
++		 * The LLI driver checks that no System RAM lies within 256 MiB
++		 * above the region base.
++		 */
++		cp-guard@de920000 {
++			reg = <0xde920000 0x60000>;
++			no-map;
++		};
++	};
++};
++
++&soc {
++	/*
++	 * MIPI-LLI controller of the CP interface: stock node
++	 * K arch/arm/boot/dts/exynos5433.dtsi:2128-2172, identical in
++	 * LIVE:5503-5558.  The stock 4th reg <0x105c0720 0x4> (PMU LLI_PHY_CON)
++	 * becomes the PMU syscon phandle (exynos-pmu already maps the whole
++	 * PMU, a second request would fail), and the stock "mphy" child
++	 * (LIVE:5535, reg 0x10f20000) becomes reg[3].  Nothing else in the
++	 * SoC dtsi uses 0x10f20000-0x10f37fff or 0x10fd0000-0x10fd1fff.
++	 * compatible: new, SoC-specific; the stock generic
++	 * "samsung,exynos-mipi-lli" also covered the Exynos5430 variant (the
++	 * 3.10 driver's CONFIG_SOC_EXYNOS5430 branches), which this port
++	 * drops.
++	 */
++	mipi_lli: mipi-lli@10f24000 {
++		compatible = "samsung,exynos5433-mipi-lli";
++		/* LIVE:5506 */
++		reg = <0x10f24000 0x4000>,	/* PA/DME/IAL/DL/TL */
++		      <0x10f34000 0x4000>,	/* remote window (unused, GPIO sideband) */
++		      <0x10fd0000 0x2000>,	/* SYSREG_CPIF: CPIF_LLI_SIG_* */
++		      <0x10f20000 0x4000>;	/* M-PHY, LIVE:5535 */
++		reg-names = "lli", "remote", "sysreg", "mphy";
++		/*
++		 * LIVE:5512 <0 0xb8 0>, <0 0xb9 0>: index 0 (SPI 184) = DME/link
++		 * events, index 1 (SPI 185) = TL signal doorbell
++		 * (K exynos-mipi-lli.c:1132-1163, mipi-lli.c:456).  Level-high
++		 * is inferred: every GIC SPI of the mainline 5433 dtsi is
++		 * level-high (KP 3.2).
++		 */
++		interrupts = <GIC_SPI 184 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 185 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "lli", "signal";
++		/* LLI_PHY_CON = PMU + 0x720 (K regs-pmu-exynos5433.h:36) */
++		samsung,pmu-syscon = <&pmu_system_controller>;
++		memory-region = <&cp_shmem>;
++
++		/*
++		 * Stock clock-names and order (K exynos5433.dtsi:2135-2162),
++		 * minus the mux and divider entries, now assigned-clocks.
++		 * Stock IDs: aclk_cpif_200 = 320, gates 2093, 2074-2071,
++		 * 2064-2060 (CLK enum :236-293); new IDs in
++		 * dt-bindings/clock/exynos5433.h (CMU_CPIF 16-25).
++		 */
++		clocks = <&cmu_mif CLK_ACLK_CPIF_200>,
++			 <&cmu_cpif CLK_GATE_CPIFNM_200>,
++			 <&cmu_cpif CLK_GATE_LLI_SVC_LOC>,
++			 <&cmu_cpif CLK_GATE_LLI_SVC_REM>,
++			 <&cmu_cpif CLK_GATE_LLI_LL_INIT>,
++			 <&cmu_cpif CLK_GATE_LLI_BE_INIT>,
++			 <&cmu_cpif CLK_GATE_LLI_CMN_CFG>,
++			 <&cmu_cpif CLK_GATE_LLI_TX0_CFG>,
++			 <&cmu_cpif CLK_GATE_LLI_RX0_CFG>,
++			 <&cmu_cpif CLK_GATE_LLI_TX0_SYMBOL>,
++			 <&cmu_cpif CLK_GATE_LLI_RX0_SYMBOL>;
++		clock-names = "aclk_cpif_200", "gate_cpifnm_200",
++			      "gate_lli_svc_loc", "gate_lli_svc_rem",
++			      "gate_lli_ll_init", "gate_lli_be_init",
++			      "gate_lli_cmn_cfg",
++			      "gate_lli_tx0_cfg", "gate_lli_rx0_cfg",
++			      "gate_lli_tx0_symbol", "gate_lli_rx0_symbol";
++
++		/*
++		 * Stock probe: clk_set_parent(mout_phyclk_lli_*_symbol_user,
++		 * phyclk_lli_*_symbol) (K exynos-mipi-lli.c:509-512) and
++		 * dout_aclk_cpif_200 = 100 MHz (:1196); PA_SYSTEM_CLK_PERIOD =
++		 * 10 ns assumes 100 MHz (:34-38).  Applied by the driver core
++		 * when the driver binds, before its probe.
++		 */
++		assigned-clocks = <&cmu_mif CLK_DIV_ACLK_CPIF_200>,
++				  <&cmu_cpif CLK_MOUT_PHYCLK_LLI_TX0_SYMBOL_USER>,
++				  <&cmu_cpif CLK_MOUT_PHYCLK_LLI_RX0_SYMBOL_USER>;
++		assigned-clock-parents = <0>,
++					 <&cmu_cpif CLK_PHYCLK_LLI_TX0_SYMBOL>,
++					 <&cmu_cpif CLK_PHYCLK_LLI_RX0_SYMBOL>;
++		assigned-clock-rates = <100000000>, <0>, <0>;
++
++		/*
++		 * Stock mphy/modems/ss333 (K exynos5433-modem-ss333.dtsi:145,147,
++		 * LIVE:5543-5544): init-gear <2 2 1> = HS, gear 2, series A;
++		 * shd-refclk 1 (shared reference clock).  The stock
++		 * modems/ss333 scrambler = 0 and automode = 0 (:133-136,
++		 * LIVE:5517-5519) are the driver defaults (no samsung,lli-*
++		 * property); shdmem_size/is_ion_alloc are replaced by
++		 * memory-region.
++		 */
++		samsung,mphy-init-gear = <2 2 1>;
++		samsung,mphy-shared-refclk;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 6f8ec3153..9e33aad42 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -914,3 +914,17 @@ &framebuffer {
+  * tablet on 2026-10-29.
+  */
+ #include "exynos5433-gts28ltexx-battery.dtsi"
++
++/* ==================================================================== */
++/* 18. Modem link: MIPI-LLI to the Shannon SS333 (AP side)              */
++/* ==================================================================== */
++
++/*
++ * 8 MiB no-map shared memory at 0xde000000 plus a no-map guard up to the
++ * end of DRAM, and the MIPI-LLI controller with its M-PHY.  The driver is
++ * a module (exynos5433-mipi-lli.ko, gts28ltexx_modem.config) that is never
++ * autoloaded and touches no LLI, M-PHY or PMU register until allow_hw=1.
++ * research/modem/research/SYNTHESIS.md D1 (patch 5), D3.  Not validated
++ * on the tablet yet.
++ */
++#include "exynos5433-gts28ltexx-modem.dtsi"

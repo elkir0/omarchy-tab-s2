@@ -1,0 +1,37 @@
+#!/bin/sh
+# t715-chromium-update [--auto]: upgrade the Debian packages of Chromium's root
+# with apt, inside that root, as root. apt checks Debian's signatures. Chromium
+# may stay open: the new version starts with its next launch.
+#   --auto  the timer's mode: only on Wi-Fi, to spare the mobile data
+set -eu
+R=/var/lib/t715-chromium/root
+[ "$(id -u)" = 0 ] || { echo "t715-chromium-update: run it as root (sudo)" >&2; exit 1; }
+[ -x "$R/usr/lib/chromium/chromium" ] || { echo "t715-chromium-update: no root in $R" >&2; exit 1; }
+if [ "$(findmnt -n -o FSTYPE /)" = overlay ]; then
+    echo "image mode: an update would not survive a reboot, skipped"
+    exit 0
+fi
+if [ "${1:-}" = --auto ] && ! nmcli -t -f TYPE,STATE device 2>/dev/null | grep -q '^wifi:connected'; then
+    echo "no Wi-Fi, skipped"
+    exit 0
+fi
+version() { awk '/^Package: chromium$/ {f=1} f && /^Version:/ {print $2; exit}' "$R/var/lib/dpkg/status"; }
+before=$(version)
+env -u LD_PRELOAD bwrap \
+    --bind "$R" / \
+    --proc /proc \
+    --dev /dev \
+    --perms 1777 --tmpfs /tmp \
+    --ro-bind /etc/resolv.conf /etc/resolv.conf \
+    --setenv DEBIAN_FRONTEND noninteractive \
+    --setenv PATH /usr/sbin:/usr/bin:/sbin:/bin \
+    sh -c 'apt-get update -qq &&
+           apt-get -y -qq --no-install-recommends -o Dpkg::Options::=--force-confold upgrade &&
+           apt-get clean'
+/usr/lib/t715-chromium/prepare-root "$R"
+after=$(version)
+if [ "$before" = "$after" ]; then
+    echo "Chromium $after, already up to date"
+else
+    echo "Chromium $before -> $after, for its next launch"
+fi

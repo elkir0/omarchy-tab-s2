@@ -1,0 +1,201 @@
+From ed71dc803f16845648857326513b85e501845c3f Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 24/24] drm/exynos: decon5433: unmask the hardware trigger only
+ at flush
+
+In command mode with the hardware trigger (no "te" interrupt in the
+board's DT), decon_setup_trigger() unmasked TE as the first step of
+atomic_enable, before the MIC, the DSI host and the panel are enabled:
+a TE edge then starts a frame that the pipe behind cannot drain.  On the
+SM-T715 about one boot-and-reboot cycle in ten to fifteen ended with
+every later commit timing out ("flip_done timed out", a black screen),
+each time right after a display hand-over (fbcon's first modeset,
+Plymouth's splash ending, Hyprland exiting).  Keep the trigger masked at
+enable and unmask it in atomic_flush, once the bridges and the panel are
+up, the order Samsung's driver uses.
+
+At bind, decon_clear_channels() stopped the clocks 50 ms after disabling
+the windows while the bootloader's hardware trigger kept frames running;
+mask it and wait for the frame in flight to end first.
+
+A delayed work logs the DECON's state once per enable when a flush has
+no frame end after 200 ms and the frame counter is frozen, so a remaining
+stall shows its registers.
+
+On the tablet with Plymouth's splash (the setting that stalled most):
+40 boot-and-reboot cycles in 40 without a stall or a diagnostic line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/exynos/exynos5433_drm_decon.c | 90 ++++++++++++++++++-
+ 1 file changed, 87 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/exynos/exynos5433_drm_decon.c b/drivers/gpu/drm/exynos/exynos5433_drm_decon.c
+index 0ef7bc884..b82c9bad6 100644
+--- a/drivers/gpu/drm/exynos/exynos5433_drm_decon.c
++++ b/drivers/gpu/drm/exynos/exynos5433_drm_decon.c
+@@ -16,6 +16,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
++#include <linux/workqueue.h>
+ 
+ #include <drm/drm_blend.h>
+ #include <drm/drm_fourcc.h>
+@@ -71,6 +72,8 @@ struct decon_context {
+ 	int				first_win;
+ 	spinlock_t			vblank_lock;
+ 	u32				frame_id;
++	struct delayed_work		frame_wd;
++	bool				frame_wd_dumped;
+ };
+ 
+ static const uint32_t decon_formats[] = {
+@@ -185,8 +188,16 @@ static void decon_setup_trigger(struct decon_context *ctx)
+ 		return;
+ 	}
+ 
+-	writel(TRIGCON_TRIGEN_PER_F | TRIGCON_TRIGEN_F | TRIGCON_HWTRIGMASK
+-	       | TRIGCON_HWTRIGEN, ctx->addr + DECON_TRIGCON);
++	/*
++	 * In command mode the hardware trigger (the panel's TE) stays masked
++	 * until decon_atomic_flush(): this runs from atomic_enable, before the
++	 * MIC, the DSI host and the panel are enabled, and a TE edge then
++	 * starts a frame that the pipe behind cannot drain.  Samsung's driver
++	 * unmasks the trigger last as well.
++	 */
++	writel(TRIGCON_TRIGEN_PER_F | TRIGCON_TRIGEN_F | TRIGCON_HWTRIGEN |
++	       (ctx->crtc->i80_mode ? 0 : TRIGCON_HWTRIGMASK),
++	       ctx->addr + DECON_TRIGCON);
+ 
+ 	if (regmap_update_bits(ctx->sysreg, DSD_CFG_MUX,
+ 			       DSD_CFG_MUX_TE_UNMASK_GLOBAL, ~0))
+@@ -474,10 +485,16 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
+ 
+ 	decon_set_bits(ctx, DECON_UPDATE, STANDALONE_UPDATE_F, ~0);
+ 
++	/* the bridges and the panel are up by now: let TE start frames */
++	if (crtc->i80_mode && (ctx->out_type & I80_HW_TRG))
++		decon_set_bits(ctx, DECON_TRIGCON, TRIGCON_HWTRIGMASK, ~0);
++
+ 	ctx->frame_id = decon_get_frame_count(ctx, true);
+ 
+ 	exynos_crtc_handle_event(crtc);
+ 
++	mod_delayed_work(system_wq, &ctx->frame_wd, msecs_to_jiffies(200));
++
+ 	spin_unlock_irqrestore(&ctx->vblank_lock, flags);
+ }
+ 
+@@ -527,6 +544,7 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
+ 
+ 	decon_swreset(ctx);
+ 
++	ctx->frame_wd_dumped = false;
+ 	decon_commit(ctx->crtc);
+ }
+ 
+@@ -535,6 +553,8 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
+ 	struct decon_context *ctx = crtc->ctx;
+ 	int i;
+ 
++	cancel_delayed_work_sync(&ctx->frame_wd);
++
+ 	if (!(ctx->out_type & I80_HW_TRG))
+ 		synchronize_irq(ctx->te_irq);
+ 	synchronize_irq(ctx->irq);
+@@ -584,6 +604,24 @@ static void decon_clear_channels(struct exynos_drm_crtc *crtc)
+ 	/* TODO: wait for possible vsync */
+ 	msleep(50);
+ 
++	/*
++	 * The bootloader may have left the display running on the hardware
++	 * trigger (command interface on): mask it and let the frame in flight
++	 * end before the clocks stop, so that no frame is cut halfway through
++	 * the MIC and the DSI host.  crtc->i80_mode is not known yet here: the
++	 * DSI host sets it when the panel attaches, after this bind.
++	 */
++	if ((ctx->out_type & I80_HW_TRG) &&
++	    (readl(ctx->addr + DECON_VIDOUTCON0) & VIDOUT_COMMAND_IF)) {
++		u32 val;
++
++		decon_set_bits(ctx, DECON_TRIGCON, TRIGCON_HWTRIGMASK, 0);
++		if (readl_poll_timeout(ctx->addr + DECON_VIDCON1, val,
++				       !(val & VIDCON1_I80_ACTIVE), 100, 50000))
++			dev_warn(ctx->dev, "frame still active before clock gating (VIDCON1 %08x)\n",
++				 val);
++	}
++
+ err:
+ 	while (--i >= 0)
+ 		clk_disable_unprepare(ctx->clks[i]);
+@@ -679,14 +717,59 @@ static void decon_handle_vblank(struct decon_context *ctx)
+ 
+ 	if (frm != ctx->frame_id) {
+ 		/* handle only if incremented, take care of wrap-around */
+-		if ((s32)(frm - ctx->frame_id) > 0)
++		if ((s32)(frm - ctx->frame_id) > 0) {
+ 			drm_crtc_handle_vblank(&ctx->crtc->base);
++			cancel_delayed_work(&ctx->frame_wd);
++		}
+ 		ctx->frame_id = frm;
+ 	}
+ 
+ 	spin_unlock(&ctx->vblank_lock);
+ }
+ 
++/*
++ * Diagnostic: a flush whose frame has not ended 200 ms later, with the frame
++ * counter frozen (it runs on every TE while the vblank interrupt is off).
++ * Logs the pipe's state once per enable (the exynos-drm "flip_done timed out"
++ * black screens of the SM-T715, sm-t715-omarchy docs/DEPLOY.md 13.).
++ */
++static void decon_frame_wd(struct work_struct *work)
++{
++	struct decon_context *ctx = container_of(to_delayed_work(work),
++						 struct decon_context, frame_wd);
++	u32 frm1, frm2, mux = 0;
++
++	if (ctx->frame_wd_dumped || pm_runtime_get_if_in_use(ctx->dev) <= 0)
++		return;
++	frm1 = readl(ctx->addr + DECON_CRFMID);
++	msleep(40);
++	frm2 = readl(ctx->addr + DECON_CRFMID);
++	/* frames still flow, the frame-end interrupt was only off */
++	if (frm2 != frm1) {
++		pm_runtime_put(ctx->dev);
++		return;
++	}
++	ctx->frame_wd_dumped = true;
++	if (ctx->sysreg)
++		regmap_read(ctx->sysreg, DSD_CFG_MUX, &mux);
++	dev_warn(ctx->dev,
++		 "no frame end 200 ms after a flush: CRFMID %08x -> %08x, VIDCON0 %08x VIDOUTCON0 %08x VIDCON1 %08x VIDINTCON0 %08x VIDINTCON1 %08x TRIGCON %08x UPDATE %08x SHADOWCON %08x WINCON0-4 %08x %08x %08x %08x %08x DSD_CFG_MUX %08x frame_id %08x\n",
++		 frm1, frm2, readl(ctx->addr + DECON_VIDCON0),
++		 readl(ctx->addr + DECON_VIDOUTCON0),
++		 readl(ctx->addr + DECON_VIDCON1),
++		 readl(ctx->addr + DECON_VIDINTCON0),
++		 readl(ctx->addr + DECON_VIDINTCON1),
++		 readl(ctx->addr + DECON_TRIGCON),
++		 readl(ctx->addr + DECON_UPDATE),
++		 readl(ctx->addr + DECON_SHADOWCON),
++		 readl(ctx->addr + DECON_WINCONx(0)),
++		 readl(ctx->addr + DECON_WINCONx(1)),
++		 readl(ctx->addr + DECON_WINCONx(2)),
++		 readl(ctx->addr + DECON_WINCONx(3)),
++		 readl(ctx->addr + DECON_WINCONx(4)), mux, ctx->frame_id);
++	pm_runtime_put(ctx->dev);
++}
++
+ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
+ {
+ 	struct decon_context *ctx = dev_id;
+@@ -800,6 +883,7 @@ static int exynos5433_decon_probe(struct platform_device *pdev)
+ 	ctx->dev = dev;
+ 	ctx->out_type = (unsigned long)of_device_get_match_data(dev);
+ 	spin_lock_init(&ctx->vblank_lock);
++	INIT_DELAYED_WORK(&ctx->frame_wd, decon_frame_wd);
+ 
+ 	if (ctx->out_type & IFTYPE_HDMI)
+ 		ctx->first_win = 1;

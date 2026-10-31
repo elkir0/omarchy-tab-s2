@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# build-rootfs — Omarchy (Hyprland + the Omarchy shell) root file system
+# image for the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Arch Linux ARM armv7h.
+#
+# Produces, in out/:
+#   rootfs-omarchy.img          raw ext4 image (label ALARM), booted read-only
+#                               under a tmpfs overlay by the tablet's initramfs
+#   rootfs-omarchy.img.sha256   its checksum (shasum -a 256 -c format)
+#   rootfs-omarchy.MANIFEST     versions, packages, setup leaves, smoke check
+#
+# The armv7h tree is built by rootfs/Dockerfile from t715-omarchy:base-armv7h
+# and the local repository out/repo/armv7h (tools/repack-omarchy), under qemu:
+# one to two hours from scratch, minutes when Docker's cache holds the
+# package layers. A Debian helper container turns `docker export` into the
+# ext4 image: the tree is never extracted on macOS. See docs/image/ROOTFS.md.
+#
+# Usage:
+#   tools/build-rootfs --ssh-pubkey FILE [--size MiB] [--keep-image] [--no-cache]
+#     --ssh-pubkey FILE  OpenSSH public key for root (and alarm); required
+#     --size MiB         file system size (default: content + 20 %)
+#     --keep-image       keep the final Docker image t715-omarchy:rootfs
+#     --no-cache         rebuild every layer (fresh package sync)
+#     -h, --help         this help
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/alarm.sh
+. "$SCRIPT_DIR/../lib/alarm.sh"
+REPO_DIR="$ALARM_REPO_DIR"
+
+FINAL_IMAGE="t715-omarchy:rootfs"
+HELPER_IMAGE="t715-omarchy-rootfs-helper:latest"
+SMOKE_CTR="t715-omarchy-rootfs-smoke"
+EXPORT_CTR="t715-omarchy-rootfs-export"
+MKFS_CTR="t715-omarchy-rootfs-mkfs"
+LABEL="ALARM"
+HOST_NAME="gts28lte-omarchy"
+
+LOCAL_REPO="$REPO_DIR/out/repo/armv7h"
+DUMPS="${T715_DUMPS_DIR:-$REPO_DIR/../dumps}"
+BT_FIRMWARE="$DUMPS/vendor_firmware/bcm4358A3_V0086.0144.hcd"
+BT_FIRMWARE_SIZE=53841
+WIFI_NVRAM="$DUMPS/etc_wifi/nvram_net.txt"
+WIFI_NVRAM_SIZE=6053
+OUT_DIR="$REPO_DIR/out"
+IMG_NAME="rootfs-omarchy.img"
+BUILD_LOG="$ALARM_CACHE_DIR/rootfs-omarchy-build.log"
+
+SSH_PUBKEY=""
+SIZE_MIB=0
+KEEP_IMAGE=0
+NO_CACHE=0
+BUILD_START="$(date +%s)"
+
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+log()  { printf '\033[1;34m[build]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssh-pubkey) SSH_PUBKEY="${2:?--ssh-pubkey needs a file}"; shift 2 ;;
+        --size)       SIZE_MIB="${2:?--size needs a value in MiB}"; shift 2 ;;
+        --keep-image) KEEP_IMAGE=1; shift ;;
+        --no-cache)   NO_CACHE=1; shift ;;
+        -h|--help)    usage 0 ;;
+        *)            die "unknown option: $1 (see --help)" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+log "1/7 preflight"
+# ---------------------------------------------------------------------------
+[ -n "$SSH_PUBKEY" ] || usage
+[ -r "$SSH_PUBKEY" ] || die "cannot read SSH public key: $SSH_PUBKEY"
+! grep -q 'PRIVATE KEY' "$SSH_PUBKEY" || die "$SSH_PUBKEY is a private key: pass the .pub file"
+[ "$(grep -c . "$SSH_PUBKEY")" -ge 1 ] || die "$SSH_PUBKEY is empty"
+grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) ' "$SSH_PUBKEY" \
+    || die "$SSH_PUBKEY does not look like an OpenSSH public key"
+[[ "$SIZE_MIB" =~ ^[0-9]+$ ]] || die "--size must be an integer (MiB)"
+[ -f "$LOCAL_REPO/t715-omarchy.db" ] \
+    || die "no local repository $LOCAL_REPO/t715-omarchy.db: run tools/repack-omarchy first"
+# Bluetooth patch RAM: the Phosh session's vendor dump (git-ignored there,
+# never copied into this repository), read-only, staged into the build
+# context below and removed with it.
+[ -f "$BT_FIRMWARE" ] || die "no Bluetooth firmware $BT_FIRMWARE (the tablet's dumps, vendor_firmware/; set T715_DUMPS_DIR)"
+[ "$(wc -c < "$BT_FIRMWARE" | tr -d ' ')" = "$BT_FIRMWARE_SIZE" ] \
+    || die "$BT_FIRMWARE is not $BT_FIRMWARE_SIZE bytes"
+# Wi-Fi NVRAM: the same, from the dumps' etc_wifi/. It holds the tablet's MAC
+# address and radio calibration: only its sha256 is ever printed.
+[ -f "$WIFI_NVRAM" ] || die "no Wi-Fi NVRAM $WIFI_NVRAM (the tablet's dumps, etc_wifi/; set T715_DUMPS_DIR)"
+[ "$(wc -c < "$WIFI_NVRAM" | tr -d ' ')" = "$WIFI_NVRAM_SIZE" ] \
+    || die "$WIFI_NVRAM is not $WIFI_NVRAM_SIZE bytes"
+alarm_setup armv7h
+alarm_ensure_base_image
+alarm_ensure_dev_image    # compiles rootfs/shim/ (Dockerfile stage "shim")
+mkdir -p "$OUT_DIR" "$ALARM_CACHE_DIR"
+
+WORK="$(mktemp -d "$ALARM_CACHE_DIR/.rootfs-omarchy.XXXXXX")"
+CTX="$WORK/context"
+cleanup() {
+    docker rm -f "$SMOKE_CTR" "$EXPORT_CTR" "$MKFS_CTR" >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+# Containers left behind by an interrupted run (our names only).
+docker rm -f "$SMOKE_CTR" "$EXPORT_CTR" "$MKFS_CTR" >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+log "2/7 build context"
+# ---------------------------------------------------------------------------
+mkdir -p "$CTX/ssh"
+cp -a "$REPO_DIR/rootfs/." "$CTX/"
+cp -a "$SCRIPT_DIR/omarchy-trusted.fpr" "$CTX/omarchy-trusted.fpr"
+cp "$SSH_PUBKEY" "$CTX/ssh/authorized_keys"
+chmod 0644 "$CTX/ssh/authorized_keys"
+mkdir -p "$CTX/firmware/bt"
+cp "$BT_FIRMWARE" "$CTX/firmware/bt/bcm4358A3_V0086.0144.hcd"
+chmod 0444 "$CTX/firmware/bt/bcm4358A3_V0086.0144.hcd"
+BT_FIRMWARE_SHA="$(shasum -a 256 "$BT_FIRMWARE" | cut -d' ' -f1)"
+mkdir -p "$CTX/firmware/wifi"
+cp "$WIFI_NVRAM" "$CTX/firmware/wifi/nvram_net.txt"
+chmod 0444 "$CTX/firmware/wifi/nvram_net.txt"
+WIFI_NVRAM_SHA="$(shasum -a 256 "$WIFI_NVRAM" | cut -d' ' -f1)"
+log "context: rootfs/, ssh/authorized_keys ($(cut -d' ' -f1,3 "$SSH_PUBKEY" | head -n1)), firmware/bt (sha256 $BT_FIRMWARE_SHA), firmware/wifi (NVRAM sha256 $WIFI_NVRAM_SHA), local repository $LOCAL_REPO"
+
+# ---------------------------------------------------------------------------
+log "3/7 docker build $FINAL_IMAGE (armv7h under qemu; log: $BUILD_LOG)"
+# ---------------------------------------------------------------------------
+build_flags=(--platform "$ALARM_PLATFORM" --progress=plain
+             --build-context "t715repo=$LOCAL_REPO"
+             --build-arg "BASE=$ALARM_BASE_IMAGE"
+             --build-arg "DEV=$ALARM_DEV_IMAGE"
+             -f "$CTX/Dockerfile" -t "$FINAL_IMAGE")
+[ "$NO_CACHE" -eq 1 ] && build_flags+=(--no-cache)
+if ! docker build "${build_flags[@]}" "$CTX" 2>&1 | tee "$BUILD_LOG"; then
+    die "docker build failed (see $BUILD_LOG)"
+fi
+
+# ---------------------------------------------------------------------------
+log "4/7 smoke check in the final armv7h image"
+# ---------------------------------------------------------------------------
+SMOKE="$WORK/smoke.txt"
+set +e
+docker run --rm --name "$SMOKE_CTR" --platform "$ALARM_PLATFORM" "$FINAL_IMAGE" \
+    /usr/lib/t715-omarchy/smoke-check > "$SMOKE" 2>&1
+smoke_rc=$?
+set -e
+cat "$SMOKE"
+[ "$smoke_rc" -eq 0 ] || die "smoke check failed (exit $smoke_rc): the session binaries do not load"
+
+# ---------------------------------------------------------------------------
+log "5/7 ext4 image"
+# ---------------------------------------------------------------------------
+if ! docker image inspect "$HELPER_IMAGE" >/dev/null 2>&1; then
+    log "building helper image $HELPER_IMAGE (debian:trixie + e2fsprogs)"
+    docker build --platform linux/arm64 -q -t "$HELPER_IMAGE" - >/dev/null <<'EOF'
+FROM debian:trixie
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends e2fsprogs tar findutils coreutils \
+ && rm -rf /var/lib/apt/lists/*
+EOF
+fi
+docker create --name "$EXPORT_CTR" --platform "$ALARM_PLATFORM" "$FINAL_IMAGE" /bin/true >/dev/null
+docker cp "$EXPORT_CTR:/usr/share/t715-omarchy/MANIFEST.image" "$WORK/MANIFEST.image"
+
+STATS="$WORK/mkimage.out"
+log "exporting the tree into $OUT_DIR/$IMG_NAME (size: $([ "$SIZE_MIB" -eq 0 ] && echo auto || echo "$SIZE_MIB MiB"))"
+if ! docker export "$EXPORT_CTR" | docker run --rm -i --name "$MKFS_CTR" --platform linux/arm64 \
+        -e IMG="/out/$IMG_NAME" -e SIZE_MIB="$SIZE_MIB" -e LABEL="$LABEL" -e HOST_NAME="$HOST_NAME" \
+        -v "$OUT_DIR:/out" -v "$REPO_DIR/rootfs/mkimage.sh:/mkimage.sh:ro" \
+        "$HELPER_IMAGE" bash /mkimage.sh > "$STATS"; then
+    rm -f "$OUT_DIR/$IMG_NAME.tmp"
+    die "ext4 image creation failed"
+fi
+docker rm -f "$EXPORT_CTR" >/dev/null
+stat_of() { sed -n "s/^T715_$1=//p" "$STATS" | head -n1; }
+
+# ---------------------------------------------------------------------------
+log "6/7 checksum, MANIFEST, summary"
+# ---------------------------------------------------------------------------
+IMG="$OUT_DIR/$IMG_NAME"
+(cd "$OUT_DIR" && shasum -a 256 "$IMG_NAME" > "$IMG_NAME.sha256.tmp" && mv "$IMG_NAME.sha256.tmp" "$IMG_NAME.sha256")
+SHA="$(cut -d' ' -f1 "$IMG.sha256")"
+IMG_BYTES="$(stat -f %z "$IMG" 2>/dev/null || stat -c %s "$IMG")"
+BS="$(stat_of BLOCK_SIZE)"; BC="$(stat_of BLOCK_COUNT)"; FB="$(stat_of FREE_BLOCKS)"
+IC="$(stat_of INODE_COUNT)"; FI="$(stat_of FREE_INODES)"
+FS_MIB=$(( BC * BS / 1048576 ))
+FREE_MIB=$(( FB * BS / 1048576 ))
+USED_MIB=$(( (BC - FB) * BS / 1048576 ))
+FREE_PCT=$(( FB * 100 / BC ))
+GIT_REV="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo 'no commit')"
+GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+
+MANIFEST="$OUT_DIR/rootfs-omarchy.MANIFEST"
+{
+    echo "# rootfs-omarchy.MANIFEST — Omarchy on the SM-T715 (Arch Linux ARM armv7h)"
+    echo "# written by tools/build-rootfs (omarchy-tab-s2, git $GIT_REV, $GIT_DIRTY uncommitted paths)"
+    echo
+    echo "== Image =="
+    echo "file:            $IMG_NAME"
+    echo "built:           $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "format:          raw ext4 (not Android sparse), label $(stat_of LABEL), block size $BS"
+    echo "features:        $(stat_of FEATURES)"
+    echo "size:            $FS_MIB MiB ($IMG_BYTES bytes), sizing: $(stat_of SIZING)"
+    echo "content:         $(stat_of CONTENT_MIB) MiB of files, $(stat_of FILES) inodes in the tree"
+    echo "used:            $USED_MIB MiB (with file system metadata and journal)"
+    echo "free:            $FREE_MIB MiB ($FREE_PCT %), $FI of $IC inodes free"
+    echo "sha256:          $SHA"
+    echo "hostname:        $HOST_NAME"
+    echo "base image:      $ALARM_BASE_IMAGE"
+    echo "local repo:      out/repo/armv7h (t715-omarchy.db sha256 $(shasum -a 256 "$LOCAL_REPO/t715-omarchy.db.tar.gz" | cut -d' ' -f1))"
+    echo "BT firmware:     bcm4358A3_V0086.0144.hcd, sha256 $BT_FIRMWARE_SHA (from the dumps' vendor_firmware/)"
+    echo "Wi-Fi NVRAM:     nvram_net.txt, sha256 $WIFI_NVRAM_SHA (from the dumps' etc_wifi/)"
+    echo
+    cat "$WORK/MANIFEST.image"
+    echo
+    echo "== Smoke check (/usr/lib/t715-omarchy/smoke-check in the final armv7h image, under qemu) =="
+    cat "$SMOKE"
+} > "$MANIFEST.tmp"
+mv "$MANIFEST.tmp" "$MANIFEST"
+
+ELAPSED=$(( $(date +%s) - BUILD_START ))
+printf '%s\n' "-------------------------------------------------------------"
+printf 'image     : %s\n' "$IMG"
+printf 'size      : %s MiB, %s MiB used, %s MiB free (%s %%)\n' "$FS_MIB" "$USED_MIB" "$FREE_MIB" "$FREE_PCT"
+printf 'sha256    : %s\n' "$SHA"
+printf 'manifest  : %s\n' "$MANIFEST"
+sed -n '/^== Versions ==/,/^$/p' "$MANIFEST" | sed '1d;$d'
+printf 'wall time : %d min %02d s\n' "$((ELAPSED / 60))" "$((ELAPSED % 60))"
+printf '%s\n' "-------------------------------------------------------------"
+
+# ---------------------------------------------------------------------------
+log "7/7 cleanup"
+# ---------------------------------------------------------------------------
+if [ "$KEEP_IMAGE" -eq 0 ]; then
+    docker image rm "$FINAL_IMAGE" >/dev/null 2>&1 || true
+    log "removed $FINAL_IMAGE (--keep-image keeps it; Docker's build cache still holds the layers)"
+else
+    log "kept $FINAL_IMAGE"
+fi
+log "done: $IMG (check with tests/verify-rootfs.sh $IMG $SSH_PUBKEY)"

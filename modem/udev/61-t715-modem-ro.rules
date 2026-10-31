@@ -1,0 +1,3 @@
+# Modem mission (2026-10-29): identity and firmware partitions stay read-only
+# at every boot, before anything opens them (SYNTHESIS.md rule 6).
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="EFS|m9kefs1|m9kefs2|m9kefs3|RADIO|CDMA-RADIO|PARAM", RUN+="/usr/bin/blockdev --setro $devnode"

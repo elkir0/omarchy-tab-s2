@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Réseau mobile
+Comment=APN, données mobiles, réseau et carte SIM
+Exec=t715-mobile-settings
+Icon=network-cellular-signal-excellent
+Terminal=false
+Categories=Settings;Network;

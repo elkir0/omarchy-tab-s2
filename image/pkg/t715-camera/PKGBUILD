@@ -1,0 +1,25 @@
+# SM-T715 (armv7h): take a photograph with the tablet's cameras, through t715-camera.ko
+# (kernel/patches/t715-parity, docs/hardware/CAMERA.md). t715-photo steers the exposure
+# and develops the raw frames, as there is no ISP; t715-camera names a file and tells the
+# owner. The sensors' tables are not here, they are Samsung's: research/parity/camera/
+# t715-cam-seq.py makes them from the owner's own ISP firmware, for /usr/lib/firmware/t715/.
+pkgname=t715-camera
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Photographs from the SM-T715's two cameras, raw Bayer developed in software"
+arch=(armv7h)
+license=('GPL-2.0-or-later')
+depends=(glibc)
+optdepends=('imv: open the picture from the notification')
+source=(t715-photo.c t715-camera t715-camera-rear.desktop t715-camera-front.desktop)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+  gcc $CFLAGS $LDFLAGS -Wall -o t715-photo t715-photo.c -lm
+}
+
+package() {
+  install -Dm755 t715-photo "$pkgdir/usr/bin/t715-photo"
+  install -Dm755 t715-camera "$pkgdir/usr/bin/t715-camera"
+  install -Dm644 -t "$pkgdir/usr/share/applications" t715-camera-rear.desktop t715-camera-front.desktop
+}

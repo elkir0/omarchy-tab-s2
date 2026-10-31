@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Réseau mobile: state of the modem, mobile data, APN, technologies, SIM.
+
+omarchy-mobile plans this as a sheet and has not written it. It speaks
+ModemManager's API (shannond's facade) for the modem, and NetworkManager, through
+nmcli, for the connection t715-mobile, the one the mobile data tile uses. The APN
+list comes from mobile-broadband-provider-info, by the SIM's operator code.
+
+Changing the SIM's PIN is left out: the facade does not offer it, and it could not
+be tried on a SIM in use. A locked SIM goes to t715-sim-pin.
+"""
+import sys
+import threading
+import xml.etree.ElementTree as ET
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+CONNECTION = "t715-mobile"
+PROVIDERS = "/usr/share/mobile-broadband-provider-info/serviceproviders.xml"
+MM = "org.freedesktop.ModemManager1"
+MM_PATH = "/org/freedesktop/ModemManager1"
+MODEM = MM + ".Modem"
+MODEM3GPP = MODEM + ".Modem3gpp"
+SIM = MM + ".Sim"
+OM = "org.freedesktop.DBus.ObjectManager"
+LOCK_NONE = 1          # MMModemLock: nothing to unlock
+LOCK_SIM_PIN = 2
+FAILED_SIM_MISSING = 2
+MODE_2G, MODE_3G, MODE_4G = 1 << 1, 1 << 2, 1 << 3
+MODES = [("Automatique : 4G, 3G, 2G", MODE_2G | MODE_3G | MODE_4G), ("3G et 2G", MODE_2G | MODE_3G),
+         ("3G uniquement", MODE_3G), ("2G uniquement", MODE_2G)]
+STATES = {-1: "En panne", 0: "Inconnu", 1: "Démarrage", 2: "SIM verrouillée", 3: "Radio coupée",
+          4: "Arrêt", 5: "Démarrage", 6: "Sans réseau", 7: "Recherche", 8: "Enregistré",
+          9: "Déconnexion", 10: "Connexion", 11: "Données actives"}
+
+
+def technology(bits):
+    if bits & 0x4000:
+        return "4G"
+    if bits & (0x20 | 0x40 | 0x80 | 0x100 | 0x200):
+        return "3G"
+    if bits & (0x02 | 0x04 | 0x08 | 0x10):
+        return "2G"
+    return "—"
+
+
+def apns_for(code):
+    """[(label, apn, user, password)] for an operator code such as 20801, internet APNs only."""
+    if len(code) < 5:
+        return []
+    mcc, mnc = code[:3], code[3:]
+    found = []
+    try:
+        root = ET.parse(PROVIDERS).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    for provider in root.iter("provider"):
+        for gsm in provider.findall("gsm"):
+            ids = gsm.findall("network-id")
+            if not any(i.get("mcc") == mcc and int(i.get("mnc", "-1")) == int(mnc) for i in ids):
+                continue
+            pname = provider.findtext("name") or "?"
+            for apn in gsm.findall("apn"):
+                if not any(u.get("type") == "internet" for u in apn.findall("usage")):
+                    continue
+                label = pname + " : " + (apn.findtext("name") or apn.get("value"))
+                found.append((label, apn.get("value"), apn.findtext("username") or "",
+                              apn.findtext("password") or ""))
+    return found
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Réseau mobile", default_width=640, default_height=800)
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.modem_path = None
+        self.sim_path = None
+        self.code = ""
+        self.suggestions = []
+        self.quiet = False      # no action while a refresh sets a widget
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        view.add_top_bar(Adw.HeaderBar())
+        page = Adw.PreferencesPage()
+        self.toasts.set_child(page)
+        view.set_content(self.toasts)
+        self.set_content(view)
+
+        state = Adw.PreferencesGroup(title="État")
+        self.r_state = self.info(state, "Modem")
+        self.r_operator = self.info(state, "Opérateur")
+        self.r_tech = self.info(state, "Réseau")
+        self.r_signal = self.info(state, "Signal")
+        self.r_number = self.info(state, "Numéro")
+        page.add(state)
+
+        data = Adw.PreferencesGroup(title="Données mobiles")
+        self.s_data = Adw.SwitchRow(title="Données mobiles", subtitle="Restent actives après un redémarrage")
+        self.s_data.connect("notify::active", self.on_data)
+        data.add(self.s_data)
+        self.s_roaming = Adw.SwitchRow(title="Itinérance", subtitle="Utiliser les données hors du réseau de l'opérateur")
+        self.s_roaming.connect("notify::active", self.on_roaming)
+        data.add(self.s_roaming)
+        page.add(data)
+
+        net = Adw.PreferencesGroup(title="Réseau préféré")
+        self.c_modes = Adw.ComboRow(title="Technologies", model=Gtk.StringList.new([m[0] for m in MODES]))
+        self.c_modes.connect("notify::selected", self.on_modes)
+        net.add(self.c_modes)
+        page.add(net)
+
+        apn = Adw.PreferencesGroup(title="Point d'accès (APN)")
+        self.c_apn = Adw.ComboRow(title="Suggestions", subtitle="Selon l'opérateur de la SIM")
+        self.c_apn.set_visible(False)
+        self.c_apn.connect("notify::selected", self.on_suggestion)
+        apn.add(self.c_apn)
+        self.e_apn = Adw.EntryRow(title="APN")
+        self.e_user = Adw.EntryRow(title="Utilisateur (souvent vide)")
+        self.e_pass = Adw.PasswordEntryRow(title="Mot de passe (souvent vide)")
+        for row in (self.e_apn, self.e_user, self.e_pass):
+            apn.add(row)
+        save = Gtk.Button(label="Enregistrer", valign=Gtk.Align.CENTER)
+        save.add_css_class("suggested-action")
+        save.connect("clicked", self.on_save)
+        apn.set_header_suffix(save)
+        page.add(apn)
+
+        sim = Adw.PreferencesGroup(title="Carte SIM")
+        self.r_sim = self.info(sim, "Code PIN")
+        self.b_pin = Gtk.Button(label="Saisir", valign=Gtk.Align.CENTER, visible=False)
+        self.b_pin.connect("clicked", lambda _b: self.run(["t715-sim-pin"]))
+        self.r_sim.add_suffix(self.b_pin)
+        page.add(sim)
+
+        self.refresh()
+        self.load_connection()
+        GLib.timeout_add_seconds(3, self.tick)
+
+    @staticmethod
+    def info(group, title):
+        row = Adw.ActionRow(title=title, subtitle="—")
+        row.add_css_class("property")
+        group.add(row)
+        return row
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=4))
+
+    def run(self, argv, done=None):
+        """Run a command; done(ok, stdout, stderr) back on the main loop."""
+        flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+        proc = Gio.Subprocess.new(argv, flags)
+
+        def finished(p, result):
+            _ok, out, err = p.communicate_utf8_finish(result)
+            if done:
+                done(p.get_successful(), out or "", err or "")
+        proc.communicate_utf8_async(None, None, finished)
+
+    def tick(self):
+        self.refresh()
+        return True
+
+    def refresh(self):
+        try:
+            reply = self.bus.call_sync(MM, MM_PATH, OM, "GetManagedObjects", None, None,
+                                       Gio.DBusCallFlags.NONE, 3000, None)
+            objects = reply.unpack()[0]
+        except GLib.Error:
+            objects = {}
+        modem = next(((path, i) for path, i in objects.items() if MODEM in i), None)
+        self.quiet = True
+        if modem is None:
+            self.modem_path = None
+            self.r_state.set_subtitle("Pas de modem")
+            for row in (self.r_operator, self.r_tech, self.r_signal, self.r_number, self.r_sim):
+                row.set_subtitle("—")
+        else:
+            self.show_modem(modem[0], modem[1], objects)
+        self.quiet = False
+        self.run(["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"], self.show_active)
+
+    def show_modem(self, path, ifaces, objects):
+        self.modem_path = path
+        m, g = ifaces[MODEM], ifaces.get(MODEM3GPP, {})
+        self.sim_path = m.get("Sim")
+        sim = objects.get(self.sim_path, {}).get(SIM, {})
+        missing = m.get("State") == -1 and m.get("StateFailedReason") == FAILED_SIM_MISSING
+        self.r_state.set_subtitle("Pas de carte SIM" if missing else STATES.get(m.get("State"), "?"))
+        self.r_operator.set_subtitle(g.get("OperatorName") or sim.get("OperatorName") or "—")
+        self.r_tech.set_subtitle(technology(m.get("AccessTechnologies", 0)))
+        self.r_signal.set_subtitle("%d %%" % m.get("SignalQuality", (0, False))[0])
+        numbers = m.get("OwnNumbers") or []
+        self.r_number.set_subtitle(numbers[0] if numbers else "—")
+        current = m.get("CurrentModes", (0, 0))[0]
+        for i, (_label, mode) in enumerate(MODES):
+            if mode == current:
+                self.c_modes.set_selected(i)
+        lock = m.get("UnlockRequired", LOCK_NONE)
+        left = dict(m.get("UnlockRetries") or {}).get(LOCK_SIM_PIN)
+        if lock == LOCK_NONE:
+            self.r_sim.set_subtitle("Non demandé" if not missing else "—")
+        else:
+            self.r_sim.set_subtitle("Demandé" + ("" if left is None else ", %d essais restants" % left))
+        self.b_pin.set_visible(lock != LOCK_NONE)
+        code = sim.get("OperatorIdentifier") or g.get("OperatorCode") or ""
+        if code and code != self.code:
+            self.code = code
+            threading.Thread(target=self.find_apns, args=(code,), daemon=True).start()
+
+    def find_apns(self, code):
+        found = apns_for(code)
+        GLib.idle_add(self.show_apns, found)
+
+    def show_apns(self, found):
+        self.suggestions = found
+        self.quiet = True
+        self.c_apn.set_model(Gtk.StringList.new(["Saisie manuelle"] + [f[0] for f in found]))
+        self.c_apn.set_visible(bool(found))
+        self.quiet = False
+        if found and not self.e_apn.get_text():
+            self.c_apn.set_selected(1)
+
+    def show_active(self, ok, out, _err):
+        self.quiet = True
+        self.s_data.set_active(ok and CONNECTION in out.split())
+        self.quiet = False
+
+    def load_connection(self):
+        self.run(["nmcli", "-t", "-s", "-g", "gsm.apn,gsm.username,gsm.password,gsm.home-only",
+                  "connection", "show", CONNECTION], self.show_connection)
+
+    def show_connection(self, ok, out, _err):
+        if not ok:
+            return
+        lines = (out.split("\n") + [""] * 4)[:4]
+        self.quiet = True
+        self.e_apn.set_text(lines[0])
+        self.e_user.set_text(lines[1])
+        self.e_pass.set_text(lines[2])
+        self.s_roaming.set_active(lines[3] != "yes")
+        self.quiet = False
+
+    def report(self, what):
+        def done(ok, _out, err):
+            self.toast(what if ok else "Refusé : " + (err.strip().split("\n")[-1][:80] or "erreur"))
+            self.refresh()
+        return done
+
+    def on_suggestion(self, row, _p):
+        i = row.get_selected()
+        if self.quiet or i == 0 or i > len(self.suggestions):
+            return
+        _label, apn, user, password = self.suggestions[i - 1]
+        self.e_apn.set_text(apn)
+        self.e_user.set_text(user)
+        self.e_pass.set_text(password)
+
+    def on_save(self, _b):
+        apn = self.e_apn.get_text().strip()
+        if not apn:
+            self.toast("Indique un APN")
+            return
+        values = ["gsm.apn", apn, "gsm.username", self.e_user.get_text().strip(),
+                  "gsm.password", self.e_pass.get_text(), "gsm.home-only",
+                  "no" if self.s_roaming.get_active() else "yes"]
+
+        def after_check(exists, _out, _err):
+            if exists:
+                argv = ["nmcli", "connection", "modify", CONNECTION] + values
+            else:
+                argv = ["nmcli", "connection", "add", "type", "gsm", "ifname", "*", "con-name", CONNECTION,
+                        "connection.autoconnect", "no", "ipv6.method", "ignore"] + values
+            self.run(argv, self.report("APN enregistré"))
+        self.run(["nmcli", "-t", "-g", "connection.id", "connection", "show", CONNECTION], after_check)
+
+    def on_data(self, row, _p):
+        if self.quiet:
+            return
+        on = row.get_active()
+        self.run(["nmcli", "connection", "modify", CONNECTION, "connection.autoconnect", "yes" if on else "no"])
+        self.run(["nmcli", "-w", "90", "connection", "up" if on else "down", CONNECTION],
+                 self.report("Données activées" if on else "Données coupées"))
+
+    def on_roaming(self, row, _p):
+        if not self.quiet:
+            self.run(["nmcli", "connection", "modify", CONNECTION, "gsm.home-only",
+                      "no" if row.get_active() else "yes"], self.report("Itinérance modifiée"))
+
+    def on_modes(self, row, _p):
+        if self.quiet or self.modem_path is None:
+            return
+        mode = MODES[row.get_selected()][1]
+
+        def done(bus, result):
+            try:
+                bus.call_finish(result)
+                self.toast("Réseau modifié")
+            except GLib.Error as exc:
+                self.toast("Refusé : " + exc.message.split(":")[-1].strip()[:80])
+            self.refresh()
+        self.bus.call(MM, self.modem_path, MODEM, "SetCurrentModes", GLib.Variant("((uu))", ((mode, 0),)), None,
+                      Gio.DBusCallFlags.NONE, 30000, None, done)
+
+
+def on_activate(app):
+    (app.get_active_window() or Window(app)).present()
+
+
+def main():
+    app = Adw.Application(application_id="org.t715.MobileSettings")
+    app.connect("activate", on_activate)
+    return app.run(sys.argv[:1])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

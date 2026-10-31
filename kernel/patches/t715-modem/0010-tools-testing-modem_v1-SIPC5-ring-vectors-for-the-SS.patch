@@ -1,0 +1,666 @@
+From 3219fbca6cd28de421f2dc21aec35ff154f83833 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 10/16] tools/testing/modem_v1: SIPC5 ring vectors for the
+ SS333 port (gate O2)
+
+Host-side harness (make -C tools/testing/modem_v1 run) that compiles the
+SIPC5 helpers (include/sipc5.h, include/circ_queue.h) and, extracted at
+build time from the driver sources, sipc5_build_config/header() and
+check_udl_space()/udl_write(), then checks the ring vectors of
+loader_spec_v2.md section 10.4: header bytes, length fields, 4-byte
+padding (the synthetic 921-byte frame takes 3 zero bytes, 928 in the
+ring), the BOOT-over-SPI header strip, the 4/6-byte header boundary, the
+decoding of a CP reply, and udl_write on a full-size ring, across a wrap
+and in the all-or-nothing -ENOSPC case.  76 checks pass; with the 3.10
+padding rule (sizeof(size_t)) a 64-bit host fails 20 of them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/testing/modem_v1/.gitignore             |   2 +
+ tools/testing/modem_v1/Makefile               |  50 +++
+ tools/testing/modem_v1/README                 |  43 ++
+ tools/testing/modem_v1/extract.awk            |  18 +
+ tools/testing/modem_v1/shim/linux/build_bug.h |  11 +
+ tools/testing/modem_v1/shim/linux/io.h        |  13 +
+ tools/testing/modem_v1/shim/linux/kernel.h    |   7 +
+ .../testing/modem_v1/shim/linux/miscdevice.h  |   5 +
+ .../modem_v1/shim/linux/platform_device.h     |   5 +
+ tools/testing/modem_v1/shim/linux/spinlock.h  |   4 +
+ tools/testing/modem_v1/shim/linux/types.h     |  15 +
+ tools/testing/modem_v1/sipc5_vectors.c        | 376 ++++++++++++++++++
+ 12 files changed, 549 insertions(+)
+ create mode 100644 tools/testing/modem_v1/.gitignore
+ create mode 100644 tools/testing/modem_v1/Makefile
+ create mode 100644 tools/testing/modem_v1/README
+ create mode 100644 tools/testing/modem_v1/extract.awk
+ create mode 100644 tools/testing/modem_v1/shim/linux/build_bug.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/io.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/kernel.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/miscdevice.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/platform_device.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/spinlock.h
+ create mode 100644 tools/testing/modem_v1/shim/linux/types.h
+ create mode 100644 tools/testing/modem_v1/sipc5_vectors.c
+
+diff --git a/tools/testing/modem_v1/.gitignore b/tools/testing/modem_v1/.gitignore
+new file mode 100644
+index 000000000..a59f6448d
+--- /dev/null
++++ b/tools/testing/modem_v1/.gitignore
+@@ -0,0 +1,2 @@
++/gen/
++/sipc5_vectors
+diff --git a/tools/testing/modem_v1/Makefile b/tools/testing/modem_v1/Makefile
+new file mode 100644
+index 000000000..50b8ed3be
+--- /dev/null
++++ b/tools/testing/modem_v1/Makefile
+@@ -0,0 +1,50 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Host-side check of the SIPC5 framing, padding and BOOT-ring write code of
++# drivers/misc/modem_v1 against the ring vectors of
++# research/modem/research/analysis/loader_spec_v2.md section 10.4 (gate O2).
++# The functions under test are compiled from the driver sources: the
++# headers are included as they are, and the static functions are extracted
++# from the .c files at build time, so the test can never check stale code.
++#
++#   make -C tools/testing/modem_v1 run
++
++SRC	:= ../../../drivers/misc/modem_v1
++GEN	:= gen
++CC	?= cc
++# -Wno-unused-parameter: the extracted driver functions keep their 3.10
++# signatures (sipc5_build_header() does not use its link_device argument).
++# -Wno-pointer-sign: as in the kernel build (udl_write() takes skb->data,
++# an unsigned char *, into a char *).
++CFLAGS	:= -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
++	   -Wno-pointer-sign \
++	   -I shim -I $(SRC)/include -I $(GEN)
++
++all: sipc5_vectors
++
++$(GEN)/framing.h: $(SRC)/modem_io_device.c extract.awk
++	@mkdir -p $(GEN)
++	@echo "/* generated from modem_io_device.c, do not edit */" > $@.tmp
++	awk -v fn=sipc5_build_config -f extract.awk $< >> $@.tmp
++	awk -v fn=sipc5_build_header -f extract.awk $< >> $@.tmp
++	@mv $@.tmp $@
++
++$(GEN)/udl.h: $(SRC)/link_device_bootdump.c extract.awk
++	@mkdir -p $(GEN)
++	@echo "/* generated from link_device_bootdump.c, do not edit */" > $@.tmp
++	awk -v fn=check_udl_space -f extract.awk $< >> $@.tmp
++	awk -v fn=udl_write -f extract.awk $< >> $@.tmp
++	@mv $@.tmp $@
++
++sipc5_vectors: sipc5_vectors.c $(GEN)/framing.h $(GEN)/udl.h \
++		$(SRC)/include/sipc5.h $(SRC)/include/circ_queue.h \
++		$(wildcard shim/linux/*.h)
++	$(CC) $(CFLAGS) -o $@ sipc5_vectors.c
++
++run: sipc5_vectors
++	./sipc5_vectors
++
++clean:
++	rm -rf $(GEN) sipc5_vectors
++
++.PHONY: all run clean
+diff --git a/tools/testing/modem_v1/README b/tools/testing/modem_v1/README
+new file mode 100644
+index 000000000..663ef82ea
+--- /dev/null
++++ b/tools/testing/modem_v1/README
+@@ -0,0 +1,43 @@
++modem_v1 SIPC5 ring vectors (gate O2)
++=====================================
++
++Host-side check of the SIPC5 framing, padding and BOOT-ring write code of
++drivers/misc/modem_v1 (Shannon SS333 modem, sec_modem_v1), against the ring
++vectors of research/modem/research/analysis/loader_spec_v2.md section 10.4
++(project repository omarchy-tab-s2).
++
++    make -C tools/testing/modem_v1 run
++
++Prints one TAP line per check and exits 0 only if every check passes.  Built
++with the host cc (-std=gnu11 -Wall -Wextra -Werror); nothing runs on the
++tablet and no kernel build is needed.
++
++What is compiled from the driver, unmodified:
++  - include/sipc5.h and include/circ_queue.h, included as they are;
++  - sipc5_build_config() and sipc5_build_header() from modem_io_device.c,
++    check_udl_space() and udl_write() from link_device_bootdump.c, copied
++    at build time by extract.awk into gen/ (the build fails if one of them
++    is not found, so the test cannot run against stale code).
++build_frame() in sipc5_vectors.c mirrors the framing steps of misc_write();
++the five txq accessors are copies of the one-line inlines of
++link_device_memory.h.
++
++Checks:
++  - seven vectors: 4-byte request (FC D7 08 00), CRC frame (FC D7 0C 00),
++    2064-byte data frame (FC D7 14 08), TOC frame (FC D7 14 02), last MAIN
++    frame (FC D7 B4 01), synthetic 921-byte frame (FC D7 9D 03, 3 zero
++    padding bytes, 928 in the ring), BOOT over SPI (F8 D7 00 2A, 0x29FC
++    payload bytes left after the header is stripped): header bytes, length
++    field, total length, payload placement, padding, and that the CP's
++    round-up-4 advance equals the AP's head advance;
++  - padding sizes 0..8, the 4/6-byte header boundary (0xFFFB/0xFFFC), the
++    decoding of a CP reply frame;
++  - udl_write on a 0x1FD000-byte ring (three frames back to back), a wrap
++    at the end of a 64-byte ring, and the all-or-nothing -ENOSPC case.
++
++Host size_t: sipc5.h asserts sizeof(size_t) == SIPC5_ALIGN (4), a check for
++the ARM32 kernel build.  On a 64-bit host the shim (shim/linux/build_bug.h)
++turns static_assert into a no-op for the included driver headers;
++sipc5_vectors.c asserts SIPC5_ALIGN == 4 itself.  With the 3.10 rule
++(padding to sizeof(size_t)) this host would pad to 8 and 20 checks fail,
++e.g. the 12-byte CRC frame becomes 16 bytes.
+diff --git a/tools/testing/modem_v1/extract.awk b/tools/testing/modem_v1/extract.awk
+new file mode 100644
+index 000000000..0928cd753
+--- /dev/null
++++ b/tools/testing/modem_v1/extract.awk
+@@ -0,0 +1,18 @@
++# Print the definition of function FN (awk -v fn=NAME) from a C file: the
++# lines from "static ... NAME(" at column 0 to the closing "}" at column 0.
++# A prototype (a header that ends with ");" before any "{") is skipped.
++# Exit status 1 if no definition was found.
++BEGIN { state = 0; found = 0 }
++state == 0 && $0 ~ "^static[^;]*[ *]" fn "\\(" { buf = $0 "\n"; state = 1; next }
++state == 1 {
++	if ($0 ~ /\);[ \t]*$/) { state = 0; buf = ""; next }
++	buf = buf $0 "\n"
++	if ($0 == "{") state = 2
++	next
++}
++state == 2 {
++	buf = buf $0 "\n"
++	if ($0 == "}") { printf "%s", buf; found = 1; state = 3 }
++	next
++}
++END { if (!found) exit 1 }
+diff --git a/tools/testing/modem_v1/shim/linux/build_bug.h b/tools/testing/modem_v1/shim/linux/build_bug.h
+new file mode 100644
+index 000000000..44df6a6bf
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/build_bug.h
+@@ -0,0 +1,11 @@
++/*
++ * sipc5.h asserts sizeof(size_t) == SIPC5_ALIGN (4): a check for the ARM32
++ * kernel build.  On a 64-bit host size_t is 8, so the included driver
++ * headers get a no-op static_assert; sipc5_vectors.c asserts
++ * SIPC5_ALIGN == 4 itself and checks the padding through the vectors.
++ */
++#ifndef SHIM_LINUX_BUILD_BUG_H
++#define SHIM_LINUX_BUILD_BUG_H
++#undef static_assert
++#define static_assert(expr, ...) _Static_assert(1, "kernel-only check")
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/io.h b/tools/testing/modem_v1/shim/linux/io.h
+new file mode 100644
+index 000000000..7a7ac0214
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/io.h
+@@ -0,0 +1,13 @@
++/* Shared memory accessors on plain host memory. */
++#ifndef SHIM_LINUX_IO_H
++#define SHIM_LINUX_IO_H
++#include <string.h>
++#include <linux/types.h>
++static inline u32 ioread32(const void *p) { return *(const volatile u32 *)p; }
++static inline void iowrite32(u32 v, void *p) { *(volatile u32 *)p = v; }
++#define memcpy_toio(d, s, n)	memcpy((d), (s), (n))
++#define memcpy_fromio(d, s, n)	memcpy((d), (s), (n))
++#define barrier()		__asm__ __volatile__("" ::: "memory")
++#define dma_wmb()		__atomic_thread_fence(__ATOMIC_RELEASE)
++#define smp_mb()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/kernel.h b/tools/testing/modem_v1/shim/linux/kernel.h
+new file mode 100644
+index 000000000..e9aa637eb
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/kernel.h
+@@ -0,0 +1,7 @@
++#ifndef SHIM_LINUX_KERNEL_H
++#define SHIM_LINUX_KERNEL_H
++#include <linux/types.h>
++#include <linux/spinlock.h>
++#define likely(x)	__builtin_expect(!!(x), 1)
++#define unlikely(x)	__builtin_expect(!!(x), 0)
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/miscdevice.h b/tools/testing/modem_v1/shim/linux/miscdevice.h
+new file mode 100644
+index 000000000..0bd07e883
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/miscdevice.h
+@@ -0,0 +1,5 @@
++#ifndef SHIM_LINUX_MISCDEVICE_H
++#define SHIM_LINUX_MISCDEVICE_H
++struct miscdevice { int minor; const char *name; };
++struct mutex { int locked; };
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/platform_device.h b/tools/testing/modem_v1/shim/linux/platform_device.h
+new file mode 100644
+index 000000000..694acb8a6
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/platform_device.h
+@@ -0,0 +1,5 @@
++#ifndef SHIM_LINUX_PLATFORM_DEVICE_H
++#define SHIM_LINUX_PLATFORM_DEVICE_H
++struct device;
++struct platform_device;
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/spinlock.h b/tools/testing/modem_v1/shim/linux/spinlock.h
+new file mode 100644
+index 000000000..4f0f99f03
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/spinlock.h
+@@ -0,0 +1,4 @@
++#ifndef SHIM_LINUX_SPINLOCK_H
++#define SHIM_LINUX_SPINLOCK_H
++typedef int spinlock_t;
++#endif
+diff --git a/tools/testing/modem_v1/shim/linux/types.h b/tools/testing/modem_v1/shim/linux/types.h
+new file mode 100644
+index 000000000..173bb8053
+--- /dev/null
++++ b/tools/testing/modem_v1/shim/linux/types.h
+@@ -0,0 +1,15 @@
++/* Host stand-in for the kernel types the modem_v1 headers use. */
++#ifndef SHIM_LINUX_TYPES_H
++#define SHIM_LINUX_TYPES_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++typedef uint8_t u8;
++typedef uint16_t u16;
++typedef uint32_t u32;
++typedef uint64_t u64;
++typedef struct { int counter; } atomic_t;
++#define __iomem
++#define __force
++#define __packed __attribute__((packed))
++#endif
+diff --git a/tools/testing/modem_v1/sipc5_vectors.c b/tools/testing/modem_v1/sipc5_vectors.c
+new file mode 100644
+index 000000000..cf33607db
+--- /dev/null
++++ b/tools/testing/modem_v1/sipc5_vectors.c
+@@ -0,0 +1,376 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Gate O2 (research/modem/research/SYNTHESIS.md section 6.1): byte vectors
++ * for the SIPC5 framing and padding of drivers/misc/modem_v1 and for the
++ * AP->CP BOOT ring write, from loader_spec_v2.md section 10.4.
++ *
++ * Under test, compiled from the driver sources:
++ *   include/sipc5.h, include/circ_queue.h            (included as they are)
++ *   sipc5_build_config(), sipc5_build_header()       (modem_io_device.c)
++ *   check_udl_space(), udl_write()                   (link_device_bootdump.c)
++ * build_frame() below mirrors the framing steps of misc_write().
++ */
++
++#include <errno.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "sipc5.h"
++#include "circ_queue.h"
++
++_Static_assert(SIPC5_ALIGN == 4, "SIPC5 frames are padded to 4 bytes");
++
++/* Minimal stand-ins for the driver structures the extracted code touches */
++struct io_device {
++	enum dev_format format;
++	unsigned int id;
++};
++
++struct link_device {
++	bool aligned;
++	const char *name;
++};
++
++struct mem_link_device {
++	struct link_device link_dev;
++};
++
++struct mem_ipc_device {
++	char name[16];
++	struct circ_queue txq;
++};
++
++struct sk_buff {
++	unsigned int len;
++	unsigned char *data;
++};
++
++static int quiet_errors;
++#undef mif_err
++#define mif_err(fmt, ...)						\
++	do {								\
++		if (!quiet_errors)					\
++			fprintf(stderr, "  mif: %s: " fmt, __func__,	\
++				##__VA_ARGS__);				\
++	} while (0)
++
++/* Same bodies as the accessors of link_device_memory.h */
++static inline void __iomem *get_txq_buff(struct mem_ipc_device *dev)
++{
++	return get_buff(&dev->txq);
++}
++
++static inline unsigned int get_txq_buff_size(struct mem_ipc_device *dev)
++{
++	return get_size(&dev->txq);
++}
++
++static inline unsigned int get_txq_head(struct mem_ipc_device *dev)
++{
++	return get_head(&dev->txq);
++}
++
++static inline void set_txq_head(struct mem_ipc_device *dev, unsigned int in)
++{
++	set_head(&dev->txq, in);
++}
++
++static inline unsigned int get_txq_tail(struct mem_ipc_device *dev)
++{
++	return get_tail(&dev->txq);
++}
++
++#include "framing.h"
++#include "udl.h"
++
++/*----------------------------------------------------------------------------*/
++
++static int tests;
++static int failures;
++
++static void check(int ok, const char *fmt, ...)
++	__attribute__((format(printf, 2, 3)));
++
++static void check(int ok, const char *fmt, ...)
++{
++	va_list ap;
++
++	tests++;
++	if (!ok)
++		failures++;
++	printf("%s %d - ", ok ? "ok" : "not ok", tests);
++	va_start(ap, fmt);
++	vprintf(fmt, ap);
++	va_end(ap);
++	putchar('\n');
++}
++
++#define BOOT_CH	SIPC5_CH_ID_BOOT_0	/* 215 = 0xD7 */
++
++/*
++ * The framing steps of misc_write(): config from sipc5_build_config(),
++ * header length from the config, padding to SIPC5_ALIGN when the link is
++ * aligned, header in front of the payload.  The padding is zeroed
++ * (skb_put_zero() in the port).
++ */
++static unsigned int build_frame(u8 *out, const u8 *payload,
++				unsigned int count, bool aligned)
++{
++	struct io_device iod = { .format = IPC_BOOT, .id = BOOT_CH };
++	struct link_device ld = { .aligned = aligned, .name = "test" };
++	unsigned int headroom;
++	unsigned int tailroom;
++	u8 cfg;
++
++	cfg = sipc5_build_config(&iod, &ld, count);
++	headroom = sipc5_get_hdr_len(&cfg);
++	tailroom = ld.aligned ? sipc5_calc_padding_size(headroom + count) : 0;
++
++	memset(out, 0, headroom + count + tailroom);
++	memcpy(out + headroom, payload, count);
++	if (cfg)
++		sipc5_build_header(&iod, &ld, out, cfg, 0, count);
++
++	return headroom + count + tailroom;
++}
++
++static void fill_payload(u8 *p, unsigned int n, unsigned int seed)
++{
++	unsigned int i;
++
++	for (i = 0; i < n; i++)
++		p[i] = (u8)(seed + i * 7 + (i >> 8));
++}
++
++struct vector {
++	const char *name;
++	unsigned int count;
++	bool aligned;
++	const u8 *payload;	/* NULL: generated */
++	u8 hdr[4];
++	unsigned int len_field;
++	unsigned int padding;
++	unsigned int total;
++};
++
++static const u8 req_0x900d[4] = { 0x0D, 0x90, 0x00, 0x00 };
++static const u8 crc_frame[8] = { 0x0C, 0x92, 0x00, 0x00,
++				 0x9C, 0x16, 0x71, 0x1E };
++
++static const struct vector vectors[] = {
++	{ "4-byte request 0x900D", 4, true, req_0x900d,
++	  { 0xFC, 0xD7, 0x08, 0x00 }, 8, 0, 8 },
++	{ "CRC frame {0x920C, crc}", 8, true, crc_frame,
++	  { 0xFC, 0xD7, 0x0C, 0x00 }, 12, 0, 12 },
++	{ "full data frame 2064 B", 2064, true, NULL,
++	  { 0xFC, 0xD7, 0x14, 0x08 }, 2068, 0, 2068 },
++	{ "TOC frame 528 B", 528, true, NULL,
++	  { 0xFC, 0xD7, 0x14, 0x02 }, 532, 0, 532 },
++	{ "last MAIN frame 432 B", 432, true, NULL,
++	  { 0xFC, 0xD7, 0xB4, 0x01 }, 436, 0, 436 },
++	{ "synthetic last frame 921 B", 921, true, NULL,
++	  { 0xFC, 0xD7, 0x9D, 0x03 }, 925, 3, 928 },
++	{ "BOOT over SPI 0x29FC B", 0x29FC, false, NULL,
++	  { 0xF8, 0xD7, 0x00, 0x2A }, 0x2A00, 0, 0x2A00 },
++};
++
++static void check_vector(const struct vector *v, int idx)
++{
++	u8 payload[0x3000];
++	u8 frame[0x3000];
++	unsigned int total;
++	unsigned int hdr;
++	unsigned int i;
++	int pad_zero = 1;
++
++	if (v->payload)
++		memcpy(payload, v->payload, v->count);
++	else
++		fill_payload(payload, v->count, idx);
++
++	total = build_frame(frame, payload, v->count, v->aligned);
++	hdr = sipc5_get_hdr_len(frame);
++
++	check(memcmp(frame, v->hdr, 4) == 0,
++	      "V%d %s: header %02X %02X %02X %02X", idx + 1, v->name,
++	      frame[0], frame[1], frame[2], frame[3]);
++	check(total == v->total, "V%d total %u == %u", idx + 1, total,
++	      v->total);
++	check(hdr == 4, "V%d header length %u == 4", idx + 1, hdr);
++	check(sipc5_get_ch(frame) == BOOT_CH, "V%d channel 0x%02X", idx + 1,
++	      sipc5_get_ch(frame));
++	check(sipc5_get_frame_len(frame) == v->len_field,
++	      "V%d len field %u == %u", idx + 1, sipc5_get_frame_len(frame),
++	      v->len_field);
++	check(sipc5_get_total_len(frame) == v->total,
++	      "V%d sipc5_get_total_len %u == %u", idx + 1,
++	      sipc5_get_total_len(frame), v->total);
++	check(memcmp(frame + hdr, payload, v->count) == 0,
++	      "V%d payload at offset %u", idx + 1, hdr);
++	for (i = 0; i < v->padding; i++)
++		if (frame[hdr + v->count + i])
++			pad_zero = 0;
++	check(total - hdr - v->count == v->padding && pad_zero,
++	      "V%d padding %u byte(s), zero", idx + 1, total - hdr - v->count);
++	/* CP BOOT advances by round-up-4 of the len field (RI section 2.5) */
++	if (v->aligned)
++		check(((v->len_field + 3) & ~3u) == total,
++		      "V%d CP round-up-4 advance %u == AP head advance %u",
++		      idx + 1, (v->len_field + 3) & ~3u, total);
++	else
++		check(total - hdr == 0x29FC &&
++		      memcmp(frame + hdr, payload, 0x29FC) == 0,
++		      "V%d SPI wire after stripping %u header bytes: 0x%X B of BOOT",
++		      idx + 1, hdr, total - hdr);
++}
++
++static void check_framing_extras(void)
++{
++	static const unsigned int pad[9] = { 0, 3, 2, 1, 0, 3, 2, 1, 0 };
++	static u8 big_payload[0x10000];
++	static u8 big_frame[0x10010];
++	u8 reply[8] = { 0xF8, 0xD7, 0x08, 0x00, 0x0D, 0xA0, 0x00, 0x00 };
++	unsigned int n;
++	unsigned int total;
++	int ok = 1;
++
++	for (n = 0; n <= 8; n++)
++		if (sipc5_calc_padding_size(n) != pad[n])
++			ok = 0;
++	check(ok, "sipc5_calc_padding_size(0..8) = 0,3,2,1,0,3,2,1,0");
++
++	total = build_frame(big_frame, big_payload, 0xFFFB, false);
++	check(sipc5_get_hdr_len(big_frame) == 4 &&
++	      !(big_frame[0] & SIPC5_EXT_FIELD_EXIST) &&
++	      sipc5_get_frame_len(big_frame) == 0xFFFF && total == 0xFFFF,
++	      "count 0xFFFB: 4-byte header, len 0xFFFF");
++
++	total = build_frame(big_frame, big_payload, 0xFFFC, false);
++	check(sipc5_ext_len(big_frame) && sipc5_get_hdr_len(big_frame) == 6 &&
++	      sipc5_get_frame_len(big_frame) == 0xFFFC + 6 &&
++	      total == 0xFFFC + 6,
++	      "count 0xFFFC: EXT_LEN, 6-byte header, len 0x%X",
++	      sipc5_get_frame_len(big_frame));
++
++	check(sipc5_start_valid(reply) && sipc5_get_ch(reply) == BOOT_CH &&
++	      sipc5_get_frame_len(reply) == 8 &&
++	      sipc5_get_total_len(reply) == 8,
++	      "CP reply F8 D7 08 00 + word decodes (ch 0xD7, len 8, total 8)");
++	reply[0] = 0xFC;
++	check(sipc5_start_valid(reply) && sipc5_padding_exist(reply) &&
++	      sipc5_get_total_len(reply) == 8,
++	      "CP reply with cfg 0xFC: total 8");
++}
++
++struct ring {
++	struct mem_link_device mld;
++	struct mem_ipc_device dev;
++	u32 head;
++	u32 tail;
++	u8 *buff;
++};
++
++static void ring_init(struct ring *r, unsigned int qsize, u32 head, u32 tail)
++{
++	memset(r, 0, sizeof(*r));
++	r->mld.link_dev.name = "lli";
++	strcpy(r->dev.name, "RAW");
++	r->buff = calloc(1, qsize);
++	if (!r->buff) {
++		perror("calloc");
++		exit(2);
++	}
++	r->head = head;
++	r->tail = tail;
++	r->dev.txq.buff = r->buff;
++	r->dev.txq.size = qsize;
++	r->dev.txq.head = &r->head;
++	r->dev.txq.tail = &r->tail;
++}
++
++static int ring_put(struct ring *r, const struct vector *v, int idx,
++		    u8 *frame, unsigned int *total)
++{
++	u8 payload[0x1000];
++	struct sk_buff skb;
++
++	if (v->payload)
++		memcpy(payload, v->payload, v->count);
++	else
++		fill_payload(payload, v->count, idx);
++	*total = build_frame(frame, payload, v->count, v->aligned);
++	skb.len = *total;
++	skb.data = frame;
++
++	return udl_write(&r->mld, &r->dev, &skb);
++}
++
++static void check_rings(void)
++{
++	static const int seq[3] = { 0, 1, 5 };	/* vectors 1, 2, 6 */
++	u8 frames[3][0x1000];
++	unsigned int totals[3];
++	unsigned int off = 0;
++	struct ring r;
++	u8 before[64];
++	int ok = 1;
++	int ret;
++	int i;
++
++	/* a) back to back in the 0x1FD000-byte raw_tx_buff */
++	ring_init(&r, 0x1FD000, 0, 0);
++	for (i = 0; i < 3; i++) {
++		ret = ring_put(&r, &vectors[seq[i]], seq[i], frames[i],
++			       &totals[i]);
++		if (ret != (int)totals[i])
++			ok = 0;
++	}
++	check(ok, "ring a: udl_write returns each frame length (8, 12, 928)");
++	check(r.head == 8 + 12 + 928, "ring a: head %u == 948", r.head);
++	for (i = 0; i < 3; i++) {
++		if (memcmp(r.buff + off, frames[i], totals[i]))
++			ok = 0;
++		off += totals[i];
++	}
++	check(ok, "ring a: frames contiguous, byte for byte");
++	check(r.buff[945] == 0 && r.buff[946] == 0 && r.buff[947] == 0,
++	      "ring a: 3 padding bytes of the 921-byte frame are zero");
++	free(r.buff);
++
++	/* b) wrap: qsize 64, head = tail = 56, 12-byte CRC frame */
++	ring_init(&r, 64, 56, 56);
++	ret = ring_put(&r, &vectors[1], 1, frames[0], &totals[0]);
++	check(ret == 12 && r.head == 4, "ring b: wrap, ret %d, head %u == 4",
++	      ret, r.head);
++	check(memcmp(r.buff + 56, frames[0], 8) == 0 &&
++	      memcmp(r.buff, frames[0] + 8, 4) == 0,
++	      "ring b: bytes 56..63 then 0..3 hold the frame");
++	free(r.buff);
++
++	/* c) all or nothing: space 9 < 12 */
++	ring_init(&r, 64, 0, 10);
++	memset(r.buff, 0xA5, 64);
++	memcpy(before, r.buff, 64);
++	quiet_errors = 1;
++	ret = ring_put(&r, &vectors[1], 1, frames[0], &totals[0]);
++	quiet_errors = 0;
++	check(ret == -ENOSPC, "ring c: no space returns -ENOSPC (%d)", ret);
++	check(r.head == 0 && memcmp(before, r.buff, 64) == 0,
++	      "ring c: head and ring unchanged");
++	free(r.buff);
++}
++
++int main(void)
++{
++	unsigned int i;
++
++	for (i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++)
++		check_vector(&vectors[i], i);
++	check_framing_extras();
++	check_rings();
++
++	printf("# %d tests, %d failed\n", tests, failures);
++	return failures ? 1 : 0;
++}

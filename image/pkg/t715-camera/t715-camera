@@ -1,0 +1,30 @@
+#!/bin/sh
+# t715-camera — take a photograph with one of the tablet's two cameras and say where it
+# went. There is no preview: the sensors give raw Bayer, and t715-photo develops one
+# picture at a time (docs/hardware/CAMERA.md).
+#
+# Usage: t715-camera [front|rear]
+case ${1:-rear} in
+  front) name=S5K6B2 ;;
+  rear) name=S5K4H5 ;;
+  *) echo "usage: t715-camera [front|rear]" >&2; exit 2 ;;
+esac
+dev=
+for f in /sys/class/video4linux/video*/name; do
+  grep -q "$name" "$f" 2>/dev/null && dev=/dev/$(basename "$(dirname "$f")")
+done
+if [ -z "$dev" ]; then
+  omarchy-notification-send -g 󰄀 "Camera" "No $name: is t715-camera.ko loaded?"
+  exit 1
+fi
+dir=$(xdg-user-dir PICTURES 2>/dev/null)
+[ -n "$dir" ] && [ "$dir" != "$HOME" ] || dir=$HOME/Pictures
+mkdir -p "$dir"
+file=$dir/photo-$(date +%Y%m%d-%H%M%S).png
+omarchy-notification-send -g 󰄀 "Camera" "Hold still…" -t 2000
+if t715-photo -d "$dev" "$file"; then
+  omarchy-notification-send -g 󰄀 "Photo taken" "$file" --exec imv "$file"
+else
+  omarchy-notification-send -g 󰄀 "Camera" "No picture: journalctl -k | grep t715"
+  exit 1
+fi

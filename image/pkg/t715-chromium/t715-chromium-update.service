@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Chromium's Debian root
+ConditionPathExists=/var/lib/t715-chromium/root/usr/lib/chromium/chromium
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/t715-chromium-update --auto
+Nice=10
+IOSchedulingClass=idle

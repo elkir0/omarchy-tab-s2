@@ -1,0 +1,568 @@
+From 629753b476c5b303f03c9d99a3b7631d10cc8399 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 15/16] ASoC: samsung: gts28_wm1814: add the baseband link to
+ the modem
+
+Call audio on the SM-T715 runs between the Shannon modem (CP) and codec
+AIF2 without going through the AP.  Add it as a codec-to-codec link, as
+aries_wm8994.c and bells.c do:
+
+- a machine-registered "gts28-modem" DAI with "Modem RX"/"Modem TX"
+  endpoints, linked to wm8998-aif2 with I2S, normal clocks and the CP as
+  clock provider (CBC_CFC, as every stock call path sets "AIF2 Mode" =
+  Slave);
+- c2c_params narrowband 8 kHz / wideband 16 kHz, two 16-bit slots,
+  selected by a "Modem Rate" control that is refused while the link is
+  powered;
+- "Modem RX"/"Modem TX" pin switches, off at boot: user space (the
+  telephony daemon) turns them on once the CP drives the AIF2 clocks;
+- FLL2 started in the modem DAI hw_params with REFCLK = MCLK1 24 MHz and
+  SYNC = AIF2BCLK (32 x fs), tracked per direction, stopped in hw_free
+  and in gts28_stop_sysclk (pacific_arizona.c);
+- ASYNCCLK from FLL2 and AIF2 moved to ASYNCCLK at late_probe;
+  SAMPLE_RATE_1 forced to 48 kHz for the ASRC sync side unless AIF1 runs;
+- ignore_suspend on the link and the call endpoints.
+
+No device tree change: the link reuses the samsung,audio-codec node.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/samsung/gts28_wm1814.c | 429 +++++++++++++++++++++++++++++--
+ 1 file changed, 414 insertions(+), 15 deletions(-)
+
+diff --git a/sound/soc/samsung/gts28_wm1814.c b/sound/soc/samsung/gts28_wm1814.c
+index a02027db5..d033ff236 100644
+--- a/sound/soc/samsung/gts28_wm1814.c
++++ b/sound/soc/samsung/gts28_wm1814.c
+@@ -9,13 +9,24 @@
+  * (card "Pacific WM1814 Sound", built for this board with
+  * CONFIG_MFD_VEGAS=y and CONFIG_MFD_FLORIDA unset) and modelled on the
+  * mainline tm2_wm5110.c.  Line references below are to that downstream
+- * file.  Only the primary playback/capture link (codec AIF1) and the
+- * speaker, headphone and main microphone paths are implemented; the
+- * modem (AIF2), Bluetooth SCO (AIF3), EAX/secondary links, sub/headset
+- * microphones, earpiece, HDMI and jack detection are left out.
++ * file.  Implemented: the primary playback/capture link (codec AIF1), the
++ * speaker, headphone and main microphone paths, and the "baseband" link
++ * that carries call audio between the Shannon modem (CP) and codec AIF2
++ * without going through the AP.  Bluetooth SCO (AIF3), EAX/secondary
++ * links, sub/headset microphones, earpiece, HDMI and jack detection are
++ * left out.
++ *
++ * The baseband link is a codec-to-codec link, as in aries_wm8994.c and
++ * bells.c: the CP end is the "gts28-modem" DAI registered here, and DAPM
++ * powers AIF2 when a route reaches the "Modem RX" input or the "Modem TX"
++ * output.  Both are pins that stay off until user space (the telephony
++ * daemon) turns them on, once the CP reports that it drives the AIF2
++ * clocks.
+  */
+ 
++#include <linux/bits.h>
+ #include <linux/clk.h>
++#include <linux/mfd/arizona/registers.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -39,16 +50,37 @@
+  */
+ #define GTS28_SYSCLK_RATE	49152000U
+ 
++/*
++ * ASYNCCLK (from FLL2) clocks AIF2 and the modem side of the sample-rate
++ * converters: pacific_wm1814_priv.asyncclk_rate (pacific_arizona.c:106-108),
++ * applied at card init (pacific_arizona.c:1635-1640).
++ */
++#define GTS28_ASYNCCLK_RATE	49152000U
++
++/*
++ * AIF2 carries two 16-bit slots per I2S frame: the CP drives BCLK at
++ * 256 kHz for 8 kHz and at 512 kHz for 16 kHz (pacific_arizona.c:1094-1106).
++ */
++#define GTS28_MODEM_BCLK_PER_FRAME	32
++
++enum {
++	GTS28_LINK_AIF1,
++	GTS28_LINK_MODEM,
++};
++
+ struct gts28_machine_priv {
+ 	struct clk *mclk;
+ 	bool mclk_enabled;
++	/* BIT(stream) of each modem DAI direction between hw_params and hw_free */
++	unsigned int modem_streams;
++	bool fll2_running;
+ };
+ 
+ static struct snd_soc_component *gts28_codec_component(struct snd_soc_card *card)
+ {
+ 	struct snd_soc_pcm_runtime *rtd;
+ 
+-	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[GTS28_LINK_AIF1]);
+ 
+ 	return snd_soc_rtd_to_codec(rtd, 0)->component;
+ }
+@@ -106,9 +138,79 @@ static int gts28_start_sysclk(struct snd_soc_card *card,
+ }
+ 
+ /*
+- * pacific_stop_sysclk(), pacific_arizona.c:1803-1827.  Downstream also
+- * stops FLL2 (:1814-1818); FLL2 only clocks the modem link (AIF2),
+- * which this driver does not implement, so it is never started.
++ * FLL2 for the baseband link (pacific_aif2_hw_params(),
++ * pacific_arizona.c:1129-1147, with "AIF2 Mode" = Slave as in every stock
++ * call path): reference MCLK1 24 MHz, synchronised to the AIF2 BCLK that
++ * the CP drives.  With the reference, FLL2 can lock and ASYNCCLK can run
++ * before the CP clocks start; the synchroniser then pulls FLL2 onto BCLK.
++ */
++static int gts28_start_fll2(struct snd_soc_card *card,
++			    struct snd_soc_component *codec,
++			    unsigned int rate)
++{
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	struct snd_soc_pcm_runtime *rtd;
++	int ret;
++
++	/*
++	 * The sync side of the ASRCs runs at SAMPLE_RATE_1, which resets to
++	 * 8 kHz (refused by the ASRC) and which only AIF1 programs: force
++	 * 48 kHz as downstream does (pacific_arizona.c:1173-1175), unless AIF1
++	 * is running and owns it.
++	 */
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[GTS28_LINK_AIF1]);
++	if (!snd_soc_dai_active(snd_soc_rtd_to_codec(rtd, 0)))
++		snd_soc_component_update_bits(codec, ARIZONA_SAMPLE_RATE_1,
++					      ARIZONA_SAMPLE_RATE_1_MASK,
++					      0x03);
++
++	ret = snd_soc_component_set_pll(codec, WM8998_FLL2_REFCLK,
++					ARIZONA_FLL_SRC_MCLK1,
++					GTS28_MCLK_RATE, GTS28_ASYNCCLK_RATE);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set FLL2 reference: %d\n", ret);
++		return ret;
++	}
++
++	ret = snd_soc_component_set_pll(codec, WM8998_FLL2,
++					ARIZONA_FLL_SRC_AIF2BCLK,
++					rate * GTS28_MODEM_BCLK_PER_FRAME,
++					GTS28_ASYNCCLK_RATE);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to start FLL2: %d\n", ret);
++		return ret;
++	}
++
++	priv->fll2_running = true;
++
++	return 0;
++}
++
++/* pacific_stop_sysclk() stops FLL2 too (pacific_arizona.c:1814-1818) */
++static int gts28_stop_fll2(struct snd_soc_card *card,
++			   struct snd_soc_component *codec)
++{
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	int ret;
++
++	if (!priv->fll2_running)
++		return 0;
++
++	ret = snd_soc_component_set_pll(codec, WM8998_FLL2, 0, 0, 0);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to stop FLL2: %d\n", ret);
++		return ret;
++	}
++
++	priv->fll2_running = false;
++
++	return 0;
++}
++
++/*
++ * pacific_stop_sysclk(), pacific_arizona.c:1803-1827.  FLL2 normally stops
++ * when the baseband link powers down (gts28_modem_hw_free()); stopping it
++ * here as well guarantees that it never outlives the codec bias.
+  */
+ static int gts28_stop_sysclk(struct snd_soc_card *card,
+ 			     struct snd_soc_component *component)
+@@ -122,6 +224,15 @@ static int gts28_stop_sysclk(struct snd_soc_card *card,
+ 		return ret;
+ 	}
+ 
++	if (priv->modem_streams) {
++		dev_warn(card->dev, "Baseband link still up at bias off\n");
++		priv->modem_streams = 0;
++	}
++
++	ret = gts28_stop_fll2(card, component);
++	if (ret < 0)
++		return ret;
++
+ 	if (priv->mclk_enabled) {
+ 		clk_disable_unprepare(priv->mclk);
+ 		priv->mclk_enabled = false;
+@@ -197,15 +308,229 @@ static const struct snd_soc_ops gts28_aif1_ops = {
+ 	.hw_params = gts28_aif1_hw_params,
+ };
+ 
++/*
++ * Baseband link formats (pacific_aif2_hw_params(), pacific_arizona.c:
++ * 1094-1118): I2S, two 16-bit slots, narrowband 8 kHz or wideband 16 kHz.
++ * The "Modem Rate" control picks one while the link is powered down; the
++ * link widgets read c2c_params at every power-up.
++ */
++static const struct snd_soc_pcm_stream gts28_modem_params[] = {
++	{
++		.stream_name	= "NB",
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE,
++		.rate_min	= 8000,
++		.rate_max	= 8000,
++		.channels_min	= 2,
++		.channels_max	= 2,
++	},
++	{
++		.stream_name	= "WB",
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE,
++		.rate_min	= 16000,
++		.rate_max	= 16000,
++		.channels_min	= 2,
++		.channels_max	= 2,
++	},
++};
++
++static const char * const gts28_modem_rate_text[] = {
++	"8kHz", "16kHz",
++};
++
++static SOC_ENUM_SINGLE_EXT_DECL(gts28_modem_rate_enum, gts28_modem_rate_text);
++
++static int gts28_modem_rate_get(struct snd_kcontrol *kcontrol,
++				struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct snd_soc_dai_link *link = &card->dai_link[GTS28_LINK_MODEM];
++
++	ucontrol->value.enumerated.item[0] = link->c2c_params -
++					     gts28_modem_params;
++
++	return 0;
++}
++
++static int gts28_modem_rate_put(struct snd_kcontrol *kcontrol,
++				struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct snd_soc_dai_link *link = &card->dai_link[GTS28_LINK_MODEM];
++	unsigned int sel = ucontrol->value.enumerated.item[0];
++	struct snd_soc_pcm_runtime *rtd;
++	unsigned int i;
++	int ret = 0;
++
++	if (sel >= ARRAY_SIZE(gts28_modem_params))
++		return -EINVAL;
++
++	rtd = snd_soc_get_pcm_runtime(card, link);
++	if (!rtd)
++		return -ENODEV;
++
++	/* DAPM powers the link widgets under the same mutex */
++	snd_soc_dapm_mutex_lock(card);
++
++	for (i = 0; i < ARRAY_SIZE(rtd->c2c_widget); i++) {
++		if (rtd->c2c_widget[i] && rtd->c2c_widget[i]->power) {
++			ret = -EBUSY;
++			goto out;
++		}
++	}
++
++	if (link->c2c_params != &gts28_modem_params[sel]) {
++		link->c2c_params = &gts28_modem_params[sel];
++		ret = 1;
++	}
++
++out:
++	snd_soc_dapm_mutex_unlock(card);
++
++	return ret;
++}
++
++/*
++ * Called by DAPM when a baseband link widget powers up, once per direction.
++ * pacific_aif2_hw_params() ran in the PCM hw_params of the downstream
++ * baseband link; a codec-to-codec link has no PCM ops, so FLL2 starts
++ * here.  The link widget powers up before the ASYNCCLK supply (same DAPM
++ * sequence, lower register), so FLL2 is up before ASYNCCLK is enabled.
++ */
++static int gts28_modem_hw_params(struct snd_pcm_substream *substream,
++				 struct snd_pcm_hw_params *params,
++				 struct snd_soc_dai *dai)
++{
++	struct snd_soc_card *card = dai->component->card;
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	unsigned int stream = BIT(substream->stream);
++	int ret;
++
++	if (priv->modem_streams & stream)
++		return 0;
++
++	if (!priv->modem_streams) {
++		ret = gts28_start_fll2(card, gts28_codec_component(card),
++				       params_rate(params));
++		if (ret < 0)
++			return ret;
++	}
++
++	priv->modem_streams |= stream;
++
++	return 0;
++}
++
++/*
++ * FLL2 stops only when both directions are down: each direction is its
++ * own link widget, and a downlink must survive the microphone path going
++ * away.
++ */
++static int gts28_modem_hw_free(struct snd_pcm_substream *substream,
++			       struct snd_soc_dai *dai)
++{
++	struct snd_soc_card *card = dai->component->card;
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	unsigned int stream = BIT(substream->stream);
++
++	if (!(priv->modem_streams & stream))
++		return 0;
++
++	priv->modem_streams &= ~stream;
++	if (priv->modem_streams)
++		return 0;
++
++	return gts28_stop_fll2(card, gts28_codec_component(card));
++}
++
++static const struct snd_soc_dai_ops gts28_modem_dai_ops = {
++	.hw_params	= gts28_modem_hw_params,
++	.hw_free	= gts28_modem_hw_free,
++};
++
++/*
++ * The CP end of the baseband link (the downstream link used the dummy DAI,
++ * pacific_arizona.c:1220-1228).  On a codec-to-codec link the CPU streams
++ * are crossed: "Modem Capture" feeds the codec's AIF2 Playback (downlink,
++ * CP to codec) and the codec's AIF2 Capture feeds "Modem Playback"
++ * (uplink, codec to CP).
++ */
++static struct snd_soc_dai_driver gts28_modem_dai = {
++	.name = "gts28-modem",
++	.ops = &gts28_modem_dai_ops,
++	.playback = {
++		.stream_name	= "Modem Playback",
++		.channels_min	= 1,
++		.channels_max	= 2,
++		.rates		= SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE,
++	},
++	.capture = {
++		.stream_name	= "Modem Capture",
++		.channels_min	= 1,
++		.channels_max	= 2,
++		.rates		= SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE,
++	},
++};
++
++/* aries_wm8994.c: "Modem RX" is the downlink source, "Modem TX" the uplink sink */
++static const struct snd_soc_dapm_widget gts28_modem_widgets[] = {
++	SND_SOC_DAPM_INPUT("Modem RX"),
++	SND_SOC_DAPM_OUTPUT("Modem TX"),
++};
++
++static const struct snd_soc_dapm_route gts28_modem_routes[] = {
++	{ "Modem Capture", NULL, "Modem RX" },
++	{ "Modem TX", NULL, "Modem Playback" },
++};
++
++static int gts28_modem_component_probe(struct snd_soc_component *component)
++{
++	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	int ret;
++
++	/*
++	 * Off at boot: running AIF2, ISRC2 and the ASRCs before the CP drives
++	 * BCLK gives silence and a click when FLL2 synchronises.  The
++	 * telephony daemon turns the pins on after the CP's clock report.
++	 */
++	ret = snd_soc_component_disable_pin(component, "Modem RX");
++	if (ret < 0)
++		return ret;
++
++	ret = snd_soc_component_disable_pin(component, "Modem TX");
++	if (ret < 0)
++		return ret;
++
++	/* A call keeps running across system suspend */
++	ret = snd_soc_dapm_ignore_suspend(dapm, "Modem RX");
++	if (ret < 0)
++		return ret;
++
++	return snd_soc_dapm_ignore_suspend(dapm, "Modem TX");
++}
++
++static const struct snd_soc_component_driver gts28_modem_component = {
++	.name			= "gts28-modem",
++	.probe			= gts28_modem_component_probe,
++	.dapm_widgets		= gts28_modem_widgets,
++	.num_dapm_widgets	= ARRAY_SIZE(gts28_modem_widgets),
++	.dapm_routes		= gts28_modem_routes,
++	.num_dapm_routes	= ARRAY_SIZE(gts28_modem_routes),
++};
++
+ static int gts28_late_probe(struct snd_soc_card *card)
+ {
+ 	struct snd_soc_pcm_runtime *rtd;
+-	struct snd_soc_dai *aif1_dai;
++	struct snd_soc_dai *aif1_dai, *aif2_dai;
+ 	int ret;
+ 
+-	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[GTS28_LINK_AIF1]);
+ 	aif1_dai = snd_soc_rtd_to_codec(rtd, 0);
+ 
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[GTS28_LINK_MODEM]);
++	aif2_dai = snd_soc_rtd_to_codec(rtd, 0);
++
+ 	/* AIF1 is clocked from SYSCLK (pacific_arizona.c:903-906) */
+ 	ret = snd_soc_dai_set_sysclk(aif1_dai, ARIZONA_CLK_SYSCLK, 0, 0);
+ 	if (ret < 0) {
+@@ -224,6 +549,37 @@ static int gts28_late_probe(struct snd_soc_card *card)
+ 		return ret;
+ 	}
+ 
++	/* ASYNCCLK <- FLL2 (pacific_arizona.c:1635-1640) */
++	ret = snd_soc_component_set_sysclk(aif2_dai->component,
++					   ARIZONA_CLK_ASYNCCLK,
++					   ARIZONA_CLK_SRC_FLL2,
++					   GTS28_ASYNCCLK_RATE,
++					   SND_SOC_CLOCK_IN);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set ASYNCCLK: %d\n", ret);
++		return ret;
++	}
++
++	/*
++	 * AIF2 is clocked from ASYNCCLK (pacific_arizona.c:895-912): this
++	 * moves the AIF2 stream widgets from the SYSCLK to the ASYNCCLK
++	 * supply, as in bells.c.
++	 */
++	ret = snd_soc_dai_set_sysclk(aif2_dai, ARIZONA_CLK_ASYNCCLK, 0, 0);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set AIF2 clock: %d\n", ret);
++		return ret;
++	}
++
++	/*
++	 * Call endpoints stay powered across system suspend
++	 * (pacific_arizona.c:1609-1617); media streams are suspended with
++	 * their PCM and do not keep these paths up.
++	 */
++	snd_soc_dapm_ignore_suspend(&card->dapm, "SPK");
++	snd_soc_dapm_ignore_suspend(&card->dapm, "HP");
++	snd_soc_dapm_ignore_suspend(&card->dapm, "Main Mic");
++
+ 	return 0;
+ }
+ 
+@@ -232,6 +588,10 @@ static const struct snd_kcontrol_new gts28_controls[] = {
+ 	SOC_DAPM_PIN_SWITCH("HP"),
+ 	SOC_DAPM_PIN_SWITCH("SPK"),
+ 	SOC_DAPM_PIN_SWITCH("Main Mic"),
++	SOC_DAPM_PIN_SWITCH("Modem RX"),
++	SOC_DAPM_PIN_SWITCH("Modem TX"),
++	SOC_ENUM_EXT("Modem Rate", gts28_modem_rate_enum,
++		     gts28_modem_rate_get, gts28_modem_rate_put),
+ };
+ 
+ /* wm1814_dapm_widgets[], pacific_arizona.c:737-738, 743 */
+@@ -268,8 +628,16 @@ SND_SOC_DAILINK_DEFS(aif1,
+ 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8998-aif1")),
+ 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+ 
++/*
++ * pacific_wm1814_dai[1] "baseband" (pacific_arizona.c:1220-1228): the CP
++ * <-> codec AIF2 ("vegas-aif2" downstream).
++ */
++SND_SOC_DAILINK_DEFS(baseband,
++	DAILINK_COMP_ARRAY(COMP_CPU("gts28-modem")),
++	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8998-aif2")));
++
+ static struct snd_soc_dai_link gts28_dai_links[] = {
+-	{
++	[GTS28_LINK_AIF1] = {
+ 		.name		= "playback-pri",
+ 		.stream_name	= "playback-pri",
+ 		.ops		= &gts28_aif1_ops,
+@@ -277,6 +645,23 @@ static struct snd_soc_dai_link gts28_dai_links[] = {
+ 				  SND_SOC_DAIFMT_CBP_CFP,
+ 		SND_SOC_DAILINK_REG(aif1),
+ 	},
++	/*
++	 * I2S, normal clocks (pacific_arizona.c:1113); the CP provides BCLK
++	 * and LRCLK, as in every stock call path ("AIF2 Mode" = Slave,
++	 * pacific_arizona.c:1116-1118).  The clock-provider bits of dai_fmt
++	 * describe the codec side: CBC_CFC (codec consumer) sets AIF2 as
++	 * slave, and the modem DAI gets the flipped value, which it ignores.
++	 */
++	[GTS28_LINK_MODEM] = {
++		.name		= "baseband",
++		.stream_name	= "baseband",
++		.dai_fmt	= SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
++				  SND_SOC_DAIFMT_CBC_CFC,
++		.c2c_params	= &gts28_modem_params[0],
++		.num_c2c_params	= 1,
++		.ignore_suspend	= 1,
++		SND_SOC_DAILINK_REG(baseband),
++	},
+ };
+ 
+ static struct snd_soc_card gts28_card = {
+@@ -299,7 +684,8 @@ static int gts28_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct snd_soc_card *card = &gts28_card;
+-	struct snd_soc_dai_link *dai_link = &card->dai_link[0];
++	struct snd_soc_dai_link *aif1_link = &card->dai_link[GTS28_LINK_AIF1];
++	struct snd_soc_dai_link *modem_link = &card->dai_link[GTS28_LINK_MODEM];
+ 	struct device_node *cpu_np, *codec_np;
+ 	struct gts28_machine_priv *priv;
+ 	int ret;
+@@ -337,14 +723,27 @@ static int gts28_probe(struct platform_device *pdev)
+ 		goto put_cpu;
+ 	}
+ 
+-	dai_link->cpus->of_node = cpu_np;
+-	dai_link->platforms->of_node = cpu_np;
+-	dai_link->codecs->of_node = codec_np;
++	aif1_link->cpus->of_node = cpu_np;
++	aif1_link->platforms->of_node = cpu_np;
++	aif1_link->codecs->of_node = codec_np;
++
++	/* The baseband link uses the same codec node; narrowband at probe */
++	modem_link->codecs->of_node = codec_np;
++	modem_link->c2c_params = &gts28_modem_params[0];
++
++	/* The modem DAI must exist before the card binds (aries_wm8994.c) */
++	ret = devm_snd_soc_register_component(dev, &gts28_modem_component,
++					      &gts28_modem_dai, 1);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "Failed to register modem DAI\n");
++		goto put_codec;
++	}
+ 
+ 	ret = devm_snd_soc_register_card(dev, card);
+ 	if (ret < 0)
+ 		dev_err_probe(dev, ret, "Failed to register card\n");
+ 
++put_codec:
+ 	of_node_put(codec_np);
+ put_cpu:
+ 	of_node_put(cpu_np);

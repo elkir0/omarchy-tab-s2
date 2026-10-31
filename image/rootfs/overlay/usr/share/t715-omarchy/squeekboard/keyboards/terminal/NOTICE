@@ -1,0 +1,23 @@
+us.yaml and fr.yaml in this directory: squeekboard's terminal keyboard
+layouts (US QWERTY and French AZERTY) with an Esc key, for terminals on the
+SM-T715's on-screen keyboard.
+
+License: GPL-3.0-or-later (SPDX header in each file). The text of the license
+is in /usr/share/licenses/spdx/GPL-3.0-or-later.txt (Arch's licenses
+package) and at https://www.gnu.org/licenses/gpl-3.0.txt.
+
+Origin of us.yaml: squeekboard 1.43.1, data/keyboards/terminal/us.yaml
+(https://gitlab.gnome.org/World/Phosh/squeekboard, tag v1.43.1,
+GPL-3.0-or-later), with an Esc key added by omarchy-mobile
+(https://github.com/derekross/omarchy-mobile, commit 5f7ba48,
+packages/omamobile-shell/squeekboard/keyboards/terminal/us.yaml). Shipped
+unmodified by omarchy-tab-s2.
+
+Origin of fr.yaml: squeekboard 1.43.1, data/keyboards/terminal/fr.yaml (the
+copy built into Arch Linux ARM's squeekboard 1.43.1-6), with the same Esc
+key added by omarchy-tab-s2 (the change is described in its header).
+
+omarchy-tab-s2 ships both in image/rootfs/overlay/usr/share/t715-omarchy/; its
+build links them as alarm's
+~/.local/share/squeekboard/keyboards/terminal/{us,fr}.yaml, the only place
+squeekboard reads layouts from besides its built-in ones.

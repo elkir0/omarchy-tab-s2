@@ -1,0 +1,61 @@
+SM-T715 tablet: quick settings without the phone's tiles.
+
+Drops mobile data, hotspot, torch, location, NFC, fingerprint and rotation
+lock from the tile catalogue (the tablet has no driven modem, GNSS, flash
+LED, NFC or fingerprint sensor, Hotspot would take the only Wi-Fi link, and
+rotation comes with P3), so they show neither in the sheet nor under "Add
+tiles"; a saved layout that names them loses them (sanitize() skips unknown
+ids). The default layout is the tablet's own tiles. Against omarchy-mobile
+5f7ba48, packages/omamobile-shell (applied with patch -p1 in that directory).
+
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,17 +12,15 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
++// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no mobile data,
++// hotspot, torch, location or NFC (the tablet's modem, GNSS, flash LED and
++// NFC are not driven, and Hotspot would drop the only Wi-Fi link), no
++// fingerprint sensor, and no rotation lock until rotation exists (P3).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+-  { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
+-  { id: "hotspot", label: "Hotspot" },
+   { id: "dnd", label: "Do not disturb" },
+-  { id: "torch", label: "Torch" },
+-  { id: "rotation-lock", label: "Rotation lock" },
+-  { id: "location", label: "Location" },
+-  { id: "nfc", label: "NFC" },
+   { id: "battery-saver", label: "Battery saver" },
+   { id: "dark-theme", label: "Dark theme" },
+   { id: "night-light", label: "Night light" },
+@@ -30,7 +28,6 @@
+   { id: "mic", label: "Microphone" },
+   { id: "screenshot", label: "Screenshot" },
+   { id: "screen-record", label: "Screen record" },
+-  { id: "fingerprint", label: "Fingerprint" },
+   { id: "keyboard", label: "Keyboard" },
+   { id: "clipboard", label: "Clipboard" },
+   { id: "dictation", label: "Dictation" }
+@@ -40,11 +37,14 @@
+ // reached for most. Clipboard and Dictation close the second page: Omarchy
+ // reaches them only by keyboard shortcut, so a tile is their touch path
+ // (TOUCH-PLAN 1.12), and appending them leaves the first page as it was.
++// SM-T715 tablet: the tablet's own tiles only. Stay awake, Microphone,
++// Screen record and Dictation stay under "Add tiles" (Stay awake is on in
++// the image, and turning it off would let the idle lock come up, which
++// needs a PIN pad: P4).
+ var DEFAULT_LAYOUT = [
+-  "wifi", "bluetooth", "dnd", "torch",
+-  "mobile-data", "rotation-lock", "airplane", "location",
+-  "battery-saver", "dark-theme", "night-light", "nfc",
+-  "fingerprint", "keyboard", "clipboard", "dictation"
++  "wifi", "bluetooth", "dnd", "airplane",
++  "battery-saver", "dark-theme", "night-light", "keyboard",
++  "clipboard", "screenshot"
+ ]
+ 
+ var QUICK_COUNT = 4

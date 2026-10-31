@@ -1,0 +1,5 @@
+# The screen's orientation for iio-sensor-proxy. The kernel's matrix comes from
+# stock (docs/hardware/SENSORS_M7.md) and reads 180 degrees off here: with the tablet
+# upright, Home key down, the proxy said bottom-up (owner, 2026-10-30). This one
+# negates x and y. iio-sensor-proxy takes it before the kernel's mount_matrix.
+SUBSYSTEM=="iio", ATTR{name}=="lsm6ds3_accel", ENV{ACCEL_MOUNT_MATRIX}="0, -1, 0; -1, 0, 0; 0, 0, -1"

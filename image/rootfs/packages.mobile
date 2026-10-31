@@ -1,0 +1,13 @@
+# Touch layer P2 (docs/journal/PLAN.md §3, docs/image/ROOTFS.md "Touch layer P2"): the
+# omarchy-mobile packages built from pkg/ by tools/build-pkg, installed by
+# rootfs/install-mobile.sh in their own Dockerfile step (after the slow
+# package layers). One per line, "name  # why"; every line is mandatory and
+# must come from the local [t715-omarchy] repository.
+omamobile-omarchy       # Omarchy's touch patches and their applier (pkg/omamobile-omarchy)
+omamobile-shell         # the touch shell: bar, quick settings, launcher, recents, home, back swipe (pkg/omamobile-shell)
+omatel-agent            # phone and messages service over the ModemManager API: rings, call log, SMS store (pkg/omatel-agent)
+omaphone                # Phone app: dialpad, call log, contacts, in-call screen (pkg/omaphone)
+omamessages             # Messages app: SMS conversations (pkg/omamessages)
+t715-modem              # the SS333 stack: loader, shannond, ModemManager facade, NV provisioning, units (pkg/t715-modem)
+t715-chromium           # the default browser: launcher and update tool for Debian's Chromium, in its own root (Dockerfile, step 3b)
+t715-camera             # Photo and Selfie: one picture at a time from the two cameras, raw Bayer developed in software

@@ -1,0 +1,65 @@
+From aabb8a57a39bd3993d68e2d530e017a32714e262 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 19/24] ARM: gts28ltexx: run DECON VCLK at 200 MHz
+
+In I80 command mode the panel TE paces the refresh, and DECON must push
+a whole frame within one TE period.  At 187.5 MHz (1500/8) a frame took
+16.8-17.0 ms, the refresh fell to 59.3-59.4 frames/s and the end of the
+frame flickered at the bottom right of the panel.  1600/8 = 200 MHz
+takes 15.9 ms per frame: measured 59.93-59.97 frames/s, no vblank
+timeout, and the flicker is gone on the tablet.
+
+1500/7 = 214.3 MHz (closest to the vendor's 214 MHz) stopped DECON from
+completing frames; the comment records it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx-m3.dtsi | 27 ++++++++++++-------
+ 1 file changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
+index dbec75873..d2618abac 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
+@@ -43,15 +43,22 @@ disp_teson: disp-teson-pins {
+  * (exynos5433-tm2.dts:25-53) minus every decon_tv entry, which this
+  * board never uses (no HDMI).  The parent topology is TM2's verbatim.
+  *
+- * Rates - pixel clock chain for the 1536x2048@60 panel mode
+- * (pixel clock 190682 kHz, see the panel driver):
+- *   CLK_FOUT_DISP_PLL = 1500 MHz: an exact exynos5433_pll_rates[]
+- *   entry (clk-exynos5433.c:748, PMS 250/4/0).
+- *   CLK_DIV_SCLK_DECON_VCLK_DISP = 1500 MHz / 8 = 187.5 MHz, giving a
+- *   ~59 Hz refresh: the closest achievable to 60 Hz, because the PLL
+- *   table has no ~190.68 MHz entry (the alternative, 1600/8 = 200 MHz,
+- *   would give ~63 Hz) and the divider is 3 bits wide, so /8 fits
+- *   (clk-exynos5433.c:2732).
++ * Rates - DECON VCLK.  In I80 command mode the panel's TE paces the
++ * refresh; VCLK only sets how long DECON takes to push one frame after
++ * each TE, and that must fit in the TE period:
++ *   CLK_FOUT_DISP_PLL = 1600 MHz: an exact exynos5433_pll_rates[]
++ *   entry (clk-exynos5433.c:747, PMS 400/6/0).
++ *   CLK_DIV_SCLK_DECON_VCLK_DISP = 1600 MHz / 8 = 200 MHz (3-bit
++ *   divider, clk-exynos5433.c:2732): 1539 x 2065 / 200 MHz = 15.9 ms
++ *   per frame, inside the 16.7 ms TE period (the vendor kernel uses
++ *   214 MHz, decon_pm_exynos5430.c:46-47).
++ *   Measured on the tablet (2026-10-29): 59.93 frames/s with vblank
++ *   enabled, i.e. paced by the TE, no vblank timeout.  The previous
++ *   1500/8 = 187.5 MHz needed 16.8-17.0 ms per frame, ran at 59.3-59.4
++ *   frames/s and left the end of the frame (bottom right) flickering.
++ *   1500/7 = 214.3 MHz made DECON stop completing frames altogether
++ *   (vblank wait timed out); ECLK and SCLK_DSIM0 read 266.67 MHz then,
++ *   so the cause is not those clocks (odd divider suspected).
+  *   Mainline DECON never calls clk_set_rate (exynos5433_drm_decon.c);
+  *   DT assigned-clocks are the only way to program this divider.
+  * Zero-rate entries are skipped by the clock core (clk-conf.c
+@@ -77,7 +84,7 @@ &cmu_disp {
+ 				 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_RXCLKESC0_PHY>,
+ 				 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8_PHY>,
+ 				 <&cmu_disp CLK_FOUT_DISP_PLL>;
+-	assigned-clock-rates = <1500000000>, <187500000>, <0>, <0>, <0>,
++	assigned-clock-rates = <1600000000>, <200000000>, <0>, <0>, <0>,
+ 				<0>, <0>, <0>, <0>, <0>;
+ };
+ 

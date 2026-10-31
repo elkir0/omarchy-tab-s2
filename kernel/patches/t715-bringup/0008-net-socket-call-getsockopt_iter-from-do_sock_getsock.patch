@@ -1,0 +1,85 @@
+From 95dd5e840917f1af6c3b3e4fd065a39cbad76d30 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 08/24] net: socket: call ->getsockopt_iter from
+ do_sock_getsockopt
+
+This 6.12.114 tree converts L2CAP to ->getsockopt_iter (sockopt_t,
+include/linux/net.h) but do_sock_getsockopt() only calls ->getsockopt,
+which L2CAP no longer sets: every SOL_L2CAP/SOL_BLUETOOTH getsockopt on
+an L2CAP socket returned -EOPNOTSUPP, and bluetoothd could not register
+any adapter ("Failed to create GATT database").
+
+Wrap the caller's buffer (user or kernel sockptr) in iov_iters, call
+->getsockopt_iter and write the returned optlen back.
+
+Checked on the SM-T715: bluetoothd registers the BCM4358 adapter, scans
+find nearby devices.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ net/socket.c | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/net/socket.c b/net/socket.c
+index 723bc3a1b..3bae417e3 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -2345,6 +2345,47 @@ SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
+ INDIRECT_CALLABLE_DECLARE(bool tcp_bpf_bypass_getsockopt(int level,
+ 							 int optname));
+ 
++/*
++ * 6.12.114 converted L2CAP to ->getsockopt_iter (sockopt_t) without the
++ * matching dispatch here, so every SOL_L2CAP/SOL_BLUETOOTH getsockopt on
++ * an L2CAP socket returned -EOPNOTSUPP and bluetoothd could not register
++ * any adapter ("Failed to create GATT database").  Wrap the caller's
++ * buffer in iov_iters and hand it to ->getsockopt_iter.
++ */
++static int do_sock_getsockopt_iter(struct socket *sock,
++				   const struct proto_ops *ops, int level,
++				   int optname, sockptr_t optval,
++				   sockptr_t optlen)
++{
++	struct kvec kv;
++	sockopt_t opt;
++	int len, err;
++
++	if (copy_from_sockptr(&len, optlen, sizeof(int)))
++		return -EFAULT;
++	if (len < 0)
++		return -EINVAL;
++
++	if (optval.is_kernel) {
++		kv.iov_base = optval.kernel;
++		kv.iov_len = len;
++		iov_iter_kvec(&opt.iter_in, ITER_SOURCE, &kv, 1, len);
++		iov_iter_kvec(&opt.iter_out, ITER_DEST, &kv, 1, len);
++	} else {
++		iov_iter_ubuf(&opt.iter_in, ITER_SOURCE, optval.user, len);
++		iov_iter_ubuf(&opt.iter_out, ITER_DEST, optval.user, len);
++	}
++	opt.optlen = len;
++
++	err = ops->getsockopt_iter(sock, level, optname, &opt);
++	if (err)
++		return err;
++
++	if (copy_to_sockptr(optlen, &opt.optlen, sizeof(int)))
++		return -EFAULT;
++	return 0;
++}
++
+ int do_sock_getsockopt(struct socket *sock, bool compat, int level,
+ 		       int optname, sockptr_t optval, sockptr_t optlen)
+ {
+@@ -2362,6 +2403,9 @@ int do_sock_getsockopt(struct socket *sock, bool compat, int level,
+ 	ops = READ_ONCE(sock->ops);
+ 	if (level == SOL_SOCKET) {
+ 		err = sk_getsockopt(sock->sk, level, optname, optval, optlen);
++	} else if (ops->getsockopt_iter) {
++		err = do_sock_getsockopt_iter(sock, ops, level, optname,
++					      optval, optlen);
+ 	} else if (unlikely(!ops->getsockopt)) {
+ 		err = -EOPNOTSUPP;
+ 	} else {

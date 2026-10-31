@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "idle": {
+    "screensaver": 150,
+    "lock": 300
+  },
+  "bar": {
+    "id": "omamobile.bar",
+    "position": "top",
+    "transparent": false,
+    "clockFormat": "HH:mm",
+    "showBatteryPercent": true,
+    "quickSettings": "omamobile.quicksettings",
+    "cellWatch": true,
+    "callWatch": true,
+    "layout": {
+      "left": [],
+      "center": [],
+      "right": []
+    }
+  },
+  "plugins": [
+    {
+      "id": "omamobile.quicksettings"
+    },
+    {
+      "id": "omamobile.call"
+    },
+    {
+      "id": "omamobile.home"
+    },
+    {
+      "id": "omamobile.launcher",
+      "columns": 6
+    },
+    {
+      "id": "omamobile.switcher"
+    },
+    {
+      "id": "omamobile.keyboard"
+    },
+    {
+      "id": "omamobile.back"
+    }
+  ],
+  "disabledPlugins": [
+    "omarchy.active-window",
+    "omarchy.agents",
+    "omarchy.audio",
+    "omarchy.bluetooth",
+    "omarchy.clock",
+    "omarchy.dropbox",
+    "omarchy.indicators",
+    "omarchy.keyboard-layout",
+    "omarchy.microphone",
+    "omarchy.monitor",
+    "omarchy.network",
+    "omarchy.power",
+    "omarchy.spacer",
+    "omarchy.system-update",
+    "omarchy.tailscale",
+    "omarchy.tray",
+    "omarchy.weather",
+    "omarchy.workspaces"
+  ]
+}

@@ -1,0 +1,169 @@
+[    0.000000] Linux version 6.12.114-dirty (root@build) (arm-linux-gnueabihf-gcc (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP
+[    0.000000] CPU: ARMv7 Processor [410fd031] revision 1 (ARMv7), cr=30c5383d
+[    0.000000] CPU: div instructions available: patching division code
+[    0.000000] CPU: PIPT / VIPT nonaliasing data cache, VIPT aliasing instruction cache
+[    0.000000] OF: fdt: Machine model: Samsung Galaxy Tab S2 8.0 LTE (SM-T715)
+[    0.000000] Memory policy: Data cache writealloc
+[    0.000000] OF: reserved mem: Reserved memory: failed to reserve memory for node 'sec-log@25fff000': base 0x0000000025fff000, size 2 MiB
+[    0.000000] Samsung CPU ID: 0xe5433311
+[    0.000000] Zone ranges:
+[    0.000000]   Normal   [mem 0x0000000020000000-0x0000000086ffffff]
+[    0.000000]   HighMem  [mem 0x0000000087000000-0x00000000de97ffff]
+[    0.000000] Movable zone start for each node
+[    0.000000] Early memory node ranges
+[    0.000000]   node   0: [mem 0x0000000020000000-0x0000000025ffefff]
+[    0.000000]   node   0: [mem 0x0000000025fff000-0x00000000261fffff]
+[    0.000000]   node   0: [mem 0x0000000026200000-0x0000000026201fff]
+[    0.000000]   node   0: [mem 0x0000000026202000-0x0000000026401fff]
+[    0.000000]   node   0: [mem 0x0000000026402000-0x0000000026403fff]
+[    0.000000]   node   0: [mem 0x0000000026404000-0x0000000026443fff]
+[    0.000000]   node   0: [mem 0x0000000026444000-0x0000000026445fff]
+[    0.000000]   node   0: [mem 0x0000000026446000-0x0000000026545fff]
+[    0.000000]   node   0: [mem 0x0000000026546000-0x0000000066ffffff]
+[    0.000000]   node   0: [mem 0x0000000067000000-0x0000000067bfffff]
+[    0.000000]   node   0: [mem 0x0000000067c00000-0x00000000cf8fffff]
+[    0.000000]   node   0: [mem 0x00000000cf900000-0x00000000ddffffff]
+[    0.000000]   node   0: [mem 0x00000000de000000-0x00000000de7fffff]
+[    0.000000]   node   0: [mem 0x00000000de800000-0x00000000de91ffff]
+[    0.000000]   node   0: [mem 0x00000000de920000-0x00000000de97ffff]
+[    0.000000] Initmem setup node 0 [mem 0x0000000020000000-0x00000000de97ffff]
+[    0.000000] OF: reserved mem: 0x0000000067000000..0x0000000067bfffff (12288 KiB) nomap non-reusable fb@67000000
+[    0.000000] OF: reserved mem: 0x0000000025fff000..0x00000000261fffff (2052 KiB) nomap non-reusable sec-log@25fff000
+[    0.000000] OF: reserved mem: 0x0000000026446000..0x0000000026545fff (1024 KiB) nomap non-reusable ramoops@26446000
+[    0.000000] OF: reserved mem: 0x0000000026202000..0x0000000026401fff (2048 KiB) nomap non-reusable sec-tima-log@26202000
+[    0.000000] OF: reserved mem: 0x0000000026404000..0x0000000026443fff (256 KiB) nomap non-reusable sec-avc-log@26404000
+[    0.000000] OF: reserved mem: 0x00000000cf900000..0x00000000ddffffff (236544 KiB) nomap non-reusable ion-carveout@cf900000
+[    0.000000] OF: reserved mem: 0x00000000de800000..0x00000000de91ffff (1152 KiB) nomap non-reusable ion-carveout@de800000
+[    0.000000] percpu: Embedded 12 pages/cpu s20032 r8192 d20928 u49152
+[    0.000000] pcpu-alloc: s20032 r8192 d20928 u49152 alloc=12*4096
+[    0.000000] pcpu-alloc: [0] 0 [0] 1 [0] 2 [0] 3 [0] 4 [0] 5 [0] 6 [0] 7 
+[    0.000000] Kernel command line: [redacted: bootloader line with device identifiers; ours appended: console=tty0 loglevel=8 nosmp clk_ignore_unused pd_ignore_unused panic=5 oops=panic s3c2410_wdt.tmr_atboot=1]
+[    0.000000] Unknown kernel command line parameters [redacted]
+[    0.000000] Dentry cache hash table entries: 262144 (order: 8, 1048576 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 131072 (order: 7, 524288 bytes, linear)
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 780672
+[    0.000000] mem auto-init: stack:all(zero), heap alloc:off, heap free:off
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=8, Nodes=1
+[    0.000000] rcu: Hierarchical RCU implementation.
+[    0.000000] Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 10 jiffies.
+[    0.000000] RCU Tasks Trace: Setting shift to 3 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=8.
+[    0.000000] NR_IRQS: 16, nr_irqs: 16, preallocated irqs: 16
+[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
+[    0.000000] Switching to timer-based delay loop, resolution 41ns
+[    0.000000] clocksource: mct-frc: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 79635851949 ns
+[    0.000002] sched_clock: 32 bits at 24MHz, resolution 41ns, wraps every 89478484971ns
+[    0.000779] sec_log: continuing an existing log, ptr = 26762264
+[    0.000793] printk: legacy console [sec_log-1] enabled
+[    0.001056] Console: colour dummy device 80x30
+[    0.001076] printk: legacy console [tty0] enabled
+[    0.001670] Calibrating delay loop (skipped), value calculated using timer frequency.. 48.00 BogoMIPS (lpj=240000)
+[    0.001703] CPU: Testing write buffer coherency: ok
+[    0.001757] pid_max: default: 32768 minimum: 301
+[    0.001926] Mount-cache hash table entries: 4096 (order: 2, 16384 bytes, linear)
+[    0.001963] Mountpoint-cache hash table entries: 4096 (order: 2, 16384 bytes, linear)
+[    0.002922] CPU0: thread -1, cpu 0, socket 1, mpidr 80000100
+[    0.004171] Setting up static identity map for 0x20200000 - 0x20200060
+[    0.004680] rcu: Hierarchical SRCU implementation.
+[    0.004713] rcu: Max phase no-delay instances is 1000.
+[    0.005726] smp: Bringing up secondary CPUs ...
+[    0.005763] smp: Brought up 1 node, 1 CPU
+[    0.005783] SMP: Total of 1 processors activated (48.00 BogoMIPS).
+[    0.005802] CPU: All CPU(s) started in SVC mode.
+[    0.006058] Memory: 2824124K/3122688K available (6144K kernel code, 544K rwdata, 1588K rodata, 2048K init, 260K bss, 296100K reserved, 0K cma-reserved, 1197440K highmem)
+[    0.006922] devtmpfs: initialized
+[    0.014458] VFP support v0.3: implementor 41 architecture 3 part 40 variant 3 rev 1
+[    0.014670] futex hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    0.014916] pinctrl core: initialized pinctrl subsystem
+[    0.016059] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.016423] DMA: preallocated 256 KiB pool for atomic coherent allocations
+[    0.017165] thermal_sys: Registered thermal governor 'step_wise'
+[    0.019043] pstore: Using crash dump compression: deflate
+[    0.019097] printk: legacy console [ramoops-1] enabled
+[    0.019486] pstore: Registered ramoops as persistent store backend
+[    0.019507] ramoops: using 0x100000@0x26446000, ecc: 0
+[    0.025963] /soc@0/interrupt-controller@11001000: Fixed dependency cycle(s) with /soc@0/interrupt-controller@11001000
+[    0.037558] samsung-pinctrl 10580000.pinctrl: failed to get alias id
+[    0.037610] samsung-pinctrl 10580000.pinctrl: driver data not available
+[    0.037636] samsung-pinctrl 10580000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.037876] samsung-pinctrl 114b0000.pinctrl: failed to get alias id
+[    0.037910] samsung-pinctrl 114b0000.pinctrl: driver data not available
+[    0.037960] samsung-pinctrl 114b0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.038136] samsung-pinctrl 10fe0000.pinctrl: failed to get alias id
+[    0.038164] samsung-pinctrl 10fe0000.pinctrl: driver data not available
+[    0.038187] samsung-pinctrl 10fe0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.038353] samsung-pinctrl 14ca0000.pinctrl: failed to get alias id
+[    0.038378] samsung-pinctrl 14ca0000.pinctrl: driver data not available
+[    0.038400] samsung-pinctrl 14ca0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.038569] samsung-pinctrl 14cb0000.pinctrl: failed to get alias id
+[    0.038593] samsung-pinctrl 14cb0000.pinctrl: driver data not available
+[    0.038614] samsung-pinctrl 14cb0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.038821] samsung-pinctrl 15690000.pinctrl: failed to get alias id
+[    0.038846] samsung-pinctrl 15690000.pinctrl: driver data not available
+[    0.038867] samsung-pinctrl 15690000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.039032] samsung-pinctrl 11090000.pinctrl: failed to get alias id
+[    0.039056] samsung-pinctrl 11090000.pinctrl: driver data not available
+[    0.039077] samsung-pinctrl 11090000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.039239] samsung-pinctrl 14cd0000.pinctrl: failed to get alias id
+[    0.039262] samsung-pinctrl 14cd0000.pinctrl: driver data not available
+[    0.039283] samsung-pinctrl 14cd0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.039522] samsung-pinctrl 14cc0000.pinctrl: failed to get alias id
+[    0.039546] samsung-pinctrl 14cc0000.pinctrl: driver data not available
+[    0.039567] samsung-pinctrl 14cc0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.039735] samsung-pinctrl 14ce0000.pinctrl: failed to get alias id
+[    0.039758] samsung-pinctrl 14ce0000.pinctrl: driver data not available
+[    0.039779] samsung-pinctrl 14ce0000.pinctrl: probe with driver samsung-pinctrl failed with error -2
+[    0.047751] pps_core: LinuxPPS API ver. 1 registered
+[    0.047798] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.047838] PTP clock support registered
+[    0.048771] vgaarb: loaded
+[    0.049188] clocksource: Switched to clocksource mct-frc
+[    0.055571] PCI: CLS 0 bytes, default 64
+[    0.056356] Initialise system trusted keyrings
+[    0.057006] Unpacking initramfs...
+[    0.057133] Freeing initrd memory: 4K
+[    0.057207] workingset: timestamp_bits=14 max_order=20 bucket_order=6
+[    0.057723] Key type asymmetric registered
+[    0.057756] Asymmetric key parser 'x509' registered
+[    0.057836] bounce: pool size: 64 pages
+[    0.057875] io scheduler mq-deadline registered
+[    0.057898] io scheduler kyber registered
+[    0.057931] io scheduler bfq registered
+[    0.060866] exynos-chipid 10000000.chipid: Exynos: CPU[EXYNOS5433] PRO_ID[0xe5433000] REV[0x11] Detected
+[    0.098667] [drm] Initialized simpledrm 1.0.0 for 67000000.framebuffer on minor 0
+[    0.180091] Console: switching to colour frame buffer device 192x128
+[    0.248118] simple-framebuffer 67000000.framebuffer: [drm] fb0: simpledrmdrmfb frame buffer device
+[    0.250759] s3c2410-wdt 10020000.watchdog: starting watchdog timer
+[    0.251547] s3c2410-wdt 10020000.watchdog: watchdog active, reset enabled, irq disabled
+[    0.252075] Synopsys Designware Multimedia Card Interface Driver
+[    0.253347] Registering SWP/SWPB emulation handler
+[    0.256897] Loading compiled-in X.509 certificates
+[    0.430078] /soc@0/power-domain@105c40a0 has as child subdomain: /soc@0/power-domain@105c4020.
+[    0.430472] /soc@0/power-domain@105c4020 has as child subdomain: /soc@0/power-domain@105c4140.
+[    0.507838] clk: Not disabling unused clocks
+[    0.507973] PM: genpd: Not disabling unused power domains
+[    0.509097] /dev/root: Can't open blockdev
+[    0.509230] VFS: Cannot open root device "" or unknown-block(0,0): error -6
+[    0.509352] Please append a correct "root=" boot option; here are the available partitions:
+[    0.509490] List of all bdev filesystems:
+[    0.509565]  ext3
+[    0.509570]  ext2
+[    0.509615]  ext4
+[    0.509660] 
+[    0.509739] Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
+[    0.509872] CPU: 0 UID: 0 PID: 1 Comm: swapper/0 Not tainted 6.12.114-dirty #3
+[    0.509995] Hardware name: Samsung Exynos (Flattened Device Tree)
+[    0.510100] Call trace: 
+[    0.510113]  unwind_backtrace from show_stack+0x10/0x14
+[    0.510284]  show_stack from dump_stack_lvl+0x54/0x68
+[    0.510389]  dump_stack_lvl from panic+0x10c/0x338
+[    0.510488]  panic from mount_root_generic+0x1f8/0x2a8
+[    0.510593]  mount_root_generic from prepare_namespace+0x1f8/0x250
+[    0.510708]  prepare_namespace from kernel_init+0x1c/0x12c
+[    0.510815]  kernel_init from ret_from_fork+0x14/0x38
+[    0.510914] Exception stack(0xe7851fb0 to 0xe7851ff8)
+[    0.511006] 1fa0:                                     00000000 00000000 00000000 00000000
+[    0.511139] 1fc0: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+[    0.511269] 1fe0: 00000000 00000000 00000000 00000000 00000013 00000000
+[    0.513853] Rebooting in 5 seconds..

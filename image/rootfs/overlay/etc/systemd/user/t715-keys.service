@@ -1,0 +1,20 @@
+# t715-keys.service — the SM-T715's Power and Home keys in the Omarchy
+# session (omarchy-tab-s2, touch layer P1; /usr/local/bin/t715-keys,
+# docs/image/ROOTFS.md). Enabled for every user at build time
+# (systemctl --global enable); runs with the graphical session uwsm starts.
+# Its log: journalctl --user -u t715-keys
+[Unit]
+Description=SM-T715 hardware keys (Power: screen and system menu, Home)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/t715-keys
+# omarchy-shell (behind omarchy-menu) refuses to run without it, and the
+# user manager may not have imported Hyprland's environment yet.
+Environment=OMARCHY_PATH=/usr/share/omarchy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

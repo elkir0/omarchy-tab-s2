@@ -1,0 +1,353 @@
+From 54c806b11df43793d443878b407d5c866a6d3e61 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 09/16] ARM: dts: gts28ltexx: SS333 modem node and SPI4 boot
+ link
+
+New exynos5433-gts28ltexx-modem-ss333.dtsi for sec_modem_v1:
+
+- mif_pdata (root node, name kept for the cbd cp_status path): the ten
+  control GPIOs as <name>-gpios, all GPIO_ACTIVE_HIGH (the stock 0x1/0xf
+  third cells would invert CP_ON/CP_RESET under gpiod), cp-status shared
+  by mif,gpio_cp_status and link_pm/gpio_cp2ap_status, the samsung,mipi-lli
+  and samsung,boot-spi probe phandles, the mif,* properties and the 13
+  iodevs of the stock modem-ss333-pdata.dtsi (checked identical to the
+  live device tree);
+- no pin control on the CP lines, so they keep their reset/sboot state
+  until allow_hw=1 (research/modem/research/review/kernel_boot_review.md
+  E2, section 5.3);
+- SPI4 @ 0x14d00000 enabled, bus pins gpv7-1/2/4 (function 3, pull-up),
+  MISO gpv7-3 parked input pull-down, child spi_boot_link at 100 kHz.
+
+Every value cites the stock dtsi and the live device tree line.  The
+board includes this file from the merged series (section 18).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-modem-ss333.dtsi    | 317 ++++++++++++++++++
+ 1 file changed, 317 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
+new file mode 100644
+index 000000000..c1e00eee2
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
+@@ -0,0 +1,317 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - Shannon SS333 CP
++ *
++ * Modem interface node for sec_modem_v1 (drivers/misc/modem_v1: SS333
++ * control GPIOs, 13 SIPC5 I/O devices) and the SPI4 boot link that carries
++ * the CP first stage (BOOT) to the SS333 BootROM.  The MIPI-LLI controller
++ * and the shared-memory reservation (labels mipi_lli, cp_shmem) live in the
++ * MIPI-LLI driver's dtsi.
++ *
++ * Sources ("K/" = kernel_universal5433, the Samsung 3.10 tree; "live" =
++ * the stock device's live device tree, live_fdt.dts):
++ *   K/arch/arm/boot/dts/exynos5433-modem-ss333.dtsi   (GPIOs, pins, SPI4)
++ *   K/arch/arm/boot/dts/modem-ss333-pdata.dtsi        (mif,*, iodevs)
++ *   live:1747-1772 (spi@14d00000), live:2580-2781 (mif_pdata, link_pm),
++ *   live:6331-6338 (spi4-bus), live:5764-5769 and 6530-6534 (gpv7-3)
++ *   research/modem/research/analysis/kernel_port_design.md section 3 (KP)
++ *   research/modem/research/review/kernel_boot_review.md (review)
++ *
++ * GPIO flags: every line is GPIO_ACTIVE_HIGH.  The stock third cells (0x1,
++ * 0xf) were ignored by 3.10 of_get_named_gpio(); gpiod would read 0x1 as
++ * active-low and invert CP_ON/CP_RESET.  The driver works in physical
++ * levels, as 3.10 did (SYNTHESIS.md section 2.2; KP section 3.3, R-7).
++ *
++ * Pin control: none on the CP control lines.  They keep their reset/sboot
++ * configuration (input, pull-down per the G1 survey) until allow_hw=1
++ * drives the AP->CP outputs low through gpiod; requesting the CP->AP IRQs
++ * selects EINT by itself (ML pinctrl-exynos.c:248-251).  The stock and KP
++ * groups set function/pull on those pins, which would leave CP_ON and
++ * CP_RESET floating inputs while allow_hw=0 (review E2, section 5.3).
++ * gpf1-1 (CP_PMIC_PWR_HOLD, stock "cp_off", input high-Z: K/...ss333.dtsi
++ * :96-100, live:209-214) is left as it is for the same reason.  Only the
++ * SPI4 bus pins are configured, by the SPI controller.
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++
++/ {
++	/*
++	 * Node name kept: the loader waits on
++	 * /sys/bus/platform/drivers/mif_sipc5/mif_pdata/cp_status/value
++	 * (cpboot v1 util.c:802-833); a root node without reg is named
++	 * "mif_pdata" by of_device_make_bus_id (KP section 3.3).
++	 */
++	mif_pdata {
++		compatible = "samsung,ss333-modem", "sec_modem,modem_pdata";
++
++		/* K/exynos5433-modem-ss333.dtsi:24 (live:2587) */
++		cp-on-gpios = <&gpr3 1 GPIO_ACTIVE_HIGH>;
++		/* :26 (live:2585); 0 = CP held in reset */
++		cp-reset-gpios = <&gpc0 5 GPIO_ACTIVE_HIGH>;
++		/* :27 (live:2590) */
++		pda-active-gpios = <&gpg2 1 GPIO_ACTIVE_HIGH>;
++		/* :28 (live:2583); rising while ONLINE = CP crash */
++		phone-active-gpios = <&gpa2 3 GPIO_ACTIVE_HIGH>;
++		/*
++		 * :30 mif,gpio_cp_status and :37 link_pm/gpio_cp2ap_status
++		 * (live:2593, 2777): the same pin, one descriptor.
++		 */
++		cp-status-gpios = <&gpa2 5 GPIO_ACTIVE_HIGH>;
++		/* :31 (live:2600); toggled per AP->CP doorbell */
++		ipc-int2cp-gpios = <&gpa2 6 GPIO_ACTIVE_HIGH>;
++		/* :32 (live:2582); 1 = force a CP crash dump */
++		ap-dump-int-gpios = <&gpr2 0 GPIO_ACTIVE_HIGH>;
++		/* :35 link_pm/gpio_cp2ap_wakeup (live:2780) */
++		cp2ap-wakeup-gpios = <&gpa3 1 GPIO_ACTIVE_HIGH>;
++		/* :36 link_pm/gpio_ap2cp_wakeup (live:2778) */
++		ap2cp-wakeup-gpios = <&gpf5 0 GPIO_ACTIVE_HIGH>;
++		/* :38 link_pm/gpio_ap2cp_status (live:2779) */
++		ap2cp-status-gpios = <&gpf1 2 GPIO_ACTIVE_HIGH>;
++
++		/* probe dependencies (KP section 2.3, modem_main.c) */
++		samsung,mipi-lli = <&mipi_lli>;
++		samsung,boot-spi = <&cp_boot_spi>;
++
++		/* K/modem-ss333-pdata.dtsi:17-27, identical in live:2580-2603 */
++		mif,name = "ss333";
++		mif,modem_net = <0>;
++		mif,modem_type = <15>;		/* SEC_SS333 */
++		mif,use_handover = <0>;
++		mif,ipc_version = <50>;		/* SIPC_VER_50 */
++		mif,link_types = <0x408>;	/* LINKDEV_LLI | LINKDEV_SPI */
++		mif,link_name = "lli";
++		/*
++		 * DUMP_ALIGNED (0x200) | BOOT_ALIGNED (0x100) | MEM_DUMP (0x80) |
++		 * MEM_BOOT (0x40) | DPRAM_MAGIC (0x08) | SBD_IPC (0x01)
++		 */
++		mif,link_attrs = <0x3C9>;
++		mif,num_iodevs = <13>;
++
++		/*
++		 * K/modem-ss333-pdata.dtsi:28-186, verbatim; identical in
++		 * live:2604-2774 (checked field by field).
++		 * format: 0 FMT, 1 RAW, 3 MULTI_RAW, 4 BOOT, 5 DUMP;
++		 * io_type: 0 misc, 1 net, 2 dummy; links: 0x400 LLI, 0x408 LLI+SPI;
++		 * attrs: 0x02 SIPC5, 0x80 SBD_IPC, 0x100 NO_LINK_HEADER,
++		 * 0x200 NO_CHECK_MAXQ.
++		 */
++		iodevs {
++			io_device_0 {
++				iod,name = "umts_ipc0";
++				iod,id = <235>;
++				iod,format = <0>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;	/* ATTR_SBD_IPC | ATTR_SIPC5 */
++				iod,app = "RIL";
++				iod,ul_num_buffers = <16>;
++				iod,ul_buffer_size = <4096>;
++				iod,dl_num_buffers = <32>;
++				iod,dl_buffer_size = <4096>;
++			};
++			io_device_1 {
++				iod,name = "umts_rfs0";
++				iod,id = <245>;
++				iod,format = <1>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;
++				iod,app = "RFS";
++				iod,ul_num_buffers = <16>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <512>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_2 {
++				iod,name = "umts_csd";
++				iod,id = <1>;
++				iod,format = <1>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;
++				iod,app = "CSVT";
++				iod,ul_num_buffers = <32>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <64>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_3 {
++				iod,name = "umts_router";
++				iod,id = <25>;
++				iod,format = <1>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;
++				iod,app = "Data Router";
++				iod,ul_num_buffers = <16>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <16>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_4 {
++				iod,name = "umts_dm0";
++				iod,id = <28>;
++				iod,format = <1>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;
++				iod,app = "DIAG";
++				iod,ul_num_buffers = <16>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <128>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_5 {
++				iod,name = "ipc_loopback0";
++				iod,id = <244>;
++				iod,format = <0>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x82>;	/* ATTR_SBD_IPC | ATTR_SIPC5 */
++				iod,app = "CLD";
++				iod,ul_num_buffers = <16>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <32>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_6 {
++				iod,name = "rmnet0";
++				iod,id = <10>;
++				iod,format = <1>;
++				iod,io_type = <1>;
++				iod,links = <0x400>;
++				iod,attrs = <0x180>;
++				iod,app = "NET";
++				iod,ul_num_buffers = <256>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <512>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_7 {
++				iod,name = "rmnet1";
++				iod,id = <11>;
++				iod,format = <1>;
++				iod,io_type = <1>;
++				iod,links = <0x400>;
++				iod,attrs = <0x180>;
++				iod,app = "NET";
++				iod,ul_num_buffers = <256>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <512>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_8 {
++				iod,name = "rmnet2";
++				iod,id = <12>;
++				iod,format = <1>;
++				iod,io_type = <1>;
++				iod,links = <0x400>;
++				iod,attrs = <0x180>;
++				iod,app = "NET";
++				iod,ul_num_buffers = <256>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <512>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_9 {
++				iod,name = "rmnet3";
++				iod,id = <13>;
++				iod,format = <1>;
++				iod,io_type = <1>;
++				iod,links = <0x400>;
++				iod,attrs = <0x180>;
++				iod,app = "NET";
++				iod,ul_num_buffers = <256>;
++				iod,ul_buffer_size = <2048>;
++				iod,dl_num_buffers = <512>;
++				iod,dl_buffer_size = <2048>;
++			};
++			io_device_10 {
++				iod,name = "multipdp";
++				iod,id = <0>;
++				iod,format = <3>;
++				iod,io_type = <2>;
++				iod,links = <0x400>;
++				iod,attrs = <0x02>;
++				iod,app = "RIL";
++			};
++			io_device_11 {
++				iod,name = "umts_boot0";
++				iod,id = <215>;
++				iod,format = <4>;
++				iod,io_type = <0>;
++				iod,links = <0x408>;
++				iod,tx_link = <10>;	/* LINKDEV_LLI */
++				iod,attrs = <0x02>;	/* ATTR_SIPC5 */
++				iod,app = "CBD";
++			};
++			io_device_12 {
++				iod,name = "umts_ramdump0";
++				iod,id = <225>;
++				iod,format = <5>;
++				iod,io_type = <0>;
++				iod,links = <0x400>;
++				iod,attrs = <0x202>;	/* ATTR_NO_CHECK_MAXQ | ATTR_SIPC5 */
++				iod,app = "CBD";
++			};
++		};
++	};
++};
++
++/*
++ * SPI4 TX-only bus: CLK gpv7-1, nCS gpv7-2, MOSI gpv7-4, function 3,
++ * pull-up, drive 0 (K/exynos5433-modem-ss333.dtsi:170-174; live:6331-6338:
++ * pin-function 3, pin-pud 3, pin-drv 0).  The mainline group is gpv7-1/3/4
++ * with the same function, pull and drive (ML exynos5433-pinctrl.dtsi
++ * :727-732): only the pin list changes, so the controller drives nCS.
++ */
++&spi4_bus {
++	samsung,pins = "gpv7-1", "gpv7-2", "gpv7-4";
++};
++
++&pinctrl_peric {
++	/*
++	 * CP_SPI_MISO gpv7-3, unused (TX only): input, pull-down; same in
++	 * power-down.  Stock initial state live:5764-5769 (function 0,
++	 * pud 1), sleep state live:6530-6534 (con-pdn 2, pud-pdn 1);
++	 * K/exynos5433-modem-ss333.dtsi:206-215.
++	 */
++	cp_spi_miso: cp-spi-miso-pins {
++		samsung,pins = "gpv7-3";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_INPUT>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_DOWN>;
++	};
++};
++
++/*
++ * SPI4 @ 0x14d00000 (not 0x14d30000, which is SPI1: SYNTHESIS.md C09)
++ * carries BOOT (0x29fc bytes, one transfer) to the SS333 BootROM: SPI mode
++ * 0, 8 bit, 100 kHz (K/exynos5433-modem-ss333.dtsi:154-169; live:1747-1772,
++ * spi-max-frequency 0x186a0).  The SoC node is disabled by default
++ * (ML arch/arm64/boot/dts/exynos/exynos5433.dtsi:1535-1553).  Without the
++ * pl330 driver the controller works in PIO mode (KP section 3.5).
++ */
++&spi_4 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi4_bus &cp_spi_miso>;
++
++	cp_boot_spi: modem-boot@0 {
++		compatible = "samsung,ss333-boot-spi", "spi_boot_link";
++		reg = <0>;
++		spi-max-frequency = <100000>;
++
++		/*
++		 * live:1769-1772: feedback delay 0.  The stock
++		 * samsung,spi-chip-select-mode = <1> has no mainline property;
++		 * the 5433 port config already uses S3C64XX_SPI_QUIRK_CS_AUTO
++		 * (ML drivers/spi/spi-s3c64xx.c:1561-1571).
++		 */
++		controller-data {
++			samsung,spi-feedback-delay = <0>;
++		};
++	};
++};

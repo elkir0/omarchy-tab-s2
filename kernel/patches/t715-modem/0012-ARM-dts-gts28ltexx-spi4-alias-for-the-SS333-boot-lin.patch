@@ -1,0 +1,38 @@
+From 68abd4d24307bec1203130133e50ff05ab66144b Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 12/16] ARM: dts: gts28ltexx: spi4 alias for the SS333 boot
+ link
+
+spi-s3c64xx needs the spi alias to pick the port's FIFO level mask and
+refuses to probe without it ("Failed to get alias id", seen on the
+tablet).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-modem-ss333.dtsi   | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
+index c1e00eee2..cbbc57ab6 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem-ss333.dtsi
+@@ -294,6 +294,18 @@ cp_spi_miso: cp-spi-miso-pins {
+  * (ML arch/arm64/boot/dts/exynos/exynos5433.dtsi:1535-1553).  Without the
+  * pl330 driver the controller works in PIO mode (KP section 3.5).
+  */
++/*
++ * spi-s3c64xx takes the port number (FIFO level mask index, 0x7f for port 4
++ * on the 5433) from the "spi" alias and refuses to probe without it
++ * (ML drivers/spi/spi-s3c64xx.c s3c64xx_spi_set_port_id, :1561-1563);
++ * stock alias spi4 = spi@14d00000 (live aliases).
++ */
++/ {
++	aliases {
++		spi4 = &spi_4;
++	};
++};
++
+ &spi_4 {
+ 	status = "okay";
+ 	pinctrl-names = "default";

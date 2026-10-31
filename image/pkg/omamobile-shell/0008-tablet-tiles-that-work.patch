@@ -1,0 +1,170 @@
+SM-T715 tablet: tiles that do what they say.
+
+Airplane mode turns the modem off too: it has no rfkill device, so that goes through
+NetworkManager, and shannond keeps the radio off across boots. The Hotspot tile is
+back under "Add tiles", now that the modem can be its uplink, and it shows its
+password. The call card has no Speaker toggle: the tablet has no earpiece, so the
+toggle switched nothing and read "off" with the sound on the speaker. Against
+omarchy-mobile 5f7ba48, packages/omamobile-shell, after 0001 to 0007.
+The modem and rfkill states are read with LC_ALL=C: the session runs in French,
+where rfkill says "bloqué", and upstream's tile never saw itself on.
+
+diff --git a/plugins/README.md b/plugins/README.md
+index d1d8411..5e5f23c 100644
+--- a/plugins/README.md
++++ b/plugins/README.md
+@@ -126,8 +126,8 @@ existed finds them under "Add tiles" too.
+ | Wi-Fi | `Networking.wifiEnabled` (NetworkManager); status shows the SSID. The chevron or a long-press opens the Wi-Fi picker (below) |
+ | Bluetooth | `omarchy-bluetooth-power on/off`, the same rfkill path as Omarchy's Bluetooth panel. The chevron or a long-press opens the Bluetooth panel (below) |
+ | Mobile data | `omamobile-sit data on/off` (omamobile-modem-sit), which starts or stops `omamobile-sit-data.service` through polkit; on while that unit is active, with the operator and technology from `/run/omamobile-sit/state.json`. "No modem" until omamobile-sitd publishes that file |
+-| Airplane mode | Wi-Fi, Bluetooth and WWAN rfkill switches together; on when all are soft-blocked. Turning it off unblocks only the ones that were on (`~/.local/state/omamobile/airplane-restore`). NFC keeps its own tile, and the modem's radio (`omamobile-sit radio`) is not touched, since turning that back on needs a reboot today |
+-| Hotspot | `nmcli device wifi hotspot con-name Hotspot` (NetworkManager makes the SSID and password; the Wi-Fi client link drops while it runs) and `nmcli connection down Hotspot`. Long-press opens the Wi-Fi picker |
++| Airplane mode | The Bluetooth rfkill switch, and Wi-Fi and the modem through `nmcli radio` (the modem has no rfkill device on the SM-T715, NetworkManager's state outlives a reboot, and shannond keeps the radio off across boots); on when all are off. Turning it off turns on only the ones that were on (`~/.local/state/omamobile/airplane-restore`). NFC keeps its own tile |
++| Hotspot | `nmcli device wifi hotspot con-name Hotspot` (NetworkManager makes the SSID and password, which a notification shows; the Wi-Fi client link drops while it runs) and `nmcli connection down Hotspot`. Long-press opens the Wi-Fi picker |
+ | Battery saver | power-profiles-daemon's `power-saver` profile, through `omarchy-powerprofiles-set autodetect power-saver/balanced` (remembered per AC or battery) |
+ | Dark theme | Swaps between the user's last dark and last light Omarchy theme (`omarchy-theme-set`; defaults Tokyo Night and Catppuccin Latte, choices kept in `~/.local/state/omamobile/theme-{dark,light}`). Long-press opens Omarchy's theme picker |
+ | Night light | `omarchy-toggle-nightlight` (hyprsunset); "No hyprsunset" without it |
+diff --git a/plugins/omamobile.call/CallCard.qml b/plugins/omamobile.call/CallCard.qml
+index d47bc5c..1da0204 100644
+--- a/plugins/omamobile.call/CallCard.qml
++++ b/plugins/omamobile.call/CallCard.qml
+@@ -313,8 +313,10 @@ Item {
+         on: card.muted
+         onTapped: card.toggleMute()
+       }
++      // SM-T715: no earpiece, so there is nothing to switch.
+       Toggle {
+         objectName: "speakerToggle"
++        visible: false
+         glyph: 0xF057E
+         label: "Speaker"
+         on: card.route === "speaker"
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index 6460e80..afeb40f 100644
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,15 +12,17 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
+-// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no hotspot, torch,
+-// location or NFC (GNSS, flash LED and NFC are not driven, and Hotspot would
+-// drop the only Wi-Fi link), and no fingerprint sensor. Mobile data goes
+-// through NetworkManager. Rotation is t715-rotate (docs/image/ROTATION.md).
++// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no torch, location or
++// NFC (GNSS, flash LED and NFC are not driven), and no fingerprint sensor.
++// Mobile data goes through NetworkManager. Rotation is t715-rotate
++// (docs/image/ROTATION.md). Hotspot needs the modem as its uplink: the tile
++// takes the Wi-Fi radio off the client network while it is on.
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
++  { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
+   { id: "dnd", label: "Do not disturb" },
+@@ -40,7 +42,7 @@ var CATALOG = [
+ // reached for most. Clipboard and Dictation close the second page: Omarchy
+ // reaches them only by keyboard shortcut, so a tile is their touch path
+ // (TOUCH-PLAN 1.12), and appending them leaves the first page as it was.
+-// SM-T715 tablet: the tablet's own tiles only. Stay awake, Microphone,
++// SM-T715 tablet: the tablet's own tiles only. Stay awake, Microphone, Hotspot,
+ // Screen record and Dictation stay under "Add tiles" (Stay awake is on in
+ // the image, and turning it off would let the idle lock come up, which
+ // needs a PIN pad: P4).
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+index f81b767..d1d8ae6 100755
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -12,29 +12,45 @@ case $want in on | off) ;; *) echo "usage: tile-action.sh TILE on|off" >&2; exit
+ 
+ case $tile in
+   airplane)
+-    # Wi-Fi, Bluetooth and WWAN switches only: NFC keeps its own tile, as on
+-    # Android. Turning airplane mode off unblocks what was on before it, so a
+-    # radio the user had switched off stays off.
++    # Wi-Fi, Bluetooth and the modem: NFC keeps its own tile, as on Android.
++    # Turning airplane mode off turns on what was on before it, so a radio the
++    # user had switched off stays off. SM-T715: the modem has no rfkill switch,
++    # and NetworkManager's own state outlives a reboot where an rfkill block on
++    # Wi-Fi does not: both go through it, and shannond keeps the radio off.
+     restore="$state_dir/airplane-restore"
+     if [ "$want" = on ]; then
+       mkdir -p "$state_dir"
+-      rfkill -rn -o TYPE,SOFT | awk '($1 == "wlan" || $1 == "bluetooth" || $1 == "wwan") && $2 == "unblocked" { print $1 }' \
+-        | sort -u >"$restore"
+-      for type in wlan bluetooth wwan; do rfkill block "$type" 2>/dev/null; done
++      {
++        LC_ALL=C rfkill -rn -o TYPE,SOFT | awk '$1 == "bluetooth" && $2 == "unblocked" { print $1 }'
++        [ "$(LC_ALL=C nmcli radio wifi)" = enabled ] && echo wlan
++        [ "$(LC_ALL=C nmcli radio wwan)" = enabled ] && echo wwan
++      } | sort -u >"$restore"
++      rfkill block bluetooth 2>/dev/null
++      nmcli radio wifi off
++      nmcli radio wwan off
+     else
+       types=$(cat "$restore" 2>/dev/null)
+-      [ -n "$types" ] || types="wlan bluetooth"
+-      for type in $types; do rfkill unblock "$type" 2>/dev/null; done
++      [ -n "$types" ] || types="wlan bluetooth wwan"
++      for type in $types; do
++        case $type in
++          wlan) nmcli radio wifi on ;;
++          wwan) nmcli radio wwan on ;;
++          *) rfkill unblock "$type" 2>/dev/null ;;
++        esac
++      done
+       rm -f "$restore"
+     fi
+     exit 0
+     ;;
+   hotspot)
+     # NetworkManager makes (or reuses) a connection named "Hotspot" with a
+-    # generated password; the Wi-Fi client link drops while it is up.
++    # generated password; the Wi-Fi client link drops while it is up. SM-T715:
++    # nothing else shows that password, so a notification does.
+     if [ "$want" = on ]; then
+       nmcli radio wifi on
+-      exec nmcli device wifi hotspot con-name Hotspot
++      nmcli device wifi hotspot con-name Hotspot || exit 1
++      omarchy-notification-send -u normal -g 󰀂 "Hotspot on" \
++        "$(nmcli -s -g 802-11-wireless.ssid,802-11-wireless-security.psk connection show Hotspot | tr '\n' ' ')"
+     else
+       exec nmcli connection down Hotspot
+     fi
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+index 261068a..1add701 100755
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -6,8 +6,8 @@
+ # Nothing here writes; each probe is bounded by timeout so a hung daemon
+ # cannot hold the sheet's refresh.
+ #
+-#   airplane      on when every Wi-Fi, Bluetooth and WWAN rfkill switch is
+-#                 soft-blocked (none without such a switch)
++#   airplane      on when the Bluetooth rfkill switch is soft-blocked and
++#                 NetworkManager has Wi-Fi and WWAN off (none without a switch)
+ #   hotspot       on while NetworkManager's "Hotspot" connection is up
+ #   powerprofile  power-profiles-daemon's active profile
+ #   theme_mode    light or dark, as Omarchy resolves the current theme
+@@ -27,9 +27,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
+ 
+ # airplane
+ if have rfkill; then
+-  t rfkill -rn -o TYPE,SOFT | awk '
+-    $1 == "wlan" || $1 == "bluetooth" || $1 == "wwan" { n++; if ($2 == "blocked") b++ }
+-    END { print "airplane=" (n == 0 ? "none" : (b == n ? "on" : "off")) }'
++  wifi=$(have nmcli && LC_ALL=C t nmcli radio wifi)
++  wwan=$(have nmcli && LC_ALL=C t nmcli radio wwan)
++  LC_ALL=C t rfkill -rn -o TYPE,SOFT | awk -v wifi="$wifi" -v wwan="$wwan" '
++    $1 == "bluetooth" || (wifi == "" && $1 == "wlan") { n++; if ($2 == "blocked") b++ }
++    END {
++      if (wifi != "") { n++; if (wifi == "disabled") b++ }
++      if (wwan != "") { n++; if (wwan == "disabled") b++ }
++      print "airplane=" (n == 0 ? "none" : (b == n ? "on" : "off"))
++    }'
+ else
+   echo "airplane=none"
+ fi

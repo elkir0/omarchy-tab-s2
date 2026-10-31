@@ -1,0 +1,5 @@
+# SM-T715: the eMMC holds Android's partitions (EFS, modem, system,
+# USERDATA, ...). The initramfs mounts USERDATA read-only itself; hide every
+# eMMC partition from udisks so that udiskie (Omarchy's automounter),
+# Nautilus and GNOME Disks never offer to mount or format them.
+SUBSYSTEM=="block", SUBSYSTEMS=="mmc", ATTRS{type}=="MMC", ENV{UDISKS_IGNORE}="1"

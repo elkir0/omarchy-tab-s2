@@ -1,0 +1,67 @@
+SM-T715 tablet: omamobile-set-pin says tablet, and sudo starts asking.
+
+Once the owner has set a PIN, the password protects something: sudo stops being
+free for the wheel group (t715-sudo-asks-password, in the image). Against
+omarchy-mobile 5f7ba48, packages/omamobile-shell.
+
+diff --git a/bin/omamobile-set-pin b/bin/omamobile-set-pin
+index aa0794b..55ae66d 100644
+--- a/bin/omamobile-set-pin
++++ b/bin/omamobile-set-pin
+@@ -1,20 +1,21 @@
+ #!/bin/bash
+ # SPDX-License-Identifier: MIT
+-# Set or change the phone's PIN or password: it is the account password, so
++# Set or change the tablet's PIN or password: it is the account password, so
+ # Omarchy's lock screen, sudo and polkit all check it through PAM.
+ #
+ #   omamobile-set-pin           open a terminal to set or change it
+ #   omamobile-set-pin --type    print this user's choice: pin or password
+-# (A phone without one is pointed here by omamobile-onboarding at login.)
+ #
+-# The choice decides how the phone asks for it, like Android: a PIN gets the
++# The choice decides how the tablet asks for it, like Android: a PIN gets the
+ # lock screen's number pad and the on-screen keyboard's digits, a password the
+ # full keyboard; every prompt has an ABC/123 switch for the other. It is kept
+ # in ~/.config/omamobile/credential (pin or password; never the secret) and
+ # mirrored to Omarchy's credential-password toggle, which the lock screen
+ # and the polkit prompt read (patches/omarchy/0011).
+ #
+-# Once one exists, the phone locks right after it starts (lock-on-start).
++# Once one exists, the tablet locks right after it starts and whenever its
++# screen goes off (lock-on-start, read by t715-keys), and sudo asks for it
++# instead of asking for nothing (t715-sudo-asks-password).
+ set -u
+ 
+ toggles=~/.local/state/omarchy/toggles
+@@ -30,7 +31,7 @@ current_type() {
+ record_type() {
+   mkdir -p "$(dirname "$record")" "$toggles"
+   printf '%s\n' "$1" >"$record.new" && mv "$record.new" "$record"
+-  # the lock's number pad and the prompts' 123/ABC switch: a touch phone
++  # the lock's number pad and the prompts' 123/ABC switch: a touch tablet
+   touch "$toggles/lock-keypad"
+   if [[ $1 == password ]]; then
+     touch "$toggles/credential-password"
+@@ -41,7 +42,8 @@ record_type() {
+ 
+ case "${1:-}" in
+   --inner)
+-    echo "Choose how you unlock the phone. It is also used for sudo."
++    echo "Choose how you unlock the tablet. It is also used for sudo."
++    echo "The current password is alarm, unless you changed it."
+     echo
+     pin="PIN (numbers only)"
+     password="Password (letters, numbers, symbols)"
+@@ -65,9 +67,10 @@ case "${1:-}" in
+     record_type "$type"
+     mkdir -p "$toggles"
+     touch "$toggles/lock-on-start"
++    sudo /usr/local/sbin/t715-sudo-asks-password
+     echo
+     [[ $type == pin ]] && echo "PIN set." || echo "Password set."
+-    echo "Your phone now locks after it starts."
++    echo "Your tablet now locks after it starts and when its screen goes off."
+     ;;
+   --type)
+     current_type

@@ -1,0 +1,12 @@
+# t715-update-check.timer — look for updates a few minutes after login, then
+# every day (omarchy-tab-s2; docs/image/ROOTFS.md).
+[Unit]
+Description=Look for Omarchy and system updates every day (SM-T715)
+
+[Timer]
+OnStartupSec=10min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

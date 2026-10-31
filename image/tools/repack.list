@@ -1,0 +1,17 @@
+# tools/repack.list — Omarchy packages reused on armv7h, one name per line
+# (exactly as published in https://pkgs.omarchy.org/stable/aarch64/omarchy.db).
+# See tools/repack-omarchy and docs/image/REPACK.md.
+#
+# arch = any     copied unchanged (with the upstream .sig);
+# arch = aarch64 retagged as armv7h (omarchy, omarchy-settings: scripts, QML,
+#                configs and themes only — the repack refuses any ELF file).
+omarchy
+omarchy-settings
+omarchy-keyring
+omarchy-themes-intros
+omarchy-nvim
+ttf-ia-writer
+ttf-jetbrains-mono-nerd-basic
+yaru-icon-theme
+tobi-try
+ufw-docker

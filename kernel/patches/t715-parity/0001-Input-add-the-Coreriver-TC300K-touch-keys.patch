@@ -1,0 +1,227 @@
+From 0ef06c2104d6e46b0e4c6d56447bf767e0b9a5c0 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 1/6] Input: add the Coreriver TC300K touch keys
+
+The capacitive Back and Recent keys of the Galaxy Tab S2.  Reduced from Samsung's
+tc300k.c to the keys and their power: the firmware path is left out on purpose, it
+reflashes the chip over bit-banged pins, and a failed flash kills the keys.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/input/keyboard/Kconfig  |  10 ++
+ drivers/input/keyboard/Makefile |   1 +
+ drivers/input/keyboard/tc300k.c | 171 ++++++++++++++++++++++++++++++++
+ 3 files changed, 182 insertions(+)
+ create mode 100644 drivers/input/keyboard/tc300k.c
+
+diff --git a/drivers/input/keyboard/Kconfig b/drivers/input/keyboard/Kconfig
+index 721ab69e8..623b8f93c 100644
+--- a/drivers/input/keyboard/Kconfig
++++ b/drivers/input/keyboard/Kconfig
+@@ -261,6 +261,16 @@ config KEYBOARD_GPIO_POLLED
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called gpio_keys_polled.
+ 
++config KEYBOARD_TC300K
++	tristate "Coreriver TC300K/TC350K touch keys"
++	depends on I2C
++	help
++	  Say Y here for the capacitive Back and Recent keys of the
++	  Samsung Galaxy Tab S2.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called tc300k.
++
+ config KEYBOARD_TCA6416
+ 	tristate "TCA6416/TCA6408A Keypad Support"
+ 	depends on I2C
+diff --git a/drivers/input/keyboard/Makefile b/drivers/input/keyboard/Makefile
+index 1e0721c30..80513036b 100644
+--- a/drivers/input/keyboard/Makefile
++++ b/drivers/input/keyboard/Makefile
+@@ -23,6 +23,7 @@ obj-$(CONFIG_KEYBOARD_EP93XX)		+= ep93xx_keypad.o
+ obj-$(CONFIG_KEYBOARD_GOLDFISH_EVENTS)	+= goldfish_events.o
+ obj-$(CONFIG_KEYBOARD_GPIO)		+= gpio_keys.o
+ obj-$(CONFIG_KEYBOARD_GPIO_POLLED)	+= gpio_keys_polled.o
++obj-$(CONFIG_KEYBOARD_TC300K)		+= tc300k.o
+ obj-$(CONFIG_KEYBOARD_TCA6416)		+= tca6416-keypad.o
+ obj-$(CONFIG_KEYBOARD_TCA8418)		+= tca8418_keypad.o
+ obj-$(CONFIG_KEYBOARD_HIL)		+= hil_kbd.o
+diff --git a/drivers/input/keyboard/tc300k.c b/drivers/input/keyboard/tc300k.c
+new file mode 100644
+index 000000000..3b15a6844
+--- /dev/null
++++ b/drivers/input/keyboard/tc300k.c
+@@ -0,0 +1,171 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Coreriver TC300K/TC350K touch keys, Back and Recent on the Galaxy Tab S2.
++ *
++ * Reduced from Samsung's tc300k.c (Copyright (C) 2013 Samsung Electronics,
++ * Junkyeong Kim <jk0430.kim@samsung.com>, GPL-2.0-or-later) to the keys and
++ * their power.  The vendor driver's firmware path is left out on purpose: it
++ * reflashes the chip over bit-banged pins, and a failed flash kills the keys.
++ * A chip that reads 0xff, which the vendor driver would reflash, is left alone.
++ */
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/regulator/consumer.h>
++
++#define TC300K_KEYCODE		0x00
++#define TC300K_FWVER		0x01
++#define TC300K_MDVER		0x02
++
++#define TC300K_KEYS		2
++#define TC300K_PRESSED(i)	BIT(i)
++#define TC300K_RELEASED(i)	BIT((i) + 4)
++
++/* The vendor driver's settling times, after each rail. */
++#define TC300K_VDD_DELAY_MS	70
++#define TC300K_VLED_DELAY_MS	130
++
++struct tc300k {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct regulator *vdd;
++	struct regulator *vled;
++	u32 keycodes[TC300K_KEYS];
++};
++
++static irqreturn_t tc300k_irq(int irq, void *dev_id)
++{
++	struct tc300k *tk = dev_id;
++	int val, i;
++
++	val = i2c_smbus_read_byte_data(tk->client, TC300K_KEYCODE);
++	if (val < 0) {
++		dev_err_ratelimited(&tk->client->dev, "key read failed: %d\n", val);
++		return IRQ_HANDLED;
++	}
++
++	for (i = 0; i < TC300K_KEYS; i++) {
++		if (val & TC300K_PRESSED(i))
++			input_report_key(tk->input, tk->keycodes[i], 1);
++		if (val & TC300K_RELEASED(i))
++			input_report_key(tk->input, tk->keycodes[i], 0);
++	}
++	input_sync(tk->input);
++
++	return IRQ_HANDLED;
++}
++
++static void tc300k_power_off(void *data)
++{
++	struct tc300k *tk = data;
++
++	regulator_disable(tk->vled);
++	regulator_disable(tk->vdd);
++}
++
++static int tc300k_power_on(struct tc300k *tk)
++{
++	int ret;
++
++	ret = regulator_enable(tk->vdd);
++	if (ret)
++		return ret;
++	msleep(TC300K_VDD_DELAY_MS);
++
++	ret = regulator_enable(tk->vled);
++	if (ret) {
++		regulator_disable(tk->vdd);
++		return ret;
++	}
++	msleep(TC300K_VLED_DELAY_MS);
++
++	return 0;
++}
++
++static int tc300k_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct tc300k *tk;
++	int fw, md, ret, i;
++
++	if (!client->irq)
++		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
++
++	tk = devm_kzalloc(dev, sizeof(*tk), GFP_KERNEL);
++	if (!tk)
++		return -ENOMEM;
++	tk->client = client;
++
++	tk->vdd = devm_regulator_get(dev, "vdd");
++	if (IS_ERR(tk->vdd))
++		return dev_err_probe(dev, PTR_ERR(tk->vdd), "no vdd supply\n");
++	tk->vled = devm_regulator_get(dev, "vled");
++	if (IS_ERR(tk->vled))
++		return dev_err_probe(dev, PTR_ERR(tk->vled), "no vled supply\n");
++
++	ret = device_property_read_u32_array(dev, "linux,keycodes", tk->keycodes,
++					     TC300K_KEYS);
++	if (ret)
++		return dev_err_probe(dev, ret, "no linux,keycodes\n");
++
++	ret = tc300k_power_on(tk);
++	if (ret)
++		return dev_err_probe(dev, ret, "power on failed\n");
++	ret = devm_add_action_or_reset(dev, tc300k_power_off, tk);
++	if (ret)
++		return ret;
++
++	fw = i2c_smbus_read_byte_data(client, TC300K_FWVER);
++	if (fw < 0)
++		return dev_err_probe(dev, fw, "no answer from the chip\n");
++	if (fw == 0xff)
++		return dev_err_probe(dev, -ENODEV,
++				     "no firmware on the chip, not flashing one\n");
++	md = i2c_smbus_read_byte_data(client, TC300K_MDVER);
++	dev_info(dev, "firmware 0x%02x, module 0x%02x\n", fw, md);
++
++	tk->input = devm_input_allocate_device(dev);
++	if (!tk->input)
++		return -ENOMEM;
++	tk->input->name = "sec_touchkey";
++	tk->input->id.bustype = BUS_I2C;
++	tk->input->keycode = tk->keycodes;
++	tk->input->keycodesize = sizeof(tk->keycodes[0]);
++	tk->input->keycodemax = TC300K_KEYS;
++	for (i = 0; i < TC300K_KEYS; i++)
++		input_set_capability(tk->input, EV_KEY, tk->keycodes[i]);
++
++	ret = input_register_device(tk->input);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, tc300k_irq,
++					IRQF_ONESHOT, "tc300k", tk);
++	if (ret)
++		return dev_err_probe(dev, ret, "no interrupt\n");
++
++	return 0;
++}
++
++static const struct of_device_id tc300k_of_match[] = {
++	{ .compatible = "coreriver,tc300-keypad" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tc300k_of_match);
++
++static struct i2c_driver tc300k_driver = {
++	.driver = {
++		.name = "tc300k",
++		.of_match_table = tc300k_of_match,
++	},
++	.probe = tc300k_probe,
++};
++module_i2c_driver(tc300k_driver);
++
++MODULE_DESCRIPTION("Coreriver TC300K/TC350K touch keys");
++MODULE_LICENSE("GPL");

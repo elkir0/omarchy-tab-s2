@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# shannon-loader: boots and supervises the Shannon SS333 CP (SM-T715).
+#
+# Started at boot by shannon-modem-prepare.service (modules, allow_hw,
+# battery gate), which device/modem-install.sh enables after the gates of
+# SYNTHESIS v2 §6 passed on the device (2026-10-30: cold boots, crash
+# recovery, off and reboot paths): systemd then power-cycles the CP
+# unattended. Bring-up of a new kernel uses the --stop-after ladder by hand.
+#
+# Exit codes (modem/loader/README.md): 0 clean stop, 2 config, 3 NV refused,
+# 4 image/TOC invalid, 5 kernel ABI missing, 6 boot failed / crash loop,
+# 7 MAIN rejected twice by the CP, 8 battery/thermal gate. Only 6 (and 1,
+# internal) are restarted.
+
+[Unit]
+Description=Shannon SS333 CP loader and supervisor
+Documentation=file:///usr/share/doc/shannon-loader/README.md
+ConditionPathExists=/dev/umts_boot0
+After=systemd-udevd.service systemd-modules-load.service local-fs.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+# --max-temp=55.0: the gauge temperature is the inside of the tablet, not the battery
+# thermistor, and stock Android powers the CP on at any temperature; the owner raised
+# the CP power-on gate from 40.0 to 55.0 on 2026-10-30 (guard against overheating only).
+ExecStart=/usr/bin/shannon-loader --kmsg --max-temp=55.0
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3 4 5 7 8
+# a boot needs seconds; the worst case of one attempt is bounded by the
+# loader's own timeouts (5 + 5 + 12 x 30 + 30 s) plus the 10 s eFuse settle
+TimeoutStartSec=480
+TimeoutStopSec=30
+KillMode=mixed
+
+# CP state for the telephony daemons: /run/shannon/cp-state
+RuntimeDirectory=shannon
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Hardening. The loader writes no file except the state file above: the
+# filesystem is read-only to it, /sys too (lli_control can never be written).
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/shannon
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+# not ProtectClock=: it implies DeviceAllow=char-rtc, which would turn the
+# device policy into an allow-list and hide /dev/umts_* and the RADIO node
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# BOOT and NV buffers are locked in RAM (mlock) when allowed
+LimitMEMLOCK=16M
+

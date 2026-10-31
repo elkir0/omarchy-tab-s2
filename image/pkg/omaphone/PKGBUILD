@@ -1,0 +1,65 @@
+# SM-T715 (armv7h) package of omarchy-mobile's omaphone (packages/omaphone, MIT): armv7h
+# added next to aarch64, version 0.2.2 as upstream's commit 9332a78 has it, and one
+# patch: no Speaker button, the tablet has no earpiece (0001-t715-no-speaker-button.patch).
+# It talks to the modem through the ModemManager D-Bus API, which shannond's
+# facade serves on this tablet (docs/hardware/MODEM.md). Build: tools/build-pkg omaphone.
+
+# SPDX-License-Identifier: MIT
+# Maintainer: Derek Ross <derekross@gmail.com>
+#
+# omaphone: Omarchy Mobile's Phone app (docs/TELEPHONY-APPS-PLAN.md
+# T6/T7). Rust, GTK 4 and libadwaita, from its own repository
+# (github.com/derekross/omaphone, GPL-3.0-or-later). It talks to the modem
+# through omatel-agent (packages/omatel) and uses omatel's crates, which
+# its Cargo.lock pins to an omatel release tag. Up to 0.1.1 this package
+# was built from omatel; the name is unchanged, so a plain upgrade
+# replaces it. Not in omamobile-apps' defaults yet.
+#
+# Source: the release tag's tarball from GitHub, pinned by its sha256
+# (README.md). Build: cargo fetches the crates, omatel's from git at the
+# pinned tag, in prepare(), and builds offline.
+pkgname=omaphone
+pkgver=0.2.2
+pkgrel=1.1
+pkgdesc="Phone: dialpad with smart dial, call log, favorites, contacts and the in-call screen"
+arch=(aarch64 armv7h)
+url="https://github.com/derekross/omaphone"
+license=('GPL-3.0-or-later' 'MIT')
+depends=('omatel-agent>=0.2.1' gcc-libs glib2 glibc 'gtk4>=4.14' 'libadwaita>=1.5' sqlite hicolor-icon-theme)
+makedepends=(cargo git pkgconf gtk4 libadwaita sqlite)
+install=omaphone.install
+options=('!debug' '!lto')
+source=("omaphone-$pkgver.tar.gz::https://github.com/derekross/omaphone/archive/refs/tags/v$pkgver.tar.gz"
+        0001-t715-no-speaker-button.patch)
+sha256sums=('c72b7808eb4bd19cd543c58ad67545dc4fce8e319718bce46a70727d5b043a25'
+            '63e352f69bdb4c5a2235371750df317c6d6ce51fa2b11c447c03ba909dd4b7b8')
+
+prepare() {
+  cd "omaphone-$pkgver"
+  patch -Np1 -i "$srcdir/0001-t715-no-speaker-button.patch"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "omaphone-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --bin omaphone
+}
+
+check() {
+  cd "omaphone-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --bin omaphone
+}
+
+package() {
+  cd "omaphone-$pkgver"
+  install -Dm755 target/release/omaphone "$pkgdir/usr/bin/omaphone"
+  install -Dm644 data/org.omamobile.Phone.desktop "$pkgdir/usr/share/applications/org.omamobile.Phone.desktop"
+  install -Dm644 data/org.omamobile.Phone.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.omamobile.Phone.svg"
+  install -Dm644 data/org.omamobile.Contacts.desktop "$pkgdir/usr/share/applications/org.omamobile.Contacts.desktop"
+  install -Dm644 data/org.omamobile.Contacts.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.omamobile.Contacts.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+}

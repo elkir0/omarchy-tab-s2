@@ -1,0 +1,368 @@
+From 59ee1c2f050f9932f4fa41fe100c69f683687512 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 04/24] soc: samsung: add a console mirroring the log into
+ sec_log RAM
+
+Samsung's bootloaders pass sec_log=<size>@<base> and the vendor kernel
+turns that RAM ring into /proc/last_kmsg after the next boot.  Mirroring
+the console there is the only way to read the log of a test kernel on
+devices without UART access.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/samsung/Kconfig           |  18 ++
+ drivers/soc/samsung/Makefile          |   2 +
+ drivers/soc/samsung/sec-log-console.c | 306 ++++++++++++++++++++++++++
+ 3 files changed, 326 insertions(+)
+ create mode 100644 drivers/soc/samsung/sec-log-console.c
+
+diff --git a/drivers/soc/samsung/Kconfig b/drivers/soc/samsung/Kconfig
+index 1a5dfdc97..26d05f1b7 100644
+--- a/drivers/soc/samsung/Kconfig
++++ b/drivers/soc/samsung/Kconfig
+@@ -75,4 +75,22 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
+ config EXYNOS_REGULATOR_COUPLER
+ 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
+ 	depends on ARCH_EXYNOS || COMPILE_TEST
++
++config SAMSUNG_SEC_LOG_CONSOLE
++	bool "Samsung sec_log RAM console"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	help
++	  Mirror the kernel console log into Samsung's "sec_log" RAM ring
++	  buffer, the persistent log area the stock Samsung kernel reads
++	  back after a reboot and exposes as /proc/last_kmsg.  The ring
++	  layout and the write algorithm are byte-identical to the stock
++	  implementation, so a mainline kernel can leave its log where a
++	  following stock kernel (e.g. after a crash of a test kernel)
++	  recovers it without UART or USB.
++
++	  The region comes from the "sec_log=<size>@<base>" kernel command
++	  line (size must be a power of two), or, absent that, from a DT
++	  reserved-memory node with compatible = "samsung,sec-log" whose
++	  reg covers the ring and its 8-byte header.  It is mapped
++	  uncached/write-combined, so no cache flush is needed at reboot.
+ endif
+diff --git a/drivers/soc/samsung/Makefile b/drivers/soc/samsung/Makefile
+index 248a33d77..3d4934da6 100644
+--- a/drivers/soc/samsung/Makefile
++++ b/drivers/soc/samsung/Makefile
+@@ -13,3 +13,5 @@ obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
+ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
+ 
+ obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
++
++obj-$(CONFIG_SAMSUNG_SEC_LOG_CONSOLE) += sec-log-console.o
+diff --git a/drivers/soc/samsung/sec-log-console.c b/drivers/soc/samsung/sec-log-console.c
+new file mode 100644
+index 000000000..bea6b7982
+--- /dev/null
++++ b/drivers/soc/samsung/sec-log-console.c
+@@ -0,0 +1,306 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Console driver mirroring the kernel log into Samsung's "sec_log" RAM
++ * ring buffer.
++ *
++ * The stock Samsung kernel keeps a persistent kernel log in a RAM area
++ * handed over by the bootloader: a power-of-two-sized ring (2 MiB at
++ * phys 0x26000000 on the SM-T715, cmdline "sec_log=0x200000@0x26000000")
++ * preceded by an 8-byte header at base-8: u32 magic 0x4d474f4c ("LOGM")
++ * at base-8 and the monotonic count of bytes ever written at base-4.
++ * After a reboot the stock kernel recovers the surviving buffer and
++ * exposes it as /proc/last_kmsg.
++ *
++ * This driver re-creates the stock writer in a mainline kernel so that
++ * when the test kernel crashes or reboots, warm-booting into stock
++ * Android recovers its log without UART or USB.  The write algorithm is
++ * byte-identical to the stock drivers/staging/samsung/sec_log.c
++ * emit_sec_log(): copy at (ptr & (size - 1)), wrap in two memcpys, then
++ * ptr += len.
++ *
++ * Two deliberate differences from stock:
++ *
++ *   - The region is mapped write-combined (uncached), not cached: the
++ *     stock kernel relies on a whole-cache flush in its reboot path,
++ *     which a mainline kernel must not depend on.
++ *
++ *   - On boot with a valid magic the previous log is appended to rather
++ *     than copied out and cleared: this kernel is not the one serving
++ *     /proc/last_kmsg, so leaving the buffer in place preserves the old
++ *     content for the stock kernel to read after the next reboot.
++ */
++
++#define pr_fmt(fmt) "sec_log: " fmt
++
++#include <linux/console.h>
++#include <linux/compiler.h>
++#include <linux/debugfs.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/kstrtox.h>
++#include <linux/log2.h>
++#include <linux/math.h>
++#include <linux/memblock.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/printk.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <asm/page.h>
++
++#define SEC_LOG_MAGIC		0x4d474f4c	/* "LOGM" */
++#define SEC_LOG_HEADER_SIZE	8		/* magic + write ptr */
++
++/*
++ * Write-combined mapping of [base-8, base+size): header at +0 (magic)
++ * and +4 (ptr), the ring at +8.  NULL until sec_log_console_init()
++ * succeeds; the console write callback no-ops on NULL.
++ */
++static void __iomem *sec_log_map;
++static u32 sec_log_size;			/* ring size, power of two */
++static phys_addr_t sec_log_base;		/* ring phys address */
++
++static DEFINE_SPINLOCK(sec_log_lock);
++
++/*
++ * "sec_log=<size>@<base>" — same parsing rules as the stock parser:
++ * size must be a non-zero power of two, base follows '@'.
++ */
++static int __init sec_log_early_param(char *str)
++{
++	char *end;
++	unsigned long long size, base;
++	phys_addr_t env_base, env_end;
++
++	size = memparse(str, &end);
++	if (!size || !is_power_of_2(size) || *end != '@' || size > U32_MAX)
++		goto bad;
++	if (kstrtoull(end + 1, 0, &base) || base < SEC_LOG_HEADER_SIZE)
++		goto bad;
++
++	/*
++	 * Reserve the page-aligned envelope covering [base-8, base+size)
++	 * before the linear map is built.  memblock splits regions at byte
++	 * granularity, but ARM excludes (and maps) whole pages, so the
++	 * page holding the header must be inside the no-map region too.
++	 */
++	env_base = round_down(base - SEC_LOG_HEADER_SIZE, PAGE_SIZE);
++	env_end = round_up(base + size, PAGE_SIZE);
++	memblock_reserve(env_base, env_end - env_base);
++	memblock_mark_nomap(env_base, env_end - env_base);
++
++	sec_log_base = base;
++	sec_log_size = size;
++	pr_debug("reserved %pa-%pa from the command line\n",
++		 &env_base, &env_end);
++	return 0;
++bad:
++	pr_err("bad cmdline value, ignoring: %s\n", str);
++	return -EINVAL;
++}
++early_param("sec_log", sec_log_early_param);
++
++/*
++ * DT fallback when the bootloader passes no sec_log= argument: a
++ * reserved-memory child with compatible = "samsung,sec-log" covering
++ * [base-8, base+size).  The node carries the same page-aligned envelope
++ * reserved by the early-param path; the stock-format ring is the
++ * power-of-two suffix of that envelope:
++ *
++ *	ring_size = rounddown_pow_of_two(envelope size)
++ *	ring_base = envelope base + envelope size - ring_size
++ *
++ * so reg = <0 0x25fff000 0 0x201000> yields the 2 MiB ring at 0x26000000
++ * with its header at 0x25fffff8, the stock layout for
++ * sec_log=0x200000@0x26000000.  The slack between envelope start and
++ * ring start holds the 8-byte header below the ring.
++ */
++static int __init sec_log_of_probe(struct device_node *np)
++{
++	const struct reserved_mem *rmem = of_reserved_mem_lookup(np);
++	phys_addr_t end;
++	u64 ring_size;
++
++	if (!rmem) {
++		pr_err("no reserved-memory region found for %pOF\n", np);
++		return -EINVAL;
++	}
++
++	ring_size = rounddown_pow_of_two(rmem->size);
++	end = rmem->base + rmem->size;
++	if (!ring_size || ring_size > U32_MAX ||
++	    rmem->size - ring_size < SEC_LOG_HEADER_SIZE) {
++		pr_err("DT region %pa-%pa cannot host a sec_log ring\n",
++		       &rmem->base, &end);
++		return -EINVAL;
++	}
++
++	sec_log_base = end - ring_size;
++	sec_log_size = ring_size;
++	return 0;
++}
++
++/*
++ * Byte-exact re-implementation of the stock emit_sec_log(): write at
++ * (ptr & (size - 1)), wrap around in two memcpys, then advance the
++ * monotonic byte counter (u32, wrapping like stock).  The header ptr is
++ * published only after the data is in memory.
++ */
++static void sec_log_emit(const char *text, unsigned int len)
++{
++	char __iomem *ring = sec_log_map + SEC_LOG_HEADER_SIZE;
++	u32 __iomem *hdr_ptr = (u32 __iomem *)(sec_log_map + 4);
++	u32 ptr = readl_relaxed(hdr_ptr);
++	u32 pos = ptr & (sec_log_size - 1);
++
++	if (likely(pos + len <= sec_log_size)) {
++		memcpy_toio(ring + pos, text, len);
++	} else {
++		u32 first = sec_log_size - pos;
++		u32 second = len - first;
++
++		memcpy_toio(ring + pos, text, first);
++		memcpy_toio(ring, text + first, second);
++	}
++	wmb();		/* data before the ptr that announces it */
++	writel_relaxed(ptr + len, hdr_ptr);
++}
++
++static void sec_log_console_write(struct console *con, const char *text,
++				  unsigned int len)
++{
++	unsigned long flags;
++	bool locked = true;
++
++	if (!sec_log_map)
++		return;
++
++	/*
++	 * printk calls ->write with console_lock held and IRQs disabled,
++	 * but oops/panic may re-enter with the lock held.  Mirror the
++	 * 8250 policy: trylock during oops so two crashing CPUs cannot
++	 * deadlock, and write anyway when the trylock fails — a garbled
++	 * interleave beats losing the last lines.
++	 */
++	if (oops_in_progress)
++		locked = spin_trylock_irqsave(&sec_log_lock, flags);
++	else
++		spin_lock_irqsave(&sec_log_lock, flags);
++
++	sec_log_emit(text, len);
++
++	if (locked)
++		spin_unlock_irqrestore(&sec_log_lock, flags);
++}
++
++/*
++ * CON_ENABLED like pstore: the bootloader always passes console= options
++ * (console=ram), and register_console() only enables a console that no
++ * console= option names when it is pre-enabled
++ * (kernel/printk/printk.c try_enable_preferred_console()).
++ */
++static struct console sec_log_console = {
++	.name	= "sec_log",
++	.write	= sec_log_console_write,
++	.flags	= CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME,
++	.index	= -1,
++};
++
++#ifdef CONFIG_DEBUG_FS
++/*
++ * Self-test aid: reconstruct the readable log exactly like the stock
++ * sec_log_save_old() reader — the last min(ptr, size) bytes, oldest
++ * first, unwrapped from the ring.
++ */
++static ssize_t sec_log_dbg_read(struct file *file, char __user *buf,
++				size_t count, loff_t *ppos)
++{
++	const char __iomem *ring = sec_log_map + SEC_LOG_HEADER_SIZE;
++	u32 ptr = readl_relaxed(sec_log_map + 4);
++	u32 avail = min(ptr, sec_log_size);
++	u64 off = *ppos;
++	char tmp[256];
++	size_t done = 0;
++
++	if (!avail || off >= avail)
++		return 0;
++	if (count > avail - off)
++		count = avail - off;
++
++	while (done < count) {
++		u32 idx = (ptr - avail + off + done) & (sec_log_size - 1);
++		size_t chunk = min_t(size_t, count - done,
++				     sec_log_size - idx);
++
++		chunk = min_t(size_t, chunk, sizeof(tmp));
++		memcpy_fromio(tmp, ring + idx, chunk);
++		if (copy_to_user(buf + done, tmp, chunk))
++			return done ? done : -EFAULT;
++		done += chunk;
++	}
++	*ppos += done;
++	return done;
++}
++
++static const struct file_operations sec_log_dbg_fops = {
++	.owner		= THIS_MODULE,
++	.read		= sec_log_dbg_read,
++	.llseek		= default_llseek,
++};
++
++static void __init sec_log_debugfs_init(void)
++{
++	debugfs_create_file("sec_log", 0400, NULL, NULL, &sec_log_dbg_fops);
++}
++#else
++static inline void sec_log_debugfs_init(void) { }
++#endif
++
++static int __init sec_log_console_init(void)
++{
++	struct device_node *np;
++	u32 magic;
++
++	if (!sec_log_base) {
++		int err;
++
++		np = of_find_compatible_node(NULL, NULL, "samsung,sec-log");
++		if (!np) {
++			pr_info("no sec_log= cmdline and no samsung,sec-log DT node; log mirror disabled\n");
++			return 0;
++		}
++		err = sec_log_of_probe(np);
++		of_node_put(np);
++		if (err)
++			return 0;
++	}
++
++	sec_log_map = ioremap_wc(sec_log_base - SEC_LOG_HEADER_SIZE,
++				 (resource_size_t)sec_log_size +
++				 SEC_LOG_HEADER_SIZE);
++	if (!sec_log_map) {
++		pr_err("cannot map the ring at %pa\n", &sec_log_base);
++		return -ENOMEM;
++	}
++
++	magic = readl_relaxed(sec_log_map);
++	if (magic != SEC_LOG_MAGIC) {
++		/* Same order as stock: clear the ptr, then the magic. */
++		writel_relaxed(0, sec_log_map + 4);
++		writel_relaxed(SEC_LOG_MAGIC, sec_log_map);
++		pr_info("magic 0x%08x invalid, starting a fresh log at %pa\n",
++			magic, &sec_log_base);
++	} else {
++		pr_info("continuing an existing log, ptr = %u\n",
++			readl_relaxed(sec_log_map + 4));
++	}
++
++	register_console(&sec_log_console);
++	sec_log_debugfs_init();
++	return 0;
++}
++console_initcall(sec_log_console_init);

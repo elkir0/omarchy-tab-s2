@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Call audio for the desktop session: the "Voice Call" profile and CallAudio.
+
+Runs in the desktop session (user unit t715-call-profile.service; the user
+must be in the radio group, and in audio for the mixer).
+
+Profile: workaround for WirePlumber < 0.5.15, which does not select the "Voice
+Call" UCM profile by itself (SYNTHESIS §2.15, D8). It follows shannond's call
+events over /run/shannond/control: at the first call state (dialing, incoming,
+...) it saves the active profile and selects "Voice Call" with the same output
+(headphones if the HiFi profile had them, else the speaker); when the last call
+is released, or the CP crashes, it restores the saved profile. shannond's audio
+hook still drives the codec's Modem switches and rate.
+
+CallAudio: it owns org.mobian_project.CallAudio on the session bus, the service
+omatel-agent asks for mute and the speaker. callaudiod itself would not do:
+it mutes PipeWire's source, and the call's microphone goes from the codec to the
+modem without passing through the AP. MuteMic turns the codec's "Main Mic
+Switch" off, reads it back and answers true only then.
+
+Screen: while a call rings or runs it holds logind's idle inhibitor, so hypridle
+and t715-keys leave the screen on.
+
+Region: once the modem is registered it fills omatel's phone region from the
+line's own number, unless the owner chose one (shannond.region).
+
+Logs carry call ids and states only.
+"""
+import json
+import subprocess
+import sys
+import threading
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+sys.path.insert(0, "/usr/lib/shannond")
+from shannond import region  # noqa: E402
+from shannond.ctl import Connection, CtlError  # noqa: E402
+
+SOCKET = "/run/shannond/control"
+CARD = "alsa_card.platform-sound"
+VOICE_SPEAKER = "Voice Call (Mic, Speaker)"
+VOICE_HEADPHONES = "Voice Call (Headphones, Mic)"
+LIVE = {"dialing", "alerting", "incoming", "waiting", "active", "held"}
+MIC_SWITCH = "Main Mic Switch"
+IDLE_HOLD = ["systemd-inhibit", "--what=idle", "--who=t715-call-profile",
+             "--why=A call is ringing or in progress", "--mode=block", "sleep", "infinity"]
+CALLAUDIO_NAME = "org.mobian_project.CallAudio"
+CALLAUDIO_PATH = "/org/mobian_project/CallAudio"
+CALLAUDIO_XML = """<node><interface name="org.mobian_project.CallAudio">
+  <method name="SelectMode"><arg type="u" direction="in"/><arg type="b" direction="out"/></method>
+  <method name="EnableSpeaker"><arg type="b" direction="in"/><arg type="b" direction="out"/></method>
+  <method name="MuteMic"><arg type="b" direction="in"/><arg type="b" direction="out"/></method>
+</interface></node>"""
+
+
+def active_profile():
+    out = subprocess.run(["pactl", "list", "cards"], capture_output=True, text=True).stdout
+    name = None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("Active Profile:") and name == CARD:
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def set_profile(profile):
+    rc = subprocess.run(["pactl", "set-card-profile", CARD, profile]).returncode
+    print("profile -> %s (rc %d)" % (profile, rc), flush=True)
+
+
+class IdleHold:
+    """logind's idle inhibitor, held by a child process while a call lives."""
+
+    def __init__(self):
+        self.child = None
+
+    def update(self, want):
+        if want and self.child is None:
+            self.child = subprocess.Popen(IDLE_HOLD)
+        elif not want and self.child is not None:
+            self.child.terminate()
+            self.child.wait()
+            self.child = None
+
+
+def fill_region():
+    out = subprocess.run(["mmcli", "-m", "0", "-J"], capture_output=True, text=True).stdout
+    try:
+        numbers = json.loads(out)["modem"]["generic"]["own-numbers"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    return bool(numbers) and region.fill(numbers[0])
+
+
+def run(hold):
+    conn = Connection(SOCKET, None)
+    reply = conn.request("subscribe", {})
+    if not reply.get("ok"):
+        raise CtlError(reply.get("error", "subscribe failed"))
+    print("following shannond call events", flush=True)
+    calls, saved = {}, None
+    region_done = False
+    while True:
+        ev = conn.read()
+        kind, data = ev.get("event"), ev.get("data") or {}
+        if kind == "state" and not region_done:
+            reg = (data.get("reg") or {}).get("cs")
+            if reg in ("home", "roaming"):
+                region_done = fill_region()
+        if kind == "call":
+            state = data.get("state")
+            print("call %s %s" % (data.get("id"), state), flush=True)
+            if state in LIVE:
+                calls[data.get("id")] = state
+            else:
+                calls.pop(data.get("id"), None)
+        elif kind == "crash":
+            calls.clear()
+        if calls and saved is None:
+            saved = active_profile() or "HiFi (Mic, Speaker)"
+            set_profile(VOICE_HEADPHONES if "Headphones" in saved else VOICE_SPEAKER)
+        elif not calls and saved is not None:
+            set_profile(saved)
+            saved = None
+        hold.update(bool(calls))
+
+
+def follow_calls():
+    hold = IdleHold()
+    while True:
+        try:
+            run(hold)
+        except (CtlError, OSError, ValueError) as exc:
+            hold.update(False)
+            print("shannond not reachable (%s), retrying in 5 s" % exc, flush=True)
+        time.sleep(5)
+
+
+def mic_switch(on):
+    """Set the codec's microphone switch; True only if it reads back as asked."""
+    want = "on" if on else "off"
+    subprocess.run(["amixer", "-q", "-c", "wm1814", "cset", "name=" + MIC_SWITCH, want])
+    out = subprocess.run(["amixer", "-c", "wm1814", "cget", "name=" + MIC_SWITCH],
+                         capture_output=True, text=True).stdout
+    return ": values=" + want in out
+
+
+class CallAudio:
+    """org.mobian_project.CallAudio, the three methods omatel-agent calls."""
+
+    def __init__(self):
+        self.speaker = True
+        self.muted = False
+
+    def SelectMode(self, _mode):
+        return True  # the profile follows shannond's calls, see run()
+
+    def EnableSpeaker(self, enable):
+        # The tablet has no earpiece: a call is always on the speaker or the headphones.
+        return bool(enable)
+
+    def MuteMic(self, mute):
+        ok = mic_switch(not mute)
+        print("mic %s: %s" % ("mute" if mute else "unmute", "ok" if ok else "FAILED"), flush=True)
+        if ok:
+            self.muted = bool(mute)
+        return ok
+
+    def method_call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        try:
+            result = getattr(self, method)(*params.unpack())
+        except (AttributeError, TypeError) as exc:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", str(exc))
+            return
+        invocation.return_value(GLib.Variant("(b)", (bool(result),)))
+
+
+def main():
+    threading.Thread(target=follow_calls, daemon=True).start()
+    service = CallAudio()
+    node = Gio.DBusNodeInfo.new_for_xml(CALLAUDIO_XML)
+
+    def on_bus(conn, _name):
+        conn.register_object(CALLAUDIO_PATH, node.interfaces[0], service.method_call, None, None)
+
+    Gio.bus_own_name(Gio.BusType.SESSION, CALLAUDIO_NAME, Gio.BusNameOwnerFlags.NONE, on_bus, None, None)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Selfie
+Comment=Take a photograph with the front camera
+Comment[fr]=Prendre une photo avec la caméra avant
+Exec=t715-camera front
+Icon=camera-web
+Categories=Graphics;Photography;
+Terminal=false

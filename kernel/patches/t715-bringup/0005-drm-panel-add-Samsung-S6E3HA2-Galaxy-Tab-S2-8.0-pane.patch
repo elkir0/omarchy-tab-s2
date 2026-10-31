@@ -1,0 +1,2161 @@
+From 8e0ebf0c6b33aedd6e000a798fefba2dea45197a Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 05/24] drm/panel: add Samsung S6E3HA2 Galaxy Tab S2 8.0 panel
+ driver
+
+1536x2048 AMOLED command-mode panel of the SM-T715.  Reads the panel MTP,
+ELVSS and TSET values and computes the per-level gamma with the vendor
+dynamic-AID algorithm; brightness through a backlight device (0-255).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../panel/samsung,amoled-mipi-dsi.yaml        |    5 +
+ drivers/gpu/drm/panel/Kconfig                 |    7 +
+ drivers/gpu/drm/panel/Makefile                |    1 +
+ .../panel-samsung-s6e3ha2-tabs2-dimming.h     | 1121 +++++++++++++++++
+ .../drm/panel/panel-samsung-s6e3ha2-tabs2.c   |  954 ++++++++++++++
+ 5 files changed, 2088 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2-dimming.h
+ create mode 100644 drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2.c
+
+diff --git a/Documentation/devicetree/bindings/display/panel/samsung,amoled-mipi-dsi.yaml b/Documentation/devicetree/bindings/display/panel/samsung,amoled-mipi-dsi.yaml
+index e8f9e9d06..c157640f9 100644
+--- a/Documentation/devicetree/bindings/display/panel/samsung,amoled-mipi-dsi.yaml
++++ b/Documentation/devicetree/bindings/display/panel/samsung,amoled-mipi-dsi.yaml
+@@ -30,6 +30,8 @@ properties:
+       - samsung,s6e63j0x03
+         # Samsung S6E3HA2 5.7" 1440x2560 AMOLED panel
+       - samsung,s6e3ha2
++        # Samsung S6E3HA2 8.0" 1536x2048 AMOLED panel, Galaxy Tab S2 8.0 (gts28)
++      - samsung,s6e3ha2-tabs2
+         # Samsung S6E3HF2 5.65" 1600x2560 AMOLED panel
+       - samsung,s6e3hf2
+ 
+@@ -43,6 +45,9 @@ properties:
+   vdd3-supply:
+     description: I/O voltage supply
+ 
++  vddr-supply:
++    description: voltage supply for the panel driver IC (1.6 V)
++
+   vci-supply:
+     description: voltage supply for analog circuits
+ 
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index a8cf1b0a5..8650a74c9 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -695,6 +695,13 @@ config DRM_PANEL_SAMSUNG_S6E3HA2
+ 	depends on BACKLIGHT_CLASS_DEVICE
+ 	select VIDEOMODE_HELPERS
+ 
++config DRM_PANEL_SAMSUNG_S6E3HA2_TABS2
++	tristate "Samsung S6E3HA2 DSI command mode panel for the Galaxy Tab S2 8.0 (gts28)"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select VIDEOMODE_HELPERS
++
+ config DRM_PANEL_SAMSUNG_S6E63J0X03
+ 	tristate "Samsung S6E63J0X03 DSI command mode panel"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 987a08702..1e0d95e50 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -70,6 +70,7 @@ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D27A1) += panel-samsung-s6d27a1.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D7AA0) += panel-samsung-s6d7aa0.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FA7) += panel-samsung-s6e3fa7.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2) += panel-samsung-s6e3ha2.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2_TABS2) += panel-samsung-s6e3ha2-tabs2.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63J0X03) += panel-samsung-s6e63j0x03.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63M0) += panel-samsung-s6e63m0.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63M0_SPI) += panel-samsung-s6e63m0-spi.o
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2-dimming.h b/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2-dimming.h
+new file mode 100644
+index 000000000..992d3857b
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2-dimming.h
+@@ -0,0 +1,1121 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Brightness tables and "dynamic AID" gamma computation for the Samsung
++ * S6E3HA2 AMOLED panel of the Galaxy Tab S2 8.0 (SM-T715, board "gts28").
++ *
++ * Private to panel-samsung-s6e3ha2-tabs2.c.  It is a separate header only
++ * so that the very same code can be compiled on the host by the unit test
++ * scripts/tests/test_s6e3ha2_tabs2_gamma.py (sm-t715-linux tree), which
++ * checks it against an independent Python port of the stock algorithm.
++ * It therefore only uses <linux/types.h>, <linux/math64.h> (div_s64,
++ * div64_s64) and <linux/errno.h>.
++ *
++ * Everything is transcribed from Samsung's GPL-2.0 downstream kernel
++ * (kernel_universal5433), directory drivers/video/exynos/panels/.  File
++ * names in the comments below are relative to that directory:
++ *   dynamic_aid.c, dynamic_aid.h        generic dynamic-AID algorithm
++ *   dynamic_aid_s6e3ha2_tabs2.h         per-panel dynamic-AID tables
++ *   dynamic_aid_gamma_curve.h           gamma 2.15 / 2.20 curves
++ *   s6e3ha2_tabs2_mipi_lcd.c ("lcd.c")  MTP decode, 0xCA layout,
++ *                                       update_brightness() decisions
++ *   s6e3ha2_tabs2_param.h ("param.h")   ELVSS / VINT / ACL tables
++ *
++ * Integer arithmetic follows the stock code type for type: int where stock
++ * uses int (struct rgb_t, l_value, m_gray, the gamma result), s64 where it
++ * uses s64 (struct rgb64_t, t1/t2), div_s64()/div64_s64() (truncating
++ * towards zero) where it uses them.  The only behavioural additions are
++ * range checks on the three spots where stock would index out of bounds
++ * or divide by zero for nonsensical MTP data; they return an error instead
++ * (the caller then leaves the panel's own gamma alone).
++ */
++
++#ifndef _PANEL_SAMSUNG_S6E3HA2_TABS2_DIMMING_H
++#define _PANEL_SAMSUNG_S6E3HA2_TABS2_DIMMING_H
++
++#include <linux/errno.h>
++#include <linux/math64.h>
++#include <linux/types.h>
++
++/* ------------------------------------------------------------------------
++ * Sizes
++ */
++
++/* LDI_MTP_LEN = 44, "MTP + Manufacture Date" (lcd.c:64-65) */
++#define TABS2_MTP_LEN			44
++/* SEQ_ELVSS_SET is 0xB6 + 22 bytes (param.h:127-133); LDI_ELVSS_LEN = 22 (lcd.c:69-70) */
++#define TABS2_ELVSS_PARAM_SIZE		23
++#define TABS2_ELVSS_LEN			(TABS2_ELVSS_PARAM_SIZE - 1)
++/* SEQ_GAMMA_CONTROL_SET is 0xCA + 35 bytes (param.h:114-120, GAMMA_PARAM_SIZE param.h:4) */
++#define TABS2_GAMMA_PARAM_SIZE		36
++
++/*
++ * Backlight range: MIN_BRIGHTNESS 0, MAX_BRIGHTNESS 255, DEFAULT_BRIGHTNESS
++ * 122 (lcd.c:54-56); EXTEND_BRIGHTNESS 355 is stock's HBM step (lcd.c:53).
++ */
++#define TABS2_MAX_BRIGHTNESS		255
++#define TABS2_DEFAULT_BRIGHTNESS	122
++#define TABS2_EXTEND_BRIGHTNESS		355
++
++/* dynamic_aid.h:4-9 */
++enum {
++	TABS2_CI_RED,
++	TABS2_CI_GREEN,
++	TABS2_CI_BLUE,
++	TABS2_CI_MAX
++};
++
++/* Gamma reference points, dynamic_aid_s6e3ha2_tabs2.h:7-19 */
++enum {
++	TABS2_IV_VT,
++	TABS2_IV_3,
++	TABS2_IV_11,
++	TABS2_IV_23,
++	TABS2_IV_35,
++	TABS2_IV_51,
++	TABS2_IV_87,
++	TABS2_IV_151,
++	TABS2_IV_203,
++	TABS2_IV_255,
++	TABS2_IV_MAX
++};
++
++/* Brightness levels ("bl"), dynamic_aid_s6e3ha2_tabs2.h:21-89 */
++enum {
++	TABS2_IBR_2NT, TABS2_IBR_3NT, TABS2_IBR_4NT, TABS2_IBR_5NT, TABS2_IBR_6NT,
++	TABS2_IBR_7NT, TABS2_IBR_8NT, TABS2_IBR_9NT, TABS2_IBR_10NT, TABS2_IBR_11NT,
++	TABS2_IBR_12NT, TABS2_IBR_13NT, TABS2_IBR_14NT, TABS2_IBR_15NT, TABS2_IBR_16NT,
++	TABS2_IBR_17NT, TABS2_IBR_19NT, TABS2_IBR_20NT, TABS2_IBR_21NT, TABS2_IBR_22NT,
++	TABS2_IBR_24NT, TABS2_IBR_25NT, TABS2_IBR_27NT, TABS2_IBR_29NT, TABS2_IBR_30NT,
++	TABS2_IBR_32NT, TABS2_IBR_34NT, TABS2_IBR_37NT, TABS2_IBR_39NT, TABS2_IBR_41NT,
++	TABS2_IBR_44NT, TABS2_IBR_47NT, TABS2_IBR_50NT, TABS2_IBR_53NT, TABS2_IBR_56NT,
++	TABS2_IBR_60NT, TABS2_IBR_64NT, TABS2_IBR_68NT, TABS2_IBR_72NT, TABS2_IBR_77NT,
++	TABS2_IBR_82NT, TABS2_IBR_87NT, TABS2_IBR_93NT, TABS2_IBR_98NT, TABS2_IBR_105NT,
++	TABS2_IBR_111NT, TABS2_IBR_119NT, TABS2_IBR_126NT, TABS2_IBR_134NT, TABS2_IBR_143NT,
++	TABS2_IBR_152NT, TABS2_IBR_162NT, TABS2_IBR_172NT, TABS2_IBR_183NT, TABS2_IBR_195NT,
++	TABS2_IBR_207NT, TABS2_IBR_220NT, TABS2_IBR_234NT, TABS2_IBR_249NT, TABS2_IBR_265NT,
++	TABS2_IBR_282NT, TABS2_IBR_300NT, TABS2_IBR_316NT, TABS2_IBR_333NT, TABS2_IBR_360NT,
++	TABS2_IBR_500NT, TABS2_IBR_MAX
++};
++
++/* ------------------------------------------------------------------------
++ * Brightness (0..255) -> level, AID, ELVSS, VINT, ACL
++ */
++
++/*
++ * brightness_table[] (dynamic_aid_s6e3ha2_tabs2.h:92-350), entries 0..255:
++ * the TABS2_IBR_* level for each backlight brightness.  Stock declares 356
++ * entries because its max_brightness is EXTEND_BRIGHTNESS = 355 (lcd.c:53,
++ * 1670); 256..354 repeat the 360-nit level of 255 and 355 is HBM (500 nit,
++ * lcd.c:1095-1096), neither of which is exposed by this driver.
++ */
++static const u8 tabs2_brightness_table[TABS2_MAX_BRIGHTNESS + 1] = {
++	/*   0 */  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13,
++	/*  16 */ 14, 15, 16, 16, 17, 18, 19, 21, 21, 22, 23, 24, 25, 27, 28, 29,
++	/*  32 */ 30, 30, 31, 31, 32, 32, 33, 33, 34, 34, 35, 35, 35, 36, 36, 36,
++	/*  48 */ 37, 37, 37, 38, 38, 38, 39, 39, 39, 39, 40, 40, 40, 41, 41, 41,
++	/*  64 */ 41, 42, 42, 42, 42, 43, 43, 43, 43, 44, 44, 44, 44, 44, 45, 45,
++	/*  80 */ 45, 45, 46, 46, 46, 46, 46, 46, 47, 47, 47, 47, 47, 48, 48, 48,
++	/*  96 */ 48, 48, 48, 49, 49, 49, 49, 49, 49, 49, 50, 50, 50, 50, 50, 50,
++	/* 112 */ 51, 51, 51, 51, 51, 51, 51, 51, 52, 52, 52, 52, 52, 52, 52, 53,
++	/* 128 */ 53, 53, 53, 53, 53, 53, 53, 54, 54, 54, 54, 54, 54, 54, 54, 54,
++	/* 144 */ 55, 55, 55, 55, 55, 55, 55, 55, 56, 56, 56, 56, 56, 56, 56, 56,
++	/* 160 */ 56, 56, 57, 57, 57, 57, 57, 57, 57, 57, 57, 57, 58, 58, 58, 58,
++	/* 176 */ 58, 58, 58, 58, 58, 58, 58, 59, 59, 59, 59, 59, 59, 59, 59, 59,
++	/* 192 */ 59, 59, 59, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 61,
++	/* 208 */ 61, 61, 61, 61, 61, 61, 61, 61, 61, 61, 61, 61, 62, 62, 62, 62,
++	/* 224 */ 62, 62, 62, 62, 62, 62, 62, 62, 63, 63, 63, 63, 63, 63, 63, 63,
++	/* 240 */ 63, 63, 63, 63, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
++};
++
++/* index_brightness_table[] (dynamic_aid_s6e3ha2_tabs2.h:367-434): nit per level */
++static const int tabs2_index_brightness[TABS2_IBR_MAX] = {
++	  2,   3,   4,   5,   6,   7,   8,   9,  10,  11,
++	 12,  13,  14,  15,  16,  17,  19,  20,  21,  22,
++	 24,  25,  27,  29,  30,  32,  34,  37,  39,  41,
++	 44,  47,  50,  53,  56,  60,  64,  68,  72,  77,
++	 82,  87,  93,  98, 105, 111, 119, 126, 134, 143,
++	152, 162, 172, 183, 195, 207, 220, 234, 249, 265,
++	282, 300, 316, 333, 360, 360,
++};
++
++/*
++ * inter_aor_cmd[] (dynamic_aid_s6e3ha2_tabs2.h:608-661), entries 0..255:
++ * the two 0xB2 (AID) parameter bytes, indexed by *brightness*, not by level
++ * (init_aid_dimming_table, lcd.c:946-957; s6e3ha2_aid_parameter_ctl,
++ * lcd.c:616-636).
++ */
++static const u8 tabs2_inter_aor_cmd[TABS2_MAX_BRIGHTNESS + 1][2] = {
++	/*   0 */ { 0xf3, 0x70 }, { 0xf3, 0x70 }, { 0xf3, 0x70 }, { 0xe4, 0x70 }, { 0xd5, 0x70 },
++	/*   5 */ { 0xc7, 0x70 }, { 0xb7, 0x70 }, { 0xa8, 0x70 }, { 0x98, 0x70 }, { 0x89, 0x70 },
++	/*  10 */ { 0x7a, 0x70 }, { 0x6b, 0x70 }, { 0x5a, 0x70 }, { 0x4d, 0x70 }, { 0x3c, 0x70 },
++	/*  15 */ { 0x2c, 0x70 }, { 0x1d, 0x70 }, { 0x0d, 0x70 }, { 0xfd, 0x60 }, { 0xee, 0x60 },
++	/*  20 */ { 0xdd, 0x60 }, { 0xcd, 0x60 }, { 0xbd, 0x60 }, { 0xa3, 0x60 }, { 0x8a, 0x60 },
++	/*  25 */ { 0x6a, 0x60 }, { 0x48, 0x60 }, { 0x38, 0x60 }, { 0x16, 0x60 }, { 0xc0, 0x50 },
++	/*  30 */ { 0x9e, 0x50 }, { 0x7a, 0x50 }, { 0x61, 0x50 }, { 0x47, 0x50 }, { 0x2b, 0x50 },
++	/*  35 */ { 0x0f, 0x50 }, { 0xf2, 0x40 }, { 0xd6, 0x40 }, { 0xbc, 0x40 }, { 0xa1, 0x40 },
++	/*  40 */ { 0x83, 0x40 }, { 0x66, 0x40 }, { 0x4d, 0x40 }, { 0x33, 0x40 }, { 0x1a, 0x40 },
++	/*  45 */ { 0x01, 0x40 }, { 0xe9, 0x30 }, { 0xd0, 0x30 }, { 0xb8, 0x30 }, { 0x9f, 0x30 },
++	/*  50 */ { 0x87, 0x30 }, { 0x6e, 0x30 }, { 0x56, 0x30 }, { 0x3d, 0x30 }, { 0x25, 0x30 },
++	/*  55 */ { 0x0e, 0x30 }, { 0xf7, 0x20 }, { 0xdf, 0x20 }, { 0x10, 0x30 }, { 0xff, 0x20 },
++	/*  60 */ { 0xdf, 0x20 }, { 0x1c, 0x30 }, { 0xfe, 0x20 }, { 0xee, 0x20 }, { 0xdf, 0x20 },
++	/*  65 */ { 0x18, 0x30 }, { 0x0a, 0x30 }, { 0xed, 0x20 }, { 0xdf, 0x20 }, { 0x15, 0x30 },
++	/*  70 */ { 0xfa, 0x20 }, { 0xed, 0x20 }, { 0xdf, 0x20 }, { 0x2b, 0x30 }, { 0x12, 0x30 },
++	/*  75 */ { 0x05, 0x30 }, { 0xec, 0x20 }, { 0xdf, 0x20 }, { 0x0f, 0x30 }, { 0x03, 0x30 },
++	/*  80 */ { 0xeb, 0x20 }, { 0xdf, 0x20 }, { 0x2d, 0x30 }, { 0x17, 0x30 }, { 0x0c, 0x30 },
++	/*  85 */ { 0x00, 0x30 }, { 0xea, 0x20 }, { 0xdf, 0x20 }, { 0x1e, 0x30 }, { 0x09, 0x30 },
++	/*  90 */ { 0xff, 0x20 }, { 0xea, 0x20 }, { 0xdf, 0x20 }, { 0x24, 0x30 }, { 0x11, 0x30 },
++	/*  95 */ { 0x07, 0x30 }, { 0xfd, 0x20 }, { 0xe9, 0x20 }, { 0xdf, 0x20 }, { 0x29, 0x30 },
++	/* 100 */ { 0x17, 0x30 }, { 0x0d, 0x30 }, { 0x04, 0x30 }, { 0xfb, 0x20 }, { 0xe8, 0x20 },
++	/* 105 */ { 0xdf, 0x20 }, { 0x1c, 0x30 }, { 0x13, 0x30 }, { 0x02, 0x30 }, { 0xf9, 0x20 },
++	/* 110 */ { 0xe8, 0x20 }, { 0xdf, 0x20 }, { 0x29, 0x30 }, { 0x18, 0x30 }, { 0x10, 0x30 },
++	/* 115 */ { 0x08, 0x30 }, { 0x00, 0x30 }, { 0xef, 0x20 }, { 0xe7, 0x20 }, { 0xdf, 0x20 },
++	/* 120 */ { 0x25, 0x30 }, { 0x15, 0x30 }, { 0x0d, 0x30 }, { 0xfe, 0x20 }, { 0xf6, 0x20 },
++	/* 125 */ { 0xe7, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 },
++	/* 130 */ { 0xdf, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 }, { 0xdf, 0x20 },
++	/* 135 */ { 0xd2, 0x20 }, { 0xc6, 0x20 }, { 0xb9, 0x20 }, { 0xad, 0x20 }, { 0xa0, 0x20 },
++	/* 140 */ { 0x94, 0x20 }, { 0x87, 0x20 }, { 0x7b, 0x20 }, { 0x6e, 0x20 }, { 0x60, 0x20 },
++	/* 145 */ { 0x52, 0x20 }, { 0x44, 0x20 }, { 0x36, 0x20 }, { 0x28, 0x20 }, { 0x1a, 0x20 },
++	/* 150 */ { 0x0c, 0x20 }, { 0xfe, 0x10 }, { 0xf1, 0x10 }, { 0xe5, 0x10 }, { 0xd8, 0x10 },
++	/* 155 */ { 0xcc, 0x10 }, { 0xbf, 0x10 }, { 0xb3, 0x10 }, { 0xa7, 0x10 }, { 0x9a, 0x10 },
++	/* 160 */ { 0x8e, 0x10 }, { 0x81, 0x10 }, { 0x73, 0x10 }, { 0x65, 0x10 }, { 0x57, 0x10 },
++	/* 165 */ { 0x49, 0x10 }, { 0x3c, 0x10 }, { 0x2e, 0x10 }, { 0x20, 0x10 }, { 0x12, 0x10 },
++	/* 170 */ { 0x04, 0x10 }, { 0xf6, 0x00 }, { 0xe9, 0x00 }, { 0xdc, 0x00 }, { 0xcf, 0x00 },
++	/* 175 */ { 0xc2, 0x00 }, { 0xb5, 0x00 }, { 0xa8, 0x00 }, { 0x9b, 0x00 }, { 0x8e, 0x00 },
++	/* 180 */ { 0x81, 0x00 }, { 0x74, 0x00 }, { 0x67, 0x00 }, { 0xd6, 0x00 }, { 0xc7, 0x00 },
++	/* 185 */ { 0xc0, 0x00 }, { 0xb8, 0x00 }, { 0xaa, 0x00 }, { 0xa2, 0x00 }, { 0x9b, 0x00 },
++	/* 190 */ { 0x8c, 0x00 }, { 0x85, 0x00 }, { 0x7d, 0x00 }, { 0x6e, 0x00 }, { 0x67, 0x00 },
++	/* 195 */ { 0xd6, 0x00 }, { 0xc8, 0x00 }, { 0xc1, 0x00 }, { 0xb3, 0x00 }, { 0xad, 0x00 },
++	/* 200 */ { 0x9f, 0x00 }, { 0x98, 0x00 }, { 0x91, 0x00 }, { 0x83, 0x00 }, { 0x7c, 0x00 },
++	/* 205 */ { 0x6e, 0x00 }, { 0x67, 0x00 }, { 0xd6, 0x00 }, { 0xc9, 0x00 }, { 0xc3, 0x00 },
++	/* 210 */ { 0xb5, 0x00 }, { 0xaf, 0x00 }, { 0xa8, 0x00 }, { 0x9b, 0x00 }, { 0x95, 0x00 },
++	/* 215 */ { 0x8e, 0x00 }, { 0x81, 0x00 }, { 0x7b, 0x00 }, { 0x6e, 0x00 }, { 0x67, 0x00 },
++	/* 220 */ { 0xc4, 0x00 }, { 0xb8, 0x00 }, { 0xb1, 0x00 }, { 0xab, 0x00 }, { 0x9f, 0x00 },
++	/* 225 */ { 0x99, 0x00 }, { 0x92, 0x00 }, { 0x86, 0x00 }, { 0x80, 0x00 }, { 0x7a, 0x00 },
++	/* 230 */ { 0x6d, 0x00 }, { 0x67, 0x00 }, { 0xc5, 0x00 }, { 0xb9, 0x00 }, { 0xb4, 0x00 },
++	/* 235 */ { 0xa8, 0x00 }, { 0xa2, 0x00 }, { 0x96, 0x00 }, { 0x90, 0x00 }, { 0x8a, 0x00 },
++	/* 240 */ { 0x7f, 0x00 }, { 0x79, 0x00 }, { 0x6d, 0x00 }, { 0x67, 0x00 }, { 0xef, 0x00 },
++	/* 245 */ { 0xdf, 0x00 }, { 0xd4, 0x00 }, { 0xc4, 0x00 }, { 0xb9, 0x00 }, { 0xa8, 0x00 },
++	/* 250 */ { 0x9d, 0x00 }, { 0x8d, 0x00 }, { 0x82, 0x00 }, { 0x72, 0x00 }, { 0x67, 0x00 },
++	/* 255 */ { 0x67, 0x00 },
++};
++
++/* MPS_TABLE[CAPS_MAX] = {0x8C, 0x9C} (param.h:229-237) */
++enum {
++	TABS2_CAPS_OFF,
++	TABS2_CAPS_ON,
++	TABS2_CAPS_MAX
++};
++
++static const u8 tabs2_mps_table[TABS2_CAPS_MAX] = { 0x8c, 0x9c };
++
++/* ELVSS_STATUS_* (param.h:243-283): 38 levels, the last one is 360 nit */
++#define TABS2_ELVSS_STATUS_MAX		38
++
++/* ELVSS_DIM_TABLE[] (param.h:285-290) */
++static const int tabs2_elvss_dim_table[TABS2_ELVSS_STATUS_MAX] = {
++	4,	9,	14,	19,	24,	25,	27,	29,	30,	32,
++	34,	37,	39,	41,	44,	47,	50,	53,	56,	119,
++	126,	134,	143,	152,	162,	172,	183,	195,	207,	220,
++	234,	249,	265,	282,	300,	316,	333,	360
++};
++
++/* ELVSS_TABLE[] (param.h:292-297) */
++static const u8 tabs2_elvss_table[TABS2_ELVSS_STATUS_MAX] = {
++	0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x12, 0x12, 0x13, 0x13,
++	0x13, 0x14, 0x14, 0x15, 0x15, 0x16, 0x17, 0x17, 0x18, 0x19,
++	0x18, 0x18, 0x17, 0x17, 0x16, 0x15, 0x14, 0x14, 0x14, 0x14,
++	0x13, 0x13, 0x12, 0x10, 0x10, 0x0f, 0x0e, 0x0d
++};
++
++/* VINT_STATUS_* (param.h:299-311), VINT_DIM_TABLE[] (param.h:313-316) */
++#define TABS2_VINT_STATUS_MAX		10
++
++static const int tabs2_vint_dim_table[TABS2_VINT_STATUS_MAX] = {
++	5,	6,	7,	8,	9,
++	10,	11,	12,	13,	14
++};
++
++/* VINT_TABLE[] (param.h:318-321) */
++static const u8 tabs2_vint_table[TABS2_VINT_STATUS_MAX] = {
++	0x21, 0x21, 0x21, 0x21, 0x21,
++	0x21, 0x21, 0x21, 0x21, 0x21
++};
++
++/* ACL_STATUS_0P / ACL_STATUS_15P (param.h:201-205) */
++enum {
++	TABS2_ACL_STATUS_0P,
++	TABS2_ACL_STATUS_15P,
++	TABS2_ACL_STATUS_MAX
++};
++
++/*
++ * ACL_CUTOFF_TABLE[] = { SEQ_ACL_OFF, SEQ_ACL_15 } (param.h:170-178, 207-210)
++ * ACL_OPR_TABLE[] = { SEQ_ACL_OFF_OPR, SEQ_ACL_ON_OPR } (param.h:160-168, 218-221),
++ * indexed by the ACL level in s6e3ha2_set_acl() (lcd.c:649-651)
++ */
++static const u8 tabs2_acl_cutoff_table[TABS2_ACL_STATUS_MAX][2] = {
++	{ 0x55, 0x00 },
++	{ 0x55, 0x02 },
++};
++
++static const u8 tabs2_acl_opr_table[TABS2_ACL_STATUS_MAX][2] = {
++	{ 0xb5, 0x40 },
++	{ 0xb5, 0x50 },
++};
++
++/* get_backlight_level_from_brightness(), lcd.c:587-594 */
++static unsigned int tabs2_brightness_to_level(unsigned int brightness)
++{
++	if (brightness > TABS2_MAX_BRIGHTNESS)
++		brightness = TABS2_MAX_BRIGHTNESS;
++
++	return tabs2_brightness_table[brightness];
++}
++
++/* s6e3ha2_set_caps(), lcd.c:662-675; LEVEL_IS_CAPS_OFF, lcd.c:48 */
++static int tabs2_caps(unsigned int bl)
++{
++	return bl <= TABS2_IBR_39NT ? TABS2_CAPS_OFF : TABS2_CAPS_ON;
++}
++
++/* ELVSS level: s6e3ha2_set_elvss(), lcd.c:683-690 */
++static int tabs2_elvss_level(unsigned int bl)
++{
++	int nit = tabs2_index_brightness[bl];
++	int level = TABS2_ELVSS_STATUS_MAX - 1;	/* ELVSS_STATUS_360 */
++	int i;
++
++	for (i = 0; i < TABS2_ELVSS_STATUS_MAX; i++) {
++		if (nit <= tabs2_elvss_dim_table[i]) {
++			level = i;
++			break;
++		}
++	}
++
++	return level;
++}
++
++/* VINT level: s6e3ha2_set_vint(), lcd.c:756-763 */
++static int tabs2_vint_level(unsigned int bl)
++{
++	int nit = tabs2_index_brightness[bl];
++	int level = TABS2_VINT_STATUS_MAX - 1;	/* VINT_STATUS_014 */
++	int i;
++
++	for (i = 0; i < TABS2_VINT_STATUS_MAX; i++) {
++		if (nit <= tabs2_vint_dim_table[i]) {
++			level = i;
++			break;
++		}
++	}
++
++	return level;
++}
++
++/*
++ * ACL level: s6e3ha2_set_acl(), lcd.c:638-660, with the stock defaults
++ * siop_enable = 0 and acl_enable = 0 (lcd.c:1675, 1683):
++ * LEVEL_IS_ACL_OFF(brightness) = 255 <= brightness <= 354 (lcd.c:49).
++ */
++static int tabs2_acl_level(unsigned int brightness)
++{
++	if (brightness >= TABS2_MAX_BRIGHTNESS &&
++	    brightness <= TABS2_EXTEND_BRIGHTNESS - 1)
++		return TABS2_ACL_STATUS_0P;
++
++	return TABS2_ACL_STATUS_15P;
++}
++
++/*
++ * 0xB6 payload for one (caps, ELVSS level), init_elvss_table() lcd.c:959-990:
++ * the 22 bytes read back from 0xB6 at probe, then byte 1 = MPS_TABLE[caps]
++ * and byte 2 = ELVSS_TABLE[level].  The two temperature variants of the
++ * stock table are identical (the per-temperature line is commented out,
++ * lcd.c:987).
++ */
++static void tabs2_build_elvss(u8 out[TABS2_ELVSS_PARAM_SIZE], int caps,
++			      int level, const u8 elvss_read[TABS2_ELVSS_LEN])
++{
++	int i;
++
++	for (i = 0; i < TABS2_ELVSS_LEN; i++)
++		out[1 + i] = elvss_read[i];
++
++	out[0] = 0xb6;				/* LDI_ELVSS_REG, lcd.c:69 */
++	out[1] = tabs2_mps_table[caps];
++	out[2] = tabs2_elvss_table[level];
++}
++
++/* ------------------------------------------------------------------------
++ * Dynamic AID tables (dynamic_aid_s6e3ha2_tabs2.h)
++ */
++
++/* VREG_OUT_X1000 (:352); dynamic_aid() uses MUL_100() of it (dynamic_aid.c:434) */
++#define TABS2_VREG_OUT_X1000		6800
++#define TABS2_VREG			(TABS2_VREG_OUT_X1000 * 100)
++
++/*
++ * vref_h: init_dynamic_aid() (lcd.c:777-795) never sets daid.vref_h and
++ * struct lcd_info is kzalloc()ed (lcd.c:1646), so stock runs with 0
++ * (the TM2-family s6e3ha2_mipi_lcd.c does the same).
++ */
++#define TABS2_VREF_H			0
++
++/* index_voltage_table[] (:354-365) */
++static const int tabs2_index_voltage[TABS2_IV_MAX] = {
++	0, 3, 11, 23, 35, 51, 87, 151, 203, 255
++};
++
++/* iv_top = iv_tbl[iv_max - 1] (dynamic_aid.c:432) */
++#define TABS2_IV_TOP			255
++
++/* gamma_default_0[] (:436-447), VT .. V255 */
++static const int tabs2_gamma_default[TABS2_IV_MAX * TABS2_CI_MAX] = {
++	0x00, 0x00, 0x00,	/* IV_VT */
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80,
++	0x100, 0x100, 0x100,	/* IV_255 */
++};
++
++/* gamma_formula[] (:451-462): { numerator, denominator } */
++static const int tabs2_gamma_formula[TABS2_IV_MAX][2] = {
++	{ 0, 860 },	/* IV_VT */
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 64, 320 },
++	{ 72, 860 },	/* IV_255 */
++};
++
++/* vt_voltage_value[] (:464-466) */
++#define TABS2_VT_VOLTAGE_COUNT		16
++
++static const int tabs2_vt_voltage_value[TABS2_VT_VOLTAGE_COUNT] = {
++	0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 138, 148, 158, 168, 178, 186
++};
++
++/* brightness_base_table[] (:468-535) */
++static const int tabs2_brightness_base[TABS2_IBR_MAX] = {
++	112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++	112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++	112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++	112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++	118, 126, 136, 141, 152, 160, 172, 180, 190, 202,
++	216, 228, 240, 253, 253, 253, 253, 253, 253, 268,
++	283, 303, 319, 335, 360, 360,
++};
++
++/* gamma_curve_2p15_table[] (dynamic_aid_gamma_curve.h:459-492) */
++static const int tabs2_gamma_curve_2p15[TABS2_IV_TOP + 1] = {
++	0,	7,	30,	71,	132,	213,	315,	439,
++	586,	754,	946,	1161,	1400,	1663,	1950,	2262,
++	2599,	2961,	3348,	3761,	4199,	4663,	5154,	5671,
++	6214,	6784,	7381,	8005,	8656,	9335,	10040,	10774,
++	11535,	12324,	13141,	13986,	14859,	15761,	16691,	17649,
++	18637,	19653,	20698,	21772,	22875,	24007,	25169,	26360,
++	27581,	28831,	30111,	31421,	32760,	34130,	35529,	36959,
++	38419,	39909,	41429,	42980,	44562,	46174,	47817,	49490,
++	51195,	52930,	54696,	56494,	58322,	60182,	62073,	63995,
++	65948,	67933,	69950,	71998,	74078,	76189,	78333,	80508,
++	82715,	84954,	87224,	89528,	91863,	94230,	96630,	99062,
++	101526,	104022,	106552,	109113,	111708,	114334,	116994,	119686,
++	122411,	125169,	127960,	130784,	133641,	136530,	139453,	142409,
++	145399,	148421,	151477,	154566,	157688,	160844,	164034,	167257,
++	170513,	173803,	177127,	180484,	183875,	187300,	190759,	194252,
++	197778,	201339,	204933,	208562,	212224,	215921,	219652,	223417,
++	227217,	231050,	234918,	238821,	242757,	246729,	250734,	254775,
++	258849,	262959,	267103,	271282,	275495,	279743,	284026,	288344,
++	292697,	297084,	301507,	305964,	310457,	314984,	319547,	324145,
++	328778,	333446,	338149,	342888,	347661,	352471,	357315,	362195,
++	367110,	372061,	377047,	382069,	387126,	392219,	397348,	402512,
++	407712,	412948,	418219,	423526,	428869,	434248,	439663,	445113,
++	450600,	456122,	461681,	467275,	472906,	478572,	484275,	490014,
++	495789,	501600,	507448,	513332,	519252,	525208,	531201,	537230,
++	543296,	549398,	555536,	561711,	567923,	574171,	580455,	586777,
++	593134,	599529,	605960,	612428,	618933,	625474,	632052,	638668,
++	645319,	652008,	658734,	665497,	672296,	679133,	686006,	692917,
++	699865,	706850,	713872,	720931,	728027,	735160,	742331,	749539,
++	756784,	764066,	771386,	778743,	786138,	793569,	801039,	808545,
++	816089,	823671,	831290,	838947,	846641,	854373,	862143,	869950,
++	877794,	885677,	893597,	901555,	909550,	917584,	925655,	933764,
++	941911,	950095,	958318,	966578,	974877,	983213,	991588,	1000000,
++};
++
++/* gamma_curve_2p20_table[] (dynamic_aid_gamma_curve.h:529-562) */
++static const int tabs2_gamma_curve_2p20[TABS2_IV_TOP + 1] = {
++	0,	5,	23,	57,	107,	175,	262,	367,
++	493,	638,	805,	992,	1202,	1433,	1687,	1963,
++	2263,	2586,	2932,	3303,	3697,	4116,	4560,	5028,
++	5522,	6041,	6585,	7155,	7751,	8373,	9021,	9696,
++	10398,	11126,	11881,	12664,	13473,	14311,	15175,	16068,
++	16988,	17936,	18913,	19918,	20951,	22013,	23104,	24223,
++	25371,	26549,	27755,	28991,	30257,	31551,	32876,	34230,
++	35614,	37029,	38473,	39947,	41452,	42987,	44553,	46149,
++	47776,	49433,	51122,	52842,	54592,	56374,	58187,	60032,
++	61907,	63815,	65754,	67725,	69727,	71761,	73828,	75926,
++	78057,	80219,	82414,	84642,	86901,	89194,	91518,	93876,
++	96266,	98689,	101145,	103634,	106156,	108711,	111299,	113921,
++	116576,	119264,	121986,	124741,	127530,	130352,	133209,	136099,
++	139022,	141980,	144972,	147998,	151058,	154152,	157281,	160444,
++	163641,	166872,	170138,	173439,	176774,	180144,	183549,	186989,
++	190463,	193972,	197516,	201096,	204710,	208360,	212044,	215764,
++	219520,	223310,	227137,	230998,	234895,	238828,	242796,	246800,
++	250840,	254916,	259027,	263175,	267358,	271577,	275833,	280124,
++	284452,	288816,	293216,	297653,	302125,	306635,	311180,	315763,
++	320382,	325037,	329729,	334458,	339223,	344026,	348865,	353741,
++	358654,	363604,	368591,	373615,	378676,	383775,	388910,	394083,
++	399293,	404541,	409826,	415148,	420508,	425905,	431340,	436813,
++	442323,	447871,	453456,	459080,	464741,	470440,	476177,	481952,
++	487765,	493616,	499505,	505432,	511398,	517401,	523443,	529523,
++	535642,	541798,	547994,	554227,	560499,	566810,	573159,	579547,
++	585973,	592438,	598942,	605484,	612066,	618686,	625345,	632043,
++	638779,	645555,	652370,	659224,	666117,	673049,	680020,	687031,
++	694081,	701170,	708298,	715465,	722672,	729919,	737205,	744530,
++	751895,	759300,	766744,	774227,	781751,	789314,	796917,	804559,
++	812241,	819964,	827726,	835528,	843370,	851252,	859174,	867136,
++	875138,	883180,	891262,	899385,	907547,	915750,	923993,	932277,
++	940601,	948965,	957370,	965815,	974300,	982826,	991393,	1000000,
++};
++
++/* gamma_curve_tables[] (:537-604): 2.15 up to 333 nit, 2.20 for 360/500 nit */
++static const int *const tabs2_gamma_curve_tables[TABS2_IBR_MAX] = {
++	[TABS2_IBR_2NT ... TABS2_IBR_333NT] = tabs2_gamma_curve_2p15,
++	[TABS2_IBR_360NT] = tabs2_gamma_curve_2p20,
++	[TABS2_IBR_500NT] = tabs2_gamma_curve_2p20,
++};
++
++/* gamma_curve_lut = gamma_curve_2p20_table (:606) */
++static const int *const tabs2_gamma_curve_lut = tabs2_gamma_curve_2p20;
++
++/* offset_gradation[][] (:732-800), VT .. V255 */
++static const s8 tabs2_offset_gradation[TABS2_IBR_MAX][TABS2_IV_MAX] = {
++	{ 0, 41, 42, 37, 32, 30, 22, 14, 9, 0 },	/*   2 nit, line 734 */
++	{ 0, 36, 36, 32, 27, 24, 19, 12, 7, 0 },	/*   3 nit, line 735 */
++	{ 0, 29, 32, 27, 22, 19, 15, 10, 6, 0 },	/*   4 nit, line 736 */
++	{ 0, 26, 28, 24, 20, 17, 13, 9, 6, 0 },	/*   5 nit, line 737 */
++	{ 0, 26, 25, 21, 17, 15, 13, 8, 5, 0 },	/*   6 nit, line 738 */
++	{ 0, 19, 24, 20, 15, 13, 11, 7, 5, 0 },	/*   7 nit, line 739 */
++	{ 0, 20, 22, 18, 14, 13, 10, 6, 5, 0 },	/*   8 nit, line 740 */
++	{ 0, 21, 20, 16, 12, 11, 9, 6, 5, 0 },	/*   9 nit, line 741 */
++	{ 0, 21, 20, 16, 12, 11, 9, 6, 5, 0 },	/*  10 nit, line 742 */
++	{ 0, 21, 18, 15, 11, 10, 9, 6, 5, 0 },	/*  11 nit, line 743 */
++	{ 0, 20, 18, 14, 11, 10, 8, 6, 4, 0 },	/*  12 nit, line 744 */
++	{ 0, 19, 16, 13, 10, 9, 7, 6, 4, 0 },	/*  13 nit, line 745 */
++	{ 0, 18, 15, 12, 9, 8, 7, 5, 4, 0 },	/*  14 nit, line 746 */
++	{ 0, 18, 15, 12, 9, 8, 6, 5, 4, 0 },	/*  15 nit, line 747 */
++	{ 0, 16, 15, 11, 8, 8, 6, 5, 4, 0 },	/*  16 nit, line 748 */
++	{ 0, 17, 14, 11, 8, 7, 5, 5, 4, 0 },	/*  17 nit, line 749 */
++	{ 0, 15, 13, 10, 7, 6, 5, 5, 4, 0 },	/*  19 nit, line 750 */
++	{ 0, 15, 13, 9, 7, 6, 5, 4, 4, 0 },	/*  20 nit, line 751 */
++	{ 0, 15, 13, 9, 7, 6, 5, 4, 4, 0 },	/*  21 nit, line 752 */
++	{ 0, 15, 12, 9, 7, 6, 5, 4, 4, 0 },	/*  22 nit, line 753 */
++	{ 0, 14, 12, 8, 7, 6, 5, 4, 4, 0 },	/*  24 nit, line 754 */
++	{ 0, 14, 12, 8, 6, 6, 5, 4, 4, 0 },	/*  25 nit, line 755 */
++	{ 0, 14, 12, 8, 6, 5, 5, 4, 4, 0 },	/*  27 nit, line 756 */
++	{ 0, 13, 11, 8, 5, 5, 4, 3, 4, 0 },	/*  29 nit, line 757 */
++	{ 0, 13, 11, 8, 5, 5, 4, 3, 4, 0 },	/*  30 nit, line 758 */
++	{ 0, 13, 10, 7, 5, 5, 4, 3, 4, 0 },	/*  32 nit, line 759 */
++	{ 0, 12, 10, 7, 4, 5, 4, 3, 3, 0 },	/*  34 nit, line 760 */
++	{ 0, 12, 10, 7, 5, 4, 4, 3, 3, 0 },	/*  37 nit, line 761 */
++	{ 0, 12, 9, 7, 4, 4, 3, 3, 3, 0 },	/*  39 nit, line 762 */
++	{ 0, 11, 9, 6, 4, 4, 4, 3, 3, 0 },	/*  41 nit, line 763 */
++	{ 0, 10, 8, 6, 4, 4, 4, 3, 3, 0 },	/*  44 nit, line 764 */
++	{ 0, 10, 8, 5, 3, 4, 4, 3, 3, 0 },	/*  47 nit, line 765 */
++	{ 0, 10, 8, 5, 3, 3, 4, 3, 3, 0 },	/*  50 nit, line 766 */
++	{ 0, 9, 8, 5, 3, 4, 4, 2, 3, 0 },	/*  53 nit, line 767 */
++	{ 0, 9, 8, 5, 3, 4, 4, 2, 3, 0 },	/*  56 nit, line 768 */
++	{ 0, 9, 7, 5, 3, 3, 3, 2, 3, 0 },	/*  60 nit, line 769 */
++	{ 0, 8, 6, 4, 3, 3, 3, 2, 3, 0 },	/*  64 nit, line 770 */
++	{ 0, 8, 6, 4, 2, 3, 2, 2, 3, 0 },	/*  68 nit, line 771 */
++	{ 0, 7, 5, 4, 2, 2, 2, 2, 3, 0 },	/*  72 nit, line 772 */
++	{ 0, 7, 5, 3, 2, 2, 2, 2, 3, 0 },	/*  77 nit, line 773 */
++	{ 0, 7, 5, 3, 2, 2, 1, 2, 2, 0 },	/*  82 nit, line 774 */
++	{ 0, 7, 5, 3, 2, 1, 2, 2, 1, 0 },	/*  87 nit, line 775 */
++	{ 0, 7, 4, 2, 1, 1, 2, 2, 2, 0 },	/*  93 nit, line 776 */
++	{ 0, 7, 4, 3, 2, 1, 2, 3, 2, 0 },	/*  98 nit, line 777 */
++	{ 0, 7, 5, 4, 2, 2, 2, 3, 2, 0 },	/* 105 nit, line 778 */
++	{ 0, 7, 5, 3, 2, 1, 2, 2, 1, 0 },	/* 111 nit, line 779 */
++	{ 0, 7, 5, 3, 3, 2, 2, 4, 1, 0 },	/* 119 nit, line 780 */
++	{ 0, 7, 4, 2, 2, 2, 2, 3, 1, 0 },	/* 126 nit, line 781 */
++	{ 0, 7, 4, 3, 2, 1, 2, 4, 1, 0 },	/* 134 nit, line 782 */
++	{ 0, 6, 4, 3, 2, 2, 2, 3, 1, 0 },	/* 143 nit, line 783 */
++	{ 0, 6, 4, 3, 2, 2, 2, 4, 1, 0 },	/* 152 nit, line 784 */
++	{ 0, 6, 3, 2, 2, 2, 3, 3, 1, 0 },	/* 162 nit, line 785 */
++	{ 0, 5, 3, 2, 2, 2, 3, 4, 1, 0 },	/* 172 nit, line 786 */
++	{ 0, 5, 3, 2, 2, 2, 2, 3, 1, 0 },	/* 183 nit, line 787 */
++	{ 0, 5, 3, 1, 2, 2, 2, 3, 1, 0 },	/* 195 nit, line 788 */
++	{ 0, 4, 3, 1, 1, 1, 1, 2, 1, 0 },	/* 207 nit, line 789 */
++	{ 0, 3, 2, 1, 1, 1, 1, 2, 0, 0 },	/* 220 nit, line 790 */
++	{ 0, 3, 2, 0, 1, 1, 1, 1, 0, 0 },	/* 234 nit, line 791 */
++	{ 0, 0, 0, 0, 0, 0, 1, 1, 0, 0 },	/* 249 nit, line 792 */
++	{ 0, 0, 0, 0, 0, 0, 0, 1, 0, 0 },	/* 265 nit, line 793 */
++	{ 0, 0, 0, 0, 0, 1, 0, 1, 0, 0 },	/* 282 nit, line 794 */
++	{ 0, 0, 0, 0, 0, 0, 0, 1, 0, 0 },	/* 300 nit, line 795 */
++	{ 0, 0, 0, 0, -1, 0, 0, 0, 0, 0 },	/* 316 nit, line 796 */
++	{ 0, 0, 0, -1, 0, 0, 0, 0, 0, 0 },	/* 333 nit, line 797 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },	/* 360 nit, line 798 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },	/* 500NT (HBM), line 799 */
++};
++
++/* offset_color[][] (:802-870), VT .. V255, R G B per point */
++static const s8 tabs2_offset_color[TABS2_IBR_MAX][TABS2_IV_MAX * TABS2_CI_MAX] = {
++	/*   2 nit, line 804 */
++	{ 0, 0, 0, 0, 0, 0, -3, 2, -4, -3, 2, -5, -4, 3, -7,
++	  -9, 3, -9, -6, 4, -7, -3, 1, -4, -4, 0, -4, -7, 0, -1 },
++	/*   3 nit, line 805 */
++	{ 0, 0, 0, 0, 0, 0, -3, 2, -6, -3, 2, -6, -7, 2, -7,
++	  -7, 3, -9, -7, 3, -8, -3, 0, -4, -4, 0, -4, -5, 0, 1 },
++	/*   4 nit, line 806 */
++	{ 0, 0, 0, 0, 0, 0, -5, 0, -8, -5, 1, -8, -7, 2, -8,
++	  -7, 3, -9, -8, 2, -8, -3, 0, -4, -2, 0, -2, -4, 0, 1 },
++	/*   5 nit, line 807 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -6, -5, 3, -7, -6, 2, -7,
++	  -7, 3, -9, -7, 3, -7, -3, 0, -4, -2, 0, -3, -3, 0, 2 },
++	/*   6 nit, line 808 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -8, -3, 3, -6, -5, 3, -7,
++	  -7, 3, -9, -6, 2, -6, -3, 0, -4, -2, 0, -2, -2, 0, 2 },
++	/*   7 nit, line 809 */
++	{ 0, 0, 0, 0, 0, 0, -4, 2, -10, -5, 1, -7, -5, 3, -6,
++	  -8, 3, -9, -6, 2, -6, -2, 0, -3, -2, 0, -2, -2, 0, 2 },
++	/*   8 nit, line 810 */
++	{ 0, 0, 0, 0, 0, 0, -2, 3, -8, -6, 2, -8, -6, 3, -7,
++	  -6, 2, -8, -6, 2, -6, -2, 0, -2, -2, 0, -2, -1, 0, 3 },
++	/*   9 nit, line 811 */
++	{ 0, 0, 0, 0, 0, 0, 0, 3, -7, -8, 2, -9, -5, 3, -7,
++	  -5, 3, -6, -5, 2, -5, -2, 0, -2, -1, 0, -2, -1, 0, 3 },
++	/*  10 nit, line 812 */
++	{ 0, 0, 0, 0, 0, 0, -2, 3, -8, -6, 2, -8, -5, 3, -7,
++	  -6, 3, -7, -5, 1, -5, -2, 0, -2, -1, 0, -2, -1, 0, 3 },
++	/*  11 nit, line 813 */
++	{ 0, 0, 0, 0, 0, 0, -2, 3, -11, -7, 2, -9, -5, 3, -7,
++	  -7, 2, -8, -5, 1, -5, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  12 nit, line 814 */
++	{ 0, 0, 0, 0, 0, 0, -3, 2, -10, -6, 3, -7, -4, 3, -6,
++	  -6, 2, -7, -5, 1, -5, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  13 nit, line 815 */
++	{ 0, 0, 0, 0, 0, 0, -4, 4, -13, -6, 3, -9, -8, 2, -8,
++	  -7, 2, -7, -4, 1, -4, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  14 nit, line 816 */
++	{ 0, 0, 0, 0, 0, 0, -2, 4, -11, -6, 3, -9, -7, 2, -7,
++	  -6, 2, -7, -4, 1, -4, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  15 nit, line 817 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -12, -6, 3, -8, -5, 3, -6,
++	  -6, 2, -7, -4, 1, -4, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  16 nit, line 818 */
++	{ 0, 0, 0, 0, 0, 0, -4, 2, -11, -7, 3, -9, -4, 3, -5,
++	  -6, 2, -7, -3, 1, -3, -1, 0, -1, -1, 0, -2, -1, 0, 3 },
++	/*  17 nit, line 819 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -14, -6, 3, -7, -5, 3, -6,
++	  -6, 2, -6, -4, 1, -4, 0, 0, -1, -1, 0, -1, 0, 0, 3 },
++	/*  19 nit, line 820 */
++	{ 0, 0, 0, 0, 0, 0, -4, 4, -14, -5, 3, -6, -4, 3, -5,
++	  -6, 2, -6, -3, 1, -3, 0, 0, -1, -1, 0, -1, 0, 0, 3 },
++	/*  20 nit, line 821 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -12, -5, 4, -8, -6, 2, -7,
++	  -6, 2, -6, -3, 1, -3, 0, 0, -1, -1, 0, -1, 0, 0, 3 },
++	/*  21 nit, line 822 */
++	{ 0, 0, 0, 0, 0, 0, -2, 4, -11, -4, 4, -7, -6, 2, -6,
++	  -6, 1, -7, -3, 1, -3, -1, 0, -1, -1, 0, -1, 0, 0, 3 },
++	/*  22 nit, line 823 */
++	{ 0, 0, 0, 0, 0, 0, -4, 4, -15, -5, 4, -7, -5, 2, -6,
++	  -6, 1, -6, -3, 1, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  24 nit, line 824 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -12, -6, 4, -9, -5, 2, -5,
++	  -6, 1, -6, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  25 nit, line 825 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -12, -6, 3, -9, -5, 2, -6,
++	  -6, 1, -6, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  27 nit, line 826 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -11, -6, 3, -8, -4, 2, -5,
++	  -6, 1, -6, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  29 nit, line 827 */
++	{ 0, 0, 0, 0, 0, 0, -5, 3, -15, -4, 3, -6, -4, 2, -5,
++	  -5, 1, -5, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  30 nit, line 828 */
++	{ 0, 0, 0, 0, 0, 0, -5, 3, -16, -4, 3, -7, -4, 2, -5,
++	  -5, 1, -5, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  32 nit, line 829 */
++	{ 0, 0, 0, 0, 0, 0, -5, 5, -15, -5, 3, -8, -4, 2, -4,
++	  -4, 1, -5, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  34 nit, line 830 */
++	{ 0, 0, 0, 0, 0, 0, -5, 4, -14, -5, 2, -8, -4, 2, -4,
++	  -3, 1, -4, -3, 0, -3, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  37 nit, line 831 */
++	{ 0, 0, 0, 0, 0, 0, -6, 4, -15, -6, 2, -9, -4, 1, -4,
++	  -4, 1, -5, -2, 0, -2, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  39 nit, line 832 */
++	{ 0, 0, 0, 0, 0, 0, -5, 5, -17, -5, 1, -8, -5, 1, -5,
++	  -3, 1, -4, -2, 0, -2, 0, 0, 0, -1, 0, -2, 0, 0, 3 },
++	/*  41 nit, line 833 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -15, -7, 2, -9, -3, 2, -4,
++	  -3, 1, -3, -2, 0, -3, 0, 0, 0, -1, 0, -1, 0, 0, 2 },
++	/*  44 nit, line 834 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -16, -3, 3, -5, -3, 2, -3,
++	  -3, 1, -4, -2, 0, -2, 0, 0, 0, -1, 0, -1, 0, 0, 2 },
++	/*  47 nit, line 835 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -13, -4, 3, -7, -3, 2, -4,
++	  -3, 1, -3, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  50 nit, line 836 */
++	{ 0, 0, 0, 0, 0, 0, -5, 3, -15, -3, 3, -6, -2, 2, -3,
++	  -4, 1, -4, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  53 nit, line 837 */
++	{ 0, 0, 0, 0, 0, 0, -5, 3, -14, -4, 2, -7, -2, 2, -3,
++	  -4, 0, -4, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  56 nit, line 838 */
++	{ 0, 0, 0, 0, 0, 0, -5, 3, -14, -3, 2, -6, -2, 2, -3,
++	  -4, 0, -4, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  60 nit, line 839 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -15, -3, 2, -6, -3, 1, -3,
++	  -3, 0, -4, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  64 nit, line 840 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -17, -4, 2, -7, -3, 1, -3,
++	  -2, 0, -3, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  68 nit, line 841 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -15, -3, 2, -6, -3, 1, -3,
++	  -1, 0, -3, -2, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 2 },
++	/*  72 nit, line 842 */
++	{ 0, 0, 0, 0, 0, 0, -5, 6, -18, -2, 2, -5, -4, 1, -4,
++	  -1, 0, -2, -1, 0, -1, 0, 0, 0, 0, 0, -1, -1, 0, 1 },
++	/*  77 nit, line 843 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -15, -3, 2, -6, -3, 1, -3,
++	  -1, 0, -2, -1, 0, -1, 0, 0, 0, 0, 0, -1, 0, 0, 1 },
++	/*  82 nit, line 844 */
++	{ 0, 0, 0, 0, 0, 0, -6, 5, -17, -2, 2, -4, -2, 1, -3,
++	  -2, 0, -2, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/*  87 nit, line 845 */
++	{ 0, 0, 0, 0, 0, 0, -6, 5, -16, -2, 1, -5, -2, 1, -2,
++	  -2, 0, -3, -1, 0, -1, 0, 0, -1, 0, 0, 0, 1, 0, 2 },
++	/*  93 nit, line 846 */
++	{ 0, 0, 0, 0, 0, 0, -6, 5, -16, -2, 1, -5, -2, 1, -2,
++	  -1, 0, -2, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1, 0, 2 },
++	/*  98 nit, line 847 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -15, -3, 1, -5, -1, 1, -1,
++	  0, 0, -2, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1, 0, 1 },
++	/* 105 nit, line 848 */
++	{ 0, 0, 0, 0, 0, 0, -5, 5, -14, -2, 1, -4, -3, 0, -3,
++	  0, 0, -1, -2, 0, -2, 0, 0, -1, 0, 0, 0, 0, 0, 1 },
++	/* 111 nit, line 849 */
++	{ 0, 0, 0, 0, 0, 0, -3, 5, -12, -2, 1, -4, -3, 0, -3,
++	  -2, 0, -2, -1, 0, -1, 1, 0, 0, 0, 0, 0, 1, 0, 1 },
++	/* 119 nit, line 850 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -14, -2, 1, -4, -2, 0, -3,
++	  -2, 0, -2, -1, 0, -1, 0, 0, -1, 0, 0, 0, 1, 0, 1 },
++	/* 126 nit, line 851 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -11, -2, 1, -4, -2, 0, -2,
++	  -1, 0, -2, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1 },
++	/* 134 nit, line 852 */
++	{ 0, 0, 0, 0, 0, 0, -4, 5, -13, -3, 1, -3, -2, 0, -2,
++	  0, 0, -1, -2, 0, -2, 0, 0, -1, -1, 0, -1, 0, 0, 1 },
++	/* 143 nit, line 853 */
++	{ 0, 0, 0, 0, 0, 0, -5, 4, -13, -2, 1, -3, -3, 0, -3,
++	  0, 0, -1, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1, 0, 2 },
++	/* 152 nit, line 854 */
++	{ 0, 0, 0, 0, 0, 0, -6, 4, -13, -1, 1, -2, -2, 0, -3,
++	  -1, 0, -1, -1, 0, -1, 0, 0, 0, 0, 0, -1, 0, 0, 1 },
++	/* 162 nit, line 855 */
++	{ 0, 0, 0, 0, 0, 0, -5, 4, -12, -3, 1, -3, -1, 0, -2,
++	  -1, 0, -1, -1, 0, -1, 1, 0, -1, 0, 0, 0, 0, 0, 1 },
++	/* 172 nit, line 856 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -10, -3, 1, -3, -1, 0, -2,
++	  -1, 0, -1, 0, 0, 0, 0, 0, -1, -1, 0, -1, 0, 0, 1 },
++	/* 183 nit, line 857 */
++	{ 0, 0, 0, 0, 0, 0, -3, 4, -10, -3, 0, -3, -1, 0, -2,
++	  -1, 0, -1, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/* 195 nit, line 858 */
++	{ 0, 0, 0, 0, 0, 0, -4, 3, -10, -3, 0, -3, -1, 0, -2,
++	  -1, 0, -1, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/* 207 nit, line 859 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -8, -3, 0, -3, 0, 0, -1,
++	  0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/* 220 nit, line 860 */
++	{ 0, 0, 0, 0, 0, 0, -3, 3, -9, -3, 0, -3, 0, 0, -1,
++	  0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/* 234 nit, line 861 */
++	{ 0, 0, 0, 0, 0, 0, -4, 2, -7, -1, 0, -2, 0, 0, 0,
++	  0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
++	/* 249 nit, line 862 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 265 nit, line 863 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 282 nit, line 864 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 300 nit, line 865 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 316 nit, line 866 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 333 nit, line 867 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 360 nit, line 868 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	/* 500NT (HBM), line 869 */
++	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++};
++
++/* ------------------------------------------------------------------------
++ * Dynamic AID computation
++ */
++
++/* dynamic_aid.c:52-56 */
++#define TABS2_MUL_10000(x)		((x) * 10000)
++#define TABS2_DIV_100(x)		(((x) + 50) / 100)
++
++/* All scratch state of dynamic_aid() (dynamic_aid.c:32-50), ~8 KiB */
++struct tabs2_daid_work {
++	int mtp[TABS2_IV_MAX * TABS2_CI_MAX];			/* daid.mtp */
++	s64 point_voltages[TABS2_IV_MAX][TABS2_CI_MAX];
++	s64 output_voltages[TABS2_IV_TOP + 1][TABS2_CI_MAX];
++	int l_value[TABS2_IV_MAX];
++	int l_lookup_table[TABS2_IV_TOP + 1];
++	int m_gray[TABS2_IV_MAX];
++	s64 m_voltage[TABS2_IV_MAX][TABS2_CI_MAX];
++	int gamma[TABS2_IV_MAX * TABS2_CI_MAX];			/* one gamma[ibr] */
++};
++
++/*
++ * init_mtp_data(), lcd.c:797-823: turn the 0xC8 read-back into signed
++ * per-point offsets mtp[iv * CI_MAX + c].
++ *   bytes 0..5    V255 R,G,B: sign in bit 0 of bytes 0/2/4, magnitude in 1/3/5
++ *   bytes 6..29   V203 .. V3 R,G,B: bit 7 sign, bits 6..0 magnitude
++ *   bytes 33, 34  VT: R = low nibble of 33, G = high nibble of 33, B = 34
++ *                 (stock copies them to bytes 30..32 first, then decodes
++ *                 30..32 like the other points, bit 7 sign)
++ * Bytes 35..39 are not used; 40..43 are the manufacture date (lcd.c:550-554).
++ */
++static void tabs2_decode_mtp(const u8 raw[TABS2_MTP_LEN],
++			     int mtp[TABS2_IV_MAX * TABS2_CI_MAX])
++{
++	u8 d[TABS2_MTP_LEN];
++	int i, c, j;
++
++	for (i = 0; i < TABS2_MTP_LEN; i++)
++		d[i] = raw[i];
++
++	d[32] = d[34];			/* VT B */
++	d[31] = (d[33] >> 4) & 0xf;	/* VT G */
++	d[30] = d[33] & 0xf;		/* VT R */
++
++	for (c = 0, j = 0; c < TABS2_CI_MAX; c++, j++) {
++		if (d[j++] & 0x01)
++			mtp[(TABS2_IV_MAX - 1) * TABS2_CI_MAX + c] = d[j] * (-1);
++		else
++			mtp[(TABS2_IV_MAX - 1) * TABS2_CI_MAX + c] = d[j];
++	}
++
++	for (i = TABS2_IV_MAX - 2; i >= 0; i--) {
++		for (c = 0; c < TABS2_CI_MAX; c++, j++) {
++			if (d[j] & 0x80)
++				mtp[TABS2_CI_MAX * i + c] = (d[j] & 0x7f) * (-1);
++			else
++				mtp[TABS2_CI_MAX * i + c] = d[j];
++		}
++	}
++}
++
++/* calc_point_voltages(), dynamic_aid.c:58-125 */
++static int tabs2_calc_point_voltages(struct tabs2_daid_work *w)
++{
++	s64 (*pv)[TABS2_CI_MAX] = w->point_voltages;
++	const int *vd, *mtp;
++	int numerator, denominator;
++	s64 v0 = TABS2_VREG;
++	s64 t1, t2;
++	int iv, c, idx;
++
++	/* iv == 0 (VT) */
++	vd = &tabs2_gamma_default[0];
++	mtp = &w->mtp[0];
++	denominator = tabs2_gamma_formula[0][1];
++	for (c = 0; c < TABS2_CI_MAX; c++) {
++		/* stock indexes vt_voltage_value[] without a bounds check */
++		idx = vd[c] + mtp[c];
++		if (idx < 0 || idx >= TABS2_VT_VOLTAGE_COUNT)
++			return -ERANGE;
++		t1 = v0;
++		t2 = v0 * tabs2_vt_voltage_value[idx];
++		pv[0][c] = t1 - div_s64(t2, denominator);
++	}
++
++	/* iv == IV_MAX - 1 .. 1 */
++	for (iv = TABS2_IV_MAX - 1; iv > 0; iv--) {
++		vd = &tabs2_gamma_default[iv * TABS2_CI_MAX];
++		mtp = &w->mtp[iv * TABS2_CI_MAX];
++		numerator = tabs2_gamma_formula[iv][0];
++		denominator = tabs2_gamma_formula[iv][1];
++
++		for (c = 0; c < TABS2_CI_MAX; c++) {
++			if (iv == 1) {
++				t1 = v0;
++				t2 = v0 - pv[iv + 1][c];
++			} else if (iv == TABS2_IV_MAX - 1) {
++				t1 = v0;
++				t2 = v0 - TABS2_VREF_H;
++			} else {
++				t1 = pv[0][c];
++				t2 = pv[0][c] - pv[iv + 1][c];
++			}
++			t2 *= vd[c] + mtp[c] + numerator;
++			pv[iv][c] = t1 - div_s64(t2, denominator);
++		}
++	}
++
++	return 0;
++}
++
++/* calc_output_voltages(), dynamic_aid.c:127-172 (struct rgb_t is int) */
++static void tabs2_calc_output_voltages(struct tabs2_daid_work *w)
++{
++	int iv, i, c;
++	int v_idx, v_cnt;
++	int v[TABS2_CI_MAX], v_diff[TABS2_CI_MAX];
++
++	for (iv = TABS2_IV_MAX - 1; iv > 0; iv--) {
++		v_cnt = tabs2_index_voltage[iv] - tabs2_index_voltage[iv - 1];
++		v_idx = tabs2_index_voltage[iv];
++
++		for (c = 0; c < TABS2_CI_MAX; c++) {
++			v[c] = w->point_voltages[iv][c];
++			v_diff[c] = w->point_voltages[iv - 1][c] -
++				    w->point_voltages[iv][c];
++		}
++
++		if (iv == 1)
++			for (c = 0; c < TABS2_CI_MAX; c++)
++				v_diff[c] = TABS2_VREG - w->point_voltages[iv][c];
++
++		for (i = 0; i < v_cnt; i++, v_idx--) {
++			for (c = 0; c < TABS2_CI_MAX; c++)
++				w->output_voltages[v_idx][c] =
++					v[c] + v_diff[c] * i / v_cnt;
++		}
++	}
++
++	for (c = 0; c < TABS2_CI_MAX; c++)
++		w->output_voltages[0][c] = TABS2_VREG;
++}
++
++/*
++ * init_l_lookup_table(), dynamic_aid.c:189-206; ibr_top is the nit of the
++ * last level, index_brightness_table[IBRIGHTNESS_MAX - 1] (dynamic_aid.c:439)
++ */
++static void tabs2_init_l_lookup_table(struct tabs2_daid_work *w)
++{
++	int ibr_top = tabs2_index_brightness[TABS2_IBR_MAX - 1];
++	int iv;
++
++	for (iv = 0; iv <= TABS2_IV_TOP; iv++)
++		w->l_lookup_table[iv] =
++			TABS2_DIV_100(ibr_top * tabs2_gamma_curve_lut[iv]);
++}
++
++/* min_diff_gray(), dynamic_aid.c:208-229 */
++static int tabs2_min_diff_gray(int in, const int *table, int table_cnt)
++{
++	int ret, i, min, temp;
++
++	ret = min = table[table_cnt] + 1;
++
++	for (i = 0; i <= table_cnt; i++) {
++		temp = table[i] - in;
++		if (temp < 0)
++			temp = -temp;
++
++		if (temp <= min) {
++			min = temp;
++			ret = i;
++		}
++
++		if (i && (in >= table[i - 1]) && (in <= table[i]))
++			break;
++	}
++
++	return ret;
++}
++
++/* calc_l_values(), dynamic_aid.c:231-258 */
++static void tabs2_calc_l_values(struct tabs2_daid_work *w, int ibr)
++{
++	const int *gamma_curve = tabs2_gamma_curve_tables[ibr];
++	int br_base = tabs2_brightness_base[ibr];
++	int iv;
++
++	for (iv = TABS2_IV_MAX - 1; iv >= 0; iv--) {
++		if (iv == TABS2_IV_MAX - 1)
++			w->l_value[iv] = TABS2_MUL_10000(br_base);
++		else
++			w->l_value[iv] = TABS2_DIV_100(br_base *
++					 gamma_curve[tabs2_index_voltage[iv]]);
++	}
++}
++
++/* calc_m_gray_values(), dynamic_aid.c:260-289 */
++static void tabs2_calc_m_gray_values(struct tabs2_daid_work *w, int ibr)
++{
++	int iv;
++
++	for (iv = TABS2_IV_MAX - 1; iv >= 0; iv--) {
++		w->m_gray[iv] = tabs2_min_diff_gray(w->l_value[iv],
++						    w->l_lookup_table,
++						    TABS2_IV_TOP);
++		w->m_gray[iv] += tabs2_offset_gradation[ibr][iv];
++	}
++}
++
++/* calc_m_rgb_voltages(), dynamic_aid.c:291-326 */
++static int tabs2_calc_m_rgb_voltages(struct tabs2_daid_work *w)
++{
++	int iv, c;
++
++	for (iv = TABS2_IV_MAX - 1; iv > 0; iv--) {
++		/* stock indexes output_voltages[] without a bounds check */
++		if (w->m_gray[iv] < 0 || w->m_gray[iv] > TABS2_IV_TOP)
++			return -ERANGE;
++
++		for (c = 0; c < TABS2_CI_MAX; c++)
++			w->m_voltage[iv][c] =
++				w->output_voltages[w->m_gray[iv]][c];
++	}
++
++	/* iv == 0 */
++	for (c = 0; c < TABS2_CI_MAX; c++)
++		w->m_voltage[0][c] = w->point_voltages[0][c];
++
++	return 0;
++}
++
++/* calc_gamma(), dynamic_aid.c:328-389, into w->gamma[] */
++static int tabs2_calc_gamma(struct tabs2_daid_work *w, int ibr)
++{
++	s64 (*mv)[TABS2_CI_MAX] = w->m_voltage;
++	int numerator, denominator;
++	int *res, *mtp;
++	s64 t1, t2;
++	int iv, c;
++
++	for (iv = TABS2_IV_MAX - 1; iv > 0; iv--) {
++		mtp = &w->mtp[iv * TABS2_CI_MAX];
++		res = &w->gamma[iv * TABS2_CI_MAX];
++		numerator = tabs2_gamma_formula[iv][0];
++		denominator = tabs2_gamma_formula[iv][1];
++
++		for (c = 0; c < TABS2_CI_MAX; c++) {
++			if (iv == 1) {
++				t1 = TABS2_VREG - mv[iv][c];
++				t2 = TABS2_VREG - mv[iv + 1][c];
++			} else if (iv == TABS2_IV_MAX - 1) {
++				t1 = TABS2_VREG - mv[iv][c];
++				t2 = TABS2_VREG - TABS2_VREF_H;
++			} else {
++				t1 = mv[0][c] - mv[iv][c];
++				t2 = mv[0][c] - mv[iv + 1][c];
++			}
++			/* stock divides without checking */
++			if (!t2)
++				return -EDOM;
++
++			res[c] = div64_s64((t1 + 1) * denominator, t2) - numerator;
++			res[c] -= mtp[c];
++			res[c] += tabs2_offset_color[ibr][iv * TABS2_CI_MAX + c];
++
++			res[c] = (res[c] < 0) ? 0 : res[c];
++
++			if ((res[c] > 255) && (iv != TABS2_IV_MAX - 1))
++				res[c] = 255;
++		}
++	}
++
++	/* iv == 0 */
++	for (c = 0; c < TABS2_CI_MAX; c++)
++		w->gamma[c] = tabs2_gamma_default[c];
++
++	return 0;
++}
++
++/*
++ * "relocate gamma order", init_gamma_table() lcd.c:880 and 896-914: 0xCA,
++ * then V255 R,G,B as (bit 8, low byte) pairs, then V203 .. V3 and VT one
++ * byte per colour.  The last two bytes stay 0 (kzalloc, lcd.c:874).
++ */
++static void tabs2_gamma_to_payload(const int gamma[TABS2_IV_MAX * TABS2_CI_MAX],
++				   u8 out[TABS2_GAMMA_PARAM_SIZE])
++{
++	const int *pgamma;
++	int c, j, v;
++
++	for (j = 0; j < TABS2_GAMMA_PARAM_SIZE; j++)
++		out[j] = 0;
++	out[0] = 0xca;
++
++	v = TABS2_IV_MAX - 1;
++	pgamma = &gamma[v * TABS2_CI_MAX];
++	for (c = 0, j = 1; c < TABS2_CI_MAX; c++, pgamma++) {
++		if (*pgamma & 0x100)
++			out[j++] = 1;
++		else
++			out[j++] = 0;
++
++		out[j++] = *pgamma & 0xff;
++	}
++
++	for (v = TABS2_IV_MAX - 2; v >= 0; v--) {
++		pgamma = &gamma[v * TABS2_CI_MAX];
++		for (c = 0; c < TABS2_CI_MAX; c++, pgamma++)
++			out[j++] = *pgamma;
++	}
++}
++
++/*
++ * init_gamma_table() + dynamic_aid() (lcd.c:841-919, dynamic_aid.c:424-503):
++ * build the 0xCA payload of every level from the raw 0xC8 read-back.
++ * Returns 0, or -ERANGE / -EDOM where stock would index out of bounds /
++ * divide by zero (table is then left partially filled; do not use it).
++ */
++static int tabs2_calc_gamma_table(const u8 mtp_raw[TABS2_MTP_LEN],
++				  u8 table[TABS2_IBR_MAX][TABS2_GAMMA_PARAM_SIZE],
++				  struct tabs2_daid_work *w)
++{
++	int ibr, ret;
++
++	tabs2_decode_mtp(mtp_raw, w->mtp);
++
++	/* calc_voltage_table(), dynamic_aid.c:174-187 */
++	ret = tabs2_calc_point_voltages(w);
++	if (ret)
++		return ret;
++	tabs2_calc_output_voltages(w);
++
++	/* calc_gamma_table(), dynamic_aid.c:391-422 */
++	tabs2_init_l_lookup_table(w);
++	for (ibr = 0; ibr < TABS2_IBR_MAX; ibr++) {
++		tabs2_calc_l_values(w, ibr);
++		tabs2_calc_m_gray_values(w, ibr);
++		ret = tabs2_calc_m_rgb_voltages(w);
++		if (ret)
++			return ret;
++		ret = tabs2_calc_gamma(w, ibr);
++		if (ret)
++			return ret;
++		tabs2_gamma_to_payload(w->gamma, table[ibr]);
++	}
++
++	return 0;
++}
++
++#endif /* _PANEL_SAMSUNG_S6E3HA2_TABS2_DIMMING_H */
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2.c b/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2.c
+new file mode 100644
+index 000000000..aec2a33bf
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3ha2-tabs2.c
+@@ -0,0 +1,954 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MIPI-DSI AMOLED panel driver for the Samsung S6E3HA2 in the
++ * Galaxy Tab S2 8.0 (SM-T715, Exynos5433, board "gts28").
++ *
++ * Every DCS sequence, delay, register read and brightness byte is
++ * transcribed from Samsung's downstream panel driver:
++ *   02_sources/kernel_universal5433/drivers/video/exynos/panels/
++ *     s6e3ha2_tabs2_mipi_lcd.c        (ldi_init/enable/disable order,
++ *                                      probe-time reads, update_brightness)
++ *     s6e3ha2_tabs2_param.h           (SEQ_* command arrays)
++ *     dynamic_aid.c                   (gamma computation)
++ *     dynamic_aid_s6e3ha2_tabs2.h     (brightness -> nit/AID/gamma tables)
++ *   02_sources/kernel_universal5433/drivers/video/exynos/decon_display/
++ *     decon_pm_exynos5430.c           (power/reset sequencing)
++ *     decon_mipi_dsi.c                (DSI read protocol)
++ * The init sequence differs from the TM2 "samsung,s6e3ha2" variant
++ * (panel-samsung-s6e3ha2.c) in several commands (TSP hsync 0xbd first
++ * parameter, Pentile 0xc0 second parameter, PCD 0xcc value, column/page
++ * window), so this is a separate driver rather than an extension.
++ *
++ * Brightness follows the stock "dynamic AID" scheme: the panel's MTP
++ * (factory trim, register 0xC8), ELVSS (0xB6) and TSET (0xB8) are read
++ * back once, the per-level gamma (0xCA) is computed from the MTP with the
++ * stock integer algorithm (panel-samsung-s6e3ha2-tabs2-dimming.h), and
++ * every brightness change is sent with the stock update_brightness()
++ * order: gamma, AID, ELVSS, VINT, gamma-update strobe, ACL, TSET, HBM.
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++
++#include "panel-samsung-s6e3ha2-tabs2-dimming.h"
++
++/*
++ * Stock power sequencing, decon_board_gts28 "enable_display_driver_power"
++ * / "reset_display_driver_panel" / "disable_display_driver_power"
++ * (live_fdt.dts:1063-1085, run from decon_pm_exynos5430.c):
++ * enable VDD3_1.8V -> VDDR_1.6V -> VCI_3.0V, wait 10-11 ms, then reset
++ * GPIO gpg0-0: high 5-6 ms, low 5-6 ms, high 5-6 ms (active low in DT).
++ */
++#define TABS2_POWER_ON_DELAY_US_MIN	10000
++#define TABS2_POWER_ON_DELAY_US_MAX	11000
++#define TABS2_RESET_DELAY_US_MIN		5000
++#define TABS2_RESET_DELAY_US_MAX		6000
++
++/* s6e3ha2_tabs2_mipi_lcd.c:1124-1133 (ldi_init) and :1201-1208 (ldi_disable) */
++#define TABS2_SLEEP_OUT_DELAY_US_MIN	5000
++#define TABS2_SLEEP_OUT_DELAY_US_MAX	6000
++#define TABS2_INTERFACE_DELAY_MS		120
++#define TABS2_SLEEP_IN_DELAY_MS		120
++
++/*
++ * Registers read back by the stock driver (s6e3ha2_tabs2_mipi_lcd.c:60-73);
++ * the MTP (0xC8, TABS2_MTP_LEN = 44) and ELVSS (0xB6, TABS2_ELVSS_LEN = 22)
++ * lengths live in the dimming header.
++ */
++#define TABS2_LDI_ID_REG		0x04
++#define TABS2_LDI_ID_LEN		3
++#define TABS2_LDI_CODE_REG		0xd6
++#define TABS2_LDI_CODE_LEN		5
++#define TABS2_LDI_MTP_REG		0xc8
++#define TABS2_LDI_TSET_REG		0xb8
++#define TABS2_LDI_TSET_LEN		8	/* TSET: Global para 8th */
++#define TABS2_TSET_PARAM_SIZE		(TABS2_LDI_TSET_LEN + 1)
++#define TABS2_LDI_ELVSS_REG		0xb6
++#define TABS2_LDI_COORDINATE_REG	0xa1
++#define TABS2_LDI_COORDINATE_LEN	4
++
++/* s6e3ha2_read() tries a read up to 5 times (s6e3ha2_tabs2_mipi_lcd.c:433) */
++#define TABS2_READ_RETRY		5
++
++/*
++ * lcd->temperature = NORMAL_TEMPERATURE = 25 (s6e3ha2_tabs2_mipi_lcd.c:51,
++ * 1684); stock only changes it from a sysfs node written by Android.
++ * > -20 degrees selects TEMP_ABOVE_MINUS_20_DEGREE = 0 (param.h:223-227,
++ * s6e3ha2_set_elvss() :692) and TSET byte = 25 (s6e3ha2_set_tset() :721).
++ */
++#define TABS2_TEMPERATURE		25
++#define TABS2_TEMP_ABOVE_MINUS_20	0
++
++struct s6e3ha2_tabs2 {
++	struct device *dev;
++	struct drm_panel panel;
++	struct backlight_device *bl_dev;
++
++	struct regulator_bulk_data supplies[3];
++	struct gpio_desc *reset_gpio;
++
++	/* Serialises prepare/enable/disable with backlight updates */
++	struct mutex lock;
++	/* lcd->ldi_enable: set between display on and display off */
++	bool ldi_enable;
++
++	/* Values read back from the panel (stock s6e3ha2_probe(), :1734-1741) */
++	u8 id[TABS2_LDI_ID_LEN];
++	u8 code[TABS2_LDI_CODE_LEN];
++	u8 coordinate[TABS2_LDI_COORDINATE_LEN];
++	u8 mtp[TABS2_MTP_LEN];
++	u8 elvss[TABS2_ELVSS_LEN];
++	u8 tset_table[TABS2_TSET_PARAM_SIZE];	/* 0xB8 + 8 read bytes */
++	bool info_read;
++	bool mtp_read;
++	bool elvss_read;
++	bool tset_read;
++
++	/* lcd->gamma_table: one 0xCA command per level, from the MTP */
++	u8 gamma_table[TABS2_IBR_MAX][TABS2_GAMMA_PARAM_SIZE];
++	bool gamma_valid;
++	bool gamma_logged;
++
++	/* update_brightness() state (struct lcd_info, :95-147) */
++	unsigned int brightness;
++	unsigned int bl;
++	unsigned int current_brightness;
++	unsigned int current_bl;
++	u32 current_elvss;
++	u8 current_vint;
++	u8 current_acl;
++	u8 current_hbm;
++};
++
++static int s6e3ha2_tabs2_dcs_write(struct s6e3ha2_tabs2 *ctx,
++				   const void *data, size_t len)
++{
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	ssize_t ret;
++
++	/*
++	 * Same packet types as stock s6e3ha2_write() (:388-396): DCS long
++	 * write for > 2 bytes, short write with parameter for 2, short
++	 * write for 1.
++	 */
++	ret = mipi_dsi_dcs_write_buffer(dsi, data, len);
++
++	return ret < 0 ? ret : 0;
++}
++
++#define s6e3ha2_tabs2_dcs_write_seq(ctx, seq...) do {		\
++	static const u8 d[] = { seq };			\
++	int ret;					\
++	ret = s6e3ha2_tabs2_dcs_write(ctx, d, ARRAY_SIZE(d));	\
++	if (ret < 0)					\
++		return ret;				\
++} while (0)
++
++#define s6e3ha2_tabs2_call_write_func(ret, func) do {	\
++	ret = (func);				\
++	if (ret < 0)				\
++		return ret;			\
++} while (0)
++
++/* SEQ_TEST_KEY_ON_F0 / SEQ_TEST_KEY_OFF_F0, param.h:34-42 */
++static int s6e3ha2_tabs2_test_key_on_f0(struct s6e3ha2_tabs2 *ctx)
++{
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf0, 0x5a, 0x5a);
++	return 0;
++}
++
++static int s6e3ha2_tabs2_test_key_off_f0(struct s6e3ha2_tabs2 *ctx)
++{
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf0, 0xa5, 0xa5);
++	return 0;
++}
++
++/* SEQ_TEST_KEY_ON_FC / SEQ_TEST_KEY_OFF_FC, param.h:54-62 */
++static int s6e3ha2_tabs2_test_key_on_fc(struct s6e3ha2_tabs2 *ctx)
++{
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xfc, 0x5a, 0x5a);
++	return 0;
++}
++
++static int s6e3ha2_tabs2_test_key_off_fc(struct s6e3ha2_tabs2 *ctx)
++{
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xfc, 0xa5, 0xa5);
++	return 0;
++}
++
++/* ------------------------------------------------------------------------
++ * Register read-back
++ */
++
++/*
++ * s6e3ha2_read() (:413-450) on top of s5p_mipi_dsi_rd_data()
++ * (decon_display/decon_mipi_dsi.c:349-354): set the maximum return packet
++ * size to the expected length, send a DCS read (all stock reads are > 2
++ * bytes, so MIPI_DSI_DCS_READ, :423-424), retry up to 5 times until
++ * exactly len bytes come back.
++ */
++static int s6e3ha2_tabs2_read(struct s6e3ha2_tabs2 *ctx, u8 reg, u8 *buf,
++			      size_t len)
++{
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	ssize_t ret = -EIO;
++	int retry;
++
++	for (retry = 0; retry < TABS2_READ_RETRY; retry++) {
++		ret = mipi_dsi_set_maximum_return_packet_size(dsi, len);
++		if (ret >= 0)
++			ret = mipi_dsi_dcs_read(dsi, reg, buf, len);
++		if (ret == (ssize_t)len)
++			return 0;
++		dev_dbg(ctx->dev, "read %02xh: %zd, retrying\n", reg, ret);
++	}
++
++	dev_err(ctx->dev, "read %02xh (%zu bytes) failed: %zd\n", reg, len, ret);
++
++	return ret < 0 ? ret : -EIO;
++}
++
++/* init_gamma_table() (:841-944): dynamic AID over all levels */
++static void s6e3ha2_tabs2_init_gamma_table(struct s6e3ha2_tabs2 *ctx)
++{
++	struct tabs2_daid_work *w;
++	int ret, iv, i;
++
++	ctx->gamma_valid = false;
++
++	w = kzalloc(sizeof(*w), GFP_KERNEL);
++	if (!w)
++		return;
++
++	ret = tabs2_calc_gamma_table(ctx->mtp, ctx->gamma_table, w);
++	if (ret) {
++		dev_err(ctx->dev,
++			"dynamic AID: MTP outside the stock tables (%d), keeping the panel gamma\n",
++			ret);
++		goto out;
++	}
++
++	for (iv = 0; iv < TABS2_IV_MAX; iv++)
++		dev_dbg(ctx->dev, "MTP offset V%d: %d %d %d\n",
++			tabs2_index_voltage[iv],
++			w->mtp[iv * TABS2_CI_MAX + TABS2_CI_RED],
++			w->mtp[iv * TABS2_CI_MAX + TABS2_CI_GREEN],
++			w->mtp[iv * TABS2_CI_MAX + TABS2_CI_BLUE]);
++
++	for (i = 0; i < TABS2_IBR_MAX; i++)
++		dev_dbg(ctx->dev, "gamma level %d (%d nit): %*ph\n", i,
++			tabs2_index_brightness[i], TABS2_GAMMA_PARAM_SIZE,
++			ctx->gamma_table[i]);
++
++	ctx->gamma_valid = true;
++out:
++	kfree(w);
++}
++
++/*
++ * Stock reads ID, code, coordinate, MTP, ELVSS and TSET once at probe,
++ * with only test key F0 open, from a panel the bootloader had already
++ * initialised (s6e3ha2_probe(), :1734-1741).  Under DRM the DSI link is
++ * first usable in prepare, so the same reads (same registers, lengths and
++ * order) run at ldi_init step 11 "Module Information READ" (:1146-1147),
++ * where stock itself re-reads the ID on every power-on and where keys F0
++ * and FC are open.  Each value is kept from the first successful read,
++ * taken right after a reset, before this driver writes 0xB6 or 0xB8.
++ */
++static void s6e3ha2_tabs2_read_panel_info(struct s6e3ha2_tabs2 *ctx)
++{
++	struct device *dev = ctx->dev;
++	bool first = !ctx->info_read;
++
++	/* s6e3ha2_read_id() (:511-523): a failure means no panel/link */
++	if (s6e3ha2_tabs2_read(ctx, TABS2_LDI_ID_REG, ctx->id,
++			       TABS2_LDI_ID_LEN)) {
++		dev_err(dev, "panel is not connected well, skipping reads\n");
++		return;
++	}
++
++	if (first) {
++		dev_info(dev, "ID: %x, %x, %x\n",
++			 ctx->id[0], ctx->id[1], ctx->id[2]);
++
++		/* s6e3ha2_read_code() (:525-535), informational */
++		if (!s6e3ha2_tabs2_read(ctx, TABS2_LDI_CODE_REG, ctx->code,
++					TABS2_LDI_CODE_LEN))
++			dev_info(dev, "code (D6h): %*ph\n",
++				 TABS2_LDI_CODE_LEN, ctx->code);
++
++		/* s6e3ha2_read_coordinate() (:495-509), informational */
++		if (!s6e3ha2_tabs2_read(ctx, TABS2_LDI_COORDINATE_REG,
++					ctx->coordinate,
++					TABS2_LDI_COORDINATE_LEN))
++			dev_info(dev, "coordinate (A1h): %*ph\n",
++				 TABS2_LDI_COORDINATE_LEN, ctx->coordinate);
++
++		ctx->info_read = true;
++	}
++
++	/* s6e3ha2_read_mtp() (:537-557) */
++	if (!ctx->mtp_read &&
++	    !s6e3ha2_tabs2_read(ctx, TABS2_LDI_MTP_REG, ctx->mtp,
++				TABS2_MTP_LEN)) {
++		ctx->mtp_read = true;
++		dev_info(dev, "MTP (C8h, %d bytes): %*ph\n", TABS2_MTP_LEN,
++			 TABS2_MTP_LEN, ctx->mtp);
++		s6e3ha2_tabs2_init_gamma_table(ctx);
++	}
++
++	/* s6e3ha2_read_elvss() (:559-570) */
++	if (!ctx->elvss_read &&
++	    !s6e3ha2_tabs2_read(ctx, TABS2_LDI_ELVSS_REG, ctx->elvss,
++				TABS2_ELVSS_LEN)) {
++		ctx->elvss_read = true;
++		dev_info(dev, "ELVSS (B6h, %d bytes): %*ph\n", TABS2_ELVSS_LEN,
++			 TABS2_ELVSS_LEN, ctx->elvss);
++	}
++
++	/* s6e3ha2_read_tset() (:572-585): stored after the 0xB8 command byte */
++	if (!ctx->tset_read &&
++	    !s6e3ha2_tabs2_read(ctx, TABS2_LDI_TSET_REG, &ctx->tset_table[1],
++				TABS2_LDI_TSET_LEN)) {
++		ctx->tset_read = true;
++		ctx->tset_table[0] = TABS2_LDI_TSET_REG;
++		dev_info(dev, "TSET (B8h, %d bytes): %*ph\n", TABS2_LDI_TSET_LEN,
++			 TABS2_LDI_TSET_LEN, &ctx->tset_table[1]);
++	}
++}
++
++/* ------------------------------------------------------------------------
++ * Brightness: stock update_brightness() (:1087-1122) and its helpers
++ */
++
++/* s6e3ha2_gamma_ctl() (:596-614) */
++static int s6e3ha2_tabs2_gamma_ctl(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	const u8 *gamma = ctx->gamma_table[ctx->bl];
++
++	/* Without MTP data there is no table: leave the panel's 0xCA alone */
++	if (!ctx->gamma_valid)
++		return 0;
++
++	if (!force && ctx->current_bl == ctx->bl)
++		return 0;
++
++	if (!ctx->gamma_logged) {
++		dev_info(ctx->dev, "gamma %d nit (CAh): %*ph\n",
++			 tabs2_index_brightness[ctx->bl],
++			 TABS2_GAMMA_PARAM_SIZE, gamma);
++		ctx->gamma_logged = true;
++	} else {
++		dev_dbg(ctx->dev, "gamma %d nit (CAh): %*ph\n",
++			tabs2_index_brightness[ctx->bl],
++			TABS2_GAMMA_PARAM_SIZE, gamma);
++	}
++
++	return s6e3ha2_tabs2_dcs_write(ctx, gamma, TABS2_GAMMA_PARAM_SIZE);
++}
++
++/*
++ * s6e3ha2_aid_parameter_ctl() (:616-636): SEQ_AID_SET[0] = 0xB2
++ * (param.h:122-125) followed by inter_aor_cmd[brightness]
++ * (init_aid_dimming_table(), :946-957).
++ */
++static int s6e3ha2_tabs2_aid_ctl(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	const u8 *cur = tabs2_inter_aor_cmd[ctx->current_brightness];
++	const u8 *aor = tabs2_inter_aor_cmd[ctx->brightness];
++	u8 data[3] = { 0xb2, aor[0], aor[1] };
++
++	if (!force && cur[0] == aor[0] && cur[1] == aor[1])
++		return 0;
++
++	return s6e3ha2_tabs2_dcs_write(ctx, data, ARRAY_SIZE(data));
++}
++
++/*
++ * s6e3ha2_set_caps() + s6e3ha2_set_elvss() (:662-714).  The resend test
++ * compares union elvss_info {mps, offset, elvss_base} = bytes 1, 2 and 22
++ * of the command (:85-93, :693-695).
++ */
++static int s6e3ha2_tabs2_set_elvss(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	int caps = tabs2_caps(ctx->bl);
++	int level = tabs2_elvss_level(ctx->bl);
++	u8 data[TABS2_ELVSS_PARAM_SIZE];
++	size_t len = TABS2_ELVSS_PARAM_SIZE;
++	u32 elvss;
++	int ret;
++
++	tabs2_build_elvss(data, caps, level, ctx->elvss);
++	elvss = data[1] | data[2] << 8 | data[22] << 16;
++
++	if (!force && ctx->current_elvss == elvss)
++		return 0;
++
++	/*
++	 * Stock would send its zero-filled buffer (:1644) if the 0xB6 read
++	 * failed; send only MPS + ELVSS then, leaving the other 0xB6
++	 * parameters at their reset values.
++	 */
++	if (!ctx->elvss_read)
++		len = 3;
++
++	ret = s6e3ha2_tabs2_dcs_write(ctx, data, len);
++	dev_info(ctx->dev, "caps: %d, temperature: %d, elvss: %d, %x\n",
++		 caps, TABS2_TEMP_ABOVE_MINUS_20, level, elvss);
++	ctx->current_elvss = elvss;
++
++	return ret;
++}
++
++/*
++ * s6e3ha2_set_vint() (:751-775): vint_table[level] is SEQ_VINT_SET
++ * {0xF4, 0xAB, 0x21} with byte 2 = VINT_TABLE[level] (:1011-1027,
++ * param.h:135-138).
++ */
++static int s6e3ha2_tabs2_set_vint(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	u8 data[3] = { 0xf4, 0xab,
++		       tabs2_vint_table[tabs2_vint_level(ctx->bl)] };
++	int ret;
++
++	if (!force && ctx->current_vint == data[2])
++		return 0;
++
++	ret = s6e3ha2_tabs2_dcs_write(ctx, data, ARRAY_SIZE(data));
++	ctx->current_vint = data[2];
++	dev_info(ctx->dev, "vint: %x\n", ctx->current_vint);
++
++	return ret;
++}
++
++/* SEQ_GAMMA_UPDATE / SEQ_GAMMA_UPDATE_L, param.h:140-148 */
++static int s6e3ha2_tabs2_gamma_update(struct s6e3ha2_tabs2 *ctx)
++{
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf7, 0x03);
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf7, 0x00);
++	return 0;
++}
++
++/* s6e3ha2_set_acl() (:638-660) */
++static int s6e3ha2_tabs2_set_acl(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	int level = tabs2_acl_level(ctx->brightness);
++	int ret;
++
++	if (!force && ctx->current_acl == tabs2_acl_cutoff_table[level][1])
++		return 0;
++
++	ret = s6e3ha2_tabs2_dcs_write(ctx, tabs2_acl_cutoff_table[level], 2);
++	if (!ret)
++		ret = s6e3ha2_tabs2_dcs_write(ctx, tabs2_acl_opr_table[level], 2);
++	ctx->current_acl = tabs2_acl_cutoff_table[level][1];
++	dev_info(ctx->dev, "acl: %d, brightness: %d\n",
++		 ctx->current_acl, ctx->brightness);
++
++	return ret;
++}
++
++/*
++ * s6e3ha2_set_tset() (:716-733): the 8 bytes read from 0xB8 with the
++ * last one replaced by the temperature (bit 7 = sign).
++ */
++static int s6e3ha2_tabs2_set_tset(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	u8 tset = TABS2_TEMPERATURE;
++	int ret;
++
++	/*
++	 * Stock would send its zero-filled table if the 0xB8 read failed;
++	 * do not touch TSET then.
++	 */
++	if (!ctx->tset_read)
++		return 0;
++
++	if (!force && ctx->tset_table[TABS2_LDI_TSET_LEN] == tset)
++		return 0;
++
++	ctx->tset_table[TABS2_LDI_TSET_LEN] = tset;
++	ret = s6e3ha2_tabs2_dcs_write(ctx, ctx->tset_table,
++				      TABS2_TSET_PARAM_SIZE);
++	dev_info(ctx->dev, "temperature: %d, tset: %d\n",
++		 TABS2_TEMPERATURE, tset);
++
++	return ret;
++}
++
++/*
++ * s6e3ha2_set_hbm() (:735-749).  HBM_TABLE[LEVEL_IS_HBM(brightness)] is
++ * SEQ_HBM_ON only for brightness 355 (lcd.c:47), above this driver's
++ * maximum of 255, so this is always SEQ_HBM_OFF = {0x53, 0x00}
++ * (param.h:150-153).
++ */
++static int s6e3ha2_tabs2_set_hbm(struct s6e3ha2_tabs2 *ctx, bool force)
++{
++	static const u8 hbm_off[] = { 0x53, 0x00 };
++	int ret;
++
++	if (!force && ctx->current_hbm == hbm_off[1])
++		return 0;
++
++	ret = s6e3ha2_tabs2_dcs_write(ctx, hbm_off, ARRAY_SIZE(hbm_off));
++	ctx->current_hbm = hbm_off[1];
++	dev_info(ctx->dev, "hbm: %d, brightness: %d\n",
++		 ctx->current_hbm, ctx->brightness);
++
++	return ret;
++}
++
++/* update_brightness() (:1087-1122); called with ctx->lock held */
++static int s6e3ha2_tabs2_update_brightness(struct s6e3ha2_tabs2 *ctx,
++					   bool force)
++{
++	int ret;
++
++	ctx->brightness = min_t(unsigned int, ctx->bl_dev->props.brightness,
++				TABS2_MAX_BRIGHTNESS);
++	ctx->bl = tabs2_brightness_to_level(ctx->brightness);
++
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_on_f0(ctx));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_gamma_ctl(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_aid_ctl(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_set_elvss(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_set_vint(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_gamma_update(ctx));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_set_acl(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_set_tset(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_set_hbm(ctx, force));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_off_f0(ctx));
++
++	ctx->current_bl = ctx->bl;
++	ctx->current_brightness = ctx->brightness;
++
++	dev_info(ctx->dev, "brightness=%u, bl=%u, candela=%d\n",
++		 ctx->brightness, ctx->bl, tabs2_index_brightness[ctx->bl]);
++
++	return 0;
++}
++
++/* ------------------------------------------------------------------------
++ * Panel power / init
++ */
++
++/*
++ * s6e3ha2_ldi_init(), s6e3ha2_tabs2_mipi_lcd.c:1124-1176: sleep out,
++ * keys, single-DSI interface setting, module information read, common
++ * setting, brightness, keys off.  Called with ctx->lock held.
++ */
++static int s6e3ha2_tabs2_panel_init(struct s6e3ha2_tabs2 *ctx)
++{
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	int ret;
++
++	/* 7. Sleep Out(11h); 8. Wait 5 ms */
++	s6e3ha2_tabs2_call_write_func(ret, mipi_dsi_dcs_exit_sleep_mode(dsi));
++	usleep_range(TABS2_SLEEP_OUT_DELAY_US_MIN, TABS2_SLEEP_OUT_DELAY_US_MAX);
++
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_on_f0(ctx));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_on_fc(ctx));
++
++	/*
++	 * 9. Interface Setting: SEQ_SINGLE_DSI_1 = {0xf2, 0x67},
++	 * SEQ_SINGLE_DSI_2 = {0xf9, 0x09} (param.h:64-72); 10. Wait 120 ms.
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf2, 0x67);
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xf9, 0x09);
++	msleep(TABS2_INTERFACE_DELAY_MS);
++
++	/* 11. Module Information READ (+ the stock probe-time reads) */
++	s6e3ha2_tabs2_read_panel_info(ctx);
++
++	/* 12. Common Setting */
++	/* 4.2.1 TE(Vsync) ON: SEQ_TE_ON = {0x35, 0x00}, param.h:74-77 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0x35, 0x00);
++	/*
++	 * 4.2.2 TSP TE(Hsync) Control: SEQ_TSP_HSYNC_ON =
++	 * {0xbd, 0x11, 0x01, 0x02, 0x16, 0x02, 0x16} (param.h:79-82).
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xbd, 0x11, 0x01, 0x02,
++				     0x16, 0x02, 0x16);
++	/*
++	 * 4.2.3 PenTile Setting: SEQ_PENTILE_SETTING =
++	 * {0xc0, 0x00, 0x0f, 0xd8, 0xd8} (param.h:84-87).
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xc0, 0x00, 0x0f, 0xd8, 0xd8);
++	/*
++	 * 4.2.4 POC Setting: SEQ_POC_SETTING_1 = {0xb0, 0x20},
++	 * SEQ_POC_SETTING_2 = {0xfe, 0x08} (param.h:89-97).
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xb0, 0x20);
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xfe, 0x08);
++	/* SEQ_PCD_SET_DET_LOW = {0xcc, 0x5c}, param.h:180-183 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xcc, 0x5c);
++	/* 4.2.5 ERR_FG Setting: SEQ_ERR_FG_SETTING = {0xed, 0x44}, param.h:99-102 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xed, 0x44);
++	/*
++	 * SEQ_TE_START_SETTING = {0xb9, 0x10, 0x07, 0xff, 0x00, 0x09}
++	 * (param.h:185-188).
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0xb9, 0x10, 0x07, 0xff, 0x00, 0x09);
++	/*
++	 * 4.2.6 Memory Address Set: SEQ_COLUMN_ADDRESS =
++	 * {0x2a, 0x00, 0x00, 0x05, 0xff}, SEQ_PAGE_ADDRESS =
++	 * {0x2b, 0x00, 0x00, 0x07, 0xff} (param.h:104-112): the 1536x2048
++	 * (0x600 x 0x800) full-screen window.
++	 */
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0x2a, 0x00, 0x00, 0x05, 0xff);
++	s6e3ha2_tabs2_dcs_write_seq(ctx, 0x2b, 0x00, 0x00, 0x07, 0xff);
++
++	/* 13. Brightness Setting: update_brightness(lcd, 1) */
++	s6e3ha2_tabs2_call_write_func(ret,
++				      s6e3ha2_tabs2_update_brightness(ctx, true));
++
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_off_fc(ctx));
++	s6e3ha2_tabs2_call_write_func(ret, s6e3ha2_tabs2_test_key_off_f0(ctx));
++
++	return 0;
++}
++
++static int s6e3ha2_tabs2_power_on(struct s6e3ha2_tabs2 *ctx)
++{
++	int ret;
++
++	/*
++	 * Stock enables VDD3_1.8V, VDDR_1.6V, VCI_3.0V in that order and
++	 * waits 10-11 ms; the supplies array below keeps that order.
++	 */
++	ret = regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	if (ret < 0)
++		return ret;
++
++	usleep_range(TABS2_POWER_ON_DELAY_US_MIN, TABS2_POWER_ON_DELAY_US_MAX);
++
++	/*
++	 * reset-gpios is GPIO_ACTIVE_LOW in DT (live_fdt.dts:1074 flag
++	 * cell 0x01), so logical 0 = physical high (reset released) and
++	 * logical 1 = physical low (reset asserted).  Stock drives
++	 * physical high, low, high with 5-6 ms between each step.
++	 */
++	gpiod_set_value(ctx->reset_gpio, 0);
++	usleep_range(TABS2_RESET_DELAY_US_MIN, TABS2_RESET_DELAY_US_MAX);
++	gpiod_set_value(ctx->reset_gpio, 1);
++	usleep_range(TABS2_RESET_DELAY_US_MIN, TABS2_RESET_DELAY_US_MAX);
++	gpiod_set_value(ctx->reset_gpio, 0);
++	usleep_range(TABS2_RESET_DELAY_US_MIN, TABS2_RESET_DELAY_US_MAX);
++
++	return 0;
++}
++
++static void s6e3ha2_tabs2_power_off(struct s6e3ha2_tabs2 *ctx)
++{
++	/* Stock "disable_display_driver_power": reset asserted, rails off */
++	gpiod_set_value(ctx->reset_gpio, 1);
++	regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++}
++
++static int s6e3ha2_tabs2_disable(struct drm_panel *panel)
++{
++	struct s6e3ha2_tabs2 *ctx = container_of(panel, struct s6e3ha2_tabs2,
++						 panel);
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	int ret;
++
++	/* s6e3ha2_power_off() (:1253-1255): stop brightness updates first */
++	mutex_lock(&ctx->lock);
++	ctx->ldi_enable = false;
++	mutex_unlock(&ctx->lock);
++
++	/* s6e3ha2_ldi_disable(): 2. Display Off (28h), 3. Sleep In (10h) */
++	s6e3ha2_tabs2_call_write_func(ret, mipi_dsi_dcs_set_display_off(dsi));
++	s6e3ha2_tabs2_call_write_func(ret, mipi_dsi_dcs_enter_sleep_mode(dsi));
++
++	/* 4. Wait 120 ms */
++	msleep(TABS2_SLEEP_IN_DELAY_MS);
++
++	return 0;
++}
++
++static int s6e3ha2_tabs2_unprepare(struct drm_panel *panel)
++{
++	struct s6e3ha2_tabs2 *ctx = container_of(panel, struct s6e3ha2_tabs2,
++						 panel);
++
++	s6e3ha2_tabs2_power_off(ctx);
++
++	return 0;
++}
++
++static int s6e3ha2_tabs2_prepare(struct drm_panel *panel)
++{
++	struct s6e3ha2_tabs2 *ctx = container_of(panel, struct s6e3ha2_tabs2,
++						 panel);
++	int ret;
++
++	ret = s6e3ha2_tabs2_power_on(ctx);
++	if (ret < 0)
++		return ret;
++
++	mutex_lock(&ctx->lock);
++	ret = s6e3ha2_tabs2_panel_init(ctx);
++	mutex_unlock(&ctx->lock);
++	if (ret < 0)
++		goto err;
++
++	return 0;
++
++err:
++	s6e3ha2_tabs2_power_off(ctx);
++	return ret;
++}
++
++static int s6e3ha2_tabs2_enable(struct drm_panel *panel)
++{
++	struct s6e3ha2_tabs2 *ctx = container_of(panel, struct s6e3ha2_tabs2,
++						 panel);
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	int ret;
++
++	/* 16. Display On(29h) */
++	ret = mipi_dsi_dcs_set_display_on(dsi);
++	if (ret < 0)
++		return ret;
++
++	/*
++	 * s6e3ha2_power_on() (:1228-1232): ldi_enable = 1, then a second
++	 * forced update_brightness() after DISPLAY_ON.
++	 */
++	mutex_lock(&ctx->lock);
++	ctx->ldi_enable = true;
++	ret = s6e3ha2_tabs2_update_brightness(ctx, true);
++	mutex_unlock(&ctx->lock);
++
++	return ret;
++}
++
++/*
++ * Backlight: stock range and default (MAX_BRIGHTNESS 255, DEFAULT 122,
++ * s6e3ha2_tabs2_mipi_lcd.c:55-56), brightness -> level (nit) via
++ * brightness_table[].  Like stock s6e3ha2_set_brightness() (:1311-1333),
++ * a change is sent to the panel only while it is on (ldi_enable).
++ */
++static int s6e3ha2_tabs2_bl_update_status(struct backlight_device *bl_dev)
++{
++	struct s6e3ha2_tabs2 *ctx = bl_get_data(bl_dev);
++	int ret = 0;
++
++	mutex_lock(&ctx->lock);
++	if (ctx->ldi_enable)
++		ret = s6e3ha2_tabs2_update_brightness(ctx, false);
++	mutex_unlock(&ctx->lock);
++
++	return ret;
++}
++
++/*
++ * Stock s6e3ha2_get_brightness() (:1304-1309) returns the candela of the
++ * current level; actual_brightness must stay within 0..max_brightness for
++ * the backlight class, so return the brightness value instead (the
++ * candela is in the "brightness=, bl=, candela=" log line).
++ */
++static int s6e3ha2_tabs2_bl_get_brightness(struct backlight_device *bl_dev)
++{
++	return bl_dev->props.brightness;
++}
++
++static const struct backlight_ops s6e3ha2_tabs2_bl_ops = {
++	.update_status = s6e3ha2_tabs2_bl_update_status,
++	.get_brightness = s6e3ha2_tabs2_bl_get_brightness,
++};
++
++/*
++ * Stock panel node s6e3ha2_qxga (live_fdt.dts:1045-1061): 1536x2048
++ * (resolution 0x600 x 0x800), refresh 60, h-porch <hbp 1, hfp 1,
++ * hsa 1>, v-porch <vbp 15, vfp 1, vsa 1> (decon_dt_exynos5430.c:460-471
++ * maps h-porch to [hbp, hfp, hsa] and v-porch to [vbp, vfp, vsa]).
++ *
++ * Pixel clock = (1536+1+1+1) * (2048+15+1+1) * 60 = 1539 * 2065 * 60
++ * = 190682220 Hz -> 190682 kHz.
++ */
++static const struct drm_display_mode s6e3ha2_tabs2_mode = {
++	.clock = 190682,
++	.hdisplay = 1536,
++	.hsync_start = 1536 + 1,
++	.hsync_end = 1536 + 1 + 1,
++	.htotal = 1536 + 1 + 1 + 1,
++	.vdisplay = 2048,
++	.vsync_start = 2048 + 1,
++	.vsync_end = 2048 + 1 + 1,
++	.vtotal = 2048 + 1 + 1 + 15,
++	.flags = 0,
++};
++
++static int s6e3ha2_tabs2_get_modes(struct drm_panel *panel,
++				   struct drm_connector *connector)
++{
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &s6e3ha2_tabs2_mode);
++	if (!mode) {
++		dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
++			s6e3ha2_tabs2_mode.hdisplay, s6e3ha2_tabs2_mode.vdisplay,
++			drm_mode_vrefresh(&s6e3ha2_tabs2_mode));
++		return -ENOMEM;
++	}
++
++	drm_mode_set_name(mode);
++
++	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	drm_mode_probed_add(connector, mode);
++
++	/* 8.0-inch 4:3 panel: 1536x2048 pixels -> 122.4 x 163.2 mm */
++	connector->display_info.width_mm = 122;
++	connector->display_info.height_mm = 163;
++
++	return 1;
++}
++
++static const struct drm_panel_funcs s6e3ha2_tabs2_drm_funcs = {
++	.disable = s6e3ha2_tabs2_disable,
++	.unprepare = s6e3ha2_tabs2_unprepare,
++	.prepare = s6e3ha2_tabs2_prepare,
++	.enable = s6e3ha2_tabs2_enable,
++	.get_modes = s6e3ha2_tabs2_get_modes,
++};
++
++static int s6e3ha2_tabs2_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.max_brightness = TABS2_MAX_BRIGHTNESS,
++		.brightness = TABS2_DEFAULT_BRIGHTNESS,
++	};
++	struct s6e3ha2_tabs2 *ctx;
++	int ret;
++
++	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	mipi_dsi_set_drvdata(dsi, ctx);
++	ctx->dev = dev;
++
++	ret = devm_mutex_init(dev, &ctx->lock);
++	if (ret)
++		return ret;
++
++	/*
++	 * Stock probe state (:1671-1676): brightness = current_brightness =
++	 * DEFAULT_BRIGHTNESS, bl = current_bl = DEFAULT_GAMMA_INDEX
++	 * (IBRIGHTNESS_162NT, :58), current_acl = 0.  The first update is
++	 * forced, so these only seed the change detection.
++	 */
++	ctx->brightness = TABS2_DEFAULT_BRIGHTNESS;
++	ctx->current_brightness = TABS2_DEFAULT_BRIGHTNESS;
++	ctx->bl = TABS2_IBR_162NT;
++	ctx->current_bl = TABS2_IBR_162NT;
++
++	/*
++	 * Stock mipi_dsi node (live_fdt.dts:1025-1043): 4 data lanes
++	 * (e_no_data_lane = 3), RGB888 (e_pixel_format = 7), command
++	 * interface (e_interface = 0 -> DSIM_COMMAND,
++	 * exynos_mipi_dsim.h enum mipi_dsim_interface_type),
++	 * eot_disable = 1 (no EoT packets).  Same flags as the TM2 board's
++	 * s6e3ha2 (panel-samsung-s6e3ha2.c:695-697): no MIPI_DSI_MODE_VIDEO,
++	 * so the Exynos DSI glue sets i80 mode (exynos_drm_dsi.c:54) and
++	 * DECON waits on its hardware TE trigger (exynos5433-decon match
++	 * data I80_HW_TRG, via samsung,disp-sysreg).
++	 */
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS |
++		MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_VIDEO_NO_HBP |
++		MIPI_DSI_MODE_VIDEO_NO_HSA | MIPI_DSI_MODE_NO_EOT_PACKET;
++
++	/*
++	 * Panel supplies in the stock power-on order:
++	 * VDD3_1.8V (ldo39), VDDR_1.6V (ldo37), VCI_3.0V (ldo25)
++	 * (live_fdt.dts:1080-1082 decon_board_gts28).
++	 */
++	ctx->supplies[0].supply = "vdd3";
++	ctx->supplies[1].supply = "vddr";
++	ctx->supplies[2].supply = "vci";
++
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
++				      ctx->supplies);
++	if (ret < 0) {
++		dev_err(dev, "failed to get regulators: %d\n", ret);
++		return ret;
++	}
++
++	/* reset-gpios = <&gpg0 0 GPIO_ACTIVE_LOW> (live_fdt.dts:1074) */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->reset_gpio)) {
++		dev_err(dev, "cannot get reset-gpios %ld\n",
++			PTR_ERR(ctx->reset_gpio));
++		return PTR_ERR(ctx->reset_gpio);
++	}
++
++	ctx->bl_dev = backlight_device_register("s6e3ha2_tabs2", dev, ctx,
++						&s6e3ha2_tabs2_bl_ops, &props);
++	if (IS_ERR(ctx->bl_dev)) {
++		dev_err(dev, "failed to register backlight device\n");
++		return PTR_ERR(ctx->bl_dev);
++	}
++
++	drm_panel_init(&ctx->panel, dev, &s6e3ha2_tabs2_drm_funcs,
++		       DRM_MODE_CONNECTOR_DSI);
++	ctx->panel.prepare_prev_first = true;
++
++	drm_panel_add(&ctx->panel);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0)
++		goto remove_panel;
++
++	return ret;
++
++remove_panel:
++	drm_panel_remove(&ctx->panel);
++	backlight_device_unregister(ctx->bl_dev);
++
++	return ret;
++}
++
++static void s6e3ha2_tabs2_remove(struct mipi_dsi_device *dsi)
++{
++	struct s6e3ha2_tabs2 *ctx = mipi_dsi_get_drvdata(dsi);
++
++	mipi_dsi_detach(dsi);
++	drm_panel_remove(&ctx->panel);
++	backlight_device_unregister(ctx->bl_dev);
++}
++
++static const struct of_device_id s6e3ha2_tabs2_of_match[] = {
++	{ .compatible = "samsung,s6e3ha2-tabs2" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s6e3ha2_tabs2_of_match);
++
++static struct mipi_dsi_driver s6e3ha2_tabs2_driver = {
++	.probe = s6e3ha2_tabs2_probe,
++	.remove = s6e3ha2_tabs2_remove,
++	.driver = {
++		.name = "panel-samsung-s6e3ha2-tabs2",
++		.of_match_table = s6e3ha2_tabs2_of_match,
++	},
++};
++module_mipi_dsi_driver(s6e3ha2_tabs2_driver);
++
++MODULE_AUTHOR("Samsung Electronics Co., Ltd (downstream panel driver)");
++MODULE_DESCRIPTION("MIPI-DSI S6E3HA2 AMOLED panel driver for the Galaxy Tab S2 8.0 (gts28)");
++MODULE_LICENSE("GPL v2");

@@ -1,0 +1,15 @@
+# Rotates the screen and touch input with the tablet (docs/image/ROTATION.md).
+# Named as omamobile.quicksettings expects: its Rotation tile starts it and
+# enables it, so it is off until the owner turns it on.
+[Unit]
+Description=Rotate the screen with the tablet
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/t715-rotate
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

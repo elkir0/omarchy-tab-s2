@@ -1,0 +1,36 @@
+# Chromium for the SM-T715: ALARM has none for armv7h, so this runs Debian's
+# armhf build in a root of its own, /var/lib/t715-chromium/root, through bwrap
+# and without privileges. It brings its own libraries and Mesa and leaves the
+# system's alone. The window, profile and files are the user's own: the home
+# directory is bound as it is.
+#
+# This package holds what pacman can own: the launcher, the desktop entry, and
+# the update tool with its daily timer. The root is not in it. apt keeps that
+# one up to date, so pacman must not own its files: the image build copies it
+# from rootfs/chromium-root.sh's stage (rootfs/Dockerfile).
+#
+# Named chromium.desktop on purpose: Omarchy's browser scripts, web apps and
+# window rules all look for that name.
+
+pkgname=t715-chromium
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Debian's Chromium in its own root for the Galaxy Tab S2 SM-T715 (launcher, update tool)"
+arch=(any)
+license=('GPL-2.0-or-later')
+depends=(bubblewrap sh systemd util-linux)
+optdepends=('networkmanager: the daily update waits for Wi-Fi')
+provides=(chromium)
+conflicts=(chromium)
+install=t715-chromium.install
+source=(chromium chromium.desktop prepare-root t715-chromium-update
+        t715-chromium-update.service t715-chromium-update.timer)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 chromium "$pkgdir/usr/bin/chromium"
+  install -Dm755 t715-chromium-update "$pkgdir/usr/bin/t715-chromium-update"
+  install -Dm755 prepare-root "$pkgdir/usr/lib/t715-chromium/prepare-root"
+  install -Dm644 chromium.desktop "$pkgdir/usr/share/applications/chromium.desktop"
+  install -Dm644 -t "$pkgdir/usr/lib/systemd/system" t715-chromium-update.service t715-chromium-update.timer
+}

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Ask for the SIM PIN through ModemManager's API (shannond's facade).
+
+    t715-sim-pin            open the dialog (says so when no PIN is needed)
+    t715-sim-pin --if-locked   open it only when the SIM wants a PIN
+
+omarchy-mobile's bar only shows a locked SIM; this is the missing entry. The
+dialog shows the attempts left and sends one code typed by the user, once per
+press: nothing is stored, retried or guessed, and the PIN is never logged.
+"""
+import sys
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+MM = "org.freedesktop.ModemManager1"
+MM_PATH = "/org/freedesktop/ModemManager1"
+MODEM = MM + ".Modem"
+SIM = MM + ".Sim"
+PROPS = "org.freedesktop.DBus.Properties"
+OM = "org.freedesktop.DBus.ObjectManager"
+LOCK_SIM_PIN = 2   # MMModemLock
+LOCK_SIM_PUK = 4
+
+
+def modem_state(bus):
+    """Return (sim path, unlock required, PIN attempts left) or None without a modem."""
+    reply = bus.call_sync(MM, MM_PATH, OM, "GetManagedObjects", None, None,
+                          Gio.DBusCallFlags.NONE, 5000, None)
+    for path, ifaces in reply.unpack()[0].items():
+        m = ifaces.get(MODEM)
+        if m:
+            retries = dict(m.get("UnlockRetries") or {})
+            return m.get("Sim"), m.get("UnlockRequired", 0), retries.get(LOCK_SIM_PIN)
+    return None
+
+
+class Dialog(Adw.ApplicationWindow):
+    def __init__(self, app, bus, state):
+        super().__init__(application=app, title="Code PIN de la SIM", default_width=360)
+        self.bus, self.sim = bus, state[0]
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, "set_margin_" + side)(18)
+        self.label = Gtk.Label(wrap=True)
+        box.append(self.label)
+        self.entry = Gtk.PasswordEntry(show_peek_icon=True, activates_default=True)
+        box.append(self.entry)
+        self.button = Gtk.Button(label="Déverrouiller")
+        self.button.add_css_class("suggested-action")
+        self.button.connect("clicked", self.send)
+        box.append(self.button)
+        self.set_content(box)
+        self.set_default_widget(self.button)
+        self.show_state(state)
+
+    def show_state(self, state):
+        _sim, lock, left = state
+        if lock == LOCK_SIM_PUK:
+            self.label.set_text("La SIM est bloquée : il faut le code PUK de l'opérateur.")
+            self.entry.set_sensitive(False)
+            self.button.set_sensitive(False)
+        elif lock == LOCK_SIM_PIN:
+            tail = "" if left is None else "\nEssais restants : %d" % left
+            self.label.set_text("Entre le code PIN de la SIM." + tail)
+        else:
+            self.label.set_text("La SIM n'a pas besoin de code PIN.")
+            self.entry.set_sensitive(False)
+            self.button.set_sensitive(False)
+
+    def send(self, _button):
+        pin = self.entry.get_text()
+        if not (pin.isdigit() and 4 <= len(pin) <= 8):
+            self.label.set_text("Le code PIN fait 4 à 8 chiffres.")
+            return
+        self.button.set_sensitive(False)
+        self.entry.set_text("")
+        self.bus.call(MM, self.sim, SIM, "SendPin", GLib.Variant("(s)", (pin,)), None,
+                      Gio.DBusCallFlags.NONE, 30000, None, self.sent)
+
+    def sent(self, bus, result):
+        try:
+            bus.call_finish(result)
+        except GLib.Error as exc:
+            self.button.set_sensitive(True)
+            state = modem_state(bus)
+            if state:
+                self.show_state(state)
+            self.label.set_text(self.label.get_text() + "\nRefusé : " + exc.message.split(":")[-1].strip())
+            return
+        self.close()
+
+
+def on_activate(app, if_locked):
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+    try:
+        state = modem_state(bus)
+    except GLib.Error:
+        state = None
+    if state is None:
+        print("no modem", file=sys.stderr)
+        app.quit()
+        return
+    if if_locked and state[1] not in (LOCK_SIM_PIN, LOCK_SIM_PUK):
+        app.quit()
+        return
+    Dialog(app, bus, state).present()
+
+
+def main():
+    if_locked = "--if-locked" in sys.argv[1:]
+    app = Adw.Application(application_id="org.t715.SimPin")
+    app.connect("activate", on_activate, if_locked)
+    return app.run([sys.argv[0]])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

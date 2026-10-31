@@ -1,0 +1,78 @@
+From 9497112f2f9b650eb01e3703e467e997f6fdb6e2 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 21/24] ARM: gts28ltexx: give every CPU node its cluster clock
+
+arch_topology multiplies each CPU's capacity-dmips-mhz by the rate of
+that CPU node's own clock.  exynos5433.dtsi gives a clock only to cpu0
+and cpu4; with no cpufreq driver to fill in the others, cpu1-3 and
+cpu5-7 got capacity 0 (cpu_capacity read 586 0 0 0 1024 0 0 0), and
+the scheduler's wake-up placement favoured cpu0 and cpu4.
+
+Give cpu1-3 the APOLLO clock and cpu5-7 the ATLAS clock, as cpu0 and
+cpu4 already have.  Expected capacities: 586 for the A53 cluster and
+1024 for the A57 cluster, both clusters running at 1.2 GHz.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 44 ++++++++++++++++---
+ 1 file changed, 38 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 8467a560b..594c1a426 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -281,15 +281,47 @@ firmware@207b000 {
+  * 2048 and 3575 under CONFIG_SOC_EXYNOS5433 (kernel_universal5433
+  * arch/arm/kernel/topology.c:72-78); mainline's arm32 table knows neither
+  * A53 nor A57 and would treat all eight cores as equal.
++ *
++ * clocks on cpu1-3 and cpu5-7: arch_topology scales each CPU's
++ * capacity-dmips-mhz by the rate of that CPU node's own clock
++ * (topology_parse_cpu_capacity(), drivers/base/arch_topology.c:343-348).
++ * exynos5433.dtsi gives a clock only to cpu0 and cpu4, and without cpufreq
++ * nothing fills in the others, so they got capacity 0 (measured
++ * 2026-10-29: cpu_capacity 586 0 0 0 1024 0 0 0) and wake-ups favoured
++ * cpu0 and cpu4.  Each core takes its cluster's clock, as on cpu0/cpu4.
+  */
+ &cpu0 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
+-&cpu1 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
+-&cpu2 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
+-&cpu3 { /delete-property/ enable-method; capacity-dmips-mhz = <2048>; };
++&cpu1 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <2048>;
++	clocks = <&cmu_apollo CLK_SCLK_APOLLO>;
++};
++&cpu2 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <2048>;
++	clocks = <&cmu_apollo CLK_SCLK_APOLLO>;
++};
++&cpu3 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <2048>;
++	clocks = <&cmu_apollo CLK_SCLK_APOLLO>;
++};
+ &cpu4 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
+-&cpu5 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
+-&cpu6 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
+-&cpu7 { /delete-property/ enable-method; capacity-dmips-mhz = <3575>; };
++&cpu5 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <3575>;
++	clocks = <&cmu_atlas CLK_SCLK_ATLAS>;
++};
++&cpu6 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <3575>;
++	clocks = <&cmu_atlas CLK_SCLK_ATLAS>;
++};
++&cpu7 {
++	/delete-property/ enable-method;
++	capacity-dmips-mhz = <3575>;
++	clocks = <&cmu_atlas CLK_SCLK_ATLAS>;
++};
+ 
+ &soc {
+ 	/*

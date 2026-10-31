@@ -1,0 +1,1582 @@
+From 46ef479692b4c6bfa5d012649f80e139f7355f42 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 07/16] misc: modem_v1: resolve the 3.10 config conditionals
+ (unifdef, mechanical)
+
+Mechanical step, no hand edit except the three two-line
+"#if defined(CONFIG_LINK_DEVICE_LLI) && !defined(..._WITH_FSM)" blocks of
+modem_main.c that unifdef cannot parse (both conditions true, kept).
+Every file of the import was run through unifdef 2.12 with the stock
+configuration (lineage_gts28ltexx_defconfig:1322-1348, 387):
+
+  defined:   LINK_DEVICE_SPI LINK_DEVICE_MEMORY LINK_CONTROL_MSG_COMMAND
+             LINK_DEVICE_WITH_SBD_ARCH LINK_DEVICE_LLI UMTS_MODEM_SS333
+             EXYNOS_MIPI_LLI_GPIO_SIDEBAND OF LINK_POWER_MANAGEMENT
+             SAMSUNG_PRODUCT_SHIP
+  undefined: LINK_POWER_MANAGEMENT_WITH_FSM (dropped, SYNTHESIS.md D2),
+             LINK_DEVICE_SHMEM LINK_DEVICE_NAPI LINK_CONTROL_MSG_IOSM
+             LINK_DEVICE_HSIC LINK_DEVICE_C2C LINK_DEVICE_USB/PLD/MIPI/DPRAM
+             SEC_MODEM_XMM7260_CAT6 LTE_MODEM_XMM7260 and the other modems
+             (SS222 SS300 SH222AP XMM626x CMC22x CBP7x/82 MDM6600 ESC6270
+             QSC6085 SPRD8803), SEC_MODEM_DEBUG(FS) DEBUG_PKTLOG ARGOS
+             SEC_DEBUG_MIF_OOM BOOT_DEVICE_SPI COMPAT (all prefixed CONFIG_)
+
+The only change in behaviour relative to stock is the FSM branch: the
+non-FSM link-PM code of link_device_lli.c is what remains, and the next
+commit replaces it with the locked-on PM of kernel_port_design.md
+section 2.7.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/modem_v1/include/modem_v1.h      |  62 ------
+ drivers/misc/modem_v1/link_ctrlmsg_command.c  |   6 -
+ drivers/misc/modem_v1/link_device_lli.c       | 181 ------------------
+ drivers/misc/modem_v1/link_device_memory.h    |  18 --
+ .../misc/modem_v1/link_device_memory_debug.c  |   2 -
+ .../misc/modem_v1/link_device_memory_main.c   |  63 ------
+ .../misc/modem_v1/link_device_memory_sbd.c    |  42 ----
+ .../modem_v1/link_device_memory_snapshot.c    |   6 -
+ drivers/misc/modem_v1/link_device_spi.c       |   8 -
+ drivers/misc/modem_v1/modem_io_device.c       |  19 --
+ drivers/misc/modem_v1/modem_main.c            |  53 -----
+ drivers/misc/modem_v1/modem_pktlog.h          |  94 ---------
+ drivers/misc/modem_v1/modem_prj.h             |  43 -----
+ drivers/misc/modem_v1/modem_utils.c           |  27 ---
+ drivers/misc/modem_v1/modem_utils.h           |  13 --
+ drivers/misc/modem_v1/modem_variation.c       |  53 -----
+ drivers/misc/modem_v1/modem_variation.h       |  72 -------
+ 17 files changed, 762 deletions(-)
+
+diff --git a/drivers/misc/modem_v1/include/modem_v1.h b/drivers/misc/modem_v1/include/modem_v1.h
+index 60136fbf0..bc5874a34 100644
+--- a/drivers/misc/modem_v1/include/modem_v1.h
++++ b/drivers/misc/modem_v1/include/modem_v1.h
+@@ -20,10 +20,6 @@
+ #include <linux/miscdevice.h>
+ #include <linux/types.h>
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-#include <mach/shdmem.h>
+-#include <mach/pmu.h>
+-#endif
+ 
+ #define MAX_STR_LEN		256
+ #define MAX_NAME_LEN		64
+@@ -329,55 +325,6 @@ struct modemlink_pm_link_activectl {
+ 	int gpio_request_host_active;
+ };
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-enum shmem_type {
+-	REAL_SHMEM,
+-	C2C_SHMEM,
+-	MAX_SHMEM_TYPE
+-};
+-
+-struct modem_mbox {
+-	unsigned int mbx_ap2cp_msg;
+-	unsigned int mbx_cp2ap_msg;
+-	unsigned int mbx_ap2cp_active;	/* PDA_ACTIVE	*/
+-	unsigned int mbx_cp2ap_active;	/* PHONE_ACTIVE	*/
+-	unsigned int mbx_ap2cp_wakeup;	/* CP_WAKEUP	*/
+-	unsigned int mbx_cp2ap_wakeup;	/* AP_WAKEUP	*/
+-	unsigned int mbx_ap2cp_status;	/* AP_STATUS	*/
+-	unsigned int mbx_cp2ap_status;	/* CP_STATUS	*/
+-
+-	unsigned int int_ap2cp_msg;
+-	unsigned int int_ap2cp_active;
+-	unsigned int int_ap2cp_wakeup;
+-	unsigned int int_ap2cp_status;
+-
+-	unsigned int irq_cp2ap_msg;
+-	unsigned int irq_cp2ap_active;
+-	unsigned int irq_cp2ap_wakeup;
+-	unsigned int irq_cp2ap_status;
+-
+-	/* Performance request */
+-	unsigned int mbx_ap2cp_perf_req;
+-	unsigned int mbx_cp2ap_perf_req;
+-
+-	unsigned int int_ap2cp_perf_req;
+-	unsigned int irq_cp2ap_perf_req;
+-
+-	/* System (H/W) revision */
+-	unsigned int mbx_ap2cp_sys_rev;
+-	unsigned int mbx_ap2cp_pmic_rev;
+-	unsigned int mbx_ap2cp_pkg_id;
+-};
+-
+-struct modem_pmu {
+-	int (*power)(enum cp_mode mode);
+-	int (*get_pwr_status)(void);
+-	int (*stop)(void);
+-	int (*start)(void);
+-	int (*clear_cp_fail)(void);
+-	int (*clear_cp_wdt)(void);
+-};
+-#endif
+ 
+ /* platform data */
+ struct modem_data {
+@@ -423,13 +370,6 @@ struct modem_data {
+ 	unsigned int gpio_sim_detect;
+ 	unsigned int irq_sim_detect;
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-	unsigned int sys_rev;
+-	unsigned int pmic_rev;
+-	unsigned int pkg_id;
+-	struct modem_mbox *mbx;
+-	struct modem_pmu *pmu;
+-#endif
+ 
+ 	/* Switch with 2 links in a modem */
+ 	unsigned int gpio_link_switch;
+@@ -489,7 +429,6 @@ struct modem_boot_spi {
+ #define to_modem_boot_spi(misc)	\
+ 		container_of(misc, struct modem_boot_spi, misc_dev);
+ 
+-#ifdef CONFIG_OF
+ #define mif_dt_read_enum(np, prop, dest) \
+ 	do { \
+ 		u32 val; \
+@@ -520,7 +459,6 @@ struct modem_boot_spi {
+ 			return -EINVAL; \
+ 		dest = val; \
+ 	} while (0)
+-#endif
+ 
+ #define LOG_TAG	"mif: "
+ #define FUNC	(__func__)
+diff --git a/drivers/misc/modem_v1/link_ctrlmsg_command.c b/drivers/misc/modem_v1/link_ctrlmsg_command.c
+index f47cfff14..c151d646b 100644
+--- a/drivers/misc/modem_v1/link_ctrlmsg_command.c
++++ b/drivers/misc/modem_v1/link_ctrlmsg_command.c
+@@ -82,7 +82,6 @@ static bool rild_ready(struct link_device *ld)
+ 	return false;
+ }
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ static void cmd_init_start_handler(struct mem_link_device *mld)
+ {
+ 	struct link_device *ld = &mld->link_dev;
+@@ -114,7 +113,6 @@ static void cmd_init_start_handler(struct mem_link_device *mld)
+ 	mif_info("%s: PIF_INIT_DONE -> %s\n", ld->name, mc->name);
+ 	send_ipc_irq(mld, cmd2int(CMD_PIF_INIT_DONE));
+ }
+-#endif
+ 
+ static void cmd_phone_start_handler(struct mem_link_device *mld)
+ {
+@@ -127,10 +125,8 @@ static void cmd_phone_start_handler(struct mem_link_device *mld)
+ 		ld->name, mc->name, mc->name, mc_state(mc),
+ 		atomic_read(&mld->cp_boot_done));
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	if (mld->start_pm)
+ 		mld->start_pm(mld);
+-#endif
+ 
+ 	spin_lock_irqsave(&ld->lock, flags);
+ 
+@@ -211,11 +207,9 @@ void mem_cmd_handler(struct mem_link_device *mld, u16 cmd)
+ 	struct link_device *ld = &mld->link_dev;
+ 
+ 	switch (cmd) {
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ 	case CMD_INIT_START:
+ 		cmd_init_start_handler(mld);
+ 		break;
+-#endif
+ 
+ 	case CMD_PHONE_START:
+ 		cmd_phone_start_handler(mld);
+diff --git a/drivers/misc/modem_v1/link_device_lli.c b/drivers/misc/modem_v1/link_device_lli.c
+index afc45dd12..8fd525b6b 100644
+--- a/drivers/misc/modem_v1/link_device_lli.c
++++ b/drivers/misc/modem_v1/link_device_lli.c
+@@ -44,7 +44,6 @@ MODULE_PARM_DESC(pm_enable, "LLI PM enable");
+ 
+ static inline void send_ap2cp_irq(struct mem_link_device *mld, u16 mask)
+ {
+-#ifdef CONFIG_EXYNOS_MIPI_LLI_GPIO_SIDEBAND
+ 	int val;
+ 	unsigned long flags;
+ 
+@@ -61,12 +60,8 @@ static inline void send_ap2cp_irq(struct mem_link_device *mld, u16 mask)
+ 	trace_send_sig(mask, val);
+ 
+ 	spin_unlock_irqrestore(&mld->sig_lock, flags);
+-#else
+-	mipi_lli_send_interrupt(mask);
+-#endif
+ }
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 
+ static bool forbid_cp_sleep_wait(struct mem_link_device *mld, int flag)
+ {
+@@ -75,9 +70,7 @@ static bool forbid_cp_sleep_wait(struct mem_link_device *mld, int flag)
+ 	if (mld->forbid_cp_sleep)
+ 		mld->forbid_cp_sleep(mld, flag);
+ 
+-#ifndef CONFIG_SEC_MODEM_XMM7260_CAT6
+ 	if (atomic_read(&mld->cp_boot_done)) {
+-#endif
+ 		/* As of now, tx path of iosm message should always guarantee
+ 		 * process context. We don't have to care rx path because cp
+ 		 * might try to mount lli i/f before sending data. */
+@@ -86,9 +79,6 @@ static bool forbid_cp_sleep_wait(struct mem_link_device *mld, int flag)
+ 		switch (res) {
+ 		case 0:
+ 			mif_err("timeout for link active event\n");
+-#ifdef CONFIG_SEC_MODEM_XMM7260_CAT6
+-			modemctl_notify_event(MDM_CRASH_BY_IOSM);
+-#endif
+ 			return false;
+ 		case -ERESTARTSYS:
+ 			mif_info("woken by a signal\n");
+@@ -96,170 +86,11 @@ static bool forbid_cp_sleep_wait(struct mem_link_device *mld, int flag)
+ 		default:
+ 			mif_info("got link active event\n");
+ 		}
+-#ifndef CONFIG_SEC_MODEM_XMM7260_CAT6
+ 	}
+-#endif
+ 
+ 	return true;
+ }
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM
+-
+-/**
+-@brief		forbid CP from going to sleep
+-
+-Wakes up a CP if it can sleep and increases the "ref_cnt" counter in the
+-mem_link_device instance.
+-
+-@param mld	the pointer to a mem_link_device instance
+-
+-@remark		CAUTION!!! permit_cp_sleep() MUST be invoked after
+-		forbid_cp_sleep() success to decrease the "ref_cnt" counter.
+-*/
+-static void forbid_cp_sleep(struct mem_link_device *mld, int flag)
+-{
+-	struct modem_link_pm *pm = &mld->link_dev.pm;
+-
+-	if (atomic_read(&pm->ref_cnt) >= 1)
+-		return;
+-
+-	atomic_set(&pm->ref_cnt, atomic_read(&pm->ref_cnt) | flag);
+-	mif_debug("ref_cnt %d\n", atomic_read(&pm->ref_cnt));
+-
+-	if (pm->request_hold)
+-		pm->request_hold(pm);
+-}
+-
+-/**
+-@brief	permit CP to go sleep
+-
+-Decreases the "ref_cnt" counter in the mem_link_device instance if it can go
+-sleep and allows CP to go sleep only if the value of "ref_cnt" counter is less
+-than or equal to 0.
+-
+-@param mld	the pointer to a mem_link_device instance
+-
+-@remark		MUST be invoked after forbid_cp_sleep() success to decrease the
+-		"ref_cnt" counter.
+-*/
+-static void permit_cp_sleep(struct mem_link_device *mld, int flag)
+-{
+-	struct modem_link_pm *pm = &mld->link_dev.pm;
+-
+-	atomic_set(&pm->ref_cnt, atomic_read(&pm->ref_cnt) & ~flag);
+-	mif_debug("ref_cnt %d\n", atomic_read(&pm->ref_cnt));
+-
+-	if (atomic_read(&pm->ref_cnt) > 0)
+-		return;
+-
+-	if (pm->release_hold)
+-		pm->release_hold(pm);
+-}
+-
+-static bool check_link_status(struct mem_link_device *mld)
+-{
+-	struct link_device *ld = &mld->link_dev;
+-	struct modem_ctl *mc = ld->mc;
+-	struct modem_link_pm *pm = &ld->pm;
+-
+-	if (gpio_get_value(mld->gpio_cp_status) == 0)
+-		return false;
+-
+-	if (mipi_lli_get_link_status() != LLI_MOUNTED)
+-		return false;
+-
+-	if (cp_online(mc))
+-		return pm->link_active ? pm->link_active(pm) : true;
+-
+-	return true;
+-}
+-
+-static void pm_fail_cb(struct modem_link_pm *pm)
+-{
+-	modemctl_notify_event(MDM_CRASH_PM_FAIL);
+-}
+-
+-static void pm_cp_fail_cb(struct modem_link_pm *pm)
+-{
+-	struct link_device *ld = pm_to_link_device(pm);
+-	struct mem_link_device *mld = ld_to_mem_link_device(ld);
+-	struct modem_ctl *mc = ld->mc;
+-	struct io_device *iod = mc->iod;
+-
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&mc->lock, flags);
+-
+-	if (cp_online(mc)) {
+-		spin_unlock_irqrestore(&mc->lock, flags);
+-
+-		if (mld->stop_pm)
+-			mld->stop_pm(mld);
+-
+-		modemctl_notify_event(MDM_CRASH_PM_CP_FAIL);
+-		return;
+-	}
+-
+-	if (cp_booting(mc)) {
+-		iod->modem_state_changed(iod, STATE_OFFLINE);
+-		ld->reload(ld);
+-		spin_unlock_irqrestore(&mc->lock, flags);
+-		return;
+-	}
+-
+-	spin_unlock_irqrestore(&mc->lock, flags);
+-}
+-
+-static void start_pm(struct mem_link_device *mld)
+-{
+-	struct link_device *ld = &mld->link_dev;
+-	struct modem_link_pm *pm = &ld->pm;
+-
+-	if (!pm->start)
+-		return;
+-
+-	if (pm_enable) {
+-		if (mld->iosm)
+-#ifdef CONFIG_SEC_MODEM_XMM7260_CAT6
+-			pm->start(pm, PM_EVENT_NO_EVENT);
+-#else
+-			pm->start(pm, PM_EVENT_CP_BOOTING);
+-#endif
+-		else
+-			pm->start(pm, PM_EVENT_CP_BOOTING);
+-	} else {
+-		pm->start(pm, PM_EVENT_LOCK_ON);
+-	}
+-}
+-
+-static void stop_pm(struct mem_link_device *mld)
+-{
+-	struct modem_link_pm *pm = &mld->link_dev.pm;
+-
+-	if (pm->stop)
+-		pm->stop(pm);
+-}
+-
+-static int init_pm(struct mem_link_device *mld)
+-{
+-	struct link_device *ld = &mld->link_dev;
+-	struct modem_link_pm *pm = &ld->pm;
+-	struct link_pm_svc *pm_svc;
+-	int ret;
+-
+-	spin_lock_init(&mld->sig_lock);
+-	atomic_set(&pm->ref_cnt, 0);
+-
+-	pm_svc = mipi_lli_get_pm_svc();
+-
+-	ret = init_link_device_pm(ld, pm, pm_svc, pm_fail_cb, pm_cp_fail_cb);
+-	if (ret < 0)
+-		return ret;
+-
+-	return 0;
+-}
+-
+-#else
+ 
+ static inline void change_irq_type(unsigned int irq, unsigned int value)
+ {
+@@ -583,8 +414,6 @@ static int init_pm(struct mem_link_device *mld)
+ 
+ 	return 0;
+ }
+-#endif
+-#endif
+ 
+ static void lli_link_reset(struct link_device *ld)
+ {
+@@ -649,10 +478,8 @@ static void lli_irq_handler(void *data, u32 intr)
+ 		print_pm_status(mld);
+ #endif
+ 
+-#ifndef CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM
+ 	if (gpio_get_value(mld->gpio_cp_wakeup) == 0)
+ 		gpio_set_value(mld->gpio_cp_wakeup, 1);
+-#endif
+ 
+ 	msb = mem_take_snapshot(mld, RX);
+ 	if (!msb)
+@@ -836,18 +663,14 @@ struct link_device *lli_create_link_device(struct platform_device *pdev)
+ 	/*
+ 	** Link local functions to the corresponding function pointers
+ 	*/
+-#ifndef CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM
+ 	mld->finalize_cp_start = finalize_cp_start;
+-#endif
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	mld->start_pm = start_pm;
+ 	mld->stop_pm = stop_pm;
+ 	mld->forbid_cp_sleep = forbid_cp_sleep;
+ 	mld->forbid_cp_sleep_wait = forbid_cp_sleep_wait;
+ 	mld->permit_cp_sleep = permit_cp_sleep;
+ 	mld->link_active = check_link_status;
+-#endif
+ 
+ 	/**
+ 	 * Initialize SHMEM maps for IPC (physical map -> logical map)
+@@ -866,7 +689,6 @@ struct link_device *lli_create_link_device(struct platform_device *pdev)
+ 		goto error;
+ 	}
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ 	if (ld->sbd_ipc) {
+ 		struct sbd_link_device *sld = &mld->sbd_link_dev;
+ 
+@@ -874,7 +696,6 @@ struct link_device *lli_create_link_device(struct platform_device *pdev)
+ 		if (err < 0)
+ 			goto error;
+ 	}
+-#endif
+ 
+ 	/**
+ 	 * Register interrupt handlers
+@@ -896,11 +717,9 @@ struct link_device *lli_create_link_device(struct platform_device *pdev)
+ 
+ 	init_waitqueue_head(&mld->wq);
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	err = init_pm(mld);
+ 	if (err)
+ 		goto error;
+-#endif
+ 
+ #ifdef DEBUG_MODEM_IF
+ 	dev_debugfs_add(mld);
+diff --git a/drivers/misc/modem_v1/link_device_memory.h b/drivers/misc/modem_v1/link_device_memory.h
+index 41c9c8e96..3aeff68fb 100644
+--- a/drivers/misc/modem_v1/link_device_memory.h
++++ b/drivers/misc/modem_v1/link_device_memory.h
+@@ -274,17 +274,13 @@ struct mst_buff_head {
+ @{
+ */
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ enum mem_ipc_mode {
+ 	MEM_LEGACY_IPC,
+ 	MEM_SBD_IPC,
+ };
+-#endif
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ #define	REFCNT_SBD	0x01
+ #define	REFCNT_IOSM	0x02
+-#endif
+ 
+ /**
+ @brief		the structure for a memory-type link device
+@@ -344,10 +340,8 @@ struct mem_link_device {
+ 	u32 __iomem *access;
+ 	struct mem_ipc_device *dev[MAX_SIPC5_DEVICES];
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ 	struct sbd_link_device sbd_link_dev;
+ 	struct work_struct iosm_w;
+-#endif
+ 
+ 	/**
+ 	 * task & irq affinity cpu mask
+@@ -388,13 +382,6 @@ struct mem_link_device {
+ 	void (*debug_info)(void);
+ 	void (*cmd_handler)(struct mem_link_device *mld, u16 cmd);
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM
+-	unsigned int gpio_ap_wakeup;		/* CP-to-AP wakeup GPIO */
+-	unsigned int gpio_cp_wakeup;		/* AP-to-CP wakeup GPIO */
+-	unsigned int gpio_cp_status;		/* CP-to-AP status GPIO */
+-	unsigned int gpio_ap_status;		/* AP-to-CP status GPIO */
+-#else
+ 	unsigned int gpio_ap_wakeup;		/* CP-to-AP wakeup GPIO */
+ 	struct modem_irq irq_ap_wakeup;		/* CP-to-AP wakeup IRQ  */
+ 
+@@ -414,7 +401,6 @@ struct mem_link_device {
+ 	spinlock_t pm_lock;
+ 
+ 	unsigned long long last_cp2ap_intr;
+-#endif
+ 	atomic_t ref_cnt;
+ 
+ 	unsigned int gpio_ipc_int2cp;		/* AP-to-CP send signal GPIO */
+@@ -428,7 +414,6 @@ struct mem_link_device {
+ 	bool (*forbid_cp_sleep_wait)(struct mem_link_device *mld, int flag);
+ 	void (*permit_cp_sleep)(struct mem_link_device *mld, int flag);
+ 	bool (*link_active)(struct mem_link_device *mld);
+-#endif
+ 
+ #ifdef DEBUG_MODEM_IF
+ 	struct dentry *dbgfs_dir;
+@@ -1024,9 +1009,6 @@ static inline struct sk_buff *mem_alloc_skb(unsigned int len)
+ 	if (!skb) {
+ 		mif_err("ERR! alloc_skb(len:%d + pad:%d, gfp:0x%x) fail\n",
+ 			len, NET_SKB_PAD, priority);
+-#ifdef CONFIG_SEC_DEBUG_MIF_OOM
+-		show_mem(SHOW_MEM_FILTER_NODES);
+-#endif
+ 		return NULL;
+ 	}
+ 
+diff --git a/drivers/misc/modem_v1/link_device_memory_debug.c b/drivers/misc/modem_v1/link_device_memory_debug.c
+index c92a7d572..e62a7fc72 100644
+--- a/drivers/misc/modem_v1/link_device_memory_debug.c
++++ b/drivers/misc/modem_v1/link_device_memory_debug.c
+@@ -44,7 +44,6 @@
+ 
+ void print_pm_status(struct mem_link_device *mld)
+ {
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	struct link_device *ld = &mld->link_dev;
+ 	unsigned int magic;
+ 	int ap_wakeup;
+@@ -64,7 +63,6 @@ void print_pm_status(struct mem_link_device *mld)
+ 	mif_info("%s: PM {%d:%d:%d:%d:%X} %d <%pf>\n", ld->name,
+ 		ap_wakeup, cp_wakeup, cp_status, ap_status, magic,
+ 		atomic_read(&mld->ref_cnt), CALLER);
+-#endif
+ }
+ 
+ /**
+diff --git a/drivers/misc/modem_v1/link_device_memory_main.c b/drivers/misc/modem_v1/link_device_memory_main.c
+index c8590267f..a83ebb1e7 100644
+--- a/drivers/misc/modem_v1/link_device_memory_main.c
++++ b/drivers/misc/modem_v1/link_device_memory_main.c
+@@ -178,11 +178,9 @@ static enum hrtimer_restart sbd_tx_timer_func(struct hrtimer *timer)
+ 	need_schedule = false;
+ 	mask = 0;
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	if (cp_online(mc) && mld->forbid_cp_sleep) {
+ 		mld->forbid_cp_sleep(mld, REFCNT_SBD);
+ 	}
+-#endif
+ 
+ 	spin_lock_irqsave(&mc->lock, flags);
+ 	if (unlikely(!ipc_active(mld))) {
+@@ -250,11 +248,9 @@ static enum hrtimer_restart sbd_tx_timer_func(struct hrtimer *timer)
+ 	if (need_schedule) {
+ 		ktime_t ktime = ktime_set(0, ms2ns(TX_PERIOD_MS));
+ 		hrtimer_start(timer, ktime, HRTIMER_MODE_REL);
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT
+ 	} else {
+ 		if (mld->permit_cp_sleep)
+ 			mld->permit_cp_sleep(mld, REFCNT_SBD);
+-#endif
+ 	}
+ 
+ 	return HRTIMER_NORESTART;
+@@ -404,11 +400,7 @@ static int rx_net_frames_from_rb(struct sbd_ring_buffer *rb, int budget)
+ 	struct mem_link_device *mld = ld_to_mem_link_device(ld);
+ 	unsigned int num_frames;
+ 
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-	num_frames = min_t(unsigned int, rb_usage(rb), budget);
+-#else
+ 	num_frames = rb_usage(rb);
+-#endif
+ 
+ 	while (rcvd < num_frames) {
+ 		struct sk_buff *skb;
+@@ -463,11 +455,7 @@ static int rx_ipc_frames_from_rb(struct sbd_ring_buffer *rb)
+ 
+ 		skb = sbd_pio_rx(rb);
+ 		if (!skb) {
+-#ifdef CONFIG_SEC_MODEM_DEBUG
+-			panic("skb alloc failed.");
+-#else
+ 			modemctl_notify_event(MDM_CRASH_NO_MEM);
+-#endif
+ 			break;
+ 		}
+ 
+@@ -544,13 +532,7 @@ void recv_sbd_ipc_frames(struct mem_link_device *mld)
+ 			continue;
+ 
+ 		if (likely(sipc_ps_ch(rb->ch))) {
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-			//mld->link_dev.disable_irq(&mld->link_dev);
+-			if (napi_schedule_prep(&rb->iod->napi))
+-				__napi_schedule(&rb->iod->napi);
+-#else
+ 			rx_net_frames_from_rb(rb, 0);
+-#endif
+ 		} else {
+ 			rx_ipc_frames_from_rb(rb);
+ 		}
+@@ -639,17 +621,6 @@ static int mem_init_comm(struct link_device *ld, struct io_device *iod)
+ 		return 0;
+ 
+ 	if (atomic_read(&mld->cp_boot_done)) {
+-#ifdef CONFIG_LINK_CONTROL_MSG_IOSM
+-		struct sbd_link_device *sl = &mld->sbd_link_dev;
+-		struct sbd_ipc_device *sid = sbd_ch2dev(sl, iod->id);
+-
+-		if (sid && atomic_read(&sid->config_done)) {
+-			tx_iosm_message(mld, IOSM_A2C_OPEN_CH, (u32 *)&id);
+-		} else {
+-			mif_err("%s isn't configured channel\n", iod->name);
+-			return -ENODEV;
+-		}
+-#endif
+ 		return 0;
+ 	}
+ 
+@@ -681,11 +652,6 @@ static int mem_init_comm(struct link_device *ld, struct io_device *iod)
+ 			}
+ 		}
+ 		break;
+-#ifdef CONFIG_LINK_CONTROL_MSG_IOSM
+-	default:
+-		mif_err("%s channel is not ready\n", iod->name);
+-		return -ENODEV;
+-#endif
+ 	}
+ 
+ 	return 0;
+@@ -701,13 +667,6 @@ static int mem_init_comm(struct link_device *ld, struct io_device *iod)
+ static void mem_terminate_comm(struct link_device *ld, struct io_device *iod)
+ {
+ 	struct mem_link_device *mld = to_mem_link_device(ld);
+-#ifdef CONFIG_LINK_CONTROL_MSG_IOSM
+-	struct sbd_link_device *sl = &mld->sbd_link_dev;
+-	struct sbd_ipc_device *sid = sbd_ch2dev(sl, iod->id);
+-
+-	if (sid && atomic_read(&mld->cp_boot_done))
+-		tx_iosm_message(mld, IOSM_A2C_CLOSE_CH, (u32 *)&iod->id);
+-#endif
+ 	if (sipc5_udl_ch(iod->id) && !atomic_read(&iod->opened))
+ 		atomic_set(&mld->cp_boot_done, 0);
+ }
+@@ -783,9 +742,6 @@ static void mem_boot_on(struct link_device *ld, struct io_device *iod)
+ 	ld->state = LINK_STATE_OFFLINE;
+ 	spin_unlock_irqrestore(&ld->lock, flags);
+ 
+-#ifdef CONFIG_LTE_MODEM_XMM7260
+-	sbd_deactivate(&mld->sbd_link_dev);
+-#endif
+ 	cancel_tx_timer(mld, &mld->sbd_tx_timer);
+ 
+ 	if (mld->iosm) {
+@@ -793,9 +749,6 @@ static void mem_boot_on(struct link_device *ld, struct io_device *iod)
+ 		mif_info("Control message region has been initialized\n");
+ 	}
+ 
+-#ifdef CONFIG_LINK_CONTROL_MSG_IOSM
+-	iowrite32(IOSM_MAGIC, mld->base + CMD_RGN_OFFSET + IOSM_MAGIC_OFFSET);
+-#endif
+ 
+ 	purge_txq(mld);
+ }
+@@ -928,16 +881,6 @@ static int mem_rx_setup(struct link_device *ld)
+ 	if (!zalloc_cpumask_var(&mld->tmask, GFP_KERNEL))
+ 		return -ENOMEM;
+ 
+-#ifdef CONFIG_ARGOS
+-	/* Below hard-coded mask values should be removed later on.
+-	 * Like net-sysfs, argos module also should support sysfs knob,
+-	 * so that user layer must be able to control these cpu mask. */
+-	cpumask_copy(mld->dmask, &hmp_slow_cpu_mask);
+-
+-	cpumask_or(mld->imask, mld->imask, cpumask_of(3));
+-
+-	argos_irq_affinity_setup_label(217, "IPC", mld->imask, mld->dmask);
+-#endif
+ 
+ 	ld->rx_wq = alloc_workqueue(
+ 			"mem_rx_work", WQ_HIGHPRI | WQ_CPU_INTENSIVE, 1);
+@@ -1069,13 +1012,7 @@ struct mem_link_device *mem_create_link_device(enum mem_iface_type type,
+ 		mld->dpram_magic = true;
+ 	}
+ 
+-#ifdef CONFIG_LINK_CONTROL_MSG_IOSM
+-	mld->iosm = true;
+-	mld->cmd_handler = iosm_event_bh;
+-	INIT_WORK(&mld->iosm_w, iosm_event_work);
+-#else
+ 	mld->cmd_handler = mem_cmd_handler;
+-#endif
+ 
+ 	/*====================================================================*\
+ 		Initialize MEM locks, completions, bottom halves, etc
+diff --git a/drivers/misc/modem_v1/link_device_memory_sbd.c b/drivers/misc/modem_v1/link_device_memory_sbd.c
+index 25edfaf1f..61864e09a 100644
+--- a/drivers/misc/modem_v1/link_device_memory_sbd.c
++++ b/drivers/misc/modem_v1/link_device_memory_sbd.c
+@@ -38,39 +38,6 @@
+ 
+ static void print_sbd_config(struct sbd_link_device *sl)
+ {
+-#ifdef CONFIG_SEC_MODEM_DEBUG
+-	int i;
+-
+-	pr_err("mif: SBD_IPC {shmem_base:0x%lX shmem_size:%d}\n",
+-		(unsigned long)sl->shmem, sl->shmem_size);
+-
+-	pr_err("mif: SBD_IPC {version:%d num_channels:%d rbps_offset:%d}\n",
+-		sl->g_desc->version, sl->g_desc->num_channels,
+-		sl->g_desc->rbps_offset);
+-
+-	for (i = 0; i < sl->num_channels; i++) {
+-		struct sbd_rb_channel *rb_ch = &sl->g_desc->rb_ch[i];
+-		struct sbd_rb_desc *rbd;
+-
+-		rbd = &sl->g_desc->rb_desc[i][UL];
+-		pr_err("mif: RB_DESC[%-2d][UL](offset:%d) = "
+-			"{id:%-2d ch:%-3d dir:%s} "
+-			"{sbdv_offset:%-5d rb_len:%-3d} "
+-			"{buff_size:%-4d payload_offset:%d}\n",
+-			i, rb_ch->ul_rbd_offset, rbd->id, rbd->ch,
+-			udl_str(rbd->direction), rb_ch->ul_sbdv_offset,
+-			rbd->length, rbd->buff_size, rbd->payload_offset);
+-
+-		rbd = &sl->g_desc->rb_desc[i][DL];
+-		pr_err("mif: RB_DESC[%-2d][DL](offset:%d) = "
+-			"{id:%-2d ch:%-3d dir:%s} "
+-			"{sbdv_offset:%-5d rb_len:%-3d} "
+-			"{buff_size:%d payload_offset:%d}\n",
+-			i, rb_ch->dl_rbd_offset, rbd->id, rbd->ch,
+-			udl_str(rbd->direction), rb_ch->dl_sbdv_offset,
+-			rbd->length, rbd->buff_size, rbd->payload_offset);
+-	}
+-#endif
+ }
+ 
+ static void init_desc_alloc(struct sbd_link_device *sl, unsigned int offset)
+@@ -336,11 +303,7 @@ static void init_ipc_device(struct sbd_link_device *sl, u16 id,
+ 	ipc_dev->id = id;
+ 	ipc_dev->ch = ch;
+ 
+-#ifdef CONFIG_SEC_MODEM_XMM7260_CAT6
+-	atomic_set(&ipc_dev->config_done, 0);
+-#else
+ 	atomic_set(&ipc_dev->config_done, 1);
+-#endif
+ 
+ 	rb = &ipc_dev->rb[UL];
+ 	spin_lock_init(&rb->lock);
+@@ -435,11 +398,6 @@ int create_sbd_link_device(struct link_device *ld, struct sbd_link_device *sl,
+ 	for (i = 0; i < sl->num_channels; i++)
+ 		init_ipc_device(sl, i, sbd_id2dev(sl, i));
+ 
+-#ifdef CONFIG_DEBUG_PKTLOG
+-	sl->pktlog = create_pktlog("lli");
+-	if (!sl->pktlog)
+-		mif_err("packet log device create fail\n");
+-#endif
+ 
+ 	return 0;
+ }
+diff --git a/drivers/misc/modem_v1/link_device_memory_snapshot.c b/drivers/misc/modem_v1/link_device_memory_snapshot.c
+index 2a31f2af4..2ce7dd4da 100644
+--- a/drivers/misc/modem_v1/link_device_memory_snapshot.c
++++ b/drivers/misc/modem_v1/link_device_memory_snapshot.c
+@@ -185,7 +185,6 @@ void msb_queue_purge(struct mst_buff_head *list)
+ 		msb_free(msb);
+ }
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ /**
+ @brief		take a snapshot of the current status of a memory interface
+ 
+@@ -213,7 +212,6 @@ static void __take_sbd_status(struct mem_link_device *mld, enum direction dir,
+ 	else
+ 		mst->int2cp = 0;
+ }
+-#endif
+ 
+ /**
+ @brief		take a snapshot of the current status of a memory interface
+@@ -271,14 +269,10 @@ struct mst_buff *mem_take_snapshot(struct mem_link_device *mld,
+ 	if (!msb)
+ 		return NULL;
+ 
+-#ifdef CONFIG_LINK_DEVICE_WITH_SBD_ARCH
+ 	if (sbd_active(&mld->sbd_link_dev))
+ 		__take_sbd_status(mld, dir, &msb->snapshot);
+ 	else
+ 		__take_mem_status(mld, dir, &msb->snapshot);
+-#else
+-	__take_mem_status(mld, dir, &msb->snapshot);
+-#endif
+ 
+ 	return msb;
+ }
+diff --git a/drivers/misc/modem_v1/link_device_spi.c b/drivers/misc/modem_v1/link_device_spi.c
+index 26258c842..22e5420fc 100644
+--- a/drivers/misc/modem_v1/link_device_spi.c
++++ b/drivers/misc/modem_v1/link_device_spi.c
+@@ -25,15 +25,11 @@
+ #include <linux/mutex.h>
+ #include <linux/irq.h>
+ #include <linux/gpio.h>
+-#ifdef CONFIG_OF
+ #include <linux/of_gpio.h>
+-#endif
+ #include <linux/wakelock.h>
+ #include <linux/delay.h>
+ #include <linux/spi/spi.h>
+-#ifdef CONFIG_LINK_DEVICE_LLI
+ #include <linux/mipi-lli.h>
+-#endif
+ 
+ #include <linux/device.h>
+ #include <linux/cdev.h>
+@@ -189,22 +185,18 @@ static int spi_boot_probe(struct spi_device *spi)
+ 	return ret;
+ }
+ 
+-#ifdef CONFIG_OF
+ static const struct of_device_id modem_boot_spi_match[] = {
+ 	{ .compatible = "spi_boot_link", },
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, modem_boot_spi_match);
+-#endif
+ 
+ static struct spi_driver spi_boot_driver = {
+ 	.probe = spi_boot_probe,
+ 	.driver = {
+ 		.name = "spi_modem_boot",
+ 		.owner = THIS_MODULE,
+-#ifdef CONFIG_OF
+ 		.of_match_table = of_match_ptr(modem_boot_spi_match),
+-#endif
+ 	},
+ };
+ 
+diff --git a/drivers/misc/modem_v1/modem_io_device.c b/drivers/misc/modem_v1/modem_io_device.c
+index c67dc80e2..3412a0bf3 100644
+--- a/drivers/misc/modem_v1/modem_io_device.c
++++ b/drivers/misc/modem_v1/modem_io_device.c
+@@ -329,14 +329,10 @@ static int rx_multi_pdp(struct sk_buff *skb)
+ 
+ 	log_ipc_pkt(PS_RX, iod->id, skb);
+ 
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-	ret = netif_receive_skb(skb);
+-#else
+ 	if (in_interrupt())
+ 		ret = netif_rx(skb);
+ 	else
+ 		ret = netif_rx_ni(skb);
+-#endif
+ 
+ 	if (ret != NET_RX_SUCCESS) {
+ 		mif_err_limited("%s: %s<-%s: ERR! netif_rx fail\n",
+@@ -1456,12 +1452,7 @@ static ssize_t misc_read(struct file *filp, char *buf, size_t count,
+ 	return copied;
+ }
+ 
+-#ifdef CONFIG_COMPAT
+-/* all compatible */
+-#define compat_misc_ioctl	misc_ioctl
+-#else
+ #define compat_misc_ioctl	NULL
+-#endif
+ 
+ static const struct file_operations misc_io_fops = {
+ 	.owner = THIS_MODULE,
+@@ -1498,9 +1489,6 @@ static int vnet_open(struct net_device *ndev)
+ 	}
+ 
+ 	netif_start_queue(ndev);
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-	napi_enable(&iod->napi);
+-#endif
+ 
+ 	mif_err("%s (opened %d) by %s\n",
+ 		iod->name, atomic_read(&iod->opened), current->comm);
+@@ -1524,9 +1512,6 @@ static int vnet_stop(struct net_device *ndev)
+ 	}
+ 
+ 	netif_stop_queue(ndev);
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-	napi_disable(&iod->napi);
+-#endif
+ 
+ 	mif_err("%s (opened %d) by %s\n",
+ 		iod->name, atomic_read(&iod->opened), current->comm);
+@@ -1811,10 +1796,6 @@ int sipc5_init_io_device(struct io_device *iod)
+ 			return -ENOMEM;
+ 		}
+ 
+-#ifdef CONFIG_LINK_DEVICE_NAPI
+-		netif_napi_add(iod->ndev, &iod->napi,
+-				mem_netdev_poll, napi_weight);
+-#endif
+ 
+ 		ret = register_netdev(iod->ndev);
+ 		if (ret) {
+diff --git a/drivers/misc/modem_v1/modem_main.c b/drivers/misc/modem_v1/modem_main.c
+index d4836a3d1..ff24a07e3 100644
+--- a/drivers/misc/modem_v1/modem_main.c
++++ b/drivers/misc/modem_v1/modem_main.c
+@@ -30,19 +30,11 @@
+ #include <linux/mutex.h>
+ #include <linux/irq.h>
+ #include <linux/gpio.h>
+-#ifdef CONFIG_OF
+ #include <linux/of_gpio.h>
+-#endif
+ #include <linux/delay.h>
+ #include <linux/wakelock.h>
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-#include <mach/shdmem.h>
+-#endif
+-#if defined(CONFIG_LINK_DEVICE_LLI) &&\
+-    !defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+ #include <linux/mipi-lli.h>
+-#endif
+ 
+ #include "modem_prj.h"
+ #include "modem_variation.h"
+@@ -255,7 +247,6 @@ static int attach_devices(struct io_device *iod, enum modem_link tx_link)
+ 	return 0;
+ }
+ 
+-#ifdef CONFIG_OF
+ static int parse_dt_common_pdata(struct device_node *np,
+ 				 struct modem_data *pdata)
+ {
+@@ -353,7 +344,6 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
+ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
+ 					   struct modem_data *pdata)
+ {
+-#if !defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+ 	int ret;
+ 
+ 	/* GPIO_CP_WAKEUP */
+@@ -407,15 +397,11 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
+ 		else
+ 			gpio_direction_input(pdata->gpio_cp_status);
+ 	}
+-#endif
+ }
+ 
+ static int parse_dt_gpio_pdata(struct device_node *np, struct modem_data *pdata)
+ {
+ 	int err = 0;
+-#if defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+-	struct device_node *pm_node;
+-#endif
+ 
+ 	err = __parse_dt_mandatory_gpio_pdata(np, pdata);
+ 	if (err)
+@@ -423,17 +409,6 @@ static int parse_dt_gpio_pdata(struct device_node *np, struct modem_data *pdata)
+ 
+ 	__parse_dt_optional_gpio_pdata(np, pdata);
+ 
+-#if defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+-	pm_node = of_get_child_by_name(np, PM_DT_NODE_NAME);
+-	if (!pm_node) {
+-		mif_err("ERR! No PM DT node\n");
+-		return -ENOSYS;
+-	}
+-
+-	err = link_pm_parse_dt_gpio_pdata(pm_node, pdata);
+-	if (err)
+-		return err;
+-#endif
+ 
+ 	return err;
+ }
+@@ -535,12 +510,6 @@ static const struct of_device_id sec_modem_match[] = {
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, sec_modem_match);
+-#else
+-static struct modem_data *modem_if_parse_dt_pdata(struct device *dev)
+-{
+-	return ERR_PTR(-ENODEV);
+-}
+-#endif
+ 
+ static int modem_probe(struct platform_device *pdev)
+ {
+@@ -670,21 +639,11 @@ static int modem_suspend(struct device *pdev)
+ {
+ 	struct modem_ctl *mc = dev_get_drvdata(pdev);
+ 
+-#if !defined(CONFIG_LINK_DEVICE_HSIC)
+ 	if (mc->gpio_pda_active)
+ 		gpio_set_value(mc->gpio_pda_active, 0);
+-#endif
+ 
+-#if defined(CONFIG_LINK_DEVICE_LLI) &&\
+-    !defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+ 	mipi_lli_suspend();
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-	mif_err("%s: pda_active:0\n", mc->name);
+-	mbox_set_value(mc->mbx_pda_active, 0);
+-	mbox_set_interrupt(mc->int_pda_active);
+-#endif
+ 
+ 	mif_info("%s: %s\n", FUNC, mc->name);
+ 
+@@ -695,13 +654,9 @@ static int modem_resume(struct device *pdev)
+ {
+ 	struct modem_ctl *mc = dev_get_drvdata(pdev);
+ 
+-#if !defined(CONFIG_LINK_DEVICE_HSIC)
+ 	if (mc->gpio_pda_active)
+ 		gpio_set_value(mc->gpio_pda_active, 1);
+-#endif
+ 
+-#if defined(CONFIG_LINK_DEVICE_LLI) &&\
+-    !defined(CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM)
+ 	mipi_lli_resume();
+ 
+ 	/* CP initiated resume case */
+@@ -710,13 +665,7 @@ static int modem_resume(struct device *pdev)
+ 		mipi_lli_set_link_status(LLI_WAITFORMOUNT);
+ 		gpio_set_value(mc->gpio_ap_status, 1);
+ 	}
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-	mif_err("%s: pda_active:1\n", mc->name);
+-	mbox_set_value(mc->mbx_pda_active, 1);
+-	mbox_set_interrupt(mc->int_pda_active);
+-#endif
+ 
+ 	mif_info("%s: %s\n", FUNC, mc->name);
+ 
+@@ -736,9 +685,7 @@ static struct platform_driver modem_driver = {
+ 		.owner = THIS_MODULE,
+ 		.pm = &modem_pm_ops,
+ 		.suppress_bind_attrs = true,
+-#ifdef CONFIG_OF
+ 		.of_match_table = of_match_ptr(sec_modem_match),
+-#endif
+ 	},
+ };
+ 
+diff --git a/drivers/misc/modem_v1/modem_pktlog.h b/drivers/misc/modem_v1/modem_pktlog.h
+index 655811d8a..d26f516dc 100644
+--- a/drivers/misc/modem_v1/modem_pktlog.h
++++ b/drivers/misc/modem_v1/modem_pktlog.h
+@@ -1,99 +1,6 @@
+ #ifndef __MODEM_PKTLOG_H__
+ #define __MODEM_PKTLOG_H__
+ 
+-#ifdef CONFIG_DEBUG_PKTLOG
+-
+-#include <linux/time.h>
+-
+-struct pktbuf_private {
+-	unsigned char dir;
+-} __packed;
+-#define pktpriv(pkt) ((struct pktbuf_private *)&pkt->cb)
+-
+-#define PCAP_VERSION_MAJOR 2
+-#define PCAP_VERSION_MINOR 4
+-#define TCPDUMP_MAGIC 0xa1b2c3d4
+-
+-#define DLT_RAW 101
+-#define DLT_LINUX_SLL 113
+-#define WTAP_ENCAP_USER0 147 /* sipc5 header */
+-
+-struct pcap_file_header {
+-	unsigned magic;
+-	unsigned short version_major;
+-	unsigned short version_minor;
+-	int thiszone;
+-	unsigned sigflag;
+-	unsigned snaplen;
+-	unsigned linktype;
+-} __packed;
+-
+-struct pcap_hdr {
+-	unsigned tv_sec;
+-	unsigned tv_usec;
+-	unsigned caplen;
+-	unsigned len;
+-} __packed;
+-
+-#define SLL_ADDRLEN 8
+-struct sll_hdr {
+-	unsigned short pkttype;
+-	unsigned short hatype;
+-	unsigned short halen;
+-	unsigned char addr[SLL_ADDRLEN];
+-	unsigned short protocol;
+-} __packed;
+-
+-struct sipc_debug {
+-	unsigned char dir;
+-} __packed;
+-
+-struct pktdump_hdr {
+-	struct pcap_hdr pcap;
+-	/*struct sipc_debug sd;*/
+-} __packed;
+-
+-struct pktlog_data {
+-	struct miscdevice misc;
+-	atomic_t opened;
+-	wait_queue_head_t wq;
+-
+-	unsigned qmax;
+-	unsigned snaplen;
+-
+-	struct sk_buff_head logq;
+-
+-	bool copy_file_header;
+-	struct pcap_file_header file_hdr;
+-	struct pktdump_hdr hdr;
+-};
+-
+-enum {
+-	PKTLOG_BOTTOM, 	/* to/from phy layer */
+-	PKTLOG_TOP,	/* to/from network/ril layer */
+-	PKTLOG_TEXT,
+-};
+-
+-#define PKT_TX 0x10
+-#define PKT_RX 0x20
+-#define PKT_IP 0x40
+-
+-#define PKT_BOT 0x0
+-#define PKT_TOP 0xF
+-
+-
+-extern struct pktlog_data *create_pktlog(char *name);
+-extern void remove_pktlog(struct pktlog_data *pktlog);
+-extern void pktlog_queue_skb(struct pktlog_data *pktlog, unsigned char dir,
+-		struct sk_buff *skb);
+-
+-#define pktlog_tx_bottom_skb(sl, skb)	pktlog_queue_skb((sl)->pktlog, (PKT_TX | PKT_BOT) , skb)
+-#define pktlog_tx_top_skb(sl, skb)	pktlog_queue_skb((sl)->pktlog, (PKT_TX | PKT_TOP) , skb)
+-#define pktlog_rx_bottom_skb(sl, skb)	pktlog_queue_skb((sl)->pktlog, (PKT_RX | PKT_BOT) , skb)
+-#define pktlog_rx_top_skb(sl, skb)	pktlog_queue_skb((sl)->pktlog, (PKT_RX | PKT_TOP) , skb)
+-#define pktlog_text_buf(sl, buf)	do {} while(0)
+-
+-#else /* else of DEBUG_PKTLOG */
+ inline static struct pktlog_data *create_pktlog(char *name) { return NULL; }
+ #define remove_pktlog(pkt)		do {} while(0)
+ #define pktlog_tx_bottom_skb(sl, skb)	do {} while(0)
+@@ -101,6 +8,5 @@ inline static struct pktlog_data *create_pktlog(char *name) { return NULL; }
+ #define pktlog_rx_bottom_skb(sl, skb)	do {} while(0)
+ #define pktlog_rx_top_skb(sl, skb)	do {} while(0)
+ #define pktlog_text_buf(sl, buf)	do {} while(0)
+-#endif /* end of DEBUG_PKTLOG */
+ 
+ #endif
+diff --git a/drivers/misc/modem_v1/modem_prj.h b/drivers/misc/modem_v1/modem_prj.h
+index e9ea6580e..1bd98ba2d 100644
+--- a/drivers/misc/modem_v1/modem_prj.h
++++ b/drivers/misc/modem_v1/modem_prj.h
+@@ -82,9 +82,6 @@ IOCTL commands
+ #define IOCTL_MODEM_RAMDUMP_STOP	_IO('o', 0xCF)
+ 
+ #define IOCTL_MODEM_XMIT_BOOT		_IO('o', 0x40)
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-#define IOCTL_MODEM_GET_SHMEM_INFO	_IO('o', 0x41)
+-#endif
+ #define IOCTL_DPRAM_INIT_STATUS		_IO('o', 0x43)
+ 
+ #define IOCTL_LINK_DEVICE_RESET		_IO('o', 0x44)
+@@ -149,12 +146,6 @@ struct modem_firmware {
+ 	u32 size;
+ };
+ 
+-#ifdef CONFIG_COMPAT
+-struct modem_firmware_64 {
+-	char *binary;
+-	unsigned long size;
+-};
+-#endif
+ 
+ #define SIPC_MULTI_FRAME_MORE_BIT	(0b10000000)	/* 0x80 */
+ #define SIPC_MULTI_FRAME_ID_MASK	(0b01111111)	/* 0x7F */
+@@ -542,17 +533,6 @@ struct link_device {
+ 
+ #define pm_to_link_device(pm)	container_of(pm, struct link_device, pm)
+ 
+-#ifdef CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM
+-#ifdef CONFIG_OF
+-int link_pm_parse_dt_gpio_pdata(struct device_node *np, struct modem_data *mdm);
+-#endif
+-
+-int init_link_device_pm(struct link_device *ld,
+-			struct modem_link_pm *pm,
+-			struct link_pm_svc *pm_svc,
+-			void (*fail_fn)(struct modem_link_pm *),
+-			void (*cp_fail_fn)(struct modem_link_pm *));
+-#endif
+ 
+ /**
+ @brief		allocate an skbuff and set skb's iod, ld
+@@ -709,29 +689,6 @@ struct modem_ctl {
+ 	unsigned int gpio_sim_detect;
+ 	unsigned int irq_sim_detect;
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-	unsigned int mbx_pda_active;
+-	unsigned int mbx_phone_active;
+-	unsigned int mbx_ap_wakeup;
+-	unsigned int mbx_ap_status;
+-	unsigned int mbx_cp_wakeup;
+-	unsigned int mbx_cp_status;
+-	unsigned int mbx_perf_req;
+-
+-	/* for system revision information */
+-	unsigned int sys_rev;
+-	unsigned int pmic_rev;
+-	unsigned int pkg_id;
+-	unsigned int mbx_sys_rev;
+-	unsigned int mbx_pmic_rev;
+-	unsigned int mbx_pkg_id;
+-
+-	struct modem_pmu *pmu;
+-
+-	/* for checking aliveness of CP */
+-	struct modem_irq irq_cp_wdt;		/* watchdog timer */
+-	struct modem_irq irq_cp_fail;
+-#endif
+ 
+ 	struct work_struct pm_qos_work;
+ 
+diff --git a/drivers/misc/modem_v1/modem_utils.c b/drivers/misc/modem_v1/modem_utils.c
+index 5d6a8b6b0..5068b909c 100644
+--- a/drivers/misc/modem_v1/modem_utils.c
++++ b/drivers/misc/modem_v1/modem_utils.c
+@@ -291,21 +291,6 @@ inline void log_ipc_pkt(enum ipc_layer layer, u8 ch, struct sk_buff *skb)
+ 	if (unlikely(!skb))
+ 		return;
+ 
+-#ifndef CONFIG_SAMSUNG_PRODUCT_SHIP
+-	if (unlikely(layer == IOD_RX || layer == IOD_TX)) {
+-		if (unlikely(!test_bit(DEBUG_FLAG_IOD, &dflags))) {
+-			return;
+-		} else {
+-			buflen = dump_skb(str, SZ_16, skb);
+-			goto trace_log;
+-		}
+-	}
+-	if (sipc_ps_ch(ch) && test_bit(DEBUG_FLAG_PS, &dflags)) {
+-		buflen = dump_skb(str, SZ_64, skb);
+-		trace_mif_log(layer_str(layer), buflen, str);
+-		return;
+-	}
+-#endif
+ 	if (sipc5_fmt_ch(ch) && test_bit(DEBUG_FLAG_FMT, &dflags))
+ 		goto print_log;
+ 	if (sipc5_rfs_ch(ch) && test_bit(DEBUG_FLAG_RFS, &dflags))
+@@ -326,10 +311,6 @@ inline void log_ipc_pkt(enum ipc_layer layer, u8 ch, struct sk_buff *skb)
+ 
+ 	mif_debug("%s: %s(%d): %s\n", MIF_TAG, layer_str(layer), buflen, str);
+ 
+-#ifndef CONFIG_SAMSUNG_PRODUCT_SHIP
+-trace_log:
+-	trace_mif_log(layer_str(layer), buflen, str);
+-#endif
+ }
+ 
+ /* print buffer as hex string */
+@@ -1239,11 +1220,7 @@ static int mif_bbinfo_show(struct seq_file *f, void *offset)
+ 		dev_name(mc->dev),
+ 		get_current_link(mc->bootd)->name,
+ 		get_current_link(mc->iod)->name,
+-#ifdef CONFIG_LINK_DEVICE_SPI
+ 		"LNK",
+-#else
+-		"BOOT",
+-#endif
+ 		mc->bootd->name,
+ 		"TBD");
+ 	}
+@@ -1293,11 +1270,7 @@ int create_baseband_info(struct modem_ctl *mc)
+ 		 dev_name(mc->dev),
+ 		 get_current_link(mc->bootd)->name,
+ 		 get_current_link(mc->iod)->name,
+-#ifdef CONFIG_LINK_DEVICE_SPI
+ 		"LNK",
+-#else
+-		"BOOT",
+-#endif
+ 		 mc->bootd->name,
+ 		 "TBD");
+ 
+diff --git a/drivers/misc/modem_v1/modem_utils.h b/drivers/misc/modem_v1/modem_utils.h
+index da7c6615c..9735f3036 100644
+--- a/drivers/misc/modem_v1/modem_utils.h
++++ b/drivers/misc/modem_v1/modem_utils.h
+@@ -534,19 +534,6 @@ void make_gpio_floating(unsigned int gpio, bool floating);
+ 
+ int create_baseband_info(struct modem_ctl *mc);
+ 
+-#ifdef CONFIG_ARGOS
+-/* kernel team needs to provide argos header file. !!!
+- * As of now, there's nothing to use. */
+-extern struct cpumask hmp_slow_cpu_mask;
+-extern struct cpumask hmp_fast_cpu_mask;
+-
+-int argos_irq_affinity_setup_label(unsigned int irq, const char *label,
+-		struct cpumask *affinity_cpu_mask,
+-		struct cpumask *default_cpu_mask);
+-int argos_task_affinity_setup_label(struct task_struct *p, const char *label,
+-		struct cpumask *affinity_cpu_mask,
+-		struct cpumask *default_cpu_mask);
+-#endif
+ 
+ #endif/*__MODEM_UTILS_H__*/
+ 
+diff --git a/drivers/misc/modem_v1/modem_variation.c b/drivers/misc/modem_v1/modem_variation.c
+index 0353210bc..36820a42e 100644
+--- a/drivers/misc/modem_v1/modem_variation.c
++++ b/drivers/misc/modem_v1/modem_variation.c
+@@ -18,108 +18,55 @@
+ /* modem device support */
+ DECLARE_MODEM_INIT_DUMMY(dummy)
+ 
+-#ifndef CONFIG_UMTS_MODEM_XMM6260
+ DECLARE_MODEM_INIT_DUMMY(xmm6260)
+-#endif
+ 
+-#ifndef CONFIG_UMTS_MODEM_XMM6262
+ DECLARE_MODEM_INIT_DUMMY(xmm6262)
+-#endif
+ 
+-#ifndef CONFIG_LTE_MODEM_XMM7260
+ DECLARE_MODEM_INIT_DUMMY(xmm7260)
+-#endif
+ 
+-#ifndef CONFIG_CDMA_MODEM_CBP71
+ DECLARE_MODEM_INIT_DUMMY(cbp71)
+-#endif
+ 
+-#ifndef CONFIG_CDMA_MODEM_CBP72
+ DECLARE_MODEM_INIT_DUMMY(cbp72)
+-#endif
+ 
+-#ifndef CONFIG_CDMA_MODEM_CBP82
+ DECLARE_MODEM_INIT_DUMMY(cbp82)
+-#endif
+ 
+-#ifndef CONFIG_LTE_MODEM_CMC220
+ DECLARE_MODEM_INIT_DUMMY(cmc220)
+-#endif
+ 
+-#ifndef CONFIG_LTE_MODEM_CMC221
+ DECLARE_MODEM_INIT_DUMMY(cmc221)
+-#endif
+ 
+-#ifndef CONFIG_UMTS_MODEM_SS222
+ DECLARE_MODEM_INIT_DUMMY(ss222)
+-#endif
+ 
+-#ifndef CONFIG_UMTS_MODEM_SH222AP
+ DECLARE_MODEM_INIT_DUMMY(sh222ap)
+-#endif
+ 
+-#ifndef CONFIG_UMTS_MODEM_SS300
+ DECLARE_MODEM_INIT_DUMMY(ss300)
+-#endif
+ 
+-#ifndef CONFIG_UMTS_MODEM_SS333
+-DECLARE_MODEM_INIT_DUMMY(ss333)
+-#endif
+ 
+-#ifndef CONFIG_CDMA_MODEM_MDM6600
+ DECLARE_MODEM_INIT_DUMMY(mdm6600)
+-#endif
+ 
+-#ifndef CONFIG_GSM_MODEM_ESC6270
+ DECLARE_MODEM_INIT_DUMMY(esc6270)
+-#endif
+ 
+-#ifndef CONFIG_CDMA_MODEM_QSC6085
+ DECLARE_MODEM_INIT_DUMMY(qsc6085)
+-#endif
+ 
+-#ifndef CONFIG_TDSCDMA_MODEM_SPRD8803
+ DECLARE_MODEM_INIT_DUMMY(sprd8803)
+-#endif
+ 
+ /* link device support */
+ DECLARE_LINK_INIT_DUMMY(undefined)
+ 
+-#ifndef CONFIG_LINK_DEVICE_MIPI
+ DECLARE_LINK_INIT_DUMMY(mipi)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_USB
+ DECLARE_LINK_INIT_DUMMY(usb)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_HSIC
+ DECLARE_LINK_INIT_DUMMY(hsic)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_DPRAM
+ DECLARE_LINK_INIT_DUMMY(dpram)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_PLD
+ DECLARE_LINK_INIT_DUMMY(pld)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_C2C
+ DECLARE_LINK_INIT_DUMMY(c2c)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_LLI
+-DECLARE_LINK_INIT_DUMMY(lli)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_SHMEM
+ DECLARE_LINK_INIT_DUMMY(shmem)
+-#endif
+ 
+-#ifndef CONFIG_LINK_DEVICE_SPI
+-DECLARE_LINK_INIT_DUMMY(spi)
+-#endif
+ 
+ static modem_init_call modem_init_func[MAX_MODEM_TYPE] = {
+ 	[IMC_XMM6260] = MODEM_INIT_CALL(xmm6260),
+diff --git a/drivers/misc/modem_v1/modem_variation.h b/drivers/misc/modem_v1/modem_variation.h
+index 43e733b32..9eb8427f3 100644
+--- a/drivers/misc/modem_v1/modem_variation.h
++++ b/drivers/misc/modem_v1/modem_variation.h
+@@ -42,106 +42,34 @@
+  */
+ 
+ /* modem device support */
+-#ifdef CONFIG_UMTS_MODEM_XMM6260
+-DECLARE_MODEM_INIT(xmm6260);
+-#endif
+ 
+-#ifdef CONFIG_UMTS_MODEM_XMM6262
+-DECLARE_MODEM_INIT(xmm6262);
+-#endif
+ 
+-#ifdef CONFIG_LTE_MODEM_XMM7260
+-DECLARE_MODEM_INIT(xmm7260);
+-#endif
+ 
+-#ifdef CONFIG_CDMA_MODEM_CBP71
+-DECLARE_MODEM_INIT(cbp71);
+-#endif
+ 
+-#ifdef CONFIG_CDMA_MODEM_CBP72
+-DECLARE_MODEM_INIT(cbp72);
+-#endif
+ 
+-#ifdef CONFIG_CDMA_MODEM_CBP82
+-DECLARE_MODEM_INIT(cbp82);
+-#endif
+ 
+-#ifdef CONFIG_LTE_MODEM_CMC220
+-DECLARE_MODEM_INIT(cmc220);
+-#endif
+ 
+-#ifdef CONFIG_LTE_MODEM_CMC221
+-DECLARE_MODEM_INIT(cmc221);
+-#endif
+ 
+-#ifdef CONFIG_UMTS_MODEM_SH222AP
+-DECLARE_MODEM_INIT(sh222ap);
+-#endif
+ 
+-#ifdef CONFIG_UMTS_MODEM_SS222
+-DECLARE_MODEM_INIT(ss222);
+-#endif
+ 
+-#ifdef CONFIG_UMTS_MODEM_SS300
+-DECLARE_MODEM_INIT(ss300);
+-#endif
+ 
+-#ifdef CONFIG_UMTS_MODEM_SS333
+ DECLARE_MODEM_INIT(ss333);
+-#endif
+ 
+-#ifdef CONFIG_CDMA_MODEM_MDM6600
+-DECLARE_MODEM_INIT(mdm6600);
+-#endif
+ 
+-#ifdef CONFIG_GSM_MODEM_ESC6270
+-DECLARE_MODEM_INIT(esc6270);
+-#endif
+ 
+-#ifdef CONFIG_CDMA_MODEM_QSC6085
+-DECLARE_MODEM_INIT(qsc6085);
+-#endif
+ 
+-#ifdef CONFIG_TDSCDMA_MODEM_SPRD8803
+-DECLARE_MODEM_INIT(sprd8803);
+-#endif
+ 
+ /* link device support */
+-#ifdef CONFIG_LINK_DEVICE_MIPI
+-DECLARE_LINK_INIT(mipi);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_USB
+-DECLARE_LINK_INIT(usb);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_HSIC
+-DECLARE_LINK_INIT(hsic);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_DPRAM
+-DECLARE_LINK_INIT(dpram);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_PLD
+-DECLARE_LINK_INIT(pld);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_C2C
+-DECLARE_LINK_INIT(c2c);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_LLI
+ DECLARE_LINK_INIT(lli);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_SHMEM
+-DECLARE_LINK_INIT(shmem);
+-#endif
+ 
+-#ifdef CONFIG_LINK_DEVICE_SPI
+ DECLARE_LINK_INIT(spi);
+-#endif
+ 
+ typedef int (*modem_init_call)(struct modem_ctl *, struct modem_data *);
+ typedef struct link_device *(*link_init_call)(struct platform_device *);

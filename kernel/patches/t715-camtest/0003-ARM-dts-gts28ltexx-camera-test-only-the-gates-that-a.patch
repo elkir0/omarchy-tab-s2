@@ -1,0 +1,54 @@
+From 56d1b68ca802baaa944830f7a6c1014780a900e9 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 3/4] ARM: dts: gts28ltexx: camera test: only the gates that
+ are off by default
+
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 24 ++++---------------
+ 1 file changed, 4 insertions(+), 20 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+index f003382bc..e5e5e1a5d 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -119,18 +119,12 @@ cam-capture@12130000 {
+ 		phy-names = "csis";
+ 		power-domains = <&pd_cam0>;
+ 
++		/*
++		 * Only the gates that are off by default.  The others are the CAM0
++		 * bus, CLK_IGNORE_UNUSED: turning them off hangs the whole SoC.
++		 */
+ 		clocks = <&cmu_cam0 CLK_ACLK_CSIS1>, <&cmu_cam0 CLK_PCLK_CSIS1>,
+ 			 <&cmu_cam0 CLK_ACLK_LITE_B>, <&cmu_cam0 CLK_PCLK_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_AXIUS_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_ASYNCAPBM_LITE_B>, <&cmu_cam0 CLK_ACLK_ASYNCAPBS_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_ASYNCAXIM_LITE_B>, <&cmu_cam0 CLK_ACLK_ASYNCAXIS_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_SMMU_LITE_B>, <&cmu_cam0 CLK_PCLK_SMMU_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_BTS_LITE_B>, <&cmu_cam0 CLK_PCLK_BTS_LITE_B>,
+-			 <&cmu_cam0 CLK_PCLK_ASYNCAXI_LITE_B>,
+-			 <&cmu_cam0 CLK_ACLK_XIU_IS0X>, <&cmu_cam0 CLK_ACLK_XIU_ISP0EX>,
+-			 <&cmu_cam0 CLK_ACLK_CAM0ND_400>, <&cmu_cam0 CLK_ACLK_CAM0NP_276>,
+-			 <&cmu_cam0 CLK_ACLK_AHBSYNCDN>, <&cmu_cam0 CLK_PCLK_SYSREG_CAM0>,
+-			 <&cmu_cam0 CLK_PCLK_PMU_CAM0>,
+ 			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
+ 
+ 		/* setup-fimc-is-sensor.c, channel 1. */
+@@ -169,16 +163,6 @@ cam-capture@12120000 {
+ 
+ 		clocks = <&cmu_cam0 CLK_ACLK_CSIS0>, <&cmu_cam0 CLK_PCLK_CSIS0>,
+ 			 <&cmu_cam0 CLK_ACLK_LITE_A>, <&cmu_cam0 CLK_PCLK_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_AXIUS_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_ASYNCAPBM_LITE_A>, <&cmu_cam0 CLK_ACLK_ASYNCAPBS_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_ASYNCAXIM_LITE_A>, <&cmu_cam0 CLK_ACLK_ASYNCAXIS_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_SMMU_LITE_A>, <&cmu_cam0 CLK_PCLK_SMMU_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_BTS_LITE_A>, <&cmu_cam0 CLK_PCLK_BTS_LITE_A>,
+-			 <&cmu_cam0 CLK_PCLK_ASYNCAXI_LITE_A>,
+-			 <&cmu_cam0 CLK_ACLK_XIU_IS0X>, <&cmu_cam0 CLK_ACLK_XIU_ISP0EX>,
+-			 <&cmu_cam0 CLK_ACLK_CAM0ND_400>, <&cmu_cam0 CLK_ACLK_CAM0NP_276>,
+-			 <&cmu_cam0 CLK_ACLK_AHBSYNCDN>, <&cmu_cam0 CLK_PCLK_SYSREG_CAM0>,
+-			 <&cmu_cam0 CLK_PCLK_PMU_CAM0>,
+ 			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
+ 
+ 		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,

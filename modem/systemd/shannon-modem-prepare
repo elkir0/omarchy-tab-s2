@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# shannon-modem-prepare.service: load the SS333 modules, allow hardware
+# access, then wait for the battery gate so that shannon-loader does not
+# refuse the first CP power-on of a hot boot (the unit gives it --max-temp=55.0;
+# the wait ends below 54.0 degC).
+#   shannon-modem-prepare [MAX_WAIT_S] [--start]
+# MAX_WAIT_S 0 waits without limit (default 1800); --start then starts
+# shannon-loader.service and shannond.service.
+set -eu
+max=${1:-1800}
+start=${2:-}
+temp=/sys/class/power_supply/sm5703-fuelgauge/temp
+modprobe exynos5433-mipi-lli
+modprobe spi-s3c64xx
+modprobe sec_modem_v1
+for m in exynos5433_mipi_lli sec_modem_v1; do
+	p=/sys/module/$m/parameters/allow_hw
+	[ "$(cat "$p")" = Y ] || echo 1 > "$p"
+done
+echo "modules loaded, allow_hw=1"
+waited=0
+while [ -r "$temp" ] && [ "$(cat "$temp")" -ge 540 ]; do
+	[ "$waited" = 0 ] && echo "battery at $(cat "$temp") deci-degC: waiting for < 540"
+	[ "$max" -gt 0 ] && [ "$waited" -ge "$max" ] && { echo "battery still hot after ${max} s"; exit 1; }
+	[ $((waited % 600)) = 0 ] && [ "$waited" -gt 0 ] && echo "still waiting: battery at $(cat "$temp") deci-degC"
+	sleep 15
+	waited=$((waited + 15))
+done
+echo "battery gate open ($(cat "$temp" 2>/dev/null) deci-degC after ${waited} s)"
+if [ "$start" = --start ]; then
+	systemctl start --no-block shannon-loader.service shannond.service
+	echo "shannon-loader and shannond started"
+fi

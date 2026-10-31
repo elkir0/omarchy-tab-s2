@@ -1,0 +1,63 @@
+From 61011a02d6fdda4290afb4fe93d7479eccee3b93 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 05/16] ARM: configs: gts28ltexx: add a modem config fragment
+
+gts28ltexx_modem.config, merged on top of gts28ltexx_defconfig by
+kernel/kbuild-mainline.sh --fragment: CONFIG_SPI=y for the SS333 SPI boot
+link, CONFIG_SPI_S3C64XX=m, CONFIG_MIPI_LLI=m and CONFIG_SEC_MODEM_V1=m
+(the modem_v1 patch of the same series; ignored until it is applied).
+Everything modem-related stays a module.
+
+Merged .config against the defconfig alone: SPI_MASTER=y, REGMAP_SPI=m,
+IIO_ST_LSM6DSX_SPI=m (no SPI device to bind; the IMU is on I2C), two menu
+symbols, everything else new is "not set".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_modem.config | 36 ++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+ create mode 100644 arch/arm/configs/gts28ltexx_modem.config
+
+diff --git a/arch/arm/configs/gts28ltexx_modem.config b/arch/arm/configs/gts28ltexx_modem.config
+new file mode 100644
+index 000000000..399d6b56d
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_modem.config
+@@ -0,0 +1,36 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# SS333 modem (MIPI-LLI + SPI boot link) for the gts28ltexx board.  Merged
++# on top of gts28ltexx_defconfig (kernel/kbuild-mainline.sh --fragment
++# gts28ltexx_modem.config), together with
++# arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-modem.dtsi.
++# research/modem/research/SYNTHESIS.md D1 (patch 6) has the rationale.
++#
++# Every modem driver is a module and stays blocklisted until the bring-up
++# gates pass (SYNTHESIS section 5, rule 15): a probe that can touch an
++# unclocked CPIF block must never run at boot behind the tester's back.
++
++# SPI core, built in: the SS333 BootROM receives the BOOT image over SPI4
++# (0x14d00000, SYNTHESIS 2.1).  Not set in gts28ltexx_defconfig.  Checked
++# against the merged .config: besides SPI_MASTER=y it only brings
++# REGMAP_SPI=m and IIO_ST_LSM6DSX_SPI=m (the SPI front end of the IMU
++# driver, a module with no SPI device to bind; the IMU stays on HSI2C10)
++# and two menu symbols (NET_VENDOR_ADI, SND_SPI); every other new SPI
++# symbol is "not set".  No SPI controller is enabled by the board DT
++# outside the modem dtsi.
++CONFIG_SPI=y
++
++# Samsung SPI controller (spi-s3c64xx, the 5433 SPI block) as a module, so
++# that nothing touches SPI4 or its gpv7 pins before the modem module asks
++# for it.
++CONFIG_SPI_S3C64XX=m
++
++# MIPI-LLI controller + M-PHY (drivers/misc/mipi-lli, exynos5433-mipi-lli.ko).
++# Loads with allow_hw=0: no clock, LLI, M-PHY or PMU access until root sets
++# /sys/module/exynos5433_mipi_lli/parameters/allow_hw to 1.
++CONFIG_MIPI_LLI=m
++
++# SS333 control, memory link and SPI boot link (drivers/misc/modem_v1,
++# sec_modem_v1.ko).  Provided by the modem_v1 patch of the same series;
++# ignored by olddefconfig until that patch is applied.
++CONFIG_SEC_MODEM_V1=m

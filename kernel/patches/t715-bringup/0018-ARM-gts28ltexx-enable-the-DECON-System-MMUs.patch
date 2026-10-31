@@ -1,0 +1,184 @@
+From c7dbdcf2f3144ee54cc65171e17eeb0475777e9c Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 18/24] ARM: gts28ltexx: enable the DECON System MMUs
+
+exynos-drm needs an IOMMU to import non-contiguous dma-bufs, such as
+panfrost client buffers that a compositor wants to scan out directly;
+without it the import fails with "buffer chunks must be mapped
+contiguously".  Enable the two DECON System MMUs (v5.1) and keep every
+other System MMU and its master disabled.
+
+Validated on the tablet: iommu group 0 for DECON, a 12 MiB panfrost
+buffer imported into exynos-drm, no page faults, display and runtime
+suspend/resume unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-iommu.dtsi  | 117 ++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |   9 ++
+ arch/arm/configs/gts28ltexx_defconfig         |   7 ++
+ 3 files changed, 133 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-iommu.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-iommu.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-iommu.dtsi
+new file mode 100644
+index 000000000..1071ffff3
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-iommu.dtsi
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - DECON System MMU.
++ *
++ * Lets exynos-drm translate DECON's DMA through its two System MMUs, so
++ * that it can import non-contiguous dma-bufs (panfrost client buffers)
++ * and scan them out.
++ * (CONFIG_EXYNOS_IOMMU=y in gts28ltexx_defconfig).  Analysis, risks and
++ * test plan: docs/IOMMU.md.  Included by the board file (section 10).
++ *
++ * DECON (exynos5433.dtsi decon@13800000) already lists both System MMUs:
++ *	iommus = <&sysmmu_decon0x>, <&sysmmu_decon1x>;
++ * Its five windows are split between the two AXI ports: M0 behind
++ * sysmmu@13a00000 serves windows 0-2 (stock "winmap = <0x07>"), M1
++ * behind sysmmu@13a10000 serves windows 3-4 ("winmap = <0x18>",
++ * 01_dumps/live_fdt.dts:1482-1491 and 1527-1536).  exynos-drm uses
++ * window 2 as the primary plane and window 4 as the cursor plane
++ * (exynos5433_drm_decon.c PRIMARY_WIN/CURSON_WIN), so both are needed.
++ * Both sit in the DISP power domain and are clocked from cmu_disp, like
++ * DECON itself.
++ */
++
++&sysmmu_decon0x {
++	status = "okay";
++};
++
++&sysmmu_decon1x {
++	status = "okay";
++};
++
++/*
++ * Every other System MMU of the SoC dtsi has no status, hence is enabled,
++ * and would probe as soon as CONFIG_EXYNOS_IOMMU=y: the driver powers its
++ * domain, enables its clocks and reads its version register at probe.
++ * None of their masters has a driver in this kernel (no MEDIA_SUPPORT,
++ * no DRM_EXYNOS_GSC/SCALER) and none of these register accesses has ever
++ * run on this board, so they are not probed at all.
++ *
++ * The masters are disabled together with their System MMUs: a master
++ * whose System MMU is disabled runs without IOMMU, and the exynos-drm GSC
++ * and scaler drivers ignore the result of exynos_drm_register_dma()
++ * (exynos_drm_gsc.c:1178, exynos_drm_scaler.c:457), so enabling one of
++ * them later would let it DMA to DECON's IO virtual addresses as if they
++ * were physical.  Re-enable a master only together with its System MMU.
++ */
++
++/* decon_tv (HDMI path) is already disabled in the SoC dtsi. */
++&sysmmu_tv0x {
++	status = "disabled";
++};
++
++&sysmmu_tv1x {
++	status = "disabled";
++};
++
++/* GSCALER 0-2, pd_gscl. */
++&gsc_0 {
++	status = "disabled";
++};
++
++&gsc_1 {
++	status = "disabled";
++};
++
++&gsc_2 {
++	status = "disabled";
++};
++
++&sysmmu_gscl0 {
++	status = "disabled";
++};
++
++&sysmmu_gscl1 {
++	status = "disabled";
++};
++
++&sysmmu_gscl2 {
++	status = "disabled";
++};
++
++/* M2M scalers and JPEG, pd_mscl. */
++&scaler_0 {
++	status = "disabled";
++};
++
++&scaler_1 {
++	status = "disabled";
++};
++
++&jpeg {
++	status = "disabled";
++};
++
++&sysmmu_scaler_0 {
++	status = "disabled";
++};
++
++&sysmmu_scaler_1 {
++	status = "disabled";
++};
++
++&sysmmu_jpeg {
++	status = "disabled";
++};
++
++/* MFC video codec, pd_mfc. */
++&mfc {
++	status = "disabled";
++};
++
++&sysmmu_mfc_0 {
++	status = "disabled";
++};
++
++&sysmmu_mfc_1 {
++	status = "disabled";
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index eb98f4780..8467a560b 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -800,6 +800,15 @@ &framebuffer {
+ 	status = "disabled";
+ };
+ 
++/*
++ * DECON System MMUs: exynos-drm imports non-contiguous dma-bufs (panfrost
++ * client buffers) and can scan them out; every other System MMU and its
++ * master stay off (docs/IOMMU.md).  Validated on the tablet on 2026-10-29:
++ * System MMU v5.1 on both DECON ports, a 12 MiB panfrost buffer imported
++ * into exynos-drm, display and runtime suspend/resume unchanged.
++ */
++#include "exynos5433-gts28ltexx-iommu.dtsi"
++
+ /* ==================================================================== */
+ /* 11. Input: touchscreen and keys                                      */
+ /* ==================================================================== */
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index d42856ce2..3630bcb16 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -227,6 +227,13 @@ CONFIG_ZRAM_BACKEND_ZSTD=y
+ CONFIG_PSI=y
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_UINPUT=y
++# DECON System MMU (docs/IOMMU.md): exynos-drm imports non-contiguous
++# dma-bufs, e.g. panfrost buffers for a compositor's direct scanout.
++# EXYNOS_IOMMU is a bool (built in); its probe only reads the version
++# register of a powered, clocked System MMU.  It selects IOMMU_API and,
++# on arm32, ARM_DMA_USE_IOMMU (drivers/iommu/Kconfig:256-262).
++CONFIG_IOMMU_SUPPORT=y
++CONFIG_EXYNOS_IOMMU=y
+ # IIO core, and the sensor drivers (LSM6DS3 IMU, YAS537 magnetometer,
+ # docs/SENSORS_M7.md) as modules: udev loads them after the initramfs
+ # watchdog guard, so a probe that stalls on the I2C bus cannot loop the

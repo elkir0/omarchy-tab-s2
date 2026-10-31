@@ -1,0 +1,2 @@
+# Members of wheel (alarm) administer the tablet without a password.
+%wheel ALL=(ALL:ALL) NOPASSWD: ALL

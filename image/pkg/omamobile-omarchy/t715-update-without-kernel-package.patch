@@ -1,0 +1,33 @@
+# SM-T715: omarchy update on an image with no kernel package and no yay. Without
+# this the update ends by asking for a reboot every time, and prints that yay is
+# not found. Here rather than in /usr/local/bin: the session's PATH puts
+# /usr/share/omarchy/bin first, and this series survives an Omarchy upgrade.
+#
+# Against Omarchy 4.0.6.
+diff --git i/bin/omarchy-update-aur-pkgs w/bin/omarchy-update-aur-pkgs
+--- i/bin/omarchy-update-aur-pkgs
++++ w/bin/omarchy-update-aur-pkgs
+@@ -2,7 +2,8 @@
+ 
+ # omarchy:summary=Update AUR packages if any are installed
+ 
+-if pacman -Qem >/dev/null; then
++# SM-T715: no yay here, and the foreign packages are the image's own.
++if command -v yay >/dev/null && pacman -Qem >/dev/null; then
+   if omarchy-pkg-aur-accessible; then
+     echo -e "\e[32m\nUpdate AUR packages\e[0m"
+     yay -Sua --noconfirm --cleanafter --ignore gcc14,gcc14-libs
+diff --git i/bin/omarchy-update-restart w/bin/omarchy-update-restart
+--- i/bin/omarchy-update-restart
++++ w/bin/omarchy-update-restart
+@@ -9,7 +9,9 @@
+ }
+ 
+ running_kernel=$(uname -r)
+-kernel_updated=true
++# SM-T715: no package owns the kernel, it lives in BOOT, so the loop below finds
++# none and this would ask for a reboot after every update.
++kernel_updated=false
+ 
+ for kernel in /usr/lib/modules/*/vmlinuz; do
+   if [[ -f $kernel ]] && pacman -Qo "$kernel" &>/dev/null; then

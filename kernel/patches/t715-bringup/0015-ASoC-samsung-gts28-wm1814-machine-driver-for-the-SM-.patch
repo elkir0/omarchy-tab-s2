@@ -1,0 +1,518 @@
+From b8e7e3f6d0d8c1a19b896ef45d32886b67aab872 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 15/24] ASoC: samsung: gts28-wm1814 machine driver for the
+ SM-T715
+
+Sound card of the Galaxy Tab S2 8.0 LTE: I2S0 with the WM1814 codec,
+driven by the mainline WM8998 driver, as clock master.  MCLK1 is the PMU
+CLKOUT on the 24 MHz oscillator; FLL1 makes SYSCLK = 49.152 MHz from it
+while the codec is out of BIAS_OFF, and AIF1 runs from SYSCLK, as the
+vendor pacific_arizona.c does.  DAPM pin switches for the speaker, the
+headphones and the main microphone; the earpiece, the other
+microphones, HDMI and jack detection are left out.
+
+Checked on the SM-T715: "WM1814 revision B", card wm1814, and a 1 kHz
+tone played on the speaker is picked up by the main microphone
+(Goertzel 678.9 at 1 kHz against 0.1 at 500 and 1500 Hz).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../bindings/sound/samsung,gts28-wm1814.yaml  |  64 +++
+ sound/soc/samsung/Kconfig                     |  11 +
+ sound/soc/samsung/Makefile                    |   2 +
+ sound/soc/samsung/gts28_wm1814.c              | 373 ++++++++++++++++++
+ 4 files changed, 450 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/sound/samsung,gts28-wm1814.yaml
+ create mode 100644 sound/soc/samsung/gts28_wm1814.c
+
+diff --git a/Documentation/devicetree/bindings/sound/samsung,gts28-wm1814.yaml b/Documentation/devicetree/bindings/sound/samsung,gts28-wm1814.yaml
+new file mode 100644
+index 000000000..19cd2f2ef
+--- /dev/null
++++ b/Documentation/devicetree/bindings/sound/samsung,gts28-wm1814.yaml
+@@ -0,0 +1,64 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/sound/samsung,gts28-wm1814.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung Galaxy Tab S2 8.0 (SM-T715) audio complex with WM1814 codec
++
++maintainers:
++  - elkir0 <elkir0@users.noreply.github.com>
++
++description:
++  Sound card of the Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433),
++  linking the Exynos5433 I2S0 controller to the Cirrus Logic/Wolfson
++  WM1814 codec AIF1. The codec provides the bit and frame clocks; its MCLK1
++  is the 24 MHz PMU CLKOUT.
++
++properties:
++  compatible:
++    const: samsung,gts28-wm1814
++
++  clocks:
++    maxItems: 1
++    description:
++      The codec MCLK1 clock (PMU CLKOUT). It is kept enabled while the
++      codec FLL1 runs.
++
++  clock-names:
++    items:
++      - const: mclk
++
++  samsung,audio-codec:
++    description: Phandle to the WM1814 audio codec.
++    $ref: /schemas/types.yaml#/definitions/phandle
++
++  samsung,audio-cpu:
++    description: Phandle to the Exynos5433 I2S0 controller.
++    $ref: /schemas/types.yaml#/definitions/phandle
++
++  samsung,model:
++    description: The user-visible name of this sound complex.
++    $ref: /schemas/types.yaml#/definitions/string
++
++required:
++  - compatible
++  - samsung,audio-codec
++  - samsung,audio-cpu
++  - samsung,model
++
++dependencies:
++  clock-names: [ clocks ]
++
++additionalProperties: false
++
++examples:
++  - |
++    sound {
++        compatible = "samsung,gts28-wm1814";
++        samsung,model = "wm1814";
++        samsung,audio-cpu = <&i2s0>;
++        samsung,audio-codec = <&wm1814>;
++        clocks = <&pmu_system_controller 0>;
++        clock-names = "mclk";
++    };
+diff --git a/sound/soc/samsung/Kconfig b/sound/soc/samsung/Kconfig
+index 60b4b7b75..130fa38bc 100644
+--- a/sound/soc/samsung/Kconfig
++++ b/sound/soc/samsung/Kconfig
+@@ -125,6 +125,17 @@ config SND_SOC_SAMSUNG_TM2_WM5110
+ 	help
+ 	  Say Y if you want to add support for SoC audio on the TM2 board.
+ 
++config SND_SOC_SAMSUNG_GTS28_WM1814
++	tristate "SoC I2S Audio support for WM1814 on Galaxy Tab S2 8.0 (SM-T715)"
++	depends on SND_SOC_SAMSUNG && MFD_ARIZONA && MFD_WM8998 && I2C
++	select SND_SOC_WM8998
++	select SND_SAMSUNG_I2S
++	help
++	  Say Y or M if you want to add support for SoC audio on the
++	  Samsung Galaxy Tab S2 8.0 LTE (SM-T715, board "gts28"), which has
++	  a WM1814 codec (driven by the WM8998 codec driver) connected to
++	  the Exynos5433 I2S0 controller.
++
+ config SND_SOC_SAMSUNG_ARIES_WM8994
+ 	tristate "SoC I2S Audio support for WM8994 on Aries"
+ 	depends on SND_SOC_SAMSUNG && I2C && IIO && EXTCON
+diff --git a/sound/soc/samsung/Makefile b/sound/soc/samsung/Makefile
+index 8d5f09147..419ef4370 100644
+--- a/sound/soc/samsung/Makefile
++++ b/sound/soc/samsung/Makefile
+@@ -25,6 +25,7 @@ snd-soc-bells-y := bells.o
+ snd-soc-odroid-y := odroid.o
+ snd-soc-arndale-y := arndale.o
+ snd-soc-tm2-wm5110-y := tm2_wm5110.o
++snd-soc-gts28-wm1814-y := gts28_wm1814.o
+ snd-soc-aries-wm8994-y := aries_wm8994.o
+ snd-soc-midas-wm1811-y := midas_wm1811.o
+ 
+@@ -40,5 +41,6 @@ obj-$(CONFIG_SND_SOC_BELLS) += snd-soc-bells.o
+ obj-$(CONFIG_SND_SOC_ODROID) += snd-soc-odroid.o
+ obj-$(CONFIG_SND_SOC_ARNDALE) += snd-soc-arndale.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_TM2_WM5110) += snd-soc-tm2-wm5110.o
++obj-$(CONFIG_SND_SOC_SAMSUNG_GTS28_WM1814) += snd-soc-gts28-wm1814.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_ARIES_WM8994) += snd-soc-aries-wm8994.o
+ obj-$(CONFIG_SND_SOC_SAMSUNG_MIDAS_WM1811) += snd-soc-midas-wm1811.o
+diff --git a/sound/soc/samsung/gts28_wm1814.c b/sound/soc/samsung/gts28_wm1814.c
+new file mode 100644
+index 000000000..a02027db5
+--- /dev/null
++++ b/sound/soc/samsung/gts28_wm1814.c
+@@ -0,0 +1,373 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ASoC machine driver for the Samsung Galaxy Tab S2 8.0 LTE (SM-T715,
++ * Exynos5433, board "gts28"): Exynos5433 I2S0 + Cirrus Logic/Wolfson
++ * WM1814, which mainline drives with the WM8998 codec driver.
++ *
++ * Transcribed from Samsung's downstream machine driver
++ *   kernel_universal5433/sound/soc/samsung/pacific_arizona.c
++ * (card "Pacific WM1814 Sound", built for this board with
++ * CONFIG_MFD_VEGAS=y and CONFIG_MFD_FLORIDA unset) and modelled on the
++ * mainline tm2_wm5110.c.  Line references below are to that downstream
++ * file.  Only the primary playback/capture link (codec AIF1) and the
++ * speaker, headphone and main microphone paths are implemented; the
++ * modem (AIF2), Bluetooth SCO (AIF3), EAX/secondary links, sub/headset
++ * microphones, earpiece, HDMI and jack detection are left out.
++ */
++
++#include <linux/clk.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++
++#include "i2s.h"
++#include "../codecs/wm8998.h"
++
++/*
++ * MCLK1 is the PMU CLKOUT pin muxed to the 24 MHz XXTI oscillator:
++ * PACIFIC_DEFAULT_MCLK1 (pacific_arizona.c:51).
++ */
++#define GTS28_MCLK_RATE		24000000U
++
++/*
++ * SYSCLK (from FLL1): pacific_wm1814_priv.sysclk_rate
++ * (pacific_arizona.c:106-107), also applied at card init as 48000 * 1024
++ * (pacific_arizona.c:1627-1631).  It is a 48 kHz-family clock, so the
++ * codec only offers 48 kHz-family rates on AIF1.
++ */
++#define GTS28_SYSCLK_RATE	49152000U
++
++struct gts28_machine_priv {
++	struct clk *mclk;
++	bool mclk_enabled;
++};
++
++static struct snd_soc_component *gts28_codec_component(struct snd_soc_card *card)
++{
++	struct snd_soc_pcm_runtime *rtd;
++
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
++
++	return snd_soc_rtd_to_codec(rtd, 0)->component;
++}
++
++/* pacific_start_sysclk(), pacific_arizona.c:1713-1756 */
++static int gts28_start_sysclk(struct snd_soc_card *card,
++			      struct snd_soc_component *component)
++{
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	int ret;
++
++	/* MCLK on before FLL1 references it (pacific_arizona.c:1719-1721) */
++	if (!priv->mclk_enabled) {
++		ret = clk_prepare_enable(priv->mclk);
++		if (ret < 0) {
++			dev_err(card->dev, "Failed to enable MCLK: %d\n", ret);
++			return ret;
++		}
++		priv->mclk_enabled = true;
++	}
++
++	/*
++	 * Clear the FLL1 reference input first (pacific_arizona.c:1740-1745).
++	 * The codec driver defaults it to the 32 kHz clock source
++	 * (arizona_init_fll(), MCLK2 unless configured otherwise); with no
++	 * reference, the FLL1 settings below are applied to the reference
++	 * path and FLL1 runs from MCLK1 alone.
++	 */
++	ret = snd_soc_component_set_pll(component, WM8998_FLL1_REFCLK,
++					ARIZONA_FLL_SRC_NONE, 0, 0);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set FLL1 reference: %d\n", ret);
++		goto err_mclk;
++	}
++
++	/*
++	 * FLL1: MCLK1 24 MHz -> 49.152 MHz (pacific_arizona.c:1746-1752).
++	 * Downstream passes ARIZONA_CLK_SRC_MCLK1 here; it has the same
++	 * value (0) as ARIZONA_FLL_SRC_MCLK1.
++	 */
++	ret = snd_soc_component_set_pll(component, WM8998_FLL1,
++					ARIZONA_FLL_SRC_MCLK1,
++					GTS28_MCLK_RATE, GTS28_SYSCLK_RATE);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to start FLL1: %d\n", ret);
++		goto err_mclk;
++	}
++
++	return 0;
++
++err_mclk:
++	clk_disable_unprepare(priv->mclk);
++	priv->mclk_enabled = false;
++	return ret;
++}
++
++/*
++ * pacific_stop_sysclk(), pacific_arizona.c:1803-1827.  Downstream also
++ * stops FLL2 (:1814-1818); FLL2 only clocks the modem link (AIF2),
++ * which this driver does not implement, so it is never started.
++ */
++static int gts28_stop_sysclk(struct snd_soc_card *card,
++			     struct snd_soc_component *component)
++{
++	struct gts28_machine_priv *priv = snd_soc_card_get_drvdata(card);
++	int ret;
++
++	ret = snd_soc_component_set_pll(component, WM8998_FLL1, 0, 0, 0);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to stop FLL1: %d\n", ret);
++		return ret;
++	}
++
++	if (priv->mclk_enabled) {
++		clk_disable_unprepare(priv->mclk);
++		priv->mclk_enabled = false;
++	}
++
++	return 0;
++}
++
++/*
++ * pacific_set_bias_level(), pacific_arizona.c:1829-1856: FLL1 runs while
++ * the codec is out of BIAS_OFF.  Downstream tests (and overwrites)
++ * card->dapm.bias_level; here the codec context's own current level is
++ * tested, which is still the old level while this callback runs.
++ */
++static int gts28_set_bias_level(struct snd_soc_card *card,
++				struct snd_soc_dapm_context *dapm,
++				enum snd_soc_bias_level level)
++{
++	struct snd_soc_component *component = gts28_codec_component(card);
++
++	if (dapm->dev != component->dev)
++		return 0;
++
++	switch (level) {
++	case SND_SOC_BIAS_STANDBY:
++		if (dapm->bias_level == SND_SOC_BIAS_OFF)
++			return gts28_start_sysclk(card, component);
++		break;
++	case SND_SOC_BIAS_OFF:
++		return gts28_stop_sysclk(card, component);
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++/* pacific_aif1_hw_params(), pacific_arizona.c:984-1032 */
++static int gts28_aif1_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
++	int ret;
++
++	/*
++	 * MCLK comes from the PMU CLKOUT, not from I2S0: CDCLK is an input
++	 * (pacific_arizona.c:1019-1024).
++	 */
++	ret = snd_soc_dai_set_sysclk(cpu_dai, SAMSUNG_I2S_CDCLK, 0,
++				     SND_SOC_CLOCK_IN);
++	if (ret < 0) {
++		dev_err(rtd->card->dev, "Failed to set I2S CDCLK: %d\n", ret);
++		return ret;
++	}
++
++	/*
++	 * I2S0 logic runs from the bus clock (pacific_arizona.c:1026-1031).
++	 * Downstream passes MOD_OPCLK_PCLK, the pre-shifted I2SMOD value
++	 * (3 << 30); the mainline driver takes the selector and shifts it.
++	 */
++	ret = snd_soc_dai_set_sysclk(cpu_dai, SAMSUNG_I2S_OPCLK, 0,
++				     SAMSUNG_I2S_OPCLK_PCLK);
++	if (ret < 0) {
++		dev_err(rtd->card->dev, "Failed to set I2S OPCLK: %d\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static const struct snd_soc_ops gts28_aif1_ops = {
++	.hw_params = gts28_aif1_hw_params,
++};
++
++static int gts28_late_probe(struct snd_soc_card *card)
++{
++	struct snd_soc_pcm_runtime *rtd;
++	struct snd_soc_dai *aif1_dai;
++	int ret;
++
++	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
++	aif1_dai = snd_soc_rtd_to_codec(rtd, 0);
++
++	/* AIF1 is clocked from SYSCLK (pacific_arizona.c:903-906) */
++	ret = snd_soc_dai_set_sysclk(aif1_dai, ARIZONA_CLK_SYSCLK, 0, 0);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set AIF1 clock: %d\n", ret);
++		return ret;
++	}
++
++	/* SYSCLK <- FLL1 at 48000 * 1024 (pacific_arizona.c:1627-1633) */
++	ret = snd_soc_component_set_sysclk(aif1_dai->component,
++					   ARIZONA_CLK_SYSCLK,
++					   ARIZONA_CLK_SRC_FLL1,
++					   GTS28_SYSCLK_RATE,
++					   SND_SOC_CLOCK_IN);
++	if (ret < 0) {
++		dev_err(card->dev, "Failed to set SYSCLK: %d\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++/* pacific_controls[], pacific_arizona.c:686-687, 691 */
++static const struct snd_kcontrol_new gts28_controls[] = {
++	SOC_DAPM_PIN_SWITCH("HP"),
++	SOC_DAPM_PIN_SWITCH("SPK"),
++	SOC_DAPM_PIN_SWITCH("Main Mic"),
++};
++
++/* wm1814_dapm_widgets[], pacific_arizona.c:737-738, 743 */
++static const struct snd_soc_dapm_widget gts28_dapm_widgets[] = {
++	SND_SOC_DAPM_HP("HP", NULL),
++	SND_SOC_DAPM_SPK("SPK", NULL),
++	SND_SOC_DAPM_MIC("Main Mic", NULL),
++};
++
++/* pacific_wm1814_dapm_routes[], pacific_arizona.c:861-872 */
++static const struct snd_soc_dapm_route gts28_dapm_routes[] = {
++	{ "HP", NULL, "HPOUTL" },
++	{ "HP", NULL, "HPOUTR" },
++
++	{ "SPK", NULL, "SPKOUTLN" },
++	{ "SPK", NULL, "SPKOUTLP" },
++	{ "SPK", NULL, "SPKOUTRN" },
++	{ "SPK", NULL, "SPKOUTRP" },
++
++	/* SEL of the main mic is connected to GND */
++	{ "Main Mic", NULL, "MICBIAS2" },
++	{ "IN1BL", NULL, "Main Mic" },
++};
++
++/*
++ * pacific_wm1814_dai[0] "playback-pri" (pacific_arizona.c:1214-1219):
++ * I2S0 primary DAI <-> codec AIF1, I2S, normal clocks, codec provides
++ * BCLK and LRCLK (SND_SOC_DAIFMT_CBM_CFM on both sides downstream,
++ * pacific_arizona.c:1001-1013).  The downstream codec DAI "vegas-aif1"
++ * is "wm8998-aif1" in mainline.
++ */
++SND_SOC_DAILINK_DEFS(aif1,
++	DAILINK_COMP_ARRAY(COMP_CPU(SAMSUNG_I2S_DAI)),
++	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8998-aif1")),
++	DAILINK_COMP_ARRAY(COMP_EMPTY()));
++
++static struct snd_soc_dai_link gts28_dai_links[] = {
++	{
++		.name		= "playback-pri",
++		.stream_name	= "playback-pri",
++		.ops		= &gts28_aif1_ops,
++		.dai_fmt	= SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
++				  SND_SOC_DAIFMT_CBP_CFP,
++		SND_SOC_DAILINK_REG(aif1),
++	},
++};
++
++static struct snd_soc_card gts28_card = {
++	.owner			= THIS_MODULE,
++
++	.dai_link		= gts28_dai_links,
++	.num_links		= ARRAY_SIZE(gts28_dai_links),
++	.controls		= gts28_controls,
++	.num_controls		= ARRAY_SIZE(gts28_controls),
++	.dapm_widgets		= gts28_dapm_widgets,
++	.num_dapm_widgets	= ARRAY_SIZE(gts28_dapm_widgets),
++	.dapm_routes		= gts28_dapm_routes,
++	.num_dapm_routes	= ARRAY_SIZE(gts28_dapm_routes),
++
++	.late_probe		= gts28_late_probe,
++	.set_bias_level		= gts28_set_bias_level,
++};
++
++static int gts28_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct snd_soc_card *card = &gts28_card;
++	struct snd_soc_dai_link *dai_link = &card->dai_link[0];
++	struct device_node *cpu_np, *codec_np;
++	struct gts28_machine_priv *priv;
++	int ret;
++
++	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++
++	snd_soc_card_set_drvdata(card, priv);
++	card->dev = dev;
++
++	/* Optional "mclk" clock of the sound node (pacific_arizona.c:2050) */
++	priv->mclk = devm_clk_get_optional(dev, "mclk");
++	if (IS_ERR(priv->mclk))
++		return dev_err_probe(dev, PTR_ERR(priv->mclk),
++				     "Failed to get mclk\n");
++
++	ret = snd_soc_of_parse_card_name(card, "samsung,model");
++	if (ret < 0) {
++		dev_err(dev, "Card name is not specified\n");
++		return ret;
++	}
++
++	/* pacific_arizona.c:2057-2075 */
++	cpu_np = of_parse_phandle(dev->of_node, "samsung,audio-cpu", 0);
++	if (!cpu_np) {
++		dev_err(dev, "Property 'samsung,audio-cpu' missing or invalid\n");
++		return -EINVAL;
++	}
++
++	codec_np = of_parse_phandle(dev->of_node, "samsung,audio-codec", 0);
++	if (!codec_np) {
++		dev_err(dev, "Property 'samsung,audio-codec' missing or invalid\n");
++		ret = -EINVAL;
++		goto put_cpu;
++	}
++
++	dai_link->cpus->of_node = cpu_np;
++	dai_link->platforms->of_node = cpu_np;
++	dai_link->codecs->of_node = codec_np;
++
++	ret = devm_snd_soc_register_card(dev, card);
++	if (ret < 0)
++		dev_err_probe(dev, ret, "Failed to register card\n");
++
++	of_node_put(codec_np);
++put_cpu:
++	of_node_put(cpu_np);
++
++	return ret;
++}
++
++static const struct of_device_id gts28_of_match[] = {
++	{ .compatible = "samsung,gts28-wm1814" },
++	{ },
++};
++MODULE_DEVICE_TABLE(of, gts28_of_match);
++
++static struct platform_driver gts28_driver = {
++	.driver = {
++		.name		= "gts28-wm1814",
++		.pm		= &snd_soc_pm_ops,
++		.of_match_table	= gts28_of_match,
++	},
++	.probe	= gts28_probe,
++};
++module_platform_driver(gts28_driver);
++
++MODULE_AUTHOR("Samsung Electronics Co., Ltd (downstream pacific_arizona.c)");
++MODULE_DESCRIPTION("ALSA SoC Galaxy Tab S2 8.0 (SM-T715) WM1814 audio support");
++MODULE_LICENSE("GPL");

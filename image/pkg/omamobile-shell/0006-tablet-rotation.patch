@@ -1,0 +1,87 @@
+SM-T715 tablet: rotation tiles.
+
+Puts Rotation (upstream's rotation lock, over omamobile-autorotate.service) back
+in the catalogue and adds Rotate, a quarter turn by hand through t715-rotate. The
+service is off by default, so the tile reads Locked. See docs/image/ROTATION.md.
+Against omarchy-mobile 5f7ba48 and the patches before it, packages/omamobile-shell
+(applied with patch -p1 in that directory).
+
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -14,13 +14,15 @@
+ // Every tile the sheet knows, in the order the "available" list shows them.
+ // SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no hotspot, torch,
+ // location or NFC (GNSS, flash LED and NFC are not driven, and Hotspot would
+-// drop the only Wi-Fi link), no fingerprint sensor, and no rotation lock until
+-// rotation exists (P3). Mobile data goes through NetworkManager.
++// drop the only Wi-Fi link), and no fingerprint sensor. Mobile data goes
++// through NetworkManager. Rotation is t715-rotate (docs/image/ROTATION.md).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
++  { id: "rotation-lock", label: "Rotation" },
++  { id: "rotate", label: "Rotate" },
+   { id: "dnd", label: "Do not disturb" },
+   { id: "battery-saver", label: "Battery saver" },
+   { id: "dark-theme", label: "Dark theme" },
+@@ -44,8 +46,9 @@
+ // needs a PIN pad: P4).
+ var DEFAULT_LAYOUT = [
+   "wifi", "bluetooth", "mobile-data", "dnd",
+-  "airplane", "battery-saver", "dark-theme", "night-light",
+-  "keyboard", "clipboard", "screenshot"
++  "airplane", "rotation-lock", "rotate", "battery-saver",
++  "dark-theme", "night-light", "keyboard", "clipboard",
++  "screenshot"
+ ]
+ 
+ var QUICK_COUNT = 4
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -217,7 +217,7 @@
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+     "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane,
+-    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock,
++    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+     "screen-record": screenRecord, "fingerprint": fingerprint, "keyboard": keyboard,
+@@ -999,6 +999,35 @@
+     onExited: rotationLock.refresh()
+   }
+ 
++  // A quarter turn by hand, with or without the sensor. It locks the rotation,
++  // or the sensor would turn the screen back.
++  QtObject {
++    id: rotate
++    readonly property bool available: true
++    readonly property bool enabled: false
++    readonly property string icon: "󰑧"
++    readonly property string status: "Turn"
++    function toggle() {
++      root.dismiss()
++      rotateLater.restart()
++    }
++  }
++
++  Timer {
++    id: rotateLater
++    interval: 450
++    onTriggered: {
++      Quickshell.execDetached(["t715-rotate", "turn"])
++      rotationRefresh.restart()
++    }
++  }
++
++  Timer {
++    id: rotationRefresh
++    interval: 600
++    onTriggered: rotationLock.refresh()
++  }
++
+   // Location over omamobile-gnss (package omamobile-gnss): on lets apps ask
+   // GeoClue for positions and runs the receiver only while one does; off
+   // stops it and lets nothing start it. As the user, on/off go through

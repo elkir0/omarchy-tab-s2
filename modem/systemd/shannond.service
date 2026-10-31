@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# shannond: owner of /dev/umts_ipc0 and /dev/umts_rfs0 (Shannon SS333, IPC 4.1).
+# Started by shannon-modem-prepare.service (enabled by device/modem-install.sh), after
+# the CP loader (shannon-loader.service) has brought the CP ONLINE.
+
+[Unit]
+Description=Shannon SS333 modem daemon (Samsung IPC 4.1 + RFS observe mode)
+After=shannon-loader.service
+Wants=shannon-loader.service
+ConditionPathExists=/dev/umts_ipc0
+# ModemManager owns org.freedesktop.ModemManager1: mask it before using --mm.
+Conflicts=ModemManager.service
+
+[Service]
+Type=simple
+# Local settings, not in the repository: SHANNOND_OPTS=--lte-apn APN (device/modem-install.sh).
+EnvironmentFile=-/etc/shannond.env
+ExecStart=/usr/bin/python3 /usr/lib/shannond/bin/shannond --mm --log-level info --audio-hook /usr/lib/shannond/voice-hook.sh --modes lte,umts,gsm --radio-on --settings /var/lib/shannond/settings.json $SHANNOND_OPTS
+# LTE needs the attach APN before radio on: from --lte-apn in /etc/shannond.env, or from the
+# first connection request; until then the mask leaves LTE out and the CP stays on 3G/2G
+# (docs/hardware/MODEM.md §6.7). Voice falls back to 3G or 2G. --radio-on: a phone has to
+# ring, so the radio does not wait for a client.
+# --audio-hook flips the codec's Modem switches and rate at call audio open/close
+# (modem/audio/voice-hook.sh; the "Voice Call" UCM verb sets the routes).
+# --mm exports the ModemManager facade for NetworkManager (needs python-gobject, python-dbus
+# and dbus/org.freedesktop.ModemManager1.conf). Drop it to run without the facade.
+# Gate G12 (first FMT/RFS traffic): add --passive to answer only the mandatory messages.
+Restart=on-failure
+RestartSec=3
+User=root
+Group=radio
+RuntimeDirectory=shannond
+RuntimeDirectoryMode=0750
+StateDirectory=shannond
+StateDirectoryMode=0700
+# The daemon only reads /var/lib/shannon (NV snapshot, efs-root copy); RFS writes
+# stay in /run/shannond/rfs (tmpfs). Never /efs, never a block device.
+ProtectSystem=strict
+ReadWritePaths=/run/shannond
+ReadOnlyPaths=/var/lib/shannon
+InaccessiblePaths=-/efs
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=/dev/umts_ipc0 rw
+DeviceAllow=/dev/umts_rfs0 rw
+# the audio hook's amixer
+DeviceAllow=char-alsa rw
+# --configure-ip needs CAP_NET_ADMIN; without it, keep the bounding set empty.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+LockPersonality=yes
+# No MemoryDenyWriteExecute: PyGObject callbacks (libffi closures) need it off.
+SystemCallArchitectures=native
+

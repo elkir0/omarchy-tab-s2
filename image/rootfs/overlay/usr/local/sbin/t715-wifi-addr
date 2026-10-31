@@ -1,0 +1,44 @@
+#!/bin/sh
+# t715-wifi-addr: give the SM-T715's Wi-Fi interface a stable MAC address of
+# its own.
+#
+# brcmfmac takes the address from the NVRAM (nvram_net.txt), a file that is
+# the same on every SM-T715: Android writes the real address from the EFS
+# partition, which Linux must never write and does not read.  Instead the
+# address is derived on the tablet from the eMMC CID (a per-device
+# constant), hashed with a fixed label (another one than t715-bt-addr's) so
+# the CID cannot be recovered from it, with the locally-administered bit
+# set.  Neither the CID nor the address is logged.  NetworkManager keeps it
+# (20-t715-wifi-mac.conf, wifi.cloned-mac-address=preserve).
+#
+# Usage: t715-wifi-addr IFINDEX  (run by 90-t715-wifi-addr.rules when a
+# brcmfmac interface appears, still down)
+set -eu
+
+# Run from udev, whose RUN programs have no stdout: log to the journal.
+log() { logger -t t715-wifi-addr "$*" 2>/dev/null || echo "t715-wifi-addr: $*"; }
+
+ifc=
+for d in /sys/class/net/*; do
+    [ "$(cat "$d/ifindex" 2>/dev/null)" = "${1:-}" ] && ifc=${d##*/}
+done
+[ -n "$ifc" ] || exit 0
+
+if ! cid=$(cat /sys/block/mmcblk0/device/cid 2>/dev/null) || [ -z "$cid" ]; then
+    log "no eMMC CID, $ifc keeps its address"
+    exit 0
+fi
+
+h=$(printf 't715-wifi-addr:%s' "$cid" | sha256sum | cut -c1-12)
+b0=$(( (0x$(printf '%s' "$h" | cut -c1-2) & 0xfc) | 0x02 ))
+addr=$(printf '%02x' "$b0")
+for c in 3 5 7 9 11; do
+    addr=$addr:$(printf '%s' "$h" | cut -c"$c-$((c + 1))")
+done
+
+if ip link set dev "$ifc" address "$addr"; then
+    log "$ifc: generated address set"
+else
+    log "$ifc: setting the generated address failed"
+    exit 1
+fi

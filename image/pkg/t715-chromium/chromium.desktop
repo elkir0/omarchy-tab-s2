@@ -1,0 +1,26 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Chromium
+GenericName=Web Browser
+GenericName[fr]=Navigateur Web
+Comment=Browse the web
+Comment[fr]=Naviguer sur le Web
+Exec=/usr/bin/chromium %U
+Icon=/var/lib/t715-chromium/root/usr/share/icons/hicolor/256x256/apps/chromium.png
+Terminal=false
+StartupNotify=true
+StartupWMClass=chromium
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Name[fr]=Nouvelle fenêtre
+Exec=/usr/bin/chromium
+
+[Desktop Action new-private-window]
+Name=New Incognito Window
+Name[fr]=Nouvelle fenêtre de navigation privée
+Exec=/usr/bin/chromium --incognito

@@ -1,0 +1,681 @@
+From 27d905016568c65ab81c76172d2565c870f67df4 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 01/24] ARM: exynos: support the Exynos5433 in 32-bit mode
+
+Samsung's bootloader on Exynos5433 tablets (Galaxy Tab S2 SM-T715) only
+boots 32-bit kernels.  Add SOC_EXYNOS5433, match its PMU, reset the
+sboot boot mode (INFORM2/INFORM3) first thing in init_irq so a panic or
+reset returns to the main system instead of the partition the kernel was
+started from, and bring up the secondary A53/A57 cores the way the vendor
+kernel does (entry point through the secure-firmware page, per-core PMU
+power-up), see docs/SMP_BRINGUP.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/mach-exynos/Kconfig    |  13 +
+ arch/arm/mach-exynos/common.h   |  14 ++
+ arch/arm/mach-exynos/exynos.c   |  47 ++++
+ arch/arm/mach-exynos/platsmp.c  | 420 ++++++++++++++++++++++++++++++++
+ arch/arm/mach-exynos/suspend.c  |  11 +
+ drivers/clk/samsung/Kconfig     |   2 +-
+ drivers/pinctrl/samsung/Kconfig |   2 +-
+ 7 files changed, 507 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/mach-exynos/Kconfig b/arch/arm/mach-exynos/Kconfig
+index b3d5df522..48375720c 100644
+--- a/arch/arm/mach-exynos/Kconfig
++++ b/arch/arm/mach-exynos/Kconfig
+@@ -117,6 +117,19 @@ config SOC_EXYNOS5800
+ 	depends on SOC_EXYNOS5420
+ 	select EXYNOS_REGULATOR_COUPLER
+ 
++config SOC_EXYNOS5433
++	bool "Samsung Exynos5433"
++	depends on ARCH_EXYNOS5
++	help
++	  Enable support for Samsung Exynos5433 SoC. This is an ARMv8
++	  (Cortex-A57/A53) SoC that is primarily supported through the
++	  ARM64 architecture, but the signed bootloader shipped on some
++	  consumer devices (e.g. Samsung Galaxy Tab S2) can only boot a
++	  32-bit kernel. Choose Y here to build such a 32-bit kernel
++	  for this SoC. Note that the Exynos5433 clock and pinctrl
++	  drivers are shared with the ARM64 architecture, so they are
++	  selected as well.
++
+ config EXYNOS_MCPM
+ 	bool
+ 	select MCPM
+diff --git a/arch/arm/mach-exynos/common.h b/arch/arm/mach-exynos/common.h
+index f4c0d33a2..68fcf2ba9 100644
+--- a/arch/arm/mach-exynos/common.h
++++ b/arch/arm/mach-exynos/common.h
+@@ -23,6 +23,12 @@
+ #define EXYNOS5410_SOC_ID	0xE5410000
+ #define EXYNOS5420_SOC_ID	0xE5420000
+ #define EXYNOS5800_SOC_ID	0xE5422000
++/*
++ * Same value and mask as the vendor kernel (kernel_universal5433
++ * arch/arm/plat-samsung/include/plat/cpu.h:55,57) and as the mainline
++ * chipid driver (drivers/soc/samsung/exynos-chipid.c:55).
++ */
++#define EXYNOS5433_SOC_ID	0xE5433000
+ #define EXYNOS5_SOC_MASK	0xFFFFF000
+ 
+ extern unsigned long exynos_cpu_id;
+@@ -41,6 +47,7 @@ IS_SAMSUNG_CPU(exynos5250, EXYNOS5250_SOC_ID, EXYNOS5_SOC_MASK)
+ IS_SAMSUNG_CPU(exynos5410, EXYNOS5410_SOC_ID, EXYNOS5_SOC_MASK)
+ IS_SAMSUNG_CPU(exynos5420, EXYNOS5420_SOC_ID, EXYNOS5_SOC_MASK)
+ IS_SAMSUNG_CPU(exynos5800, EXYNOS5800_SOC_ID, EXYNOS5_SOC_MASK)
++IS_SAMSUNG_CPU(exynos5433, EXYNOS5433_SOC_ID, EXYNOS5_SOC_MASK)
+ 
+ #if defined(CONFIG_SOC_EXYNOS3250)
+ # define soc_is_exynos3250()	is_samsung_exynos3250()
+@@ -94,6 +101,13 @@ IS_SAMSUNG_CPU(exynos5800, EXYNOS5800_SOC_ID, EXYNOS5_SOC_MASK)
+ # define soc_is_exynos5800()	0
+ #endif
+ 
++/* vendor kernel: arch/arm/plat-samsung/include/plat/cpu.h:169-173 */
++#if defined(CONFIG_SOC_EXYNOS5433)
++# define soc_is_exynos5433()	is_samsung_exynos5433()
++#else
++# define soc_is_exynos5433()	0
++#endif
++
+ extern u32 cp15_save_diag;
+ extern u32 cp15_save_power;
+ 
+diff --git a/arch/arm/mach-exynos/exynos.c b/arch/arm/mach-exynos/exynos.c
+index 2e8099479..9a4477bbc 100644
+--- a/arch/arm/mach-exynos/exynos.c
++++ b/arch/arm/mach-exynos/exynos.c
+@@ -141,6 +141,14 @@ void exynos_set_delayed_reset_assertion(bool enable)
+ static const struct of_device_id exynos_dt_pmu_match[] = {
+ 	{ .compatible = "samsung,exynos5260-pmu" },
+ 	{ .compatible = "samsung,exynos5410-pmu" },
++	/*
++	 * Exynos5433 (32-bit port): platsmp.c powers the secondary cores
++	 * through the PMU before any driver probes, like the vendor kernel,
++	 * which maps the PMU at 0x105c0000 statically (kernel_universal5433
++	 * arch/arm/mach-exynos/common.c:675-678, map.h:87).  Mapping only:
++	 * nothing is written here.
++	 */
++	{ .compatible = "samsung,exynos5433-pmu" },
+ 	{ /*sentinel*/ },
+ };
+ 
+@@ -154,8 +162,46 @@ static void exynos_map_pmu(void)
+ 	of_node_put(np);
+ }
+ 
++/*
++ * Samsung's bootloader (sboot) on Exynos5433 phones and tablets takes the
++ * boot target from PMU INFORM3 (normal/recovery/download) and enters the
++ * charging-only mode after a warm reset unless INFORM2 holds a magic; the
++ * vendor kernel rewrites both on every reboot (sec_reboot.c).  Set them to
++ * "normal boot" here, so that a panic, watchdog or reset-key restart of
++ * this kernel goes back to the main system instead of looping into the
++ * partition (e.g. recovery) it was started from.  Done first thing in
++ * init_irq, the earliest machine hook with the device tree unflattened and
++ * ioremap available, so that only a hang during setup_arch or the early
++ * memory setup can still send the next boot back to that partition.
++ */
++#define EXYNOS5433_INFORM2		0x0808
++#define EXYNOS5433_INFORM3		0x080c
++#define SBOOT_NO_LPM_MAGIC		0x12345678
++#define SBOOT_REBOOT_MODE_NORMAL	0x12345670
++
++static void __init exynos5433_set_normal_boot_mode(void)
++{
++	struct device_node *np;
++	void __iomem *pmu;
++
++	np = of_find_compatible_node(NULL, NULL, "samsung,exynos5433-pmu");
++	if (!np)
++		return;
++	pmu = of_iomap(np, 0);
++	of_node_put(np);
++	if (!pmu)
++		return;
++
++	writel_relaxed(SBOOT_NO_LPM_MAGIC, pmu + EXYNOS5433_INFORM2);
++	writel(SBOOT_REBOOT_MODE_NORMAL, pmu + EXYNOS5433_INFORM3);
++	iounmap(pmu);
++}
++
+ static void __init exynos_init_irq(void)
+ {
++	if (of_machine_is_compatible("samsung,exynos5433"))
++		exynos5433_set_normal_boot_mode();
++
+ 	irqchip_init();
+ 	/*
+ 	 * Since platsmp.c needs pmu base address by the time
+@@ -201,6 +247,7 @@ static char const *const exynos_dt_compat[] __initconst = {
+ 	"samsung,exynos5250",
+ 	"samsung,exynos5260",
+ 	"samsung,exynos5420",
++	"samsung,exynos5433",
+ 	NULL
+ };
+ 
+diff --git a/arch/arm/mach-exynos/platsmp.c b/arch/arm/mach-exynos/platsmp.c
+index fb4a394ec..c11a0a0ef 100644
+--- a/arch/arm/mach-exynos/platsmp.c
++++ b/arch/arm/mach-exynos/platsmp.c
+@@ -29,6 +29,68 @@ extern void exynos4_secondary_startup(void);
+ /* XXX exynos_pen_release is cargo culted code - DO NOT COPY XXX */
+ volatile int exynos_pen_release = -1;
+ 
++/*
++ * Exynos5433 (Cortex-A53 "KFC" cluster at MPIDR Aff1 = 1, Cortex-A57
++ * "EAGLE" cluster at Aff1 = 0), booted as a 32-bit kernel by the vendor
++ * bootloader.  The secondary-CPU sequence below is the one of the vendor
++ * 3.10 kernel; "stock" references are files of kernel_universal5433
++ * arch/arm/mach-exynos/ unless stated otherwise:
++ *  - PMU per-core registers are indexed core + 4 * cluster
++ *    (stock pmu-exynos5433.c:94-97,151-154; mainline's 0x2000 + 0x80 * n
++ *    layout of EXYNOS_ARM_CORE_* matches stock regs-pmu.h:306-339);
++ *  - the secure monitor takes the entry point from offset 0x1c of the
++ *    "samsung,secure-firmware" window, one register for all cores
++ *    (stock firmware.c:36-42; that window is sysram-ns, 0x0207b000,
++ *    stock include/mach/map.h:44);
++ *  - a core is woken with dsb + sev only: no SMC, no IPI
++ *    (stock platsmp.c:221-222).
++ */
++#define EXYNOS5433_NR_CLUSTERS		2
++#define EXYNOS5433_CORES_PER_CLUSTER	4	/* stock pmu-exynos5433.c:97 */
++#define EXYNOS5433_NR_CORES		8	/* stock loops, pmu-exynos5433.c:342,350 (NR_CPUS=8) */
++
++/* EXYNOS_CORE_PWR_EN, stock include/mach/regs-pmu.h:367 */
++#define EXYNOS5433_CORE_PWR_EN		0xf
++/* DURATION0..3 = CORE_CONFIGURATION + 0x10..0x1c: stock pmu-exynos5433.c:104-122,
++ * include/mach/regs-pmu-exynos5433.h:123-125 */
++#define EXYNOS5433_CORE_DURATION(n, i)	(EXYNOS_ARM_CORE_CONFIGURATION(n) + 0x10 + 4 * (i))
++#define EXYNOS5433_DUR_WAIT_RESET	(0xf << 20)	/* regs-pmu-exynos5433.h:126 */
++#define EXYNOS5433_DUR_SCALL		(0xf << 4)	/* regs-pmu-exynos5433.h:127 */
++#define EXYNOS5433_DUR_SCALL_VALUE	(0x1 << 4)	/* regs-pmu-exynos5433.h:128 */
++#define EXYNOS5433_DUR_FEEDBACK_MASK	(0xff << 4)	/* pmu-exynos5433.c:105 */
++#define EXYNOS5433_DUR_FEEDBACK_VALUE	(0x11 << 4)	/* pmu-exynos5433.c:106 */
++#define EXYNOS5433_USE_SMPEN		BIT(28)		/* regs-pmu-exynos5433.h:205 */
++/* UP scheduler, stock include/mach/regs-pmu.h:28,30-31 */
++#define EXYNOS5433_UP_SCHEDULER		0x0120
++#define EXYNOS5433_ENABLE_EAGLE_CPU	BIT(0)
++#define EXYNOS5433_ENABLE_KFC_CPU	BIT(1)
++/* cluster logic and CPU sequencer, stock regs-pmu-exynos5433.h:130-141 */
++#define EXYNOS5433_EAGLE_NONCPU_CONFIGURATION	0x2400
++#define EXYNOS5433_KFC_NONCPU_CONFIGURATION	0x2420
++#define EXYNOS5433_EAGLE_CPUSEQ_CONFIGURATION	0x2480
++#define EXYNOS5433_KFC_CPUSEQ_CONFIGURATION	0x24a0
++/* L2: 0x20 stride on 5430/5433, stock include/mach/regs-pmu.h:350-358 */
++#define EXYNOS5433_L2_CONFIGURATION(c)	(0x2600 + 0x20 * (c))
++/* boot flag word = sysram-ns + 0x28 + 4 * PMU core index, stock
++ * pmu-exynos5433.c:28,79-81 (mainline firmware.c REG_CPU_STATE_ADDR);
++ * HOTPLUG = BIT(2), stock include/mach/pmu.h:73 */
++#define EXYNOS5433_BOOT_FLAG_HOTPLUG	BIT(2)
++#define EXYNOS5433_BOOT_ADDR_OFFSET	0x1c	/* stock firmware.c:38 */
++#define EXYNOS5433_BOOT_FLAG_OFFSET	0x28	/* stock pmu-exynos5433.c:28 */
++
++/* true on an Exynos5433 machine: the generic path below must not run */
++static bool exynos5433_smp __ro_after_init;
++/* PMU mapped, chip ID and secure-firmware boot window checked, PMU set up */
++static bool exynos5433_smp_ready __ro_after_init;
++/* a secondary did not come up: start no other one (see exynos5433_boot_secondary) */
++static bool exynos5433_smp_failed;
++
++static unsigned int exynos5433_pmu_core(u32 mpidr)
++{
++	return MPIDR_AFFINITY_LEVEL(mpidr, 0) +
++	       EXYNOS5433_CORES_PER_CLUSTER * MPIDR_AFFINITY_LEVEL(mpidr, 1);
++}
++
+ #ifdef CONFIG_HOTPLUG_CPU
+ static inline void cpu_leave_lowpower(u32 core_id)
+ {
+@@ -257,6 +319,16 @@ static void exynos_secondary_init(unsigned int cpu)
+ 	 */
+ 	exynos_write_pen_release(-1);
+ 
++	/*
++	 * Exynos5433: drop the monitor's HOTPLUG boot flag of this core, as
++	 * the vendor kernel does on every secondary start (stock
++	 * platsmp.c:93 -> pmu-exynos5433.c:71-86).  The helper takes the
++	 * flag slot number, i.e. the PMU core index on this SoC.
++	 */
++	if (exynos5433_smp_ready)
++		exynos_clear_boot_flag(exynos5433_pmu_core(cpu_logical_map(cpu)),
++				       EXYNOS5433_BOOT_FLAG_HOTPLUG);
++
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+@@ -314,6 +386,330 @@ int exynos_get_boot_addr(u32 core_id, unsigned long *boot_addr)
+ 	return ret;
+ }
+ 
++/* stock exynos5433_cpu_state(), pmu-exynos5433.c:146-158 */
++static bool exynos5433_core_powered(unsigned int idx)
++{
++	return (pmu_raw_readl(EXYNOS_ARM_CORE_STATUS(idx)) &
++		EXYNOS5433_CORE_PWR_EN) == EXYNOS5433_CORE_PWR_EN;
++}
++
++static void exynos5433_show_core(const char *when, unsigned int idx)
++{
++	pr_info("EXYNOS5433: %s: PMU core %u (MPIDR 0x%03x): CONF 0x%08x STATUS 0x%08x OPTION 0x%08x DUR0-3 0x%08x 0x%08x 0x%08x 0x%08x\n",
++		when, idx,
++		((idx / EXYNOS5433_CORES_PER_CLUSTER) << MPIDR_LEVEL_BITS) |
++		(idx % EXYNOS5433_CORES_PER_CLUSTER),
++		pmu_raw_readl(EXYNOS_ARM_CORE_CONFIGURATION(idx)),
++		pmu_raw_readl(EXYNOS_ARM_CORE_STATUS(idx)),
++		pmu_raw_readl(EXYNOS_ARM_CORE_OPTION(idx)),
++		pmu_raw_readl(EXYNOS5433_CORE_DURATION(idx, 0)),
++		pmu_raw_readl(EXYNOS5433_CORE_DURATION(idx, 1)),
++		pmu_raw_readl(EXYNOS5433_CORE_DURATION(idx, 2)),
++		pmu_raw_readl(EXYNOS5433_CORE_DURATION(idx, 3)));
++}
++
++/* Read-only CPU part of the stock PMU dump, show_exynos_pmu(), pmu-exynos5433.c:412-439 */
++static void __init exynos5433_show_cpu_pmu(const char *when)
++{
++	unsigned int i, c;
++
++	for (i = 0; i < EXYNOS5433_NR_CORES; i++)
++		exynos5433_show_core(when, i);
++
++	for (c = 0; c < EXYNOS5433_NR_CLUSTERS; c++) {
++		u32 noncpu = c ? EXYNOS5433_KFC_NONCPU_CONFIGURATION :
++				 EXYNOS5433_EAGLE_NONCPU_CONFIGURATION;
++		u32 cpuseq = c ? EXYNOS5433_KFC_CPUSEQ_CONFIGURATION :
++				 EXYNOS5433_EAGLE_CPUSEQ_CONFIGURATION;
++
++		pr_info("EXYNOS5433: %s: %s NONCPU 0x%08x/0x%08x/0x%08x L2 0x%08x/0x%08x/0x%08x CPUSEQ 0x%08x/0x%08x/0x%08x (CONF/STATUS/OPTION)\n",
++			when, c ? "KFC" : "EAGLE",
++			pmu_raw_readl(noncpu), pmu_raw_readl(noncpu + 0x4),
++			pmu_raw_readl(noncpu + 0x8),
++			pmu_raw_readl(EXYNOS5433_L2_CONFIGURATION(c)),
++			pmu_raw_readl(EXYNOS5433_L2_CONFIGURATION(c) + 0x4),
++			pmu_raw_readl(EXYNOS5433_L2_CONFIGURATION(c) + 0x8),
++			pmu_raw_readl(cpuseq), pmu_raw_readl(cpuseq + 0x4),
++			pmu_raw_readl(cpuseq + 0x8));
++	}
++
++	pr_info("EXYNOS5433: %s: UP_SCHEDULER 0x%08x\n", when,
++		pmu_raw_readl(EXYNOS5433_UP_SCHEDULER));
++
++	if (sysram_ns_base_addr) {
++		void __iomem *flags = sysram_ns_base_addr +
++				      EXYNOS5433_BOOT_FLAG_OFFSET;
++
++		pr_info("EXYNOS5433: %s: monitor boot addr 0x%08x, boot flags %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			when,
++			readl_relaxed(sysram_ns_base_addr +
++				      EXYNOS5433_BOOT_ADDR_OFFSET),
++			readl_relaxed(flags + 0x00), readl_relaxed(flags + 0x04),
++			readl_relaxed(flags + 0x08), readl_relaxed(flags + 0x0c),
++			readl_relaxed(flags + 0x10), readl_relaxed(flags + 0x14),
++			readl_relaxed(flags + 0x18), readl_relaxed(flags + 0x1c));
++	}
++}
++
++/*
++ * Pre-SMP part of the stock PMU init, exynos5433_pmu_init()
++ * (pmu-exynos5433.c:457-545, run from exynos_init_time() before any
++ * secondary is started), restricted to the CPU core and cluster power
++ * sequencing, in the stock order:
++ *  - exynos_use_feedback() (:252-266) for the two cluster entries of
++ *    exynos_list_feed (:31-32); the other entries are power domains;
++ *  - exynos_core_option() (:338-357);
++ *  - UP scheduler enable (:500-503).
++ * Not ported: OSC duration, central sequencer, L2 retention options, LPI
++ * mask, PS_HOLD, pmu_cal_sys_init() (system sleep and power domains).
++ */
++static void __init exynos5433_pmu_cpu_init(void)
++{
++	unsigned int i;
++	u32 val;
++
++	for (i = 0; i < EXYNOS5433_NR_CLUSTERS; i++) {
++		u32 opt = (i ? EXYNOS5433_KFC_NONCPU_CONFIGURATION :
++			       EXYNOS5433_EAGLE_NONCPU_CONFIGURATION) + 0x8;
++
++		val = pmu_raw_readl(opt);
++		val &= ~EXYNOS5_USE_SC_COUNTER;		/* stock regs-pmu.h:295 */
++		val |= EXYNOS5_USE_SC_FEEDBACK;		/* stock regs-pmu.h:296 */
++		pmu_raw_writel(val, opt);
++	}
++
++	for (i = 0; i < EXYNOS5433_NR_CORES; i++) {
++		val = pmu_raw_readl(EXYNOS_ARM_CORE_OPTION(i));
++		val |= EXYNOS5_USE_SC_COUNTER | EXYNOS5_USE_SC_FEEDBACK |
++		       EXYNOS5433_USE_SMPEN;
++		pmu_raw_writel(val, EXYNOS_ARM_CORE_OPTION(i));
++	}
++
++	for (i = 0; i < EXYNOS5433_NR_CORES; i++) {
++		val = pmu_raw_readl(EXYNOS5433_CORE_DURATION(i, 0));
++		val |= EXYNOS5433_DUR_WAIT_RESET;
++		val &= ~EXYNOS5433_DUR_SCALL;
++		val |= EXYNOS5433_DUR_SCALL_VALUE;
++		pmu_raw_writel(val, EXYNOS5433_CORE_DURATION(i, 0));
++	}
++
++	val = pmu_raw_readl(EXYNOS5433_UP_SCHEDULER);
++	val |= EXYNOS5433_ENABLE_EAGLE_CPU | EXYNOS5433_ENABLE_KFC_CPU;
++	pmu_raw_writel(val, EXYNOS5433_UP_SCHEDULER);
++}
++
++static void __init exynos5433_smp_prepare_cpus(void)
++{
++	unsigned long boot_addr = __pa_symbol(exynos4_secondary_startup);
++	int ret;
++
++	pr_info("EXYNOS5433: SMP: chip ID 0x%08lx, boot CPU MPIDR 0x%03x\n",
++		exynos_cpu_id, cpu_logical_map(0));
++
++	if (!soc_is_exynos5433()) {
++		pr_err("EXYNOS5433: SMP: chip ID is not an Exynos5433 or CONFIG_SOC_EXYNOS5433 is off; secondary CPUs stay off\n");
++		return;
++	}
++
++	if (!pmu_base_addr) {
++		pr_err("EXYNOS5433: SMP: PMU not mapped (no samsung,exynos5433-pmu node); secondary CPUs stay off\n");
++		return;
++	}
++
++	/* PMU and monitor state as left by the bootloader (read only) */
++	exynos5433_show_cpu_pmu("before SMP setup");
++
++	/*
++	 * The vendor kernel writes the entry point before powering any core
++	 * (stock platsmp.c:288-297), through the secure-firmware window only
++	 * (stock firmware.c:36-42).  Here the firmware op needs both the
++	 * "samsung,secure-firmware" node (ops registered from .init_early)
++	 * and the "samsung,exynos4210-sysram-ns" mapping (firmware.c
++	 * exynos_set_cpu_boot_addr()).  No fallback to the per-core
++	 * registers of the secure sysram (stock platsmp.c:48-63): it was
++	 * never used on this SoC by the vendor kernel.
++	 */
++	ret = call_firmware_op(set_cpu_boot_addr, 0, boot_addr);
++	if (ret) {
++		pr_err("EXYNOS5433: SMP: cannot set the boot address through the secure firmware (%d); need samsung,secure-firmware and samsung,exynos4210-sysram-ns nodes; secondary CPUs stay off\n",
++		       ret);
++		return;
++	}
++
++	exynos5433_pmu_cpu_init();
++	exynos5433_smp_ready = true;
++
++	pr_info("EXYNOS5433: SMP: entry point 0x%08lx at secure-firmware window + 0x%x, PMU core options set\n",
++		boot_addr, EXYNOS5433_BOOT_ADDR_OFFSET);
++}
++
++/*
++ * exynos4_secondary_startup (headsmp.S) waits until exynos_pen_release
++ * equals MPIDR[3:0], so the A53 and the A57 with the same Aff0 share one
++ * pen value (the vendor kernel compares the full MPIDR instead, stock
++ * headsmp.S:16,26-27, platsmp.c:192).  Cores are started one at a time
++ * from power-off, so only the core being started is in the pen; refuse
++ * to start a core whose other-cluster twin is powered but not online,
++ * since that twin could be spinning in the pen too.
++ */
++static int exynos5433_check_pen_twin(unsigned int cpu, u32 mpidr)
++{
++	u32 twin = mpidr ^ (1 << MPIDR_LEVEL_BITS);	/* other cluster, same Aff0 */
++	int twin_cpu = get_logical_index(twin);
++
++	if (twin_cpu >= 0 && cpu_online(twin_cpu))
++		return 0;
++
++	if (exynos5433_core_powered(exynos5433_pmu_core(twin))) {
++		pr_err("EXYNOS5433: CPU%u: not started: core MPIDR 0x%03x has the same holding-pen value and is powered but not online\n",
++		       cpu, twin);
++		return -EBUSY;
++	}
++
++	return 0;
++}
++
++/*
++ * stock exynos5433_cpu_up(), pmu-exynos5433.c:88-128, including the
++ * CONFIG_EXYNOS5433_CORE_FEEDBACK_CHECK_DISABLE block (:99-123): set in
++ * the vendor defconfig (lineage_gts28ltexx_defconfig:430) and present in
++ * the shipped kernel (01_dumps/stock/Image.stock, code at offset
++ * 0x1e330-0x1e3b8: OPTION &= ~0x2, DURATION0-3 bits [11:4] = 0x11,
++ * CONFIGURATION |= 0xf).
++ */
++static void exynos5433_core_power_up(unsigned int idx)
++{
++	unsigned int i;
++	u32 val;
++
++	val = pmu_raw_readl(EXYNOS_ARM_CORE_OPTION(idx));
++	val &= ~EXYNOS5_USE_SC_FEEDBACK;		/* stock :100-102, "~(0x2)" */
++	pmu_raw_writel(val, EXYNOS_ARM_CORE_OPTION(idx));
++
++	for (i = 0; i < 4; i++) {			/* stock :104-122 */
++		val = pmu_raw_readl(EXYNOS5433_CORE_DURATION(idx, i));
++		val &= ~EXYNOS5433_DUR_FEEDBACK_MASK;
++		val |= EXYNOS5433_DUR_FEEDBACK_VALUE;
++		pmu_raw_writel(val, EXYNOS5433_CORE_DURATION(idx, i));
++	}
++
++	/* pen value and entry point reach memory before the core runs */
++	wmb();
++
++	val = pmu_raw_readl(EXYNOS_ARM_CORE_CONFIGURATION(idx));
++	val |= EXYNOS5433_CORE_PWR_EN;			/* stock :125-127 */
++	pmu_raw_writel(val, EXYNOS_ARM_CORE_CONFIGURATION(idx));
++}
++
++static int exynos5433_boot_secondary(unsigned int cpu)
++{
++	unsigned long boot_addr = __pa_symbol(exynos4_secondary_startup);
++	u32 mpidr = cpu_logical_map(cpu);
++	u32 core = MPIDR_AFFINITY_LEVEL(mpidr, 0);
++	u32 cluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
++	unsigned long timeout;
++	unsigned int idx, ms = 0;
++	u32 status;
++	int ret;
++
++	if (!exynos5433_smp_ready)
++		return -ENODEV;
++
++	if (exynos5433_smp_failed) {
++		pr_err("EXYNOS5433: CPU%u: not started: an earlier secondary CPU failed to start\n",
++		       cpu);
++		return -EIO;
++	}
++
++	if (core >= EXYNOS5433_CORES_PER_CLUSTER ||
++	    cluster >= EXYNOS5433_NR_CLUSTERS ||
++	    MPIDR_AFFINITY_LEVEL(mpidr, 2)) {
++		pr_err("EXYNOS5433: CPU%u: unexpected MPIDR 0x%x\n", cpu, mpidr);
++		return -EINVAL;
++	}
++	idx = exynos5433_pmu_core(mpidr);
++
++	ret = exynos5433_check_pen_twin(cpu, mpidr);
++	if (ret)
++		return ret;
++
++	/* entry point in place before the core is powered, as in stock */
++	ret = call_firmware_op(set_cpu_boot_addr, mpidr, boot_addr);
++	if (ret)
++		return ret;
++
++	spin_lock(&boot_lock);
++
++	/* MPIDR[3:0], see exynos5433_check_pen_twin() */
++	exynos_write_pen_release(core);
++
++	/* stock exynos_power_up_cpu(), platsmp.c:102-128 */
++	status = pmu_raw_readl(EXYNOS_ARM_CORE_STATUS(idx));
++	if (exynos5433_core_powered(idx)) {
++		pr_warn("EXYNOS5433: CPU%u: core power already enabled (STATUS 0x%08x)\n",
++			cpu, status);
++	} else {
++		exynos5433_core_power_up(idx);
++
++		/* wait max 10 ms, 1 ms steps: stock platsmp.c:114-127 */
++		while (!exynos5433_core_powered(idx) && ms < 10) {
++			mdelay(1);
++			ms++;
++		}
++		if (!exynos5433_core_powered(idx)) {
++			pr_err("EXYNOS5433: CPU%u: core power-up timed out\n",
++			       cpu);
++			ret = -ETIMEDOUT;
++			goto fail;
++		}
++	}
++	pr_info("EXYNOS5433: CPU%u: MPIDR 0x%03x, PMU core %u powered (STATUS 0x%08x -> 0x%08x, %u ms)\n",
++		cpu, mpidr, idx, status,
++		pmu_raw_readl(EXYNOS_ARM_CORE_STATUS(idx)), ms);
++
++	/*
++	 * Release loop of stock platsmp.c:206-232 for this SoC: rewrite the
++	 * entry point and send an event, for up to 1 s.  No
++	 * call_firmware_op(cpu_boot) (SMC_CMD_CPU1BOOT) and no wake-up IPI:
++	 * the vendor kernel uses neither on Exynos5433 (:221-226).
++	 */
++	timeout = jiffies + (1 * HZ);
++	while (time_before(jiffies, timeout)) {
++		smp_rmb();
++
++		call_firmware_op(set_cpu_boot_addr, mpidr, boot_addr);
++		dsb_sev();
++
++		if (exynos_pen_release == -1)
++			break;
++
++		udelay(10);
++	}
++
++	if (exynos_pen_release != -1) {
++		pr_err("EXYNOS5433: CPU%u: did not leave the holding pen within 1 s\n",
++		       cpu);
++		ret = -ETIMEDOUT;
++		goto fail;
++	}
++
++	spin_unlock(&boot_lock);
++	return 0;
++
++fail:
++	/*
++	 * Unlike stock, park the pen at -1 so that this core, if it shows
++	 * up late, keeps spinning instead of starting with a stale
++	 * secondary_data, and start no further core (its pen value could
++	 * release this one).
++	 */
++	exynos_write_pen_release(-1);
++	exynos5433_smp_failed = true;
++	exynos5433_show_core("failed", idx);
++	spin_unlock(&boot_lock);
++	return ret;
++}
++
+ static int exynos_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ {
+ 	unsigned long timeout;
+@@ -321,6 +717,9 @@ static int exynos_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	u32 core_id = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+ 	int ret = -ENOSYS;
+ 
++	if (exynos5433_smp)
++		return exynos5433_boot_secondary(cpu);
++
+ 	/*
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+@@ -411,6 +810,11 @@ static void __init exynos_smp_prepare_cpus(unsigned int max_cpus)
+ 
+ 	if (read_cpuid_part() == ARM_CPU_PART_CORTEX_A9)
+ 		exynos_scu_enable();
++
++	if (of_machine_is_compatible("samsung,exynos5433")) {
++		exynos5433_smp = true;
++		exynos5433_smp_prepare_cpus();
++	}
+ }
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+@@ -438,6 +842,21 @@ static void exynos_cpu_die(unsigned int cpu)
+ 	if (spurious)
+ 		pr_warn("CPU%u: %u spurious wakeup calls\n", cpu, spurious);
+ }
++
++static bool exynos_cpu_can_disable(unsigned int cpu)
++{
++	/*
++	 * Exynos5433: exynos_cpu_die() powers down PMU core Aff0, a core of
++	 * the other cluster for every A53, and the vendor hot-unplug
++	 * handshake (boot flag, SMC_CMD_SHUTDOWN: stock hotplug.c:99-119) is
++	 * not ported, so no CPU may be taken offline.
++	 */
++	if (of_machine_is_compatible("samsung,exynos5433"))
++		return false;
++
++	/* arm32 default without .cpu_can_disable (kernel/smp.c) */
++	return cpu != 0;
++}
+ #endif /* CONFIG_HOTPLUG_CPU */
+ 
+ const struct smp_operations exynos_smp_ops __initconst = {
+@@ -446,5 +865,6 @@ const struct smp_operations exynos_smp_ops __initconst = {
+ 	.smp_boot_secondary	= exynos_boot_secondary,
+ #ifdef CONFIG_HOTPLUG_CPU
+ 	.cpu_die		= exynos_cpu_die,
++	.cpu_can_disable	= exynos_cpu_can_disable,
+ #endif
+ };
+diff --git a/arch/arm/mach-exynos/suspend.c b/arch/arm/mach-exynos/suspend.c
+index aca767935..2bbffaf35 100644
+--- a/arch/arm/mach-exynos/suspend.c
++++ b/arch/arm/mach-exynos/suspend.c
+@@ -676,6 +676,17 @@ void __init exynos_pm_init(void)
+ 	struct device_node *np;
+ 	u32 tmp;
+ 
++	/*
++	 * Exynos5433 is an ARMv8 SoC that can also be booted in ARMv7
++	 * mode by its bootloader. It has no data in the legacy ARM32
++	 * suspend table below (its PMU is only used through the
++	 * generic syscon regmap and power-domain drivers), so skip it
++	 * explicitly to avoid the misleading "Failed to find PMU
++	 * node" error.
++	 */
++	if (of_machine_is_compatible("samsung,exynos5433"))
++		return;
++
+ 	np = of_find_matching_node_and_match(NULL, exynos_pmu_of_device_ids, &match);
+ 	if (!np) {
+ 		pr_err("Failed to find PMU node\n");
+diff --git a/drivers/clk/samsung/Kconfig b/drivers/clk/samsung/Kconfig
+index 76a494e95..baab4f444 100644
+--- a/drivers/clk/samsung/Kconfig
++++ b/drivers/clk/samsung/Kconfig
+@@ -11,7 +11,7 @@ config COMMON_CLK_SAMSUNG
+ 	select EXYNOS_5260_COMMON_CLK if ARM && SOC_EXYNOS5260
+ 	select EXYNOS_5410_COMMON_CLK if ARM && SOC_EXYNOS5410
+ 	select EXYNOS_5420_COMMON_CLK if ARM && SOC_EXYNOS5420
+-	select EXYNOS_ARM64_COMMON_CLK if ARM64 && ARCH_EXYNOS
++	select EXYNOS_ARM64_COMMON_CLK if ARM64 && ARCH_EXYNOS || SOC_EXYNOS5433
+ 	select TESLA_FSD_COMMON_CLK if ARM64 && ARCH_TESLA_FSD
+ 
+ config S3C64XX_COMMON_CLK
+diff --git a/drivers/pinctrl/samsung/Kconfig b/drivers/pinctrl/samsung/Kconfig
+index 697ff7812..e051668c1 100644
+--- a/drivers/pinctrl/samsung/Kconfig
++++ b/drivers/pinctrl/samsung/Kconfig
+@@ -13,7 +13,7 @@ config PINCTRL_EXYNOS
+ 	depends on ARCH_EXYNOS || ARCH_S5PV210 || (COMPILE_TEST && OF)
+ 	select PINCTRL_SAMSUNG
+ 	select PINCTRL_EXYNOS_ARM if ARM && (ARCH_EXYNOS || ARCH_S5PV210)
+-	select PINCTRL_EXYNOS_ARM64 if ARM64 && ARCH_EXYNOS
++	select PINCTRL_EXYNOS_ARM64 if ARM64 && ARCH_EXYNOS || SOC_EXYNOS5433
+ 
+ config PINCTRL_EXYNOS_ARM
+ 	bool "ARMv7-specific pinctrl driver for Samsung Exynos SoCs" if COMPILE_TEST

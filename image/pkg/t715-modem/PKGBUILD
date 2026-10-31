@@ -1,0 +1,58 @@
+# SM-T715 (armv7h) modem stack for the Shannon SS333 CP, from this
+# repository's modem/ (docs/hardware/MODEM.md): the CP loader and supervisor
+# (static armv7 binary), shannond (Samsung IPC 4.1 daemon, RFS sandbox,
+# ModemManager facade for NetworkManager and omarchy-mobile's omatel), the
+# units, the NV provisioning from EFS (read only), the call audio hook and
+# the "Voice Call" profile user service, udev rules and the modprobe
+# blacklist. Needs a kernel with kernel/patches/t715-modem; on another kernel
+# every unit skips itself.
+#
+# Source: pkg/t715-modem/t715-modem-src.tar.gz, made by tools/stage-t715-modem
+# (git-ignored). Build: tools/stage-t715-modem && tools/build-pkg t715-modem.
+# The "Voice Call" UCM files come from the image overlay, not from here.
+
+pkgname=t715-modem
+pkgver=0.1.0
+pkgrel=9
+pkgdesc="Shannon SS333 modem stack of the Galaxy Tab S2 SM-T715 (loader, shannond, ModemManager facade)"
+arch=(armv7h)
+license=('GPL-2.0-or-later')
+depends=(python python-dbus python-gobject dbus systemd util-linux coreutils kmod alsa-utils libpulse gtk4 libadwaita)
+optdepends=('networkmanager: mobile data through the ModemManager facade'
+            'mobile-broadband-provider-info: APN suggestions in t715-mobile-settings'
+            'omatel-agent: omarchy-mobile Phone and Messages service'
+            'modemmanager: mmcli only (keep ModemManager.service masked)')
+install=t715-modem.install
+options=('!strip' '!debug')
+source=("t715-modem-src.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  local m="$srcdir/modem"
+  install -Dm755 "$m/loader/build/shannon-loader-armv7" "$pkgdir/usr/bin/shannon-loader"
+  install -d "$pkgdir/usr/lib/shannond"
+  cp -r "$m/shannond/shannond" "$m/shannond/bin" "$pkgdir/usr/lib/shannond/"
+  ln -s /usr/lib/shannond/bin/shannonctl "$pkgdir/usr/bin/shannonctl"
+  install -m755 "$m/audio/voice-hook.sh" "$pkgdir/usr/lib/shannond/voice-hook.sh"
+  install -m755 "$m/audio/t715-call-profile" "$pkgdir/usr/lib/shannond/t715-call-profile"
+  install -Dm755 "$m/audio/t715-sim-pin" "$pkgdir/usr/bin/t715-sim-pin"
+  install -Dm644 "$m/audio/t715-sim-pin.desktop" "$pkgdir/usr/share/applications/t715-sim-pin.desktop"
+  install -Dm755 "$m/ui/t715-mobile-settings" "$pkgdir/usr/bin/t715-mobile-settings"
+  install -Dm644 "$m/ui/t715-mobile-settings.desktop" "$pkgdir/usr/share/applications/t715-mobile-settings.desktop"
+  install -m755 "$m/systemd/shannon-modem-prepare" "$pkgdir/usr/lib/shannond/shannon-modem-prepare"
+  install -m755 "$m/systemd/shannon-nv-provision" "$pkgdir/usr/lib/shannond/shannon-nv-provision"
+  install -m755 "$m/tools/cp-kill.py" "$pkgdir/usr/lib/shannond/cp-kill.py"
+  install -Dm644 -t "$pkgdir/usr/lib/systemd/system" "$m"/systemd/*.service
+  install -Dm644 "$m/audio/t715-call-profile.service" "$pkgdir/usr/lib/systemd/user/t715-call-profile.service"
+  # not ModemManager's own file name: modemmanager (mmcli) ships that one
+  install -Dm644 "$m/shannond/dbus/org.freedesktop.ModemManager1.conf" "$pkgdir/usr/share/dbus-1/system.d/t715-modem-mm.conf"
+  install -Dm644 -t "$pkgdir/usr/lib/udev/rules.d" "$m"/udev/*.rules
+  install -Dm644 "$m/modprobe/t715-modem.conf" "$pkgdir/usr/lib/modprobe.d/t715-modem.conf"
+  local doc="$pkgdir/usr/share/doc/t715-modem"
+  install -Dm644 "$m/shannond/README.md" "$doc/shannond.md"
+  install -Dm644 "$m/shannond/README-mm.md" "$doc/modemmanager-facade.md"
+  install -Dm644 "$m/loader/README.md" "$doc/loader.md"
+  install -Dm644 "$m/audio/README.md" "$doc/audio.md"
+  install -d "$pkgdir/usr/lib/sysusers.d"
+  printf 'g radio - - -\n' > "$pkgdir/usr/lib/sysusers.d/t715-modem.conf"
+}

@@ -1,0 +1,1356 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+#
+# /init of the SM-T715 (Galaxy Tab S2 8.0 LTE) initramfs: busybox sh, PID 1.
+#
+# Boots the Arch Linux ARM image stored as a FILE on Android's USERDATA
+# partition, without ever writing to that partition (image mode; for the
+# persistent root, which does write to it, see "Persistent root" below):
+#   1. mount devtmpfs, proc, sysfs, devpts and a /run tmpfs;
+#   2. bring up the USB RNDIS debug link exactly like the rootfs does
+#      (image/rootfs/overlay/usr/local/sbin/usb-rndis-setup: configfs
+#      gadget g1, same IDs, 172.16.42.1/24), plus busybox udhcpd
+#      (172.16.42.2-10) and telnetd (/bin/sh) bound to that address only;
+#   3. wait for the partition whose GPT name is USERDATA, make the block
+#      device read-only (BLKROSET) and mount it ro,noload on /userdata;
+#   4. losetup -r the image, mount it read-only and stack an overlayfs
+#      with a tmpfs upper layer on /newroot; copy the packed module tree
+#      (lib/modules/RELEASE) into that layer;
+#   5. tear the debug link down (usb-rndis.service takes over in Arch),
+#      move /run (USERDATA ends up at /run/t715/userdata), /dev, /proc and
+#      /sys into the new root and exec switch_root /newroot /sbin/init.
+# On any failure: log the reason, keep the debug shell up for
+# t715.failwait seconds, then reboot -f (back to Android).  This script
+# never exits on purpose: PID 1 exiting would panic the kernel.
+#
+# Every progress/error line goes to /dev/kmsg prefixed "t715-initramfs:"
+# (the kernel log is what survives the reboot) and to
+# /run/t715/initramfs.log (kept in /run after the switch_root).
+#
+# Knobs, from the kernel command line (they win) and from /etc/t715-knobs
+# (same syntax, written by boot/build-initramfs.sh --knobs):
+#   t715.rootimg=PATH    image path inside USERDATA
+#                        (default media/0/linux/rootfs.img)
+# Image choice without the kernel command line: a file rootfs.select next
+# to the default image (Android: /sdcard/linux/rootfs.select) whose first
+# line is the name of another image in the same directory, e.g.
+# "rootfs-omarchy.img" (letters, digits, . _ -, ending in .img).  Missing
+# or invalid names fall back to the default image; t715.rootimg= wins.
+# An optional second line "persist=NAME" asks for the persistent root NAME
+# (below), seeded from the image of the first line; t715.persist= wins.
+#   t715.shell=1         prepare /newroot, then stay in the debug shell;
+#                        "touch /tmp/t715-continue" there to switch_root
+#   t715.failwait=SECS   debug-shell time before rebooting on failure (300)
+#   t715.modules=0       do not insert /lib/t715-modules/*.ko (GPU modules)
+#   t715.modblacklist=a,b  write "blacklist a", "blacklist b" into the root's
+#                        /etc/modprobe.d (tmpfs layer): udev no longer
+#                        autoloads them, modprobe by hand still works
+#                        (bring-up tests, e.g. pci_exynos for Wi-Fi)
+#   t715.wdtguard=0      boot even if the previous reset was the watchdog
+#                        (default: restart to Android at once, see wdt_guard)
+#   t715.returnafter=SECS  unattended test boot: SECS seconds after the
+#                        hand-over, restart the board (back to Android) through
+#                        sysrq "b", and forward the systemd journal to the
+#                        kernel log (0: off)
+#   t715.rootwait=SECS   how long to wait for USERDATA to appear (20)
+#   t715.autotest=1      TEST IMAGES ONLY: once Arch is up, run
+#                        t715-autotest.sh from the root image's directory on
+#                        USERDATA (Android: /sdcard/linux/) as root, through
+#                        a t715-autotest.service written into the tmpfs
+#                        layer, with the journal forwarded to the kernel log
+#                        (read back from Android in /proc/last_kmsg).  Any
+#                        Android app that can write /sdcard can plant that
+#                        script, so never bake this knob into a daily image.
+#   t715.usbfn=rndis|ecm USB network function (default rndis, as the rootfs)
+#   t715.persist=NAME    persistent root USERDATA/NAME (see below)
+#   t715.persist=0       image mode even if rootfs.select asks for a
+#                        persistent root (rescue boot)
+#   t715.quiet=1         a quiet screen until the splash: console loglevel
+#                        3 from here on (CONFIG_CMDLINE's loglevel=8 comes
+#                        after anything sboot or the boot image could add),
+#                        the VT cleared and its cursor hidden
+#
+# Persistent root (a tablet that keeps no Android): instead of steps 3-4,
+# USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
+# (noatime, errors=remount-ro: its superblock says panic) and the
+# directory NAME at its top is bind-mounted on /newroot; changes survive
+# reboots.  On the first boot NAME does not exist: the selected image is
+# attached read-only and its tree copied into USERDATA/.NAME.t715-seed by
+# the image's own cp (GNU cp -a keeps owners, modes, hard links, xattrs and
+# file capabilities), the marker .t715-persist is written, then the
+# directory is renamed NAME.  A NAME that exists without the marker is
+# never touched.  Knob-written files (modprobe blacklist, autotest unit)
+# go to /run, not into the root.  If anything fails, the boot falls back to
+# image mode with USERDATA read-only again.
+# Host-side tests (boot/tests/test_initramfs.sh) set
+# T715_INITRAMFS_TEST=host-test: log to stderr, read the knobs from
+# $T715_TEST_CMDLINE, use the test's veth "usb0" instead of the USB
+# gadget, keep the test's stdio, exit 99 instead of rebooting, and leave
+# 1 MiB instead of 512 MiB free after a seed (the test's USERDATA is tiny).
+# Nothing else differs.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+
+TAG=t715-initramfs
+TEST=
+if [ "${T715_INITRAMFS_TEST:-}" = host-test ]; then
+    TEST=1
+fi
+
+# --- USB debug link: same values as the rootfs (usb-rndis-setup and
+# --- /etc/usb-rndis/dnsmasq.conf), so the host sees one network.
+GADGET_DIR=/sys/kernel/config/usb_gadget
+GADGET=$GADGET_DIR/g1
+USB_VID=0x05ac
+USB_PID=0x0a14
+USB_BCDDEVICE=0x0100
+USB_BCDUSB=0x0200
+USB_SERIAL=0123456789ABCDEF
+USB_MANUFACTURER=Samsung
+USB_PRODUCT="SM-T715 RNDIS"
+NET_IP=172.16.42.1
+NET_CIDR=$NET_IP/24
+DHCP_START=172.16.42.2
+DHCP_END=172.16.42.10
+DHCP_LEASE=43200           # 12 h, as dnsmasq.conf
+UDC_WAIT=10                # seconds to wait for the USB device controller
+IFACE_WAIT=10              # seconds to wait for the gadget's net interface
+
+# --- knob defaults
+ROOTIMG=media/0/linux/rootfs.img
+ROOTIMG_KNOB=0      # 1 once t715.rootimg= is given: rootfs.select is ignored
+SHELL_MODE=0
+FAILWAIT=300
+ROOTWAIT=20
+USBFN=rndis
+RETURNAFTER=0
+RETURN_TIMER_PID=
+WDTGUARD=1
+LOAD_MODULES=1
+MODBLACKLIST=       # module names from t715.modblacklist, comma-separated
+AUTOTEST=0
+PERSIST=            # persistent root directory, or 0 (t715.persist=, rootfs.select)
+QUIET=0
+PERSIST_KNOB=0      # 1 once t715.persist= is given: rootfs.select's line 2 is ignored
+SEED_MARGIN_KIB=524288  # free space a seed must leave on USERDATA (512 MiB)
+[ -z "$TEST" ] || SEED_MARGIN_KIB=1024
+
+# --- paths
+RUNDIR=/run/t715
+LOGFILE=$RUNDIR/initramfs.log
+KMSG=/dev/kmsg
+UD_MNT=/userdata            # USERDATA, read-only (read-write for a persistent root)
+UD_FINAL=$RUNDIR/userdata   # where USERDATA lives after the switch_root
+LOWER=$RUNDIR/lower         # the image, read-only
+RWDIR=$RUNDIR/rw            # tmpfs: overlay upper + work dirs
+NEWROOT=/newroot
+NEW_INIT=/sbin/init
+KNOBS_FILE=/etc/t715-knobs
+PERSIST_MARK=.t715-persist  # marks a directory of USERDATA as a persistent root
+CONTINUE_FLAG=/tmp/t715-continue
+STAY_FLAG=/tmp/t715-stay
+
+# --- state
+NET_UP=
+NET_IFACE=
+GADGET_FN=
+CONFIGFS_MOUNTED=
+TELNETD_PID=
+UDHCPD_PID=
+UD_DEV=
+LOOP_DEV=
+PERSIST_ON=         # 1 once the persistent root is bind-mounted on /newroot
+
+# ---------------------------------------------------------------------------
+# logging
+
+# _log LEVEL MSG...: one line to /dev/kmsg (console fallback) and the log file.
+# Each line opens /dev/kmsg anew: the kernel rate-limits per open file.
+_log() {
+    _l_lvl=$1
+    shift
+    _l_msg="$TAG: $*"
+    if [ -n "$TEST" ]; then
+        printf '%s\n' "$_l_msg" >&2
+    elif [ -c "$KMSG" ] && printf '<%s>%.900s\n' "$_l_lvl" "$_l_msg" 2>/dev/null >"$KMSG"; then
+        :
+    else
+        printf '%s\n' "$_l_msg" >&2
+    fi
+    if [ -d "$RUNDIR" ]; then
+        printf '%s\n' "$_l_msg" 2>/dev/null >>"$LOGFILE"
+    fi
+    return 0
+}
+log() { _log 5 "$@"; }
+warn() { _log 4 "WARNING: $*"; }
+err() { _log 3 "ERROR: $*"; }
+
+# _log_lines LEVEL TEXT: log every non-empty line of TEXT, indented.
+_log_lines() {
+    _ll_lvl=$1
+    printf '%s\n' "$2" | while IFS= read -r _ll; do
+        if [ -n "$_ll" ]; then
+            _log "$_ll_lvl" "  $_ll"
+        fi
+    done
+}
+
+# run CMD [ARG...]: run a command; on failure log it with its output.
+run() {
+    _r_out=$("$@" 2>&1)
+    _r_rc=$?
+    if [ "$_r_rc" -ne 0 ]; then
+        err "'$*' failed (exit $_r_rc)"
+        _log_lines 3 "$_r_out"
+    fi
+    return "$_r_rc"
+}
+
+# ---------------------------------------------------------------------------
+# helpers
+
+# uint VALUE: print VALUE without leading zeros if it is a small unsigned
+# integer (ash arithmetic reads 010 as octal), fail otherwise.
+uint() {
+    case $1 in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "${#1}" -le 6 ] || return 1
+    _u=${1#"${1%%[!0]*}"}
+    printf '%s\n' "${_u:-0}"
+}
+
+# persist_name_ok NAME: a persistent root's directory at the top of
+# USERDATA: letters, digits, . _ -, not starting with a dot.
+persist_name_ok() {
+    case $1 in
+    '' | .* | *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
+# mount_opts MOUNTPOINT: print the options of its last /proc/mounts entry.
+mount_opts() {
+    _mo=
+    [ -r /proc/mounts ] || return 1
+    while read -r _ _mo_mp _ _mo_opts _; do
+        if [ "$_mo_mp" = "$1" ]; then
+            _mo=$_mo_opts
+        fi
+    done </proc/mounts
+    [ -n "$_mo" ] && printf '%s\n' "$_mo"
+}
+
+is_mounted() { [ -n "$(mount_opts "$1")" ]; }
+
+is_mounted_ro() {
+    case ",$(mount_opts "$1")," in
+    *,ro,*) return 0 ;;
+    esac
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# early mounts and knobs
+
+mount_early() {
+    mkdir -p /dev /proc /sys /run /tmp
+    # devtmpfs first: /dev/kmsg is the log.  (DEVTMPFS_MOUNT does not
+    # apply to an initramfs.)
+    mount -t devtmpfs -o mode=0755,nosuid devtmpfs /dev
+    mount -t proc -o nosuid,nodev,noexec proc /proc
+    mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+    mkdir -p /dev/pts
+    # Same options as systemd uses, which keeps these mounts.
+    mount -t devpts -o nosuid,noexec,gid=5,mode=0620,ptmxmode=000 devpts /dev/pts
+    mount -t tmpfs -o mode=0755,nosuid,nodev,size=20% tmpfs /run
+    mkdir -p "$RUNDIR"
+    for _m in /dev /proc /sys /dev/pts /run; do
+        if ! is_mounted "$_m"; then
+            err "early mount of $_m failed"
+        fi
+    done
+}
+
+# parse_knobs TEXT SOURCE: apply the t715.* words of TEXT.
+parse_knobs() {
+    _pk_src=$2
+    set -f
+    # shellcheck disable=SC2086  # word splitting of the command line is wanted
+    set -- $1
+    set +f
+    for _pk in "$@"; do
+        case $_pk in
+        t715.rootimg=*)
+            ROOTIMG=${_pk#*=}
+            ROOTIMG_KNOB=1
+            ;;
+        t715.shell | t715.shell=1 | t715.shell=y | t715.shell=yes | t715.shell=on | t715.shell=true)
+            SHELL_MODE=1
+            ;;
+        t715.shell=0 | t715.shell=n | t715.shell=no | t715.shell=off | t715.shell=false)
+            SHELL_MODE=0
+            ;;
+        t715.failwait=* | t715.rootwait=* | t715.returnafter=*)
+            if _pk_v=$(uint "${_pk#*=}"); then
+                case $_pk in
+                t715.failwait=*) FAILWAIT=$_pk_v ;;
+                t715.returnafter=*) RETURNAFTER=$_pk_v ;;
+                *) ROOTWAIT=$_pk_v ;;
+                esac
+            else
+                warn "$_pk_src: ignoring invalid '$_pk' (seconds expected)"
+            fi
+            ;;
+        t715.wdtguard=0 | t715.wdtguard=1)
+            WDTGUARD=${_pk#*=}
+            ;;
+        t715.modules=0 | t715.modules=1)
+            LOAD_MODULES=${_pk#*=}
+            ;;
+        t715.autotest=0 | t715.autotest=1)
+            AUTOTEST=${_pk#*=}
+            ;;
+        t715.modblacklist=*)
+            _pk_v=${_pk#*=}
+            case $_pk_v in
+            '' | ,* | *, | *,,* | *[!A-Za-z0-9_,-]*)
+                warn "$_pk_src: ignoring invalid '$_pk' (module names, comma-separated)"
+                ;;
+            *) MODBLACKLIST=$_pk_v ;;
+            esac
+            ;;
+        t715.usbfn=rndis | t715.usbfn=ecm)
+            USBFN=${_pk#*=}
+            ;;
+        t715.quiet=0 | t715.quiet=1)
+            QUIET=${_pk#*=}
+            ;;
+        t715.persist=*)
+            _pk_v=${_pk#*=}
+            if [ "$_pk_v" = 0 ] || persist_name_ok "$_pk_v"; then
+                PERSIST=$_pk_v
+                PERSIST_KNOB=1
+            else
+                warn "$_pk_src: ignoring invalid '$_pk' (directory name or 0)"
+            fi
+            ;;
+        t715.*)
+            warn "$_pk_src: ignoring unknown or invalid '$_pk'"
+            ;;
+        esac
+    done
+}
+
+read_knobs() {
+    if [ -r "$KNOBS_FILE" ]; then
+        parse_knobs "$(cat "$KNOBS_FILE")" "$KNOBS_FILE"
+    fi
+    if [ -n "$TEST" ]; then
+        _rk_cmdline=${T715_TEST_CMDLINE:-}
+    else
+        _rk_cmdline=$(cat /proc/cmdline 2>/dev/null)
+    fi
+    # sboot's own line is ~800 bytes and the kernel keeps 1023: knobs
+    # appended at the end of CONFIG_CMDLINE are the first to be cut.
+    if [ "${#_rk_cmdline}" -ge 1020 ]; then
+        warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
+    fi
+    parse_knobs "$_rk_cmdline" "cmdline"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET"
+}
+
+# ---------------------------------------------------------------------------
+# USB debug link
+
+first_udc() {
+    for _fu in /sys/class/udc/*; do
+        if [ -e "$_fu" ]; then
+            printf '%s\n' "${_fu##*/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# cfs_write VALUE FILE
+cfs_write() {
+    if ! printf '%s\n' "$1" 2>/dev/null >"$2"; then
+        err "cannot write '$1' to $2"
+        return 1
+    fi
+}
+
+gadget_up() {
+    if ! grep -q '^[^ ]* /sys/kernel/config configfs ' /proc/mounts; then
+        run mount -t configfs configfs /sys/kernel/config || return 1
+        CONFIGFS_MOUNTED=1
+    fi
+    if [ ! -d "$GADGET_DIR" ]; then
+        err "no $GADGET_DIR: the kernel lacks USB_CONFIGFS/USB_LIBCOMPOSITE (they must be built in, this initramfs has no modules)"
+        return 1
+    fi
+    _gu_waited=0
+    while ! _gu_udc=$(first_udc); do
+        if [ "$_gu_waited" -ge "$UDC_WAIT" ]; then
+            err "no USB device controller in /sys/class/udc after ${UDC_WAIT}s (DWC3 not built in or not probed)"
+            return 1
+        fi
+        sleep 1
+        _gu_waited=$((_gu_waited + 1))
+    done
+    log "USB device controller $_gu_udc found after ${_gu_waited}s"
+
+    GADGET_FN=$USBFN.0
+    case $USBFN in
+    ecm) _gu_cfgname=ECM ;;
+    *) _gu_cfgname=RNDIS ;;
+    esac
+    run mkdir -p "$GADGET/strings/0x409" "$GADGET/functions/$GADGET_FN" \
+        "$GADGET/configs/b.1/strings/0x409" || return 1
+    cfs_write "$USB_VID" "$GADGET/idVendor" || return 1
+    cfs_write "$USB_PID" "$GADGET/idProduct" || return 1
+    cfs_write "$USB_BCDDEVICE" "$GADGET/bcdDevice" || return 1
+    cfs_write "$USB_BCDUSB" "$GADGET/bcdUSB" || return 1
+    cfs_write "$USB_SERIAL" "$GADGET/strings/0x409/serialnumber" || return 1
+    cfs_write "$USB_MANUFACTURER" "$GADGET/strings/0x409/manufacturer" || return 1
+    cfs_write "$USB_PRODUCT" "$GADGET/strings/0x409/product" || return 1
+    cfs_write "$_gu_cfgname" "$GADGET/configs/b.1/strings/0x409/configuration" || return 1
+    if [ ! -L "$GADGET/configs/b.1/$GADGET_FN" ]; then
+        run ln -s "$GADGET/functions/$GADGET_FN" "$GADGET/configs/b.1/$GADGET_FN" || return 1
+    fi
+    cfs_write "$_gu_udc" "$GADGET/UDC" || return 1
+    log "configfs gadget g1 ($GADGET_FN, $USB_VID:$USB_PID) bound to $_gu_udc"
+}
+
+gadget_iface() {
+    _gi=$(cat "$GADGET/functions/$GADGET_FN/ifname" 2>/dev/null)
+    if [ -n "$_gi" ] && [ -e "/sys/class/net/$_gi" ]; then
+        printf '%s\n' "$_gi"
+        return 0
+    fi
+    for _gi in usb0 rndis0; do
+        if [ -e "/sys/class/net/$_gi" ]; then
+            printf '%s\n' "$_gi"
+            return 0
+        fi
+    done
+    return 1
+}
+
+gadget_down() {
+    [ -d "$GADGET" ] || return 0
+    _gd_ok=1
+    if [ -n "$(cat "$GADGET/UDC" 2>/dev/null)" ]; then
+        cfs_write "" "$GADGET/UDC" || _gd_ok=
+    fi
+    for _gd_fn in "$GADGET"/configs/b.1/*.0; do
+        if [ -L "$_gd_fn" ]; then
+            run rm -f "$_gd_fn" || _gd_ok=
+        fi
+    done
+    for _gd_d in "$GADGET/configs/b.1/strings/0x409" "$GADGET/configs/b.1" \
+        "$GADGET"/functions/*.0 "$GADGET/strings/0x409" "$GADGET"; do
+        if [ -d "$_gd_d" ]; then
+            run rmdir "$_gd_d" || _gd_ok=
+        fi
+    done
+    if [ -n "$_gd_ok" ]; then
+        log "configfs gadget g1 removed"
+    else
+        warn "gadget g1 only partly removed; usb-rndis-setup in Arch reuses an existing g1"
+    fi
+    if [ -n "$CONFIGFS_MOUNTED" ]; then
+        run umount /sys/kernel/config && CONFIGFS_MOUNTED=
+    fi
+}
+
+# Host-side test only: there is no USB device controller in a container;
+# the test creates a veth pair whose usb0 end stands in for the interface
+# the gadget would create (and net_down deletes it, like removing the
+# gadget function does).
+test_link_up() {
+    if [ ! -e /sys/class/net/usb0 ]; then
+        err "test: no usb0 interface (the test harness creates it)"
+        return 1
+    fi
+    GADGET_FN=veth
+}
+
+write_issue() {
+    cat >/etc/issue.net <<EOF
+
+SM-T715 initramfs debug shell (busybox). Log: $LOGFILE
+  touch $CONTINUE_FLAG   switch_root to the prepared $NEWROOT
+  touch $STAY_FLAG       cancel the reboot timer after a failure
+  reboot -f                  reboot (back to Android)
+
+EOF
+}
+
+start_udhcpd() {
+    cat >"$RUNDIR/udhcpd.conf" <<EOF
+start $DHCP_START
+end $DHCP_END
+interface $NET_IFACE
+max_leases 9
+lease_file $RUNDIR/udhcpd.leases
+pidfile $RUNDIR/udhcpd.pid
+option subnet 255.255.255.0
+option lease $DHCP_LEASE
+EOF
+    # (not ": >file": a redirection error on a special builtin ends the shell)
+    printf '' >"$RUNDIR/udhcpd.leases"
+    udhcpd -f "$RUNDIR/udhcpd.conf" >>"$RUNDIR/udhcpd.log" 2>&1 &
+    UDHCPD_PID=$!
+}
+
+start_telnetd() {
+    telnetd -F -b "$NET_IP" -l /bin/sh >>"$RUNDIR/telnetd.log" 2>&1 &
+    TELNETD_PID=$!
+}
+
+# check_daemon NAME PID LOGFILE: warn when a daemon died right away.
+check_daemon() {
+    if ! kill -0 "$2" 2>/dev/null; then
+        err "$1 exited right after start"
+        _log_lines 3 "$(cat "$3" 2>/dev/null)"
+        return 1
+    fi
+}
+
+net_up() {
+    [ -n "$NET_UP" ] && return 0
+    if [ -n "$TEST" ]; then
+        test_link_up || return 1
+        NET_IFACE=usb0
+    else
+        gadget_up || return 1
+        _nu_waited=0
+        while ! NET_IFACE=$(gadget_iface); do
+            if [ "$_nu_waited" -ge "$IFACE_WAIT" ]; then
+                err "no network interface for $GADGET_FN after ${IFACE_WAIT}s"
+                return 1
+            fi
+            sleep 1
+            _nu_waited=$((_nu_waited + 1))
+        done
+    fi
+    run ip link set dev "$NET_IFACE" up || return 1
+    if ! ip addr show dev "$NET_IFACE" 2>/dev/null | grep -q "inet $NET_CIDR "; then
+        run ip addr add "$NET_CIDR" dev "$NET_IFACE" || return 1
+    fi
+    NET_UP=1
+    write_issue
+    start_udhcpd
+    start_telnetd
+    sleep 1
+    check_daemon udhcpd "$UDHCPD_PID" "$RUNDIR/udhcpd.log" || UDHCPD_PID=
+    check_daemon telnetd "$TELNETD_PID" "$RUNDIR/telnetd.log" || TELNETD_PID=
+    log "debug link up: $NET_IFACE $NET_CIDR, DHCP $DHCP_START-$DHCP_END, shell: telnet $NET_IP"
+}
+
+# stop_daemon NAME PID: SIGTERM, then SIGKILL after 3 s, then reap.
+stop_daemon() {
+    [ -n "$2" ] || return 0
+    kill "$2" 2>/dev/null
+    _sd=0
+    while kill -0 "$2" 2>/dev/null && [ "$_sd" -lt 6 ]; do
+        sleep 0.5
+        _sd=$((_sd + 1))
+    done
+    kill -s KILL "$2" 2>/dev/null
+    wait "$2" 2>/dev/null
+    log "$1 stopped"
+}
+
+# kill_others SIGNAL: signal every user-space process but PID 1 and the
+# t715.returnafter timer; kernel threads (empty cmdline) are left alone,
+# as killall5 does.
+kill_others() {
+    for _ko in /proc/[0-9]*; do
+        _ko_pid=${_ko#/proc/}
+        if [ "$_ko_pid" = 1 ] || [ "$_ko_pid" = "$RETURN_TIMER_PID" ] ||
+            [ ! -r "$_ko/cmdline" ]; then
+            continue
+        fi
+        if [ -n "$(tr -d '\000' <"$_ko/cmdline" 2>/dev/null)" ]; then
+            kill -s "$1" "$_ko_pid" 2>/dev/null
+        fi
+    done
+}
+
+net_down() {
+    stop_daemon telnetd "$TELNETD_PID"
+    TELNETD_PID=
+    stop_daemon udhcpd "$UDHCPD_PID"
+    UDHCPD_PID=
+    # Debug-shell sessions and anything started from them must not
+    # survive into the new root.
+    kill_others TERM
+    sleep 1
+    kill_others KILL
+    if [ -n "$NET_IFACE" ] && [ -e "/sys/class/net/$NET_IFACE" ]; then
+        run ip addr flush dev "$NET_IFACE"
+        run ip link set dev "$NET_IFACE" down
+    fi
+    if [ -n "$TEST" ]; then
+        if [ -e /sys/class/net/usb0 ]; then
+            run ip link del usb0
+        fi
+    else
+        gadget_down
+    fi
+    NET_UP=
+    NET_IFACE=
+    log "debug link down"
+}
+
+# ---------------------------------------------------------------------------
+# USERDATA, image, overlay
+
+check_rootimg() {
+    _cr=$ROOTIMG
+    while :; do
+        case $_cr in
+        /*) _cr=${_cr#/} ;;
+        *) break ;;
+        esac
+    done
+    case "/$_cr/" in
+    // | */../* | */./* | *//*)
+        err "invalid t715.rootimg '$ROOTIMG' (relative path inside USERDATA, no . or .. components)"
+        return 1
+        ;;
+    esac
+    ROOTIMG=$_cr
+}
+
+# list_partnames: "DEVNAME PARTNAME" for every block device with a
+# partition name (GPT), from the kernel's uevent files.
+list_partnames() {
+    for _lp_ue in /sys/class/block/*/uevent; do
+        [ -r "$_lp_ue" ] || continue
+        _lp_dev=
+        _lp_name=
+        while IFS='=' read -r _lp_k _lp_v; do
+            case $_lp_k in
+            DEVNAME) _lp_dev=$_lp_v ;;
+            PARTNAME) _lp_name=$_lp_v ;;
+            esac
+        done <"$_lp_ue"
+        if [ -n "$_lp_dev" ] && [ -n "$_lp_name" ]; then
+            printf '%s %s\n' "$_lp_dev" "$_lp_name"
+        fi
+    done
+}
+
+find_userdata() {
+    log "waiting up to ${ROOTWAIT}s for the partition named USERDATA"
+    _fu_waited=0
+    while :; do
+        _fu_hits=$(list_partnames | while read -r _fu_d _fu_n; do
+            if [ "$_fu_n" = USERDATA ]; then
+                printf '%s ' "$_fu_d"
+            fi
+        done)
+        set -f
+        # shellcheck disable=SC2086  # count the words
+        set -- $_fu_hits
+        set +f
+        if [ "$#" -gt 1 ]; then
+            err "several partitions are named USERDATA ($_fu_hits), refusing to guess"
+            return 1
+        fi
+        if [ "$#" -eq 1 ] && [ -b "/dev/$1" ]; then
+            UD_DEV=/dev/$1
+            log "USERDATA is $UD_DEV (found after ${_fu_waited}s)"
+            return 0
+        fi
+        if [ "$_fu_waited" -ge "$ROOTWAIT" ]; then
+            err "no partition named USERDATA after ${ROOTWAIT}s"
+            _fu_all=$(list_partnames | tr ' \n' '= ')
+            log "named partitions seen: ${_fu_all:-none}"
+            return 1
+        fi
+        sleep 1
+        _fu_waited=$((_fu_waited + 1))
+    done
+}
+
+# check_ext4 DEV: log what the ext4 superblock says before mounting
+# (magic 0xEF53 at 1080; s_feature_incompat at 1120, bit 0x4 = RECOVER).
+check_ext4() {
+    _ce=$(dd if="$1" bs=1 skip=1080 count=44 2>/dev/null | od -An -tu1 -v) || return 0
+    set -f
+    # shellcheck disable=SC2086  # one byte per word
+    set -- $_ce
+    set +f
+    if [ "$#" -lt 44 ]; then
+        warn "could not read the superblock of $UD_DEV"
+        return 0
+    fi
+    if [ "$1" != 83 ] || [ "$2" != 239 ]; then
+        err "$UD_DEV has no ext4 superblock (encrypted or not ext4?)"
+        return 1
+    fi
+    shift 40
+    if [ $(($1 & 4)) -ne 0 ]; then
+        warn "USERDATA journal was not replayed (Android did not unmount it cleanly): mounting without replay, recently written files may look stale"
+    fi
+}
+
+mount_userdata() {
+    # Defence in depth: the block device itself is made read-only before
+    # anything mounts it.  Nothing (this script, a remount, a later
+    # process in Arch) can then write to it until the next reboot.
+    run blockdev --setro "$UD_DEV" || return 1
+    if [ "$(blockdev --getro "$UD_DEV" 2>/dev/null)" != 1 ]; then
+        err "$UD_DEV did not become read-only"
+        return 1
+    fi
+    log "$UD_DEV set read-only (BLKROSET)"
+    check_ext4 "$UD_DEV" || return 1
+    mkdir -p "$UD_MNT"
+    run mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$UD_DEV" "$UD_MNT" || return 1
+    if ! is_mounted_ro "$UD_MNT"; then
+        err "USERDATA is not mounted read-only ($(mount_opts "$UD_MNT")): unmounting"
+        run umount "$UD_MNT"
+        return 1
+    fi
+    log "USERDATA mounted ro,noload on $UD_MNT"
+}
+
+# select_rootimg: rootfs.select next to the default image picks another
+# image of the same directory, and optionally a persistent root (see the
+# header).  USERDATA is read-only here, so the choice stays until the file
+# is changed (from Android, or from Arch on a persistent root).
+select_rootimg() {
+    [ "$ROOTIMG_KNOB" = 0 ] || return 0
+    _sr_dir=${ROOTIMG%/*}
+    _sr_file=$UD_MNT/$_sr_dir/rootfs.select
+    [ -f "$_sr_file" ] || return 0
+    _sr_name=
+    _sr_line2=
+    {
+        IFS= read -r _sr_name || true
+        IFS= read -r _sr_line2 || true
+    } <"$_sr_file"
+    _sr_name=$(printf '%s' "$_sr_name" | tr -d '\r \t')
+    _sr_line2=$(printf '%s' "$_sr_line2" | tr -d '\r \t')
+    if [ "$PERSIST_KNOB" = 0 ] && [ -n "$_sr_line2" ]; then
+        case $_sr_line2 in
+        persist=*)
+            if persist_name_ok "${_sr_line2#persist=}"; then
+                PERSIST=${_sr_line2#persist=}
+                log "rootfs.select: persistent root $PERSIST"
+            else
+                warn "rootfs.select: invalid directory name on line 2, no persistent root"
+            fi
+            ;;
+        *) warn "rootfs.select: line 2 is not persist=NAME, ignored" ;;
+        esac
+    fi
+    case $_sr_name in
+    '' | .* | *[!A-Za-z0-9._-]*)
+        warn "rootfs.select: invalid image name, booting the default image"
+        return 0
+        ;;
+    *.img) ;;
+    *)
+        warn "rootfs.select: '$_sr_name' does not end in .img, booting the default image"
+        return 0
+        ;;
+    esac
+    if [ ! -f "$UD_MNT/$_sr_dir/$_sr_name" ]; then
+        warn "rootfs.select: $_sr_name not found, booting the default image"
+        return 0
+    fi
+    ROOTIMG=$_sr_dir/$_sr_name
+    log "rootfs.select: booting $_sr_name"
+}
+
+attach_image() {
+    _ai_img=$UD_MNT/$ROOTIMG
+    if [ ! -f "$_ai_img" ]; then
+        err "root image '$ROOTIMG' not found in USERDATA"
+        # Name the first missing component; never list the owner's files.
+        _ai_p=$UD_MNT
+        _ai_rest=$ROOTIMG
+        while [ -n "$_ai_rest" ]; do
+            _ai_c=${_ai_rest%%/*}
+            case $_ai_rest in
+            */*) _ai_rest=${_ai_rest#*/} ;;
+            *) _ai_rest= ;;
+            esac
+            _ai_p=$_ai_p/$_ai_c
+            if [ ! -e "$_ai_p" ]; then
+                err "first missing path component: ${_ai_p#"$UD_MNT"/}"
+                break
+            fi
+        done
+        return 1
+    fi
+    _ai_size=$(stat -L -c %s "$_ai_img" 2>/dev/null)
+    case $_ai_size in
+    '' | *[!0-9]*) _ai_size=0 ;; # an arithmetic error would end the shell
+    esac
+    log "root image $ROOTIMG: $((_ai_size / 1048576)) MiB"
+    if ! LOOP_DEV=$(losetup -f 2>/dev/null) || [ -z "$LOOP_DEV" ]; then
+        err "no free loop device (BLK_DEV_LOOP missing?)"
+        LOOP_DEV=
+        return 1
+    fi
+    if ! run losetup -r "$LOOP_DEV" "$_ai_img"; then
+        LOOP_DEV=
+        return 1
+    fi
+    if [ "$(cat "/sys/block/${LOOP_DEV##*/}/ro" 2>/dev/null)" != 1 ]; then
+        err "$LOOP_DEV is not read-only: detaching"
+        run losetup -d "$LOOP_DEV"
+        LOOP_DEV=
+        return 1
+    fi
+    log "image attached read-only on $LOOP_DEV"
+}
+
+mount_newroot() {
+    mkdir -p "$LOWER" "$RWDIR" "$NEWROOT"
+    run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER" || return 1
+    if ! is_mounted_ro "$LOWER"; then
+        err "the image is not mounted read-only"
+        return 1
+    fi
+    run mount -t tmpfs -o mode=0755 t715-rw "$RWDIR" || return 1
+    mkdir -p "$RWDIR/upper" "$RWDIR/work"
+    run mount -t overlay -o "lowerdir=$LOWER,upperdir=$RWDIR/upper,workdir=$RWDIR/work" \
+        t715-root "$NEWROOT" || return 1
+    log "overlay root on $NEWROOT: image read-only below, tmpfs above (changes are lost at reboot)"
+}
+
+# install_modules: the root images ship no kernel modules.  The tree packed
+# by build-initramfs.sh --modules (lib/modules/RELEASE, built with this very
+# kernel) is copied into the overlay's tmpfs layer, where udev finds it
+# after the switch_root (Bluetooth, Wi-Fi...).  An image with its own tree
+# for this release keeps it.  On a persistent root the copy carries a stamp
+# (.t715-initramfs: this initramfs' build id, which names the modules'
+# tarball) and is replaced when the stamp differs; a tree without the stamp
+# is not ours and is kept.  Never fatal: without it, only the modules
+# loaded here (GPU) are available.
+install_modules() {
+    _im_rel=$(uname -r)
+    [ -d "/lib/modules/$_im_rel" ] || return 0
+    _im_dst=$NEWROOT/lib/modules/$_im_rel
+    _im_id=$(cat /etc/t715-initramfs.id 2>/dev/null)
+    if [ -e "$_im_dst" ]; then
+        if [ -z "$PERSIST_ON" ] || [ ! -f "$_im_dst/.t715-initramfs" ]; then
+            log "modules: the root has its own lib/modules/$_im_rel, kept"
+            return 0
+        fi
+        if [ "$(cat "$_im_dst/.t715-initramfs" 2>/dev/null)" = "$_im_id" ]; then
+            log "modules: lib/modules/$_im_rel up to date in the persistent root"
+            return 0
+        fi
+        log "modules: replacing lib/modules/$_im_rel (another initramfs build)"
+        if ! run rm -rf "$_im_dst"; then
+            warn "modules: could not remove the old lib/modules/$_im_rel"
+            return 0
+        fi
+    fi
+    if run mkdir -p "$NEWROOT/lib/modules" &&
+        run cp -a "/lib/modules/$_im_rel" "$NEWROOT/lib/modules/"; then
+        if [ -n "$PERSIST_ON" ]; then
+            printf '%s\n' "$_im_id" >"$_im_dst/.t715-initramfs" ||
+                warn "modules: could not write the stamp"
+            log "modules: lib/modules/$_im_rel installed in the persistent root"
+        else
+            log "modules: lib/modules/$_im_rel installed in the root (tmpfs layer)"
+        fi
+    else
+        warn "modules: could not install lib/modules/$_im_rel in the root"
+    fi
+}
+
+# write_modblacklist: t715.modblacklist, see the knob list at the top.
+# Into /run/modprobe.d (moved into the new root with /run, read by kmod):
+# a knob must not outlive its boot on a persistent root.
+write_modblacklist() {
+    [ -n "$MODBLACKLIST" ] || return 0
+    _wb_f=/run/modprobe.d/t715-knob-blacklist.conf
+    if ! run mkdir -p /run/modprobe.d; then
+        warn "t715.modblacklist: could not create /run/modprobe.d"
+        return 0
+    fi
+    {
+        echo "# t715.modblacklist (initramfs knob): no autoload, modprobe still works"
+        printf '%s\n' "$MODBLACKLIST" | tr ',' '\n' | sed 's/^/blacklist /'
+    } >"$_wb_f" || warn "t715.modblacklist: could not write $_wb_f"
+    log "t715.modblacklist: autoload disabled for $MODBLACKLIST"
+}
+
+# write_autotest: t715.autotest, see the knob list at the top.  The unit is
+# Type=simple so that the boot transaction completes; the script itself
+# waits for the system to settle.  Paths are the ones Arch sees once /run
+# has been moved into the new root.  Unit and drop-in go to /run/systemd
+# (runtime units), like the blacklist: nothing of a knob stays in the root.
+write_autotest() {
+    [ "$AUTOTEST" = 1 ] || return 0
+    _wa_script=$RUNDIR/userdata/${ROOTIMG%/*}/t715-autotest.sh
+    _wa_unit=/run/systemd/system/t715-autotest.service
+    if ! run mkdir -p /run/systemd/system/multi-user.target.wants \
+        /run/systemd/journald.conf.d; then
+        warn "t715.autotest: could not create the systemd directories"
+        return 0
+    fi
+    printf '[Journal]\nForwardToKMsg=yes\nMaxLevelKMsg=info\n' \
+        >/run/systemd/journald.conf.d/90-t715-kmsg.conf ||
+        warn "t715.autotest: could not enable journal forwarding to the kernel log"
+    {
+        echo "# t715.autotest (initramfs knob): test images only"
+        echo "[Unit]"
+        echo "Description=t715.autotest script from the Android storage"
+        echo "ConditionPathExists=$_wa_script"
+        echo "[Service]"
+        echo "Type=simple"
+        echo "ExecStart=/bin/sh $_wa_script"
+        echo "StandardOutput=journal"
+        echo "StandardError=journal"
+        echo "SyslogIdentifier=t715-autotest"
+    } >"$_wa_unit" || { warn "t715.autotest: could not write $_wa_unit"; return 0; }
+    run ln -sfn ../t715-autotest.service \
+        /run/systemd/system/multi-user.target.wants/t715-autotest.service ||
+        warn "t715.autotest: could not enable t715-autotest.service"
+    log "t715.autotest: t715-autotest.service runs $_wa_script once Arch is up"
+}
+
+# ---------------------------------------------------------------------------
+# persistent root (see the header)
+
+# fsck_userdata: e2fsck -p (preen) before the read-write mount.  Exit 0-3:
+# clean or fixed (USERDATA is not mounted, so no reboot is needed); 4 and
+# up: errors left, no read-write mount.  Its full output stays in
+# /run/t715/e2fsck.log (file names can appear in it), the log gets the
+# summary line.
+fsck_userdata() {
+    if [ ! -x /sbin/e2fsck ]; then
+        warn "no /sbin/e2fsck in this initramfs: mounting USERDATA without a check"
+        return 0
+    fi
+    log "checking USERDATA (e2fsck -p)"
+    _fs_t0=$(date +%s)
+    /sbin/e2fsck -p "$UD_DEV" >"$RUNDIR/e2fsck.log" 2>&1
+    _fs_rc=$?
+    _fs_sum=$(grep -m 1 -E ': (clean|[0-9]+/[0-9]+ files)' "$RUNDIR/e2fsck.log")
+    log "e2fsck exit $_fs_rc after $(($(date +%s) - _fs_t0))s: ${_fs_sum:-$(wc -l <"$RUNDIR/e2fsck.log") lines, see $RUNDIR/e2fsck.log}"
+    if [ "$_fs_rc" -ge 4 ]; then
+        err "e2fsck left errors on USERDATA (exit $_fs_rc): no read-write mount"
+        return 1
+    fi
+}
+
+# seed_cleanup: undo what seed_persist attached and mounted.
+seed_cleanup() {
+    if is_mounted "$LOWER/mnt"; then
+        run umount "$LOWER/mnt"
+    fi
+    if is_mounted "$LOWER"; then
+        run umount "$LOWER"
+    fi
+    if [ -n "$LOOP_DEV" ]; then
+        run losetup -d "$LOOP_DEV"
+        LOOP_DEV=
+    fi
+}
+
+# seed_persist: first boot of a persistent root.  Each top-level entry of
+# the image (lost+found aside) is copied by the image's own /usr/bin/cp,
+# chrooted into the image, onto /mnt, where USERDATA/.NAME.t715-seed is
+# bind-mounted; /mnt itself is created empty.  The marker goes in last,
+# then the directory is renamed NAME.  An interrupted seed leaves only the
+# hidden directory, which the next attempt removes.
+seed_persist() {
+    _sp_tmp=$UD_MNT/.$PERSIST.t715-seed
+    log "seeding USERDATA/$PERSIST from $ROOTIMG (first boot of this persistent root)"
+    attach_image || return 1
+    mkdir -p "$LOWER"
+    if ! run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER"; then
+        seed_cleanup
+        return 1
+    fi
+    if [ ! -d "$LOWER/mnt" ] || [ ! -x "$LOWER/usr/bin/cp" ]; then
+        err "the image has no /mnt or no /usr/bin/cp: cannot seed from it"
+        seed_cleanup
+        return 1
+    fi
+    _sp_used=$(df -Pk "$LOWER" | awk 'NR == 2 { print $3 }')
+    _sp_free=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $4 }')
+    case $_sp_used$_sp_free in
+    '' | *[!0-9]*)
+        err "could not read the image's use or USERDATA's free space"
+        seed_cleanup
+        return 1
+        ;;
+    esac
+    if [ -e "$_sp_tmp" ]; then
+        log "removing an interrupted seed"
+        if ! run rm -rf "$_sp_tmp"; then
+            seed_cleanup
+            return 1
+        fi
+        _sp_free=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $4 }')
+    fi
+    if [ "$_sp_free" -lt $((_sp_used + SEED_MARGIN_KIB)) ]; then
+        err "USERDATA has $((_sp_free / 1024)) MiB free, the seed needs $(((_sp_used + SEED_MARGIN_KIB) / 1024)) MiB"
+        seed_cleanup
+        return 1
+    fi
+    if ! run mkdir -m 0755 "$_sp_tmp" || ! run mount --bind "$_sp_tmp" "$LOWER/mnt"; then
+        seed_cleanup
+        return 1
+    fi
+    log "copying $((_sp_used / 1024)) MiB from the image (one-time, the screen stays dark)"
+    _sp_t0=$(date +%s)
+    _sp_rc=0
+    for _sp_e in "$LOWER"/* "$LOWER"/.[!.]* "$LOWER"/..?*; do
+        [ -e "$_sp_e" ] || [ -L "$_sp_e" ] || continue
+        _sp_n=${_sp_e##*/}
+        case $_sp_n in
+        lost+found) ;;
+        mnt) run mkdir -m 0755 "$_sp_tmp/mnt" || _sp_rc=1 ;;
+        *) run chroot "$LOWER" /usr/bin/cp -a "/$_sp_n" /mnt/ || _sp_rc=1 ;;
+        esac
+    done
+    run umount "$LOWER/mnt" || _sp_rc=1
+    if [ "$_sp_rc" != 0 ]; then
+        err "copying the image into USERDATA/.$PERSIST.t715-seed failed"
+        seed_cleanup
+        return 1
+    fi
+    {
+        printf 'persistent root %s, seeded from %s\n' "$PERSIST" "$ROOTIMG"
+        printf 'kernel %s, %s\n' "$(uname -r)" "$(cat /etc/t715-initramfs.id 2>/dev/null)"
+        printf 'date %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    } >"$_sp_tmp/$PERSIST_MARK" || _sp_rc=1
+    sync
+    if [ "$_sp_rc" != 0 ] || ! run mv "$_sp_tmp" "$UD_MNT/$PERSIST"; then
+        err "could not finish the seed of USERDATA/$PERSIST"
+        seed_cleanup
+        return 1
+    fi
+    sync
+    seed_cleanup
+    log "USERDATA/$PERSIST seeded in $(($(date +%s) - _sp_t0))s"
+}
+
+# persist_root: USERDATA read-write, the persistent root on /newroot.
+persist_root() {
+    _pr_dir=$UD_MNT/$PERSIST
+    log "persistent root $PERSIST: USERDATA goes read-write"
+    run umount "$UD_MNT" || return 1
+    run blockdev --setrw "$UD_DEV" || return 1
+    fsck_userdata || return 1
+    mkdir -p "$UD_MNT"
+    # No nosuid/nodev/noexec here: the bind mount of the root inherits the
+    # flags of this mount (handoff restricts USERDATA's own view later).
+    run mount -t ext4 -o rw,noatime,errors=remount-ro "$UD_DEV" "$UD_MNT" || return 1
+    if is_mounted_ro "$UD_MNT"; then
+        err "USERDATA came up read-only"
+        return 1
+    fi
+    log "USERDATA mounted rw,noatime,errors=remount-ro on $UD_MNT"
+    if [ ! -e "$_pr_dir" ] && [ ! -L "$_pr_dir" ]; then
+        seed_persist || return 1
+    fi
+    if [ -L "$_pr_dir" ] || [ ! -d "$_pr_dir" ] || [ ! -f "$_pr_dir/$PERSIST_MARK" ]; then
+        err "USERDATA/$PERSIST exists but is not a persistent root (no $PERSIST_MARK): left untouched"
+        return 1
+    fi
+    mkdir -p "$NEWROOT"
+    run mount --bind "$_pr_dir" "$NEWROOT" || return 1
+    PERSIST_ON=1
+    log "persistent root on $NEWROOT: USERDATA/$PERSIST, read-write ($(head -n 1 "$_pr_dir/$PERSIST_MARK" 2>/dev/null))"
+}
+
+# persist_fallback: the persistent root is unusable: back to image mode,
+# USERDATA read-only again.
+persist_fallback() {
+    warn "persistent root $PERSIST unusable: booting the image read-only instead"
+    PERSIST_ON=
+    if is_mounted "$NEWROOT"; then
+        run umount "$NEWROOT"
+    fi
+    seed_cleanup
+    if is_mounted "$UD_MNT"; then
+        run umount "$UD_MNT" || return 1
+    fi
+    mount_userdata
+}
+
+prepare_root() {
+    check_rootimg || return 1
+    find_userdata || return 1
+    mount_userdata || return 1
+    select_rootimg
+    if [ "$PERSIST" = 0 ]; then
+        log "t715.persist=0: image mode, USERDATA read-only"
+    elif [ -n "$PERSIST" ]; then
+        if persist_root; then
+            install_modules
+            write_modblacklist
+            write_autotest
+            return 0
+        fi
+        persist_fallback || return 1
+    fi
+    attach_image || return 1
+    mount_newroot || return 1
+    install_modules
+    write_modblacklist
+    write_autotest
+}
+
+# ---------------------------------------------------------------------------
+# hand-over, failure path
+
+# handoff: only returns on failure.
+# t715.returnafter: unattended test boots.  Once switch_root has run, no
+# file of the initramfs can be executed any more, so the timer is a
+# subshell using only ash builtins (printf, read -t) on descriptors opened
+# here: /proc/sysrq-trigger, a FIFO for the 5 s waits and /dev/kmsg.  When
+# the time is up it writes "b" (immediate restart): the kernel resets the
+# SoC through PMU SWRESET, which keeps INFORM3 = normal (set at boot by the
+# kernel), so sboot boots Android.  Do NOT use a watchdog reset for this:
+# it clears INFORM3 and sboot then boots RECOVERY again, i.e. this kernel,
+# in an endless loop (seen on 2026-10-28).
+return_timer_start() {
+    [ "$RETURNAFTER" -gt 0 ] || return 0
+    if [ ! -w /proc/sysrq-trigger ]; then
+        warn "t715.returnafter: no /proc/sysrq-trigger (CONFIG_MAGIC_SYSRQ), no automatic return to Android"
+        return 0
+    fi
+    if ! run mkdir -p "$NEWROOT/etc/systemd/journald.conf.d" ||
+        ! printf '[Journal]\nForwardToKMsg=yes\nMaxLevelKMsg=info\n' \
+            >"$NEWROOT/etc/systemd/journald.conf.d/90-t715-kmsg.conf"; then
+        warn "t715.returnafter: could not enable journal forwarding to the kernel log"
+    fi
+    run mkfifo "$RUNDIR/return-tick" || return 0
+    (
+        exec 3>/proc/sysrq-trigger 4<>"$RUNDIR/return-tick" 5>/dev/kmsg || exit 1
+        _rt=0
+        while [ "$_rt" -lt "$RETURNAFTER" ]; do
+            # shellcheck disable=SC3045  # busybox ash has read -t
+            read -r -t 5 _rt_x <&4
+            _rt=$((_rt + 5))
+        done
+        printf '<5>t715-initramfs: returnafter: %ss elapsed, restarting (back to Android)\n' "$RETURNAFTER" >&5
+        printf b >&3
+    ) </dev/null >/dev/null 2>&1 &
+    RETURN_TIMER_PID=$!
+    log "t715.returnafter: software restart (back to Android) ${RETURNAFTER}s after the hand-over; journal forwarded to the kernel log"
+}
+
+handoff() {
+    if ! is_mounted "$NEWROOT"; then
+        err "$NEWROOT is not mounted"
+        return 1
+    fi
+    if [ ! -x "$NEWROOT$NEW_INIT" ]; then
+        err "$NEW_INIT is missing or not executable in the image"
+        return 1
+    fi
+    if [ "$$" != 1 ]; then
+        err "not PID 1, switch_root would refuse"
+        return 1
+    fi
+    if ! command -v switch_root >/dev/null 2>&1; then
+        err "switch_root applet missing"
+        return 1
+    fi
+    for _ho_d in dev proc sys run; do
+        if [ ! -d "$NEWROOT/$_ho_d" ]; then
+            run mkdir -p "$NEWROOT/$_ho_d" || return 1
+        fi
+    done
+
+    log "handing over to $NEW_INIT"
+    [ -n "$TEST" ] || return_timer_start
+    net_down
+    if is_mounted "$UD_MNT"; then
+        mkdir -p "$UD_FINAL"
+        run mount --move "$UD_MNT" "$UD_FINAL" || return 1
+    fi
+    if [ -n "$PERSIST_ON" ]; then
+        # Per-mount flags: the root's bind mount keeps exec, suid and devices.
+        run mount -o remount,bind,nosuid,nodev,noexec "$UD_FINAL" ||
+            warn "could not restrict USERDATA's view at $UD_FINAL (nosuid,nodev,noexec)"
+        log "USERDATA stays mounted read-write at $UD_FINAL in Arch; the root is USERDATA/$PERSIST"
+    else
+        log "USERDATA stays mounted read-only at $UD_FINAL in Arch"
+    fi
+    log "exec switch_root $NEWROOT $NEW_INIT"
+    run mount --move /run "$NEWROOT/run" || return 1
+    RUNDIR=$NEWROOT$RUNDIR
+    LOGFILE=$RUNDIR/initramfs.log
+    run mount --move /dev "$NEWROOT/dev" || return 1
+    KMSG=$NEWROOT/dev/kmsg
+    run mount --move /proc "$NEWROOT/proc" || return 1
+    run mount --move /sys "$NEWROOT/sys" || return 1
+    if [ -n "$TEST" ]; then
+        exec switch_root "$NEWROOT" "$NEW_INIT"
+    fi
+    exec switch_root -c /dev/console "$NEWROOT" "$NEW_INIT"
+}
+
+# Shell mode: everything is ready, wait for the debug shell's go-ahead.
+# Like fail_wait, it reboots after t715.failwait seconds unless the debug
+# shell cancels the timer, so an unattended test still returns to Android.
+shell_wait() {
+    log "t715.shell=1: root ready on $NEWROOT, staying in the initramfs (telnet $NET_IP; touch $CONTINUE_FLAG to switch_root, $STAY_FLAG to cancel the ${FAILWAIT}s reboot timer)"
+    _sw_left=$FAILWAIT
+    _sw_stay=
+    while [ ! -e "$CONTINUE_FLAG" ]; do
+        if [ -z "$_sw_stay" ] && [ -e "$STAY_FLAG" ]; then
+            _sw_stay=1
+            log "reboot timer cancelled from the debug shell"
+        fi
+        sleep 1
+        if [ -z "$_sw_stay" ]; then
+            _sw_left=$((_sw_left - 1))
+            [ "$_sw_left" -gt 0 ] || do_reboot
+        fi
+    done
+    rm -f "$CONTINUE_FLAG"
+    log "continue requested from the debug shell"
+}
+
+# fail_wait: returns 0 when the debug shell asks to retry the hand-over,
+# 1 when the reboot timer expired.
+fail_wait() {
+    if [ -z "$NET_UP" ]; then
+        log "retrying the USB debug link"
+        net_up || warn "no USB debug link"
+    fi
+    log "boot stopped: debug shell on telnet $NET_IP for ${FAILWAIT}s, then reboot (touch $STAY_FLAG to stay, $CONTINUE_FLAG to retry the switch_root)"
+    _fw_left=$FAILWAIT
+    _fw_stay=
+    while [ "$_fw_left" -gt 0 ] || [ -n "$_fw_stay" ]; do
+        if [ -e "$CONTINUE_FLAG" ]; then
+            rm -f "$CONTINUE_FLAG"
+            log "continue requested from the debug shell"
+            return 0
+        fi
+        if [ -z "$_fw_stay" ] && [ -e "$STAY_FLAG" ]; then
+            _fw_stay=1
+            log "reboot timer cancelled from the debug shell"
+        fi
+        sleep 1
+        if [ -z "$_fw_stay" ]; then
+            _fw_left=$((_fw_left - 1))
+            if [ "$_fw_left" -gt 0 ] && [ $((_fw_left % 60)) -eq 0 ]; then
+                log "rebooting in ${_fw_left}s"
+            fi
+        fi
+    done
+    return 1
+}
+
+do_reboot() {
+    log "rebooting (reboot -f)"
+    if [ -n "$TEST" ]; then
+        exit 99
+    fi
+    sync
+    while :; do
+        reboot -f
+        sleep 5
+    done
+}
+
+# wdt_guard: a watchdog reset clears INFORM3, and sboot then boots the
+# partition it booted last (here RECOVERY, i.e. this kernel) again: a test
+# kernel that hangs would loop forever (seen on 2026-10-28).  If the
+# watchdog driver reports that the last reset was its own
+# (WDIOF_CARDRESET, from PMU RST_STAT), restart at once through a software
+# reset: the kernel has set INFORM3 back to normal, so sboot boots Android.
+wdt_guard() {
+    [ "$WDTGUARD" = 1 ] || return 0
+    _wg=/sys/class/watchdog/watchdog0/bootstatus
+    if [ ! -r "$_wg" ]; then
+        warn "no $_wg: cannot tell a watchdog reset from a normal boot"
+        return 0
+    fi
+    _wg_v=$(cat "$_wg" 2>/dev/null)
+    case $_wg_v in
+    '' | *[!0-9]*) warn "unreadable watchdog bootstatus '$_wg_v'"; return 0 ;;
+    esac
+    if [ $((_wg_v & 32)) -ne 0 ]; then
+        err "the previous reset was the watchdog (bootstatus $_wg_v): restarting to Android instead of booting (t715.wdtguard=0 to boot anyway)"
+        [ -n "$TEST" ] && exit 98
+        do_reboot
+    fi
+    log "watchdog bootstatus $_wg_v: not a watchdog reset"
+}
+
+# quiet_console: t715.quiet, see the knob list at the top.  Errors still
+# reach the kernel log and /run/t715/initramfs.log.
+quiet_console() {
+    [ "$QUIET" = 1 ] || return 0
+    log "t715.quiet: console loglevel 3, VT cleared"
+    [ -n "$TEST" ] && return 0
+    dmesg -n 3 2>/dev/null || warn "t715.quiet: could not set the console loglevel"
+    if [ -c /dev/tty0 ]; then
+        printf '\033[2J\033[H\033[?25l' >/dev/tty0 2>/dev/null || true
+    fi
+}
+
+# load_modules: insert the kernel modules shipped in the initramfs (the GPU:
+# gpu-sched, panfrost), in file-name order, after wdt_guard: if a probe
+# hangs, the watchdog resets the board and the next boot's wdt_guard sends
+# it back to Android instead of looping (2026-10-28: built-in panfrost
+# looped).  The modules stay loaded after switch_root.
+load_modules() {
+    [ "$LOAD_MODULES" = 1 ] || return 0
+    for _lm in /lib/t715-modules/*.ko; do
+        [ -e "$_lm" ] || continue
+        if insmod "$_lm"; then
+            log "module ${_lm##*/} loaded"
+        else
+            warn "module ${_lm##*/} failed to load"
+        fi
+    done
+}
+
+main() {
+    mount_early
+    # A failed redirection on "exec" would end the shell (= kernel panic
+    # for PID 1): try it in a subshell first.
+    if [ -z "$TEST" ] && (exec </dev/console >/dev/console) 2>/dev/null; then
+        exec </dev/console >/dev/console 2>&1
+    fi
+    log "starting (pid $$, kernel $(uname -r 2>/dev/null), build $(cat /etc/t715-initramfs.id 2>/dev/null))"
+    read_knobs
+    quiet_console
+    wdt_guard
+    [ -n "$TEST" ] || load_modules
+    net_up || warn "USB debug link not available, booting without it"
+    if prepare_root; then
+        if [ "$SHELL_MODE" = 1 ]; then
+            shell_wait
+        fi
+        handoff
+        err "switch_root preparation failed"
+    fi
+    while :; do
+        if fail_wait; then
+            handoff
+            err "switch_root preparation failed again"
+        else
+            do_reboot
+        fi
+    done
+}
+
+main "$@"

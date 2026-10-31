@@ -1,0 +1,165 @@
+SM-T715 tablet: no do-not-disturb poll, no modem or call watcher.
+
+The home screen's quick toggles asked the notification service for
+do-not-disturb with `qs ipc ... notifications dndState` when they appeared,
+after each tap and every 30 s: a qs client process and an IPC round trip
+each time. Omarchy's notification service already keeps the setting in
+~/.local/state/omarchy/notifications.json ({"version": 3, "dnd": ...},
+saved by its FileView 200 ms after every change, with an atomic rename),
+so the toggles now watch that file, as the bar watches its
+notifications-seen mark; no file means do-not-disturb was never turned on.
+Off the device, Quickshell 0.3.2's FileView followed six alternating
+atomic writes in a row, the first of which created the file.
+
+The status bar started omamobile-cell-watch and omamobile-call-watch
+--observe at every shell start. The tablet build ships neither (no modem,
+no omatel), so each start only logged "Process failed to start". They now
+run only while the bar's `cellWatch` / `callWatch` setting in shell.json is
+true (default off); plugins/README.md lists both. Against omarchy-mobile
+5f7ba48, packages/omamobile-shell (applied with patch -p1 in that
+directory, after 0001, 0002 and 0003).
+
+diff --git a/plugins/README.md b/plugins/README.md
+index 0580c67..d1d8411 100644
+--- a/plugins/README.md
++++ b/plugins/README.md
+@@ -68,6 +68,8 @@ Settings live on the `bar` object in `shell.json`:
+ | `clockFormat` | `"HH:mm"` | Qt date format |
+ | `showBatteryPercent` | `true` | |
+ | `quickSettings` | `"omamobile.quicksettings"` | Plugin id the bar opens |
++| `cellWatch` | `false` | Run `omamobile-cell-watch` for the cellular icon (SM-T715 tablet build) |
++| `callWatch` | `false` | Run `omamobile-call-watch --observe` for the call chip (SM-T715 tablet build) |
+ 
+ **Unread notifications:** an accent pill with the number of files in
+ Omarchy's notification history (`~/.local/state/omarchy/notifications/history/`,
+@@ -82,6 +84,8 @@ history, so it counts until the shade has been opened.
+ **Mobile network and calls:** the cellular icon and the call chip come from
+ `omamobile-cell-watch` and `omamobile-call-watch --observe` (see
+ omamobile.call below); without a modem or omatel's agent they don't show.
++The SM-T715 tablet build ships neither helper and starts them only when
++`cellWatch` / `callWatch` is `true`.
+ 
+ IPC (`omarchy-shell omamobile.bar <method>`), for scripts and tests; no
+ gesture or key binds it yet:
+@@ -480,8 +484,10 @@ pages are a `ListView` inside it. Apps cover it when open; nothing renders
+ while they do.
+ 
+ Smoothness. Widgets are plain rectangles and text: no blur, shadow or
+-`layer.enabled`, and only the clock (once a minute), the media widget (while
+-playing) and the toggles' do-not-disturb poll (30 s) change while you look.
++`layer.enabled`, and only the clock (once a minute) and the media widget
++(while playing) change while you look. The toggles' do-not-disturb follows
++`~/.local/state/omarchy/notifications.json`, which the notification service
++rewrites on every change, through a file watch, not a poll.
+ Every layout edit rebuilds the page's delegates, so the weather answer and
+ command output are cached per widget id and an edit is not a new request.
+ 
+diff --git a/plugins/omamobile.bar/Bar.qml b/plugins/omamobile.bar/Bar.qml
+index 96f73fd..952fdca 100644
+--- a/plugins/omamobile.bar/Bar.qml
++++ b/plugins/omamobile.bar/Bar.qml
+@@ -80,6 +80,14 @@ Item {
+   // The mobile network, from ModemManager's API through
+   // bin/omamobile-cell-watch (omamobile-mmd serves it on the Pixel 7 Pro).
+   // No modem, no icon.
++  // SM-T715 tablet: this watcher and the call one below start only when
++  // the bar's `cellWatch` / `callWatch` setting is true (default off). The
++  // tablet build ships neither helper, so each start only logged "Process
++  // failed to start".
++  readonly property bool cellWatchEnabled: setting("cellWatch", false) === true
++  readonly property bool callWatchEnabled: setting("callWatch", false) === true
++  onCellWatchEnabledChanged: cellWatch.running = cellWatchEnabled
++  onCallWatchEnabledChanged: callWatch.running = callWatchEnabled
+   property var cell: null
+   readonly property string cellGlyph: StatusModel.cellGlyph(cell)
+   readonly property string cellText: StatusModel.cellText(cell)
+@@ -87,16 +95,16 @@ Item {
+   Process {
+     id: cellWatch
+     command: ["omamobile-cell-watch"]
+-    running: true
++    running: root.cellWatchEnabled
+     stdout: SplitParser {
+       onRead: function(line) {
+         var c = StatusModel.parseCell(line)
+         if (c) root.cell = c
+       }
+     }
+-    onExited: { root.cell = null; cellRestart.restart() }
++    onExited: { root.cell = null; if (root.cellWatchEnabled) cellRestart.restart() }
+   }
+-  Timer { id: cellRestart; interval: 5000; onTriggered: cellWatch.running = true }
++  Timer { id: cellRestart; interval: 5000; onTriggered: cellWatch.running = root.cellWatchEnabled }
+ 
+   // A call in progress: a chip with its time beside the clock. omatel's
+   // agent through bin/omamobile-call-watch --observe (the call card runs
+@@ -108,11 +116,11 @@ Item {
+   Process {
+     id: callWatch
+     command: ["omamobile-call-watch", "--observe"]
+-    running: true
++    running: root.callWatchEnabled
+     stdout: SplitParser { onRead: function(line) { root.callLine = String(line) } }
+-    onExited: { root.callLine = ""; callRestart.restart() }
++    onExited: { root.callLine = ""; if (root.callWatchEnabled) callRestart.restart() }
+   }
+-  Timer { id: callRestart; interval: 5000; onTriggered: callWatch.running = true }
++  Timer { id: callRestart; interval: 5000; onTriggered: callWatch.running = root.callWatchEnabled }
+   Timer {
+     interval: 1000
+     repeat: true
+diff --git a/plugins/omamobile.home/TogglesWidget.qml b/plugins/omamobile.home/TogglesWidget.qml
+index d2f17a1..9f89ff6 100644
+--- a/plugins/omamobile.home/TogglesWidget.qml
++++ b/plugins/omamobile.home/TogglesWidget.qml
+@@ -10,8 +10,8 @@ import qs.Commons as Commons
+ // A row of quick-settings toggles. Taps go through quick settings' own IPC
+ // (`toggleTile`), so each one does exactly what its tile does; "More" opens
+ // the sheet. Wi-Fi and Bluetooth state come straight from Quickshell;
+-// do-not-disturb is asked of the notification service when the widget
+-// appears, after a tap, and every 30 s.
++// do-not-disturb from the notification service's settings file, watched
++// (SM-T715 tablet: no `qs ipc` poll every 30 s).
+ Item {
+   id: widget
+ 
+@@ -45,24 +45,26 @@ Item {
+ 
+   Process {
+     id: toggleProc
+-    onExited: dndRead.restart()
+   }
+ 
+-  Process {
+-    id: dndProc
+-    command: widget.ipc(["notifications", "dndState"])
+-    stdout: StdioCollector {
+-      waitForEnd: true
+-      onStreamFinished: {
+-        var t = String(text || "").trim().toLowerCase()
+-        widget.dnd = t === "on" || t === "true" || t === "1"
+-      }
++  // Omarchy's notification service saves {"version": 3, "dnd": ...} to this
++  // file 200 ms after every do-not-disturb change, whoever made it, with an
++  // atomic rename that FileView follows; no file yet means it was never
++  // turned on (the service's default, off).
++  FileView {
++    path: Quickshell.env("HOME") + "/.local/state/omarchy/notifications.json"
++    watchChanges: true
++    printErrors: false
++    onFileChanged: reload()
++    onLoaded: {
++      try {
++        var settings = JSON.parse(text())
++        widget.dnd = !!settings && settings.dnd === true
++      } catch (e) {}
+     }
++    onLoadFailed: widget.dnd = false
+   }
+ 
+-  Timer { id: dndRead; interval: 400; onTriggered: if (!dndProc.running) dndProc.running = true }
+-  Timer { interval: 30000; repeat: true; running: true; triggeredOnStart: true; onTriggered: dndRead.restart() }
+-
+   Grid {
+     anchors.centerIn: parent
+     columns: widget.width >= widget.height * 1.8 ? 4 : 2

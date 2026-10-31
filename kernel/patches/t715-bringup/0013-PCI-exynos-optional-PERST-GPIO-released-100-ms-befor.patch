@@ -1,0 +1,77 @@
+From 74cb7b7d57f042709672653e014f62516359b2c7 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 13/24] PCI: exynos: optional PERST# GPIO, released 100 ms
+ before link training
+
+The controller driver had no PERST# handling. Get an optional
+"perst-gpios" asserted at probe, release it once the PHY and its
+reference clock run, then give the device T_PVPERL (100 ms) before the
+link is trained, like the vendor 5433 driver does (it drives PERST# from
+a GPIO and waits 80 ms before LTSSM enable).
+
+Used by the SM-T715 for its BCM4358 Wi-Fi (gpr3-5).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/pci/controller/dwc/pci-exynos.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pci-exynos.c b/drivers/pci/controller/dwc/pci-exynos.c
+index fa45da28a..580854f81 100644
+--- a/drivers/pci/controller/dwc/pci-exynos.c
++++ b/drivers/pci/controller/dwc/pci-exynos.c
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/clk.h>
+ #include <linux/delay.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/interrupt.h>
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+@@ -21,6 +22,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ 
++#include "../../pci.h"
+ #include "pcie-designware.h"
+ 
+ #define to_exynos_pcie(x)	dev_get_drvdata((x)->dev)
+@@ -57,6 +59,7 @@ struct exynos_pcie {
+ 	struct clk_bulk_data		*clks;
+ 	struct phy			*phy;
+ 	struct regulator_bulk_data	supplies[2];
++	struct gpio_desc		*perst;
+ };
+ 
+ static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
+@@ -232,6 +235,17 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
+ 	exynos_pcie_deassert_core_reset(ep);
+ 	exynos_pcie_enable_irq_pulse(ep);
+ 
++	/*
++	 * Optional PERST#: held asserted since probe, released once the PHY
++	 * and its reference clock run, then the device gets T_PVPERL before
++	 * link training (the vendor kernel waits 80 ms here).
++	 */
++	if (ep->perst) {
++		usleep_range(100, 200);
++		gpiod_set_value_cansleep(ep->perst, 0);
++		msleep(PCIE_T_PVPERL_MS);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -295,6 +309,11 @@ static int exynos_pcie_probe(struct platform_device *pdev)
+ 	if (IS_ERR(ep->phy))
+ 		return PTR_ERR(ep->phy);
+ 
++	/* Asserted (device in reset) until exynos_pcie_host_init() */
++	ep->perst = devm_gpiod_get_optional(dev, "perst", GPIOD_OUT_HIGH);
++	if (IS_ERR(ep->perst))
++		return dev_err_probe(dev, PTR_ERR(ep->perst), "failed to get PERST# GPIO\n");
++
+ 	/* External Local Bus interface (ELBI) registers */
+ 	ep->elbi_base = devm_platform_ioremap_resource_byname(pdev, "elbi");
+ 	if (IS_ERR(ep->elbi_base))

@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+# build-pkg — build pkg/NAME/PKGBUILD for armv7h with makepkg and publish
+# the result in the local pacman repository out/repo/armv7h
+# (t715-omarchy.db), next to the packages of tools/repack-omarchy.
+# See docs/image/PACKAGES.md.
+#
+# Usage:
+#   build-pkg NAME [--force] [-h|--help]
+#
+#     NAME     a directory pkg/NAME/ holding a PKGBUILD and its local
+#              sources (patches, ...)
+#     --force  rebuild and republish even if the repository already holds
+#              this version
+#
+# Everything runs in t715-omarchy:dev-armv7h (under qemu on the Mac): full
+# upgrade, dependencies installed with pacman (the official ALARM
+# repositories, plus [t715-omarchy] before [core] when it exists), then
+# makepkg as the unprivileged user "builder". Sources are downloaded inside
+# the container into the Docker volume t715-omarchy-pkg-src and checked by
+# makepkg on every build. Before publication each package file is checked in
+# the container: .PKGINFO matches its file name, every ELF file is 32-bit ARM
+# (arch = armv7h) and an arch = any package holds none. The macOS host only
+# moves whole package files: cache/pkg/armv7h/ (build output, log in
+# cache/build-pkg/NAME/) and out/repo/armv7h/ (repository, recorded in
+# MANIFEST-built.tsv; repo-add runs in the container).
+#
+# Idempotent: without --force, if MANIFEST-built.tsv already records the
+# files this PKGBUILD version produces, with matching sha256, and
+# t715-omarchy.db lists them, nothing is built and nothing is written.
+# Older files of NAME's packages are removed from the repository; packages of
+# tools/repack-omarchy are never touched.
+#
+# Prints the repository directory on stdout (logs go to stderr).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/alarm.sh
+. "$SCRIPT_DIR/../lib/alarm.sh"
+
+NAME=""
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force)   FORCE=1; shift ;;
+        -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -*)        alarm_die "unknown option: $1 (see --help)" ;;
+        *)         [ -z "$NAME" ] || alarm_die "only one NAME at a time (see --help)"
+                   NAME="$1"; shift ;;
+    esac
+done
+[ -n "$NAME" ] || alarm_die "missing NAME (see --help)"
+[[ "$NAME" =~ ^[a-z0-9@_+][a-z0-9@._+-]*$ ]] || alarm_die "invalid package directory name: $NAME"
+
+PKG_DIR="$ALARM_REPO_DIR/pkg/$NAME"
+[ -f "$PKG_DIR/PKGBUILD" ] || alarm_die "no $PKG_DIR/PKGBUILD"
+
+REPO_OUT="$ALARM_REPO_DIR/out/repo/armv7h"
+BUILT="$REPO_OUT/MANIFEST-built.tsv"
+REPACKED="$REPO_OUT/MANIFEST.tsv"
+PKG_CACHE="$ALARM_CACHE_DIR/pkg/armv7h"
+WORK="$ALARM_CACHE_DIR/build-pkg/$NAME"
+SRC_VOLUME="t715-omarchy-pkg-src"
+PACKAGER_ID="SM-T715 omarchy build-pkg <noreply@localhost>"
+BUILT_HEADER="$(printf 'name\tpkgname\tversion\tarch\tfilename\tsha256\trecipe_sha256\tbuilt_utc')"
+
+sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+pkgname_of() { printf '%s\n' "$1" | sed -E 's/-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$//'; }
+entry_of()   { printf '%s\n' "$1" | sed -E 's/-[^-]+\.pkg\.tar\.zst$//'; }   # name-ver-rel
+db_entries() { # the name-ver-rel entries t715-omarchy.db lists (listing only)
+    if [ -f "$REPO_OUT/t715-omarchy.db.tar.gz" ]; then
+        tar -tzf "$REPO_OUT/t715-omarchy.db.tar.gz" | sed -n 's|^\(.*\)/desc$|\1|p' | sort
+    fi
+}
+
+# Hash of everything in pkg/NAME (PKGBUILD, patches, ...): recorded with the
+# build so that a recipe changed without a pkgrel bump can be reported.
+recipe_sha256() {
+    (cd "$PKG_DIR" && find . -type f ! -name .DS_Store ! -path './src/*' ! -path './pkg/*' \
+        ! -name '*.pkg.tar.*' | LC_ALL=C sort | while IFS= read -r f; do
+            printf '%s  %s\n' "$(sha256_of "$f")" "$f"
+        done) | shasum -a 256 | awk '{print $1}'
+}
+RECIPE_SHA="$(recipe_sha256)"
+
+alarm_setup armv7h
+alarm_ensure_dev_image
+mkdir -p "$WORK" "$PKG_CACHE"
+
+# ------------------------------------------------------- container script
+# MODE=query: prints "ARCH <arch>" for each arch=() entry and "FILE <name>"
+# for each package file the PKGBUILD produces. MODE=build: upgrades, installs
+# the dependencies, runs makepkg, checks the packages, copies them to /out
+# and prints "FILE <file>\t<pkgname>\t<pkgver>\t<arch>" for each. Everything
+# else goes to stderr.
+IFS= read -r -d '' CONTAINER_SCRIPT <<'EOS' || true
+set -euo pipefail
+fail() { echo "build-pkg (container): $*" >&2; exit 1; }
+
+id builder >/dev/null 2>&1 || useradd -m -U builder
+rm -rf /build; mkdir -p /build/recipe /build/work /build/out
+cp -a /recipe/. /build/recipe/
+chown -R builder:builder /build /srcdest
+
+mk() { # makepkg as builder, with this tool's fixed settings
+    (cd /build/recipe && runuser -u builder -- env \
+        PKGDEST=/build/out SRCDEST=/srcdest BUILDDIR=/build/work \
+        PKGEXT=.pkg.tar.zst PACKAGER="$PACKAGER" MAKEFLAGS="-j$(nproc)" \
+        makepkg "$@")
+}
+
+mk --printsrcinfo > /build/SRCINFO || fail "makepkg --printsrcinfo failed"
+
+if [ "$MODE" = query ]; then
+    sed -n 's/^\tarch = /ARCH /p' /build/SRCINFO | sort -u
+    mk --packagelist | sed 's|.*/|FILE |'
+    exit 0
+fi
+
+# [t715-omarchy] before [core], when the local repository exists, so that a
+# PKGBUILD can depend on packages built or repacked here.
+if [ -e /repo/t715-omarchy.db ]; then
+    awk -v stanza='[t715-omarchy]
+SigLevel = Optional TrustAll
+Server = file:///repo' '
+        !done && /^\[core\]$/ { print stanza; print ""; done = 1 }
+        { print }
+    ' /etc/pacman.conf > /tmp/pacman.conf.t715
+    grep -q '^\[t715-omarchy\]$' /tmp/pacman.conf.t715 || fail "could not declare [t715-omarchy]"
+    cat /tmp/pacman.conf.t715 > /etc/pacman.conf
+    echo "[t715-omarchy] declared before [core] (file:///repo)" >&2
+fi
+
+echo "== pacman -Syu" >&2
+pacman -Syu --noconfirm --noprogressbar >&2 || fail "pacman -Syu failed"
+
+# What makepkg --syncdeps would install (the pkgbase section of .SRCINFO:
+# depends, makedepends, checkdepends, plus their _armv7h variants), installed
+# by root here so that no sudo is needed; makepkg re-checks them.
+# An arch = any package (scripts, QML, data) needs its runtime depends only
+# where it is installed: here only its makedepends and checkdepends are
+# installed, makepkg runs with --nodeps, and each runtime depend must still
+# resolve (pacman -Sp) from the repositories the image uses. Otherwise a data
+# package that depends on omarchy would pull the whole desktop into this
+# container, under qemu, at every build.
+any_only=1
+while IFS= read -r a; do [ "$a" = any ] || any_only=0; done < <(sed -n 's/^\tarch = //p' /build/SRCINFO)
+kinds='depends|makedepends|checkdepends'
+[ "$any_only" -eq 0 ] || kinds='makedepends|checkdepends'
+deps=()
+while IFS= read -r d; do deps+=("$d"); done < <(awk -v kinds="$kinds" '
+    /^pkgname = / { exit }
+    $0 ~ "^\t(" kinds ")(_armv7h)? = " { sub(/^\t[a-z_0-9]+ = /, ""); print }
+' /build/SRCINFO)
+if [ "$any_only" -eq 1 ]; then
+    rdeps=()
+    while IFS= read -r d; do rdeps+=("$d"); done < <(awk '
+        /^\tdepends(_armv7h)? = / { sub(/^\t[a-z_0-9]+ = /, ""); print }
+    ' /build/SRCINFO | sort -u)
+    unresolved=""
+    for d in ${rdeps[@]+"${rdeps[@]}"}; do
+        pacman -Sp --print-format %n "$d" >/dev/null 2>&1 || unresolved="$unresolved $d"
+    done
+    [ -z "$unresolved" ] || fail "arch = any: runtime depends that no repository provides:$unresolved"
+    echo "== arch = any: ${#rdeps[@]} runtime depends resolve (not installed here)" >&2
+fi
+if [ "${#deps[@]}" -gt 0 ]; then
+    echo "== installing ${#deps[@]} build dependencies" >&2
+    pacman -S --needed --asdeps --noconfirm --noprogressbar "${deps[@]}" >&2 \
+        || fail "dependency installation failed"
+fi
+
+echo "== makepkg (as builder, $(nproc) jobs)" >&2
+mkflags=(--noconfirm --noprogressbar)
+[ "$any_only" -eq 0 ] || mkflags+=(--nodeps)
+mk "${mkflags[@]}" >&2 || fail "makepkg failed"
+
+shopt -s nullglob
+pkgs=( /build/out/*.pkg.tar.zst )
+[ "${#pkgs[@]}" -gt 0 ] || fail "makepkg produced no package"
+for f in "${pkgs[@]}"; do
+    b="${f##*/}"
+    bsdtar -tf "$f" > /build/members || fail "$b: unreadable archive"
+    for m in .PKGINFO .MTREE; do
+        grep -qxF "$m" /build/members || fail "$b has no $m"
+    done
+    info="$(bsdtar -xOf "$f" .PKGINFO)"
+    name="$(printf '%s\n' "$info" | sed -n 's/^pkgname = //p' | head -n1)"
+    ver="$(printf '%s\n' "$info" | sed -n 's/^pkgver = //p' | head -n1)"
+    arch="$(printf '%s\n' "$info" | sed -n 's/^arch = //p' | head -n1)"
+    [ "$b" = "$name-$ver-$arch.pkg.tar.zst" ] || fail "$b: .PKGINFO says $name $ver $arch"
+    case "$arch" in armv7h|any) ;; *) fail "$b: arch $arch is neither armv7h nor any" ;; esac
+
+    # Machine code check on the extracted files (here, never on the host):
+    # 32-bit little-endian ARM only, and none at all in an arch = any package.
+    d="$(mktemp -d)"
+    bsdtar -xf "$f" -C "$d"
+    nelf=0
+    while IFS= read -r -d '' x; do
+        hdr="$(head -c 20 -- "$x" | od -An -tx1 | tr -d ' \n')"
+        case "$hdr" in 7f454c46*) ;; *) continue ;; esac
+        nelf=$((nelf + 1))
+        [ "$arch" != any ] || fail "$b: arch = any but contains an ELF file: ${x#$d/}"
+        # EI_CLASS (byte 4) = 1 (ELF32), EI_DATA (5) = 1 (LE), e_machine (18-19) = 0x28 (ARM)
+        [ "${hdr:8:4}${hdr:36:4}" = 01012800 ] \
+            || fail "$b: ${x#$d/} is not a 32-bit little-endian ARM ELF file"
+    done < <(find "$d" -type f -print0)
+    rm -rf "$d"
+    echo "checked $b: arch $arch, $nelf ELF file(s), all 32-bit ARM" >&2
+
+    cp -f "$f" "/out/$b"
+    printf 'FILE %s\t%s\t%s\t%s\n' "$b" "$name" "$ver" "$arch"
+done
+EOS
+
+run_container() { # MODE [extra docker args...]: container script, stdout = protocol
+    local mode="$1"; shift
+    # bash -c, not bash -s: stdin stays free, so nothing makepkg runs can
+    # swallow the rest of the script.
+    # CARGO_HOME on tmpfs: 32-bit libgit2 under qemu cannot read cargo's git
+    # dependencies on the container's file system (64-bit directory offsets).
+    docker run --rm --platform "$ALARM_PLATFORM" \
+        -v "$PKG_DIR:/recipe:ro" \
+        -v "$SRC_VOLUME:/srcdest" \
+        --tmpfs /cargo-home:rw,exec,mode=1777,size=2g -e CARGO_HOME=/cargo-home \
+        -e MODE="$mode" -e PACKAGER="$PACKAGER_ID" \
+        "$@" "$ALARM_DEV_IMAGE" bash -c "$CONTAINER_SCRIPT" build-pkg </dev/null
+}
+
+# ------------------------------------------------------------ what it makes
+alarm_log "$NAME: reading pkg/$NAME/PKGBUILD in $ALARM_DEV_IMAGE"
+QUERY="$(run_container query)" || alarm_die "$NAME: cannot read pkg/$NAME/PKGBUILD with makepkg"
+ARCHES="$(printf '%s\n' "$QUERY" | sed -n 's/^ARCH //p')"
+FILES="$(printf '%s\n' "$QUERY" | sed -n 's/^FILE //p' | LC_ALL=C sort)"
+[ -n "$FILES" ] || alarm_die "$NAME: makepkg --packagelist lists no package"
+printf '%s\n' "$ARCHES" | grep -qxE 'armv7h|any' \
+    || alarm_die "$NAME: arch=() has neither armv7h nor any ($(echo $ARCHES))"
+while IFS= read -r f; do
+    case "$f" in
+        *-armv7h.pkg.tar.zst|*-any.pkg.tar.zst) ;;
+        *) alarm_die "$NAME: unexpected package file name $f" ;;
+    esac
+done <<< "$FILES"
+PKGNAMES="$(while IFS= read -r f; do pkgname_of "$f"; done <<< "$FILES" | LC_ALL=C sort -u)"
+
+# A package name belongs to one producer only.
+while IFS= read -r p; do
+    if [ -f "$REPACKED" ] && awk -F'\t' -v p="$p" 'NR > 1 && $1 == p { f = 1 } END { exit !f }' "$REPACKED"; then
+        alarm_die "$p is repacked by tools/repack-omarchy (MANIFEST.tsv): remove it from tools/repack.list and rerun tools/repack-omarchy first"
+    fi
+    if [ -f "$BUILT" ] && awk -F'\t' -v p="$p" -v n="$NAME" 'NR > 1 && $2 == p && $1 != n { f = 1 } END { exit !f }' "$BUILT"; then
+        alarm_die "$p is already built from another pkg/ directory (MANIFEST-built.tsv)"
+    fi
+done <<< "$PKGNAMES"
+
+# ------------------------------------------------------------ up to date?
+recorded() { # FIELD...: the given columns of NAME's MANIFEST-built.tsv rows
+    [ -f "$BUILT" ] || return 0
+    awk -F'\t' -v n="$NAME" -v cols="$*" '
+        BEGIN { k = split(cols, c, " ") }
+        NR > 1 && $1 == n { s = $(c[1]); for (i = 2; i <= k; i++) s = s "\t" $(c[i]); print s }
+    ' "$BUILT"
+}
+OLD_FILES="$(recorded 5 | LC_ALL=C sort)"
+
+if [ "$FORCE" -eq 0 ] && [ -n "$OLD_FILES" ] && [ "$OLD_FILES" = "$FILES" ]; then
+    up_to_date=1
+    entries="$(db_entries)"
+    while IFS=$'\t' read -r f sha; do
+        if [ ! -f "$REPO_OUT/$f" ] || [ "$(sha256_of "$REPO_OUT/$f")" != "$sha" ]; then
+            alarm_log "$f: missing from $REPO_OUT or changed since its build"; up_to_date=0
+        elif ! printf '%s\n' "$entries" | grep -qxF "$(entry_of "$f")"; then
+            alarm_log "$f: not listed in t715-omarchy.db"; up_to_date=0
+        fi
+    done < <(recorded 5 6)
+    if [ "$up_to_date" -eq 1 ]; then
+        old_recipe="$(recorded 7 | head -n1)"
+        if [ "$old_recipe" != "$RECIPE_SHA" ]; then
+            alarm_log "WARNING: pkg/$NAME changed since this version was built, but its version did not: bump pkgrel (or use --force)"
+        fi
+        alarm_log "$NAME: $(echo $FILES) already in $REPO_OUT: nothing to do (--force rebuilds)"
+        printf '%s\n' "$REPO_OUT"
+        exit 0
+    fi
+fi
+
+# ------------------------------------------------------------------ build
+STAGE="$WORK/out"
+LOG="$WORK/build.log"
+rm -rf "$STAGE"; mkdir -p "$STAGE"
+repo_mount=()
+if [ -e "$REPO_OUT/t715-omarchy.db" ]; then repo_mount=(-v "$REPO_OUT:/repo:ro"); fi
+alarm_log "$NAME: building $(echo $FILES) in $ALARM_DEV_IMAGE (qemu: slow; log $LOG)"
+start="$(date +%s)"
+if ! run_container build -v "$STAGE:/out" ${repo_mount[@]+"${repo_mount[@]}"} \
+        2>&1 >"$WORK/plan.txt" | tee "$LOG" >&2; then
+    alarm_die "$NAME: build failed (log $LOG)"
+fi
+alarm_log "$NAME: built in $(( ($(date +%s) - start) / 60 )) min"
+
+BUILT_FILES="$(sed -n 's/^FILE \([^	]*\)	.*$/\1/p' "$WORK/plan.txt" | LC_ALL=C sort)"
+[ "$BUILT_FILES" = "$FILES" ] \
+    || alarm_die "$NAME: makepkg produced [$(echo $BUILT_FILES)], expected [$(echo $FILES)]"
+
+# -------------------------------------------------------------- publish
+mkdir -p "$REPO_OUT"
+while IFS= read -r f; do
+    cp -f "$STAGE/$f" "$PKG_CACHE/$f"
+    cp -f "$STAGE/$f" "$REPO_OUT/$f.part"
+    mv -f "$REPO_OUT/$f.part" "$REPO_OUT/$f"
+done <<< "$FILES"
+
+# Files of an earlier version of NAME (recorded by us, never anyone else's).
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ! printf '%s\n' "$FILES" | grep -qxF "$f"; then
+        rm -f "$REPO_OUT/$f"
+        alarm_log "removed stale $f"
+    fi
+done <<< "$OLD_FILES"
+dropped=()
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    printf '%s\n' "$PKGNAMES" | grep -qxF "$p" || dropped+=("$p")
+done < <(recorded 2 | LC_ALL=C sort -u)
+
+alarm_log "repo-add: $(echo $FILES) into t715-omarchy.db"
+add_args=()
+while IFS= read -r f; do add_args+=("$f"); done <<< "$FILES"
+docker run --rm -i --platform "$ALARM_PLATFORM" \
+    -v "$REPO_OUT:/repo" \
+    "$ALARM_DEV_IMAGE" bash -s -- "${#dropped[@]}" ${dropped[@]+"${dropped[@]}"} "${add_args[@]}" \
+    >&2 <<'EOS' || alarm_die "repo-add failed"
+set -euo pipefail
+cd /repo
+ndrop="$1"; shift
+drop=( "${@:1:$ndrop}" ); shift "$ndrop"
+if [ "${#drop[@]}" -gt 0 ]; then repo-remove -q t715-omarchy.db.tar.gz "${drop[@]}"; fi
+repo-add -q t715-omarchy.db.tar.gz "$@"
+rm -f t715-omarchy.db.tar.gz.old t715-omarchy.files.tar.gz.old   # repo-add's backups
+echo "repo-add: indexed $* (t715-omarchy.db + t715-omarchy.files)" >&2
+EOS
+
+entries="$(db_entries)"
+while IFS= read -r f; do
+    printf '%s\n' "$entries" | grep -qxF "$(entry_of "$f")" \
+        || alarm_die "$f: not listed in t715-omarchy.db after repo-add"
+done <<< "$FILES"
+
+# MANIFEST-built.tsv: NAME's rows replaced, the other pkg/ directories' kept.
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+    printf '%s\n' "$BUILT_HEADER"
+    {
+        if [ -f "$BUILT" ]; then
+            awk -F'\t' -v n="$NAME" 'NR > 1 && $1 != n' "$BUILT"
+        fi
+        while IFS=$'\t' read -r f p v a; do
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$NAME" "$p" "$v" "$a" "$f" \
+                "$(sha256_of "$REPO_OUT/$f")" "$RECIPE_SHA" "$now"
+        done < <(sed -n 's/^FILE //p' "$WORK/plan.txt")
+    } | LC_ALL=C sort -t$'\t' -k1,1 -k5,5
+} > "$BUILT.tmp"
+mv -f "$BUILT.tmp" "$BUILT"
+
+while IFS= read -r f; do
+    alarm_log "published $f (sha256 $(sha256_of "$REPO_OUT/$f"))"
+done <<< "$FILES"
+printf '%s\n' "$REPO_OUT"

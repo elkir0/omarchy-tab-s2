@@ -1,0 +1,87 @@
+From 52c9420659101ac050ab98910ec80785fd1c0d4c Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 03/24] mmc: dw_mmc-exynos: keep the data timeout at its
+ maximum on Exynos5433
+
+The SM-T715 eMMC answers block reads later than its CSD access time
+allows; with the TAAC-derived timeout every read ended in a data read
+timeout about 1 ms after the command.  Program TMOUT to its maximum like
+the vendor kernel, and reset the DQS/delay-line registers the bootloader
+leaves in HS400 state to the vendor defaults.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/mmc/host/dw_mmc-exynos.c | 45 ++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/drivers/mmc/host/dw_mmc-exynos.c b/drivers/mmc/host/dw_mmc-exynos.c
+index 89682f10e..eb165afc9 100644
+--- a/drivers/mmc/host/dw_mmc-exynos.c
++++ b/drivers/mmc/host/dw_mmc-exynos.c
+@@ -127,6 +127,23 @@ static int dw_mci_exynos_priv_init(struct dw_mci *host)
+ 
+ 	dw_mci_exynos_config_smu(host);
+ 
++	/*
++	 * Exynos5433 sboot hands over the eMMC in HS400 with enhanced
++	 * strobe and leaves its DQS, delay-line and phase-shift settings
++	 * behind.  The vendor driver rewrites them on every mode change
++	 * with fixed defaults (kernel_universal5433 dw_mmc-exynos.c:722-752,
++	 * mach/exynos-dwmci.h:103-117): TXDT CRC timer 0x13/0x15 with
++	 * strobe and response-clock modes off, FIFO clock delay 2, read
++	 * DQS delay 0x40.  Start from those instead of the inherited
++	 * values, and clear the HS400 tuning phase shift (0x110 [1:0]).
++	 */
++	if (of_device_is_compatible(host->dev->of_node,
++				    "samsung,exynos5433-dw-mshc-smu")) {
++		writel(readl(host->regs + 0x110) & ~0x3, host->regs + 0x110);
++		mci_writel(host, HS400_DQS_EN, (0x13 << 16) | (0x15 << 8));
++		mci_writel(host, HS400_DLINE_CTRL, (0x2 << 16) | 0x40);
++	}
++
+ 	if (priv->ctrl_type >= DW_MCI_TYPE_EXYNOS5420) {
+ 		priv->saved_strobe_ctrl = mci_readl(host, HS400_DLINE_CTRL);
+ 		priv->saved_dqs_en = mci_readl(host, HS400_DQS_EN);
+@@ -644,6 +661,32 @@ static const struct dw_mci_drv_data exynos_drv_data = {
+ 	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
+ };
+ 
++/*
++ * Exynos5433: keep the hardware data timeout at its maximum, as the vendor
++ * kernel does (kernel_universal5433 drivers/mmc/host/dw_mmc.c:4381, never
++ * lowered afterwards).  The SM-T715 eMMC answers block reads later than
++ * the CSD access time allows: with the TAAC-derived timeout every read
++ * ends in a data read timeout (DRTO) about 1 ms after the command, while
++ * reads with a fixed long timeout (tuning) succeed.
++ */
++static void dw_mci_exynos5433_set_data_timeout(struct dw_mci *host,
++					       unsigned int timeout_ns)
++{
++	mci_writel(host, TMOUT, ~0);
++}
++
++static const struct dw_mci_drv_data exynos5433_drv_data = {
++	.caps			= exynos_dwmmc_caps,
++	.num_caps		= ARRAY_SIZE(exynos_dwmmc_caps),
++	.common_caps		= MMC_CAP_CMD23,
++	.init			= dw_mci_exynos_priv_init,
++	.set_ios		= dw_mci_exynos_set_ios,
++	.parse_dt		= dw_mci_exynos_parse_dt,
++	.execute_tuning		= dw_mci_exynos_execute_tuning,
++	.prepare_hs400_tuning	= dw_mci_exynos_prepare_hs400_tuning,
++	.set_data_timeout	= dw_mci_exynos5433_set_data_timeout,
++};
++
+ static const struct dw_mci_drv_data artpec_drv_data = {
+ 	.common_caps		= MMC_CAP_CMD23,
+ 	.init			= dw_mci_exynos_priv_init,
+@@ -663,6 +706,8 @@ static const struct of_device_id dw_mci_exynos_match[] = {
+ 			.data = &exynos_drv_data, },
+ 	{ .compatible = "samsung,exynos5420-dw-mshc-smu",
+ 			.data = &exynos_drv_data, },
++	{ .compatible = "samsung,exynos5433-dw-mshc-smu",
++			.data = &exynos5433_drv_data, },
+ 	{ .compatible = "samsung,exynos7-dw-mshc",
+ 			.data = &exynos_drv_data, },
+ 	{ .compatible = "samsung,exynos7-dw-mshc-smu",

@@ -1,0 +1,186 @@
+From c37490ac15b480d2dc68b94080fc373887446cbd Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 14/24] ARM: dts: gts28ltexx: Wi-Fi in the board file, drop the
+ M5 wrapper
+
+- exynos5433-gts28ltexx-m5.dtsi becomes exynos5433-gts28ltexx-wifi.dtsi
+  and is included by the board file (section 14): PCIe host with the
+  BCM4358 (14e4:43ec, chip ID 43562), WLAN_EN as an always-on fixed rail,
+  PERST# through perst-gpios (gpr3-5) instead of a pinctrl "output high".
+- exynos5433-gts28ltexx-m5.dts, its Makefile line and the empty
+  gts28ltexx_m5.config fragment are removed.
+
+Checked on the SM-T715 from a cold boot: brcmfmac brings the chip up
+with the linux-firmware brcmfmac4358-pcie.bin (7.112.300.14) and the
+device NVRAM, scans 2.4 and 5 GHz, Bluetooth works alongside.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/Makefile            |  1 -
+ .../dts/samsung/exynos5433-gts28ltexx-m5.dts  | 13 ------
+ ...5.dtsi => exynos5433-gts28ltexx-wifi.dtsi} | 44 +++++++++----------
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 13 ++++++
+ arch/arm/configs/gts28ltexx_m5.config         | 11 -----
+ 5 files changed, 34 insertions(+), 48 deletions(-)
+ delete mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+ rename arch/arm/boot/dts/samsung/{exynos5433-gts28ltexx-m5.dtsi => exynos5433-gts28ltexx-wifi.dtsi} (84%)
+ delete mode 100644 arch/arm/configs/gts28ltexx_m5.config
+
+diff --git a/arch/arm/boot/dts/samsung/Makefile b/arch/arm/boot/dts/samsung/Makefile
+index 31095ba48..84ccaa416 100644
+--- a/arch/arm/boot/dts/samsung/Makefile
++++ b/arch/arm/boot/dts/samsung/Makefile
+@@ -44,7 +44,6 @@ dtb-$(CONFIG_ARCH_EXYNOS5) += \
+ 	exynos5422-odroidxu4.dtb \
+ 	exynos5422-samsung-k3g.dtb \
+ 	exynos5433-gts28ltexx.dtb \
+-	exynos5433-gts28ltexx-m5.dtb \
+ 	exynos5433-gts28ltexx-m6.dtb \
+ 	exynos5433-gts28ltexx-m7.dtb \
+ 	exynos5800-peach-pi.dtb
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+deleted file mode 100644
+index c3760be16..000000000
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
++++ /dev/null
+@@ -1,13 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
+- *
+- * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus
+- * Wi-Fi (BCM4358 on PCIe, brcmfmac) from exynos5433-gts28ltexx-m5.dtsi;
+- * Bluetooth is part of the board file.  See docs/WIFI_BT_M5.md.
+- */
+-
+-/dts-v1/;
+-
+-#include "exynos5433-gts28ltexx.dts"
+-#include "exynos5433-gts28ltexx-m5.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
+similarity index 84%
+rename from arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+rename to arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
+index f0d24ed6f..f7ea2da47 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
+@@ -1,11 +1,13 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - Wi-Fi
+  *
+- * Wi-Fi: Broadcom BCM4358 on PCIe (brcmfmac).  Bluetooth moved to
+- * exynos5433-gts28ltexx-bt.dtsi (included by the board file) once it
+- * worked on the tablet; Wi-Fi stays here until the firmware start stall
+- * is solved (docs/WIFI_BT_M5.md section 7.2).
++ * Broadcom BCM4358 rev 3 (PCI 14e4:43ec, chipcommon ID 43562) on PCIe,
++ * brcmfmac.  Validated on the tablet on 2026-10-28 with the linux-firmware
++ * brcmfmac4358-pcie.bin (7.112.300.14, 4358a3 ROM) and the device's
++ * nvram_net.txt: scans on 2.4 and 5 GHz.  The Samsung bcmdhd firmware
++ * (7.112.53.12) stops answering on PCIe at start under brcmfmac
++ * (docs/WIFI_BT_M5.md section 7).
+  *
+  * The stock kernel toggled the radio-enable GPIOs from vendor glue
+  * (bcmdhd dhd_custom_exynos.c, bcm4358.c) that has no mainline
+@@ -86,10 +88,10 @@ pcie_vdd10: regulator-pcie-vdd10 {
+  * (four phandles, live_fdt.dts:7071); we mirror those four groups with
+  * mainline pinctrl settings.
+  *
+- * Mainline pci-exynos.c has no perst-GPIO support: the link reset flows
+- * from the controller registers (exynos_pcie_assert/deassert_core_reset),
+- * and the required vdd10/vdd18 supplies are the only pre-link power
+- * hook.  assigned-clocks restate TM2's 100 MHz refclk muxing
++ * PERST# is sequenced by pci-exynos through perst-gpios (added for this
++ * board: asserted at probe, released 100 ms before link training, like
++ * the vendor driver), and the required vdd10/vdd18 supplies are the
++ * pre-link power hook.  assigned-clocks restate TM2's 100 MHz refclk muxing
+  * (exynos5433-tm2-common.dtsi &pcie); the live tree leaves the CMU muxes
+  * as the bootloader set them.
+  */
+@@ -100,17 +102,20 @@ &pcie {
+ 	/*
+ 	 * gpr3-4 (CLKREQ_EN) and gpr3-6 keep the PCIe function of the
+ 	 * SoC pcie_bus group (exynos5433-pinctrl.dtsi:340); gpr3-5 is
+-	 * PERST#, which the stock driver requests as a GPIO output driven
+-	 * high (kernel_universal5433 drivers/pci/host/pci-exynos.c:837-841,
+-	 * labels in arch/arm/boot/dts/exynos5433-gts2_common.dtsi:1441-1443)
+-	 * instead of leaving it to function 3.  Mainline pci-exynos has no
+-	 * PERST# handling, so the pin is held high by pinctrl.
++	 * PERST#, which the stock driver requests as a GPIO
++	 * (kernel_universal5433 drivers/pci/host/pci-exynos.c:837-841) and
++	 * sequences around link training; here perst-gpios below.
+ 	 * wlan_en_pins / pcie_wake_pins / wlan_host_wake_pins: board groups
+ 	 * defined below, transcribed from the stock cfg-wlanen, pcie_wake
+ 	 * and wlan_host_wake groups.
+ 	 */
+-	pinctrl-0 = <&pcie_clkreq_pins &pcie_perst_pins &wlan_en_pins
+-		     &pcie_wake_pins &wlan_host_wake_pins>;
++	pinctrl-0 = <&pcie_clkreq_pins &wlan_en_pins &pcie_wake_pins
++		     &wlan_host_wake_pins>;
++
++	/* gpr3-5, the vendor's "PERST" gpio (exynos5433-gts2_common.dtsi:
++	 * 1441-1443), driven by pci-exynos: asserted at probe, released
++	 * 100 ms before link training. */
++	perst-gpios = <&gpr3 5 GPIO_ACTIVE_LOW>;
+ 
+ 	vdd10-supply = <&pcie_vdd10>;
+ 	vdd18-supply = <&wlan_reg_on>;
+@@ -203,11 +208,4 @@ pcie_clkreq_pins: pcie-clkreq-pins {
+ 		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+ 	};
+ 
+-	/* Stock state: GPIO output high, pull-up kept from pcie_bus. */
+-	pcie_perst_pins: pcie-perst-pins {
+-		samsung,pins = "gpr3-5";
+-		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+-		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+-		samsung,pin-val = <1>;
+-	};
+ };
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 7147c9a7f..d0ff21970 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -28,6 +28,7 @@
+  *  11. Input: touchscreen and keys
+  *  12. GPU (Mali-T760 MP6, panfrost)
+  *  13. Bluetooth (BCM4358 on UART3, hci_bcm)
++ *  14. Wi-Fi (BCM4358 on PCIe, brcmfmac)
+  */
+ 
+ /dts-v1/;
+@@ -825,3 +826,15 @@ &framebuffer {
+  * that the initramfs installs into the root filesystem.
+  */
+ #include "exynos5433-gts28ltexx-bt.dtsi"
++
++/* ==================================================================== */
++/* 14. Wi-Fi (BCM4358 on PCIe, brcmfmac)                                */
++/* ==================================================================== */
++
++/*
++ * PCIe host with PERST# sequencing, WLAN_EN as an always-on fixed rail;
++ * pci-exynos and brcmfmac are modules installed by the initramfs.  Needs
++ * the linux-firmware brcmfmac4358-pcie.bin in the root filesystem:
++ * docs/WIFI_BT_M5.md section 7.7, validated on the tablet on 2026-10-28.
++ */
++#include "exynos5433-gts28ltexx-wifi.dtsi"
+diff --git a/arch/arm/configs/gts28ltexx_m5.config b/arch/arm/configs/gts28ltexx_m5.config
+deleted file mode 100644
+index c7b50da8a..000000000
+--- a/arch/arm/configs/gts28ltexx_m5.config
++++ /dev/null
+@@ -1,11 +0,0 @@
+-# SPDX-License-Identifier: GPL-2.0
+-#
+-# Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433) - milestone 5
+-#
+-# Superseded: the Wi-Fi/Bluetooth symbols now live in gts28ltexx_defconfig,
+-# with every radio driver (PCI_EXYNOS, CFG80211, BRCMFMAC, BT, BT_HCIUART,
+-# SERIAL_SAMSUNG, MFD_EXYNOS_LPASS) as a module.  Do not switch them back
+-# to =y: a built-in probe that hangs runs before the initramfs watchdog
+-# guard and loops the board through RECOVERY (docs/WIFI_BT_M5.md).
+-# The milestone-5 device tree is exynos5433-gts28ltexx-m5.dtb from the
+-# default build; this fragment is kept empty so old commands still work.

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Debian's Chromium in /var/lib/t715-chromium/root (see the PKGBUILD). The root is
+# read-only here; only the home directory, /tmp and the runtime directory come
+# through, so Downloads and uploads work as in any browser.
+R=/var/lib/t715-chromium/root
+[ -x "$R/usr/lib/chromium/chromium" ] || { echo "chromium: no root in $R" >&2; exit 1; }
+U=$(id -u)
+unset LD_PRELOAD   # Hyprland's dmabuf shim: the session passes it on, this root has none
+exec bwrap \
+    --ro-bind "$R" / \
+    --dev-bind /dev /dev \
+    --proc /proc \
+    --ro-bind /sys /sys \
+    --bind /tmp /tmp \
+    --tmpfs /run \
+    --bind "/run/user/$U" "/run/user/$U" \
+    --ro-bind-try /run/dbus /run/dbus \
+    --ro-bind-try /run/udev /run/udev \
+    --ro-bind /etc/resolv.conf /etc/resolv.conf \
+    --ro-bind /etc/passwd /etc/passwd \
+    --ro-bind /etc/group /etc/group \
+    --ro-bind /etc/localtime /etc/localtime \
+    --tmpfs /home \
+    --bind "$HOME" "$HOME" \
+    --chdir "$HOME" \
+    --die-with-parent \
+    /usr/bin/chromium --ozone-platform=wayland --enable-wayland-ime --touch-events=enabled \
+    --no-first-run --no-default-browser-check --password-store=basic "$@"

@@ -1,0 +1,104 @@
+# SM-T715 (armv7h) package of omarchy-mobile's omamobile-omarchy at commit
+# 5f7ba48, trimmed for an 8" tablet without an [omamobile] repository.
+#
+# What it is: omarchy-mobile's touch patches to Omarchy 4.0.6 (lock, idle,
+# polkit, notifications, menu, image picker, screensaver) and the tool that
+# keeps them applied, omamobile-omarchy-patches: every run starts from
+# Omarchy's own files (checked against the omarchy package's mtree sha256s
+# in pacman's local database), applies the series in a scratch tree with
+# patch --fuzz=0, checks that reversing it gives Omarchy's files back, then
+# swaps the files in. A pacman hook re-applies it after every transaction
+# that installs or upgrades omarchy or this package.
+#
+# Dropped (docs/image/PACKAGES.md, "omamobile-omarchy"):
+#   - patches 0012 (omarchy-update hands over to omamobile-update) and 0016
+#     (channel switch and pacman refresh refused on a phone): both need
+#     omamobile-update, which assumes an [omamobile] repository and a phone's
+#     update flow; t715-pacman-keeps-alarm.patch does 0016's job here;
+#   - bin/omamobile-update and lib/update-bin/: not shipped (see above).
+# Kept on purpose: bridge-4.0.4-menu-first-frame.patch. Despite its name it
+# targets 4.0.6 (its header: "4.0.6's menu is still a plain PanelWindow";
+# upstream's test/patches.py applies it to the real 4.0.6 package after
+# 0018): the menu card no longer flashes at the top edge for a frame.
+#
+# Source: the GitHub tarball of derekross/omarchy-mobile at 5f7ba48 (MIT),
+# checked by sha256; only packages/omamobile-omarchy is extracted.
+# Build: tools/build-pkg omamobile-omarchy. Image: rootfs/install-mobile.sh
+# (packages.mobile), checked by tests/verify-rootfs.sh.
+
+# Maintainer (upstream): Derek Ross <derekross@gmail.com>
+
+pkgname=omamobile-omarchy
+pkgver=0.1.12
+pkgrel=1.4
+pkgdesc="Omarchy Mobile's touch patches to Omarchy, re-applied after every Omarchy upgrade (SM-T715 tablet build)"
+arch=(any)
+url="https://github.com/derekross/omarchy-mobile"
+license=(MIT)
+# The applier: python, patch (the series), libarchive (bsdtar, for Omarchy's
+# copy in pacman's cache), util-linux (runuser, its failure notification).
+depends=('omarchy>=4.0.6' bash python patch libarchive util-linux)
+checkdepends=(python patch diffutils)
+install=omamobile-omarchy.install
+_commit=5f7ba487cec6ca66ee04606be9d71d1aad855ea0
+_tarball=omarchy-mobile-${_commit:0:7}.tar.gz
+_dir=omarchy-mobile-$_commit/packages/omamobile-omarchy
+source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit.tar.gz"
+        t715-update-without-kernel-package.patch
+        t715-pacman-keeps-alarm.patch)
+sha256sums=('3009362b931b4097b3222a9c048b80ba2832cf570cfbe99edf7a9a4282c2029d'
+            '17b2558e4114e9ee9d81d9c5842dd69f1dea77dd4317b69025050338c45c0738'
+            'e4800d17937dbddb1c80b4866ba681b56904548cce03a6d3f531cd14389985bd')
+noextract=("$_tarball")
+
+# Upstream files left out of this package, relative to packages/omamobile-omarchy.
+_drop=(
+  patches/0012-update-hand-omarchy-update-to-the-phone-wrapper.patch
+  patches/0016-pacman-a-phone-refuses-the-channel-switch-and-pacman-refresh.patch
+  bin/omamobile-update
+  lib/update-bin
+)
+
+prepare() {
+  bsdtar -xf "$srcdir/$_tarball" "$_dir"
+  [[ $(cat "$srcdir/$_dir/version") == "$pkgver" ]] || { echo "upstream version is not $pkgver" >&2; return 1; }
+  local f
+  for f in "${_drop[@]}"; do
+    [[ -e $srcdir/$_dir/$f ]] || { echo "nothing to drop at $f" >&2; return 1; }
+    rm -rf "${srcdir:?}/$_dir/$f"
+  done
+}
+
+check() {
+  cd "$srcdir/$_dir"
+  local f
+  for f in lib/lock-pam test/lock-pam.sh; do bash -n "$f"; done
+  for f in bin/omamobile-omarchy-patches test/patches.py; do
+    python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
+  done
+  grep -qxF 'Exec = /usr/bin/omamobile-omarchy-patches apply --hook' libalpm/95-omamobile-omarchy-patches.hook
+  # The applier against upstream's synthetic Omarchy trees (the checks against
+  # the real package expect 0012 and 0016 and are skipped here: no
+  # OMARCHY_PKG). The image build applies and verifies the series on the real
+  # omarchy 4.0.6 package (rootfs/install-mobile.sh).
+  env -u OMARCHY_PKG HOME="$srcdir/home" python3 -B test/patches.py
+  bash test/lock-pam.sh
+  [[ $(ls patches/*.patch | wc -l) == 17 ]] || { echo "expected 17 patches" >&2; return 1; }
+}
+
+package() {
+  cd "$srcdir/$_dir"
+  install -Dm755 bin/omamobile-omarchy-patches "$pkgdir/usr/bin/omamobile-omarchy-patches"
+  install -Dm755 lib/lock-pam "$pkgdir/usr/lib/omamobile-omarchy/lock-pam"
+  local f
+  for f in patches/*.patch; do
+    install -Dm644 "$f" "$pkgdir/usr/share/omamobile/omarchy/patches/${f##*/}"
+  done
+  # Ours, not upstream's: added here, after check(), whose synthetic Omarchy trees do not have these files
+  install -Dm644 -t "$pkgdir/usr/share/omamobile/omarchy/patches" \
+    "$srcdir/t715-update-without-kernel-package.patch" "$srcdir/t715-pacman-keeps-alarm.patch"
+  install -Dm644 libalpm/95-omamobile-omarchy-patches.hook \
+    "$pkgdir/usr/share/libalpm/hooks/95-omamobile-omarchy-patches.hook"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 version "$pkgdir/usr/share/omamobile/omarchy/version"
+}

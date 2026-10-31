@@ -1,0 +1,63 @@
+The edge swipe does what the Back key does
+
+Its Escape by name failed on the tablet, "key not found": Hyprland looks a name up
+in the main keyboard's keymap, squeekboard's. t715-keys already knows sheets,
+browsers and key codes, so the swipe asks it, with SIGHUP.
+
+--- a/plugins/omamobile.back/BackModel.js
++++ b/plugins/omamobile.back/BackModel.js
+@@ -2,16 +2,11 @@
+ // The back gesture's pure parts, shared by Back.qml and test/back-model.js
+ // (through the module.exports at the end).
+ 
+-// Escape to whatever has the keyboard focus: an app's window or a focused
+-// shell surface (a sheet, the drawer). Hyprland 0.56's Lua dispatcher, as
+-// Omarchy's own clipboard bindings send keys (default/hypr/bindings/
+-// clipboard.lua): no window target, so focused layer surfaces get it too, and
+-// a key down then a key up 50 ms later, because send_shortcut sometimes left
+-// the synthetic key held. One sh, so the up can't overtake the down.
+-var ESCAPE_DOWN = 'hl.dsp.send_key_state({ mods = "", key = "Escape", state = "down" })'
+-var ESCAPE_UP = 'hl.dsp.send_key_state({ mods = "", key = "Escape", state = "up" })'
+-var ESCAPE_ARGV = ["sh", "-c", 'hyprctl dispatch "$1" >/dev/null; sleep 0.05; hyprctl dispatch "$2" >/dev/null',
+-                   "sh", ESCAPE_DOWN, ESCAPE_UP]
++// SM-T715 tablet: back is t715-keys', shared with the Back key: it closes a
++// sheet or the drawer, is the previous page in a browser, and Escape elsewhere.
++// Upstream's Escape by name finds no key here: Hyprland looks it up in the main
++// keyboard's keymap, which is squeekboard's.
++var BACK_ARGV = ["systemctl", "--user", "kill", "--kill-whom=main", "--signal=SIGHUP", "t715-keys.service"]
+ 
+ // How far the finger has to come in from the edge (logical px), and how far
+ // a swipe may wander along the edge for each pixel it comes in: a mostly
+@@ -40,7 +35,7 @@
+ 
+ if (typeof module !== "undefined") {
+   module.exports = {
+-    ESCAPE_DOWN: ESCAPE_DOWN, ESCAPE_UP: ESCAPE_UP, ESCAPE_ARGV: ESCAPE_ARGV, THRESHOLD: THRESHOLD,
++    BACK_ARGV: BACK_ARGV, THRESHOLD: THRESHOLD,
+     progress: progress, fires: fires, inwardFor: inwardFor
+   }
+ }
+--- a/plugins/omamobile.back/Back.qml
++++ b/plugins/omamobile.back/Back.qml
+@@ -8,10 +8,8 @@
+ import "BackModel.js" as BackModel
+ 
+ // The back gesture, as on Android (TOUCH-PLAN 1.2): swipe in from the left
+-// or right edge of the screen and let go to go back. "Back" is Escape, sent
+-// to whatever has the keyboard focus (BackModel.js has how): it closes app
+-// dialogs, menus and popovers that have no other way out on a touch screen,
+-// and the shell's own sheets and drawer, which all close on Escape.
++// or right edge of the screen and let go to go back. SM-T715 tablet: "back" is
++// the Back key's, in t715-keys (BackModel.js has how).
+ //
+ // Each edge is a thin strip on the Overlay layer, like the home pill: its
+ // window is wide enough to draw the arrow that follows the finger, but its
+@@ -38,7 +36,7 @@
+ 
+   // `shell call omamobile.back back ''`: the same as the gesture.
+   function back() {
+-    Quickshell.execDetached(BackModel.ESCAPE_ARGV)
++    Quickshell.execDetached(BackModel.BACK_ARGV)
+     return "ok"
+   }
+ 

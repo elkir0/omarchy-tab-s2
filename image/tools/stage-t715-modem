@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# stage-t715-modem — put the SS333 modem stack of the repository (modem/)
+# into pkg/t715-modem/t715-modem-src.tar.gz, the local source of
+# pkg/t715-modem/PKGBUILD (git-ignored), then build-pkg can build it.
+#
+# Usage: stage-t715-modem    (from anywhere; run tools/build-pkg t715-modem next)
+#
+# The archive holds modem/loader/build/shannon-loader-armv7 (build it first:
+# make -C modem/loader docker-cross), modem/shannond (package, CLI, D-Bus
+# policy), modem/audio (hook, call profile service), modem/systemd,
+# modem/udev, modem/modprobe and modem/tools.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+OUT="$ROOT/image/pkg/t715-modem/t715-modem-src.tar.gz"
+[ -x "$ROOT/modem/loader/build/shannon-loader-armv7" ] || { echo "build the loader first: make -C modem/loader docker-cross" >&2; exit 1; }
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$ROOT" --exclude=__pycache__ --exclude='*.pyc' --exclude=tests \
+    -czf "$OUT" modem/loader/build/shannon-loader-armv7 modem/shannond/shannond modem/shannond/bin \
+    modem/shannond/dbus modem/shannond/README.md modem/shannond/README-mm.md modem/loader/README.md \
+    modem/audio modem/ui modem/systemd modem/udev modem/modprobe modem/tools
+echo "$OUT"

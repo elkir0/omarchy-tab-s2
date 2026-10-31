@@ -1,0 +1,156 @@
+From a146483928e3d59aa64e6de7773ab69bc65eff60 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 14/16] ASoC: wm8998: add the second async rate controls, fix
+ ASRC defaults
+
+The WM8998 has a second asynchronous sample rate (ASYNC_SAMPLE_RATE_2,
+selector value 9) that the driver does not expose.  A baseband link on
+AIF2 runs at 8 or 16 kHz from ASYNCCLK; converting it to the 48 kHz
+SYSCLK domain needs the ISRC high side and the async side of the ASRC at
+a 48 kHz ASYNCCLK rate, which only ASYNC rate 2 provides (Samsung's
+platform sets ASYNC Sample Rate 2 = 48kHz, ASRC RATE 2 = ASYNCCLK rate 2
+and ISRC2 FSH = ASYNCCLK rate 2 for calls).
+
+- add "ASRC RATE 2" (ASYNCCLK rate / ASYNCCLK rate 2) and
+  "ASYNC Sample Rate 2" controls;
+- give the ISRC1/2 FSL/FSH selectors a local rate table with
+  "ASYNCCLK rate 2" (9) after the existing items, which keep their names
+  and values;
+- program SAMPLE_RATE_2/3 to 8/16 kHz at probe, as wm5102 does, so the
+  "8kHz"/"16kHz" items of the rate selectors are true;
+- start the ASRC from a legal configuration: the reset value of
+  ASRC_RATE2 selects ASYNC rate 1 (8 kHz at reset, the AIF rate on
+  ASYNCCLK afterwards), which wm8998_asrc_ev() refuses with -EINVAL
+  while DAPM enables the ASRC anyway.  Default ASYNC rate 2 to 48 kHz and
+  point ASRC_RATE2 at it.  No other block uses ASYNC rate 2 by default.
+
+Existing controls keep their names; no HiFi path uses the ISRCs or ASRCs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/codecs/wm8998.c | 96 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 92 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/codecs/wm8998.c b/sound/soc/codecs/wm8998.c
+index b72b8a64b..a038fc5e4 100644
+--- a/sound/soc/codecs/wm8998.c
++++ b/sound/soc/codecs/wm8998.c
+@@ -185,6 +185,65 @@ static const struct snd_kcontrol_new wm8998_in2mux =
+ 	SOC_DAPM_ENUM_EXT("IN2 Mux", wm8998_in2mux_enum,
+ 			  snd_soc_dapm_get_enum_double, wm8998_inmux_put);
+ 
++/*
++ * Rate selectors of the ISRCs and of the ASRC.  The shared
++ * arizona_rate_text[] stops at "ASYNCCLK rate" (value 8), but the WM8998
++ * also has a second asynchronous rate, ASYNC_SAMPLE_RATE_2 (value 9).  A
++ * baseband link on AIF2 runs at 8 or 16 kHz from ASYNCCLK (ASYNC rate 1);
++ * the ISRC then needs its high side at a 48 kHz rate of the same clock
++ * domain and the ASRC needs an async-side rate it supports, which only
++ * ASYNC rate 2 can provide.  Values 0-8 keep the shared names.
++ */
++static const char * const wm8998_rate_text[] = {
++	"SYNCCLK rate", "8kHz", "16kHz", "ASYNCCLK rate", "ASYNCCLK rate 2",
++};
++
++static const unsigned int wm8998_rate_val[] = {
++	0x0, 0x1, 0x2, 0x8, 0x9,
++};
++
++/* First asynchronous item of wm8998_rate_text[] */
++#define WM8998_RATE_ASYNC_FIRST	3
++
++static const struct soc_enum wm8998_isrc_fsh[] = {
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ISRC_1_CTRL_1,
++			      ARIZONA_ISRC1_FSH_SHIFT, 0xf,
++			      ARRAY_SIZE(wm8998_rate_text),
++			      wm8998_rate_text, wm8998_rate_val),
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ISRC_2_CTRL_1,
++			      ARIZONA_ISRC2_FSH_SHIFT, 0xf,
++			      ARRAY_SIZE(wm8998_rate_text),
++			      wm8998_rate_text, wm8998_rate_val),
++};
++
++static const struct soc_enum wm8998_isrc_fsl[] = {
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ISRC_1_CTRL_2,
++			      ARIZONA_ISRC1_FSL_SHIFT, 0xf,
++			      ARRAY_SIZE(wm8998_rate_text),
++			      wm8998_rate_text, wm8998_rate_val),
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ISRC_2_CTRL_2,
++			      ARIZONA_ISRC2_FSL_SHIFT, 0xf,
++			      ARRAY_SIZE(wm8998_rate_text),
++			      wm8998_rate_text, wm8998_rate_val),
++};
++
++/* The async side of the ASRC takes an ASYNC rate only (wm8998_asrc_ev) */
++static const struct soc_enum wm8998_asrc_rate2 =
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ASRC_RATE2, ARIZONA_ASRC_RATE2_SHIFT, 0xf,
++			      ARRAY_SIZE(wm8998_rate_text) -
++			      WM8998_RATE_ASYNC_FIRST,
++			      wm8998_rate_text + WM8998_RATE_ASYNC_FIRST,
++			      wm8998_rate_val + WM8998_RATE_ASYNC_FIRST);
++
++static const struct soc_enum wm8998_async_sample_rate2 =
++	SOC_VALUE_ENUM_SINGLE(ARIZONA_ASYNC_SAMPLE_RATE_2,
++			      ARIZONA_ASYNC_SAMPLE_RATE_2_SHIFT,
++			      ARIZONA_ASYNC_SAMPLE_RATE_2_MASK >>
++			      ARIZONA_ASYNC_SAMPLE_RATE_2_SHIFT,
++			      ARIZONA_SAMPLE_RATE_ENUM_SIZE,
++			      arizona_sample_rate_text,
++			      arizona_sample_rate_val);
++
+ static DECLARE_TLV_DB_SCALE(ana_tlv, 0, 100, 0);
+ static DECLARE_TLV_DB_SCALE(eq_tlv, -1200, 100, 0);
+ static DECLARE_TLV_DB_SCALE(digital_tlv, -6400, 50, 0);
+@@ -307,11 +366,13 @@ SOC_ENUM("LHPF2 Mode", arizona_lhpf2_mode),
+ SOC_ENUM("LHPF3 Mode", arizona_lhpf3_mode),
+ SOC_ENUM("LHPF4 Mode", arizona_lhpf4_mode),
+ 
+-SOC_ENUM("ISRC1 FSL", arizona_isrc_fsl[0]),
+-SOC_ENUM("ISRC2 FSL", arizona_isrc_fsl[1]),
+-SOC_ENUM("ISRC1 FSH", arizona_isrc_fsh[0]),
+-SOC_ENUM("ISRC2 FSH", arizona_isrc_fsh[1]),
++SOC_ENUM("ISRC1 FSL", wm8998_isrc_fsl[0]),
++SOC_ENUM("ISRC2 FSL", wm8998_isrc_fsl[1]),
++SOC_ENUM("ISRC1 FSH", wm8998_isrc_fsh[0]),
++SOC_ENUM("ISRC2 FSH", wm8998_isrc_fsh[1]),
+ SOC_ENUM("ASRC RATE 1", arizona_asrc_rate1),
++SOC_ENUM("ASRC RATE 2", wm8998_asrc_rate2),
++SOC_ENUM("ASYNC Sample Rate 2", wm8998_async_sample_rate2),
+ 
+ ARIZONA_MIXER_CONTROLS("HPOUTL", ARIZONA_OUT1LMIX_INPUT_1_SOURCE),
+ ARIZONA_MIXER_CONTROLS("HPOUTR", ARIZONA_OUT1RMIX_INPUT_1_SOURCE),
+@@ -1372,6 +1433,33 @@ static int wm8998_probe(struct platform_device *pdev)
+ 			 ARIZONA_IRQ_FLL2_LOCK, ARIZONA_IRQ_FLL2_CLOCK_OK,
+ 			 &wm8998->fll[1]);
+ 
++	/*
++	 * SR2 fixed at 8kHz, SR3 fixed at 16kHz, as on wm5102: these back the
++	 * "8kHz" and "16kHz" items of the ISRC and ASRC rate selectors.
++	 */
++	regmap_update_bits(arizona->regmap, ARIZONA_SAMPLE_RATE_2,
++			   ARIZONA_SAMPLE_RATE_2_MASK, 0x11);
++	regmap_update_bits(arizona->regmap, ARIZONA_SAMPLE_RATE_3,
++			   ARIZONA_SAMPLE_RATE_3_MASK, 0x12);
++
++	/*
++	 * The ASRC cannot run either side at 8, 16 or 32 kHz: wm8998_asrc_ev()
++	 * then returns -EINVAL, but DAPM only logs the failed PRE_PMU event
++	 * and enables the ASRC anyway.  The reset values fail that check on
++	 * the async side: ASRC_RATE2 selects ASYNC rate 1, which resets to
++	 * 8 kHz and follows the AIF clocked from ASYNCCLK, typically a
++	 * baseband link at 8 or 16 kHz.  Give ASYNC rate 2 a 48 kHz default
++	 * and point the async side of the ASRC at it, so that the ASRC starts
++	 * from a legal configuration.  No other block uses ASYNC rate 2 unless
++	 * a rate selector is set to it.  The sync side follows SAMPLE_RATE_1,
++	 * which the AIF on SYSCLK programs in its hw_params.
++	 */
++	regmap_update_bits(arizona->regmap, ARIZONA_ASYNC_SAMPLE_RATE_2,
++			   ARIZONA_ASYNC_SAMPLE_RATE_2_MASK, 0x03);
++	regmap_update_bits(arizona->regmap, ARIZONA_ASRC_RATE2,
++			   ARIZONA_ASRC_RATE2_MASK,
++			   0x9 << ARIZONA_ASRC_RATE2_SHIFT);
++
+ 	for (i = 0; i < ARRAY_SIZE(wm8998_dai); i++)
+ 		arizona_init_dai(&wm8998->core, i);
+ 

@@ -1,0 +1,2935 @@
+From b8bd9e731f92c8b0ec4eab87ae29cb828613f9f0 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 03/16] misc: mipi-lli: port the Exynos5433 MIPI-LLI driver for
+ the SS333 modem
+
+Port Samsung's MIPI-LLI controller and M-PHY driver (kernel_universal5433
+drivers/misc/mipi-lli/, include/linux/mipi-lli.h, GPLv2) to 6.12 as one
+module, exynos5433-mipi-lli.ko (CONFIG_MIPI_LLI), for the link between the
+Exynos5433 and the Shannon SS333 modem of the SM-T715.  The 3.10 file
+names are kept so that diff -ru against that tree stays the review tool.
+Design: research/modem/research/analysis/kernel_port_design.md 2.1-2.8,
+SYNTHESIS.md D1-D3, kernel_boot_review.md 3 and 5.1-5.3.
+
+API: include/linux/mipi-lli.h keeps the 3.10 prototypes modem_v1 uses and
+the link states (LLI_UNMOUNTED 0, LLI_MOUNTED 1, LLI_WAITFORMOUNT 2).
+Every call is safe before the driver is bound; mipi_lli_get_phys_base()
+and _size() return 0 until then.  mipi_lli_get_pm_svc() is gone (no link
+PM FSM in phase 1).  New: mipi_lli_hw_allowed(), mipi_lli_remap_ok() and
+mipi_lli_wait_reset_done().
+
+allow_hw module parameter (default 0, root-writable): with 0 the probe
+maps the four register ranges (lli, remote, sysreg, mphy), looks up the
+PMU syscon, the memory-region, the clocks and the IRQs, requests both IRQs
+with IRQF_NO_AUTOEN, and touches no clock gate and no LLI, M-PHY or PMU
+register; every explicit action returns -EPERM or does nothing.  With 1,
+hw_init (debugfs, or the first mipi_lli_reset/intr_enable) enables the
+clocks once, writes LLI_PHY_CON = 1 through the PMU regmap, masks and
+clears the LLI interrupts and enables the IRQs.  The driver core still
+applies the node's assigned-clocks before probe (CMU only, as 3.10 did).
+
+Interlocks:
+ - the probe binds only on memory-region 0xde000000 + 8 MiB (anything
+   else needs shmem_unsafe_base=1), power-of-two size, size-aligned base,
+   no System RAM in the region (a failed reservation still prints its
+   "OF: reserved mem" line) nor in the 256 MiB CP window above its base;
+ - IAL_LL/BE_INIT_ADDR_REMAP is programmed at each SW_RESET_DONE (0x0001BC97
+   for the board region, checked by static_assert and a probe self-test);
+   the remap registers and LLI_PHY_CON are read back there and set
+   remap_ok, which every reset clears;
+ - HIBERN8_EXIT_DONE writes LLI_MOUNT_CTRL only while remap_ok, else logs
+   "lli: mount refused (remap %08x/%08x)";
+ - RESET_ON_ERROR_SENT is cleared (W1C) before its soft reset, which is
+   limited to roe_reset_limit per second; more than irq_storm_limit (1000)
+   link or sig_irq_storm_limit (10000) signal interrupts per second
+   disable the IRQ until the next reset;
+ - the M-PHY AFC branch runs until a mount with DL credits has saved the
+   AFC code (phy->afc_valid), instead of only in the first cmn_init after
+   boot, so a reset without a mount no longer forces AFC code 0.
+
+Kept from 3.10: the controller settings and the three M-PHY tuning
+tables (the Exynos5433 + SS333 branch made unconditional), the hard/
+threaded IRQ logic, the re-arm on UNMOUNT_DONE, the "lli: " message
+texts, lli_control's "MIPI-LLI %x\n" show format.  lli_control's store
+accepts only 0 (debug dump), and 1-3 only with lli_debug_cmds=1 and
+allow_hw=1.  debugfs mipi-lli/status (software state; registers only
+with the clocks on), mipi-lli/hw_init and mipi-lli/reset (hw_init +
+intr_enable + soft reset: gate G3, CP held in reset).
+
+Dropped: the link PM callbacks, the loopback test, the register dump
+work and its 5430 clock table, store commands 4-6/98/99, the shared
+memory vmap, system and runtime PM callbacks, every panic and BUG, the
+remove callback and module_exit (suppress_bind_attrs); no
+MODULE_DEVICE_TABLE, so the module is never autoloaded from the DT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/Kconfig                         |    1 +
+ drivers/misc/Makefile                        |    1 +
+ drivers/misc/mipi-lli/Kconfig                |   22 +
+ drivers/misc/mipi-lli/Makefile               |    8 +
+ drivers/misc/mipi-lli/exynos-mipi-lli-mphy.c |  178 +++
+ drivers/misc/mipi-lli/exynos-mipi-lli-mphy.h |  120 ++
+ drivers/misc/mipi-lli/exynos-mipi-lli.c      | 1151 ++++++++++++++++++
+ drivers/misc/mipi-lli/exynos-mipi-lli.h      |  254 ++++
+ drivers/misc/mipi-lli/mipi-lli.c             |  827 +++++++++++++
+ include/linux/mipi-lli.h                     |  221 ++++
+ 10 files changed, 2783 insertions(+)
+ create mode 100644 drivers/misc/mipi-lli/Kconfig
+ create mode 100644 drivers/misc/mipi-lli/Makefile
+ create mode 100644 drivers/misc/mipi-lli/exynos-mipi-lli-mphy.c
+ create mode 100644 drivers/misc/mipi-lli/exynos-mipi-lli-mphy.h
+ create mode 100644 drivers/misc/mipi-lli/exynos-mipi-lli.c
+ create mode 100644 drivers/misc/mipi-lli/exynos-mipi-lli.h
+ create mode 100644 drivers/misc/mipi-lli/mipi-lli.c
+ create mode 100644 include/linux/mipi-lli.h
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 3fe7e2a9b..023fab1de 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -628,4 +628,5 @@ source "drivers/misc/uacce/Kconfig"
+ source "drivers/misc/pvpanic/Kconfig"
+ source "drivers/misc/mchp_pci1xxxx/Kconfig"
+ source "drivers/misc/keba/Kconfig"
++source "drivers/misc/mipi-lli/Kconfig"
+ endmenu
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index a9f94525e..7ae11ef4c 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -72,3 +72,4 @@ obj-$(CONFIG_TPS6594_PFSM)	+= tps6594-pfsm.o
+ obj-$(CONFIG_NSM)		+= nsm.o
+ obj-$(CONFIG_MARVELL_CN10K_DPI)	+= mrvl_cn10k_dpi.o
+ obj-y				+= keba/
++obj-$(CONFIG_MIPI_LLI)		+= mipi-lli/
+diff --git a/drivers/misc/mipi-lli/Kconfig b/drivers/misc/mipi-lli/Kconfig
+new file mode 100644
+index 000000000..3f2442a80
+--- /dev/null
++++ b/drivers/misc/mipi-lli/Kconfig
+@@ -0,0 +1,22 @@
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# MIPI LLI
++#
++
++config MIPI_LLI
++	tristate "Exynos5433 MIPI-LLI controller (SS333 modem link)"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	depends on OF && HAS_IOMEM
++	help
++	  MIPI-LLI (Low Latency Interface) controller and M-PHY of the
++	  Exynos5433 CP interface, which links the application processor
++	  to an external Samsung Shannon SS333 modem (Samsung Galaxy Tab S2
++	  SM-T715).  Ported from Samsung's 3.10 kernel; exports the API the
++	  modem_v1 driver uses.
++
++	  The driver binds without touching the hardware: the allow_hw
++	  module parameter (default 0) must be set before it turns a clock
++	  on or accesses an LLI, M-PHY or PMU register.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called exynos5433-mipi-lli.
+diff --git a/drivers/misc/mipi-lli/Makefile b/drivers/misc/mipi-lli/Makefile
+new file mode 100644
+index 000000000..bae460183
+--- /dev/null
++++ b/drivers/misc/mipi-lli/Makefile
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# Makefile for MIPI-LLI
++#
++
++obj-$(CONFIG_MIPI_LLI)		+= exynos5433-mipi-lli.o
++exynos5433-mipi-lli-y		:= mipi-lli.o exynos-mipi-lli.o \
++				   exynos-mipi-lli-mphy.o
+diff --git a/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.c b/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.c
+new file mode 100644
+index 000000000..0a4094c55
+--- /dev/null
++++ b/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.c
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Exynos MIPI-LLI-MPHY driver
++ *
++ * Copyright (C) 2013 Samsung Electronics Co.Ltd
++ * Author: Yulgon Kim <yulgon.kim@samsung.com>
++ *
++ * Port to Linux 6.12 (Exynos5433 + SS333 only): the three tuning tables
++ * are kept as in kernel_universal5433 exynos-mipi-lli-mphy.c:26-152, with
++ * the CONFIG_SOC_EXYNOS5433 && CONFIG_UMTS_MODEM_SS333 branch made
++ * unconditional and the CONFIG_SOC_EXYNOS5430 lines dropped (neither was
++ * built for the SM-T715: lineage_gts28ltexx_defconfig:364,365,1346).  The
++ * static is_first of cmn_init becomes phy->afc_valid.  The platform driver
++ * is gone; gear, rate and reference clock come from the MIPI-LLI node.
++ * Only called with the LLI clocks on.
++ */
++
++#define pr_fmt(fmt) "lli: " fmt
++
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/printk.h>
++
++#include "exynos-mipi-lli-mphy.h"
++
++int exynos_mphy_init(struct exynos_mphy *phy)
++{
++	int gear = phy->default_mode & 0x7;
++
++	writel(0x45, phy->loc_regs + PHY_TX_HS_SYNC_LENGTH(0));
++	/* if TX_LCC is disable, M-TX should enter SLEEP or STALL state
++	based on the current value of the TX_MODE upon getting a TOB REQ */
++	writel(0x0, phy->loc_regs + PHY_TX_LCC_ENABLE(0));
++
++	if (phy->default_mode & OPMODE_HS) {
++		writel(0x2, phy->loc_regs + PHY_TX_MODE(0));
++		writel(0x2, phy->loc_regs + PHY_RX_MODE(0));
++	}
++
++	if (gear > 0x1) {
++		writel(gear, phy->loc_regs + PHY_TX_HSGEAR(0));
++		writel(gear, phy->loc_regs + PHY_RX_HSGEAR(0));
++	}
++
++	if (phy->default_mode & HS_RATE_B) {
++		writel(0x2, phy->loc_regs + PHY_TX_HSRATE_SERIES(0));
++		writel(0x2, phy->loc_regs + PHY_RX_HSRATE_SERIES(0));
++	}
++
++	return 0;
++}
++
++int exynos_mphy_cmn_init(struct exynos_mphy *phy)
++{
++	if (phy->is_shared_clk)
++		writel(0x00, phy->loc_regs + (0x4f*4));
++	else
++		writel(0xF9, phy->loc_regs + (0x4f*4));
++
++	/* Basic tune for series-A */
++	/* Exynos5433 + SS333 (was #if CONFIG_SOC_EXYNOS5433 && CONFIG_UMTS_MODEM_SS333) */
++	writel(0x06, phy->loc_regs + (0x0A*4));
++	writel(0x41, phy->loc_regs + (0x1C*4));
++
++	writel(0x03, phy->loc_regs + (0x11*4));
++	writel(0x03, phy->loc_regs + (0x12*4));
++	writel(0x03, phy->loc_regs + (0x13*4));
++	writel(0x02, phy->loc_regs + (0x14*4));
++	writel(0x00, phy->loc_regs + (0x16*4));
++	writel(0xD6, phy->loc_regs + (0x19*4));
++	writel(0x00, phy->loc_regs + (0x44*4));
++	writel(0x01, phy->loc_regs + (0x4D*4));
++	writel(0x03, phy->loc_regs + (0x4E*4));
++
++	/*
++	 * afc on only booting time (3.10); here: until a mount has saved a
++	 * valid AFC code (afc_valid, set by the MOUNT_DONE thread).
++	 */
++	if (!phy->afc_valid) {
++		writel(0x00, phy->loc_regs + (0x44*4));
++		writel(0x00, phy->loc_regs + (0x31*4));
++	} else {
++		writel(phy->afc_val, phy->loc_regs + (0x44*4));
++		writel(0x01, phy->loc_regs + (0x31*4));
++	}
++
++	/* afc tune */
++	writel(0x2c, phy->loc_regs + (0x46*4));
++
++	return 0;
++}
++
++int exynos_mphy_ovtm_init(struct exynos_mphy *phy)
++{
++	if (!phy->is_shared_clk)
++		writel(0, phy->loc_regs + (0x20*4));
++	else
++		writel(1, phy->loc_regs + (0x20*4));
++
++	/* SYNC PATTERN change enable as 0b10101010 */
++	writel(0x1, phy->loc_regs + (0x8A*4));
++	writel(0xA, phy->loc_regs + (0x87*4));
++	writel(0xAA, phy->loc_regs + (0x88*4));
++	writel(0xAA, phy->loc_regs + (0x89*4));
++
++	/* Basic tune for series-A */
++	/* for TX */
++	writel(0x02, phy->loc_regs + (0x76*4));
++	writel(0x01, phy->loc_regs + (0x84*4));
++	writel(0xAA, phy->loc_regs + (0x85*4));
++	/* for RX */
++	writel(0xBC, phy->loc_regs + (0x0A*4));
++	writel(0x02, phy->loc_regs + (0x16*4));
++	/* It should be changed by CP. (0x2E) */
++	writel(0xC0, phy->loc_regs + (0x2E*4));
++	writel(0xAB, phy->loc_regs + (0x2F*4));
++	writel(0x08, phy->loc_regs + (0x40*4));
++	writel(0x8F, phy->loc_regs + (0x45*4));
++
++	/* setting values for each mphy cfg clk */
++	{
++		/* for tx */
++		{
++			/* tx_line_reset_nvalue when cfg clk is 100Mhz */
++			writel(0x0E, phy->loc_regs + (0x77*4));
++			/* tx_line_reset_pvalue when cfg clk is 100Mhz */
++			writel(0x49, phy->loc_regs + (0x7D*4));
++		}
++		/* for rx */
++		{
++			/* rx_line_reset_value when cfg clk is 100Mhz */
++			writel(0x19, phy->loc_regs + (0x17*4));
++			/* h8_wait_value when cfg clk is 100Mhz */
++			writel(0x16, phy->loc_regs + (0x31*4));
++			writel(0xE3, phy->loc_regs + (0x32*4));
++			writel(0x60, phy->loc_regs + (0x33*4));
++		}
++	}
++
++	return 0;
++}
++
++/*
++ * Gear, rate and reference clock from the MIPI-LLI node, replacing the
++ * 3.10 "mphy/modems/<modem-name>" sub-node (exynos-mipi-lli-mphy.c:159-222):
++ *   samsung,mphy-init-gear = <mode gear series>: mode 2 = HS (else PWM),
++ *	gear 1..7 (else 1), series 2 = B (else A); absent = PWM-G1-A;
++ *   samsung,mphy-shared-refclk: shared reference clock.
++ * No register access.
++ */
++void exynos_mphy_get_setting(struct exynos_mphy *phy, struct device_node *np)
++{
++	u32 gear[3];
++
++	phy->lane = 1;
++	phy->afc_valid = false;
++
++	if (!of_property_read_u32_array(np, "samsung,mphy-init-gear", gear, 3)) {
++		phy->default_mode = (gear[0] == 0x2) ? OPMODE_HS : OPMODE_PWM;
++
++		if (gear[1] > 0x0 && gear[1] < 0x8)
++			phy->default_mode |= gear[1];
++		else
++			phy->default_mode |= GEAR_1;
++
++		phy->default_mode |= (gear[2] == 0x2) ? HS_RATE_B : HS_RATE_A;
++	} else {
++		phy->default_mode = OPMODE_PWM | GEAR_1 | HS_RATE_A;
++	}
++
++	phy->is_shared_clk = of_property_read_bool(np, "samsung,mphy-shared-refclk");
++
++	pr_info("mphy gear:%s-G%d%s, shdclk:%d\n",
++		phy->default_mode & OPMODE_HS ? "HS" : "PWM",
++		phy->default_mode & 0x7,
++		phy->default_mode & HS_RATE_B ? "B" : "A",
++		phy->is_shared_clk);
++}
+diff --git a/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.h b/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.h
+new file mode 100644
+index 000000000..e4dd7fb6d
+--- /dev/null
++++ b/drivers/misc/mipi-lli/exynos-mipi-lli-mphy.h
+@@ -0,0 +1,120 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * exynos-mipi-lli-mphy.h - Exynos MIPI-LLI MPHY Header
++ *
++ * Copyright (c) 2013 Samsung Electronics Co., Ltd.
++ *		http://www.samsung.com/
++ *
++ * Port to Linux 6.12: the M-PHY is no longer a platform device of its own
++ * but the "mphy" register range of the MIPI-LLI node; the register dump
++ * tables are gone (exynos-mipi-lli.c keeps the standard-attribute list).
++ */
++
++#ifndef __DRIVERS_EXYNOS_MIPI_LLI_MPHY_H
++#define __DRIVERS_EXYNOS_MIPI_LLI_MPHY_H
++
++#include <linux/types.h>
++
++struct device;
++struct device_node;
++
++/* Phy Attributes */
++#define PHY_TX_HSMODE_CAP(LANE)				(1024*LANE + 0x01*4)
++#define PHY_TX_HSGEAR_CAP(LANE)				(1024*LANE + 0x02*4)
++#define PHY_TX_PWMG0_CAP(LANE)				(1024*LANE + 0x03*4)
++#define PHY_TX_PWMGEAR_CAP(LANE)			(1024*LANE + 0x04*4)
++#define PHY_TX_AMP_CAP(LANE)				(1024*LANE + 0x05*4)
++#define PHY_TX_EXTSYNC_CAP(LANE)			(1024*LANE + 0x06*4)
++#define PHY_TX_HS_UNT_LINE_DRV_CAP(LANE)		(1024*LANE + 0x07*4)
++#define PHY_TX_LS_TERM_LINE_DRV_CAP(LANE)		(1024*LANE + 0x08*4)
++#define PHY_TX_MIN_SLEEP_NOCFG_TIME_CAP(LANE)		(1024*LANE + 0x09*4)
++#define PHY_TX_MIN_STALL_NOCFG_TIME_CAP(LANE)		(1024*LANE + 0x0a*4)
++#define PHY_TX_MIN_SAVE_CONFIG_TIME_CAP(LANE)		(1024*LANE + 0x0b*4)
++#define PHY_TX_REF_CLK_SHARED_CAP(LANE)			(1024*LANE + 0x0c*4)
++#define PHY_TX_PHY_MAJORMINOR_RELEASE_CAP(LANE)		(1024*LANE + 0x0d*4)
++#define PHY_TX_PHY_EDITORIAL_RELEASE_CAP(LANE)		(1024*LANE + 0x0e*4)
++#define PHY_TX_MODE(LANE)				(1024*LANE + 0x21*4)
++#define PHY_TX_HSRATE_SERIES(LANE)			(1024*LANE + 0x22*4)
++#define PHY_TX_HSGEAR(LANE)				(1024*LANE + 0x23*4)
++#define PHY_TX_PWMGEAR(LANE)				(1024*LANE + 0x24*4)
++#define PHY_TX_AMPLITUDE(LANE)				(1024*LANE + 0x25*4)
++#define PHY_TX_HS_SLEWRATE(LANE)			(1024*LANE + 0x26*4)
++#define PHY_TX_SYNC_SOURCE(LANE)			(1024*LANE + 0x27*4)
++#define PHY_TX_HS_SYNC_LENGTH(LANE)			(1024*LANE + 0x28*4)
++#define PHY_TX_HS_PREPARE_LENGTH(LANE)			(1024*LANE + 0x29*4)
++#define PHY_TX_LS_PREPARE_LENGTH(LANE)			(1024*LANE + 0x2a*4)
++#define PHY_TX_HIBERN8_CONTROL(LANE)			(1024*LANE + 0x2b*4)
++#define PHY_TX_LCC_ENABLE(LANE)				(1024*LANE + 0x2C*4)
++#define PHY_TX_PWM_BURST_CLOSURE_EXT(LANE)		(1024*LANE + 0x2D*4)
++#define PHY_TX_BYPASS_8B10B_ENABLE(LANE)		(1024*LANE + 0x2E*4)
++#define PHY_TX_DRIVER_POLARITY(LANE)			(1024*LANE + 0x2F*4)
++#define PHY_TX_HS_UNT_LINE_DRV_ENABLE(LANE)		(1024*LANE + 0x30*4)
++#define PHY_TX_LS_TERM_LINE_DRV_ENABLE(LANE)		(1024*LANE + 0x31*4)
++#define PHY_TX_LCC_SEQUENCER(LANE)			(1024*LANE + 0x32*4)
++#define PHY_TX_MIN_ACTIVATETIME(LANE)			(1024*LANE + 0x33*4)
++#define PHY_TX_FSM_STATE(LANE)				(1024*LANE + 0x41*4)
++#define PHY_RX_HSMODE_CAP(LANE)				(1024*LANE + 0x81*4)
++#define PHY_RX_HSGEAR_CAP(LANE)				(1024*LANE + 0x82*4)
++#define PHY_RX_PWMG0_CAP(LANE)				(1024*LANE + 0x83*4)
++#define PHY_RX_PWMGEAR_CAP(LANE)			(1024*LANE + 0x84*4)
++#define PHY_RX_HS_UNT_CAP(LANE)				(1024*LANE + 0x85*4)
++#define PHY_RX_LS_TERM_CAP(LANE)			(1024*LANE + 0x86*4)
++#define PHY_RX_MIN_SLEEP_NOCFG_TIME_CAP(LANE)		(1024*LANE + 0x87*4)
++#define PHY_RX_MIN_STALL_NOCFG_TIME_CAP(LANE)		(1024*LANE + 0x88*4)
++#define PHY_RX_MIN_SAVE_CONFIG_TIME_CAP(LANE)		(1024*LANE + 0x89*4)
++#define PHY_RX_REF_CLK_SHARED_CAP(LANE)			(1024*LANE + 0x8A*4)
++#define PHY_RX_HS_SYNC_LENGTH(LANE)			(1024*LANE + 0x8B*4)
++#define PHY_RX_HS_PREPARE_LENGTH_CAP(LANE)		(1024*LANE + 0x8C*4)
++#define PHY_RX_LS_PREPARE_LENGTH_CAP(LANE)		(1024*LANE + 0x8D*4)
++#define PHY_RX_PWM_BURST_CLOSURE_LENGTH_CAP(LANE)	(1024*LANE + 0x8E*4)
++#define PHY_RX_MIN_ACTIVATETIME(LANE)			(1024*LANE + 0x8F*4)
++#define PHY_RX_PHY_MAJORMINOR_RELEASE_CAP(LANE)		(1024*LANE + 0x90*4)
++#define PHY_RX_PHY_EDITORIAL_RELEASE_CAP(LANE)		(1024*LANE + 0x91*4)
++#define PHY_RX_MODE(LANE)				(1024*LANE + 0xA1*4)
++#define PHY_RX_HSRATE_SERIES(LANE)			(1024*LANE + 0xA2*4)
++#define PHY_RX_HSGEAR(LANE)				(1024*LANE + 0xA3*4)
++#define PHY_RX_PWMGEAR(LANE)				(1024*LANE + 0xA4*4)
++#define PHY_RX_LS_TERM_ENABLE(LANE)			(1024*LANE + 0xA5*4)
++#define PHY_RX_HS_UNT_ENABLE(LANE)			(1024*LANE + 0xA6*4)
++#define PHY_RX_ENTER_HIBERN8(LANE)			(1024*LANE + 0xA7*4)
++#define PHY_RX_BYPASS_8B10B_ENABLE(LANE)		(1024*LANE + 0xA8*4)
++#define PHY_RX_FSM_STATE(LANE)				(1024*LANE + 0xC1*4)
++#define PHY_RX_FILLER_INSERTION_ENABLE(LANE)		(1024*LANE + 0x16*4)
++
++enum phy_mode_type {
++	GEAR_1 = 0x1,
++	GEAR_2 = 0x2,
++	GEAR_3 = 0x3,
++	GEAR_4 = 0x4,
++	GEAR_5 = 0x5,
++	GEAR_6 = 0x6,
++	GEAR_7 = 0x7,
++	OPMODE_PWM = 0x10,
++	OPMODE_HS = 0x20,
++	HS_RATE_A = 0x100,
++	HS_RATE_B = 0x200,
++};
++
++struct exynos_mphy {
++	struct device	*dev;
++	void __iomem	*loc_regs;
++	u8		lane;
++
++	u32		default_mode;	/* enum phy_mode_type bits */
++	bool		is_shared_clk;
++	/*
++	 * afc_valid: afc_val holds the AFC code saved at a MOUNT_DONE that got
++	 * DL credits.  Until then every cmn_init runs the AFC (3.10 ran it only
++	 * in the first cmn_init after boot, so a second reset before a mount
++	 * forced AFC code 0: kernel_boot_review.md D1-c).
++	 */
++	bool		afc_valid;
++	int		afc_val;
++};
++
++void exynos_mphy_get_setting(struct exynos_mphy *phy, struct device_node *np);
++int exynos_mphy_init(struct exynos_mphy *phy);
++int exynos_mphy_cmn_init(struct exynos_mphy *phy);
++int exynos_mphy_ovtm_init(struct exynos_mphy *phy);
++
++#endif /* __DRIVERS_EXYNOS_MIPI_LLI_MPHY_H */
+diff --git a/drivers/misc/mipi-lli/exynos-mipi-lli.c b/drivers/misc/mipi-lli/exynos-mipi-lli.c
+new file mode 100644
+index 000000000..6a53d8b4c
+--- /dev/null
++++ b/drivers/misc/mipi-lli/exynos-mipi-lli.c
+@@ -0,0 +1,1151 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Exynos MIPI-LLI driver
++ *
++ * Copyright (C) 2013 Samsung Electronics Co.Ltd
++ * Author: Yulgon Kim <yulgon.kim@samsung.com>
++ *
++ * Port to Linux 6.12 for the Exynos5433 / SS333 modem link of the SM-T715,
++ * 32-bit LPAE kernel (research/modem/research/analysis/
++ * kernel_port_design.md sections 2.2, 2.4, 2.6, 2.8; SYNTHESIS.md D1-D3):
++ *  - the M-PHY is the fourth "reg" of the node (no child device);
++ *  - LLI_PHY_CON is written through the PMU syscon regmap;
++ *  - the shared memory is the node's memory-region, checked at probe;
++ *  - clock muxes and the 100 MHz aclk_cpif_200 come from assigned-clocks;
++ *  - nothing touches the hardware at probe.  Clocks, PMU, interrupt
++ *    clearing and IRQ enabling happen in hw_init, which needs the allow_hw
++ *    module parameter (mipi-lli.c) at 1;
++ *  - the soft reset on RESET_ON_ERROR_SENT is rate limited;
++ *  - no link PM FSM (pm_svc callbacks), no loopback test, no register
++ *    dump work, no panic or BUG call, no remove.
++ * The "lli: " kernel messages keep their 3.10 texts so bring-up logs can
++ * be compared with the stock ones.
++ */
++
++#define pr_fmt(fmt) "lli: " fmt
++
++#include <linux/bitops.h>
++#include <linux/build_bug.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/jiffies.h>
++#include <linux/ioport.h>
++#include <linux/log2.h>
++#include <linux/mipi-lli.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/seq_file.h>
++#include <linux/soc/samsung/exynos-pmu.h>
++#include <linux/soc/samsung/exynos-regs-pmu.h>
++
++#include "exynos-mipi-lli.h"
++#include "exynos-mipi-lli-mphy.h"
++
++#define EXYNOS_LLI_INTR_ENABLED		(0x3FFFF)
++#define EXYNOS_LLI_INTR_DISABLED	(0x0)
++
++/*
++ * 5ns, Default System Clock 100MHz
++ * SYSTEM_CLOCK_PERIOD = 1000MHz / System Clock
++ */
++#define SYSTEM_CLOCK_PERIOD		(10)
++#define SIG_INT_MASK0			(0xFFFFFFFF)
++#define SIG_INT_MASK1			(0x00000000)
++
++static unsigned int credit_cnt = 10;
++module_param(credit_cnt, uint, 0644);
++MODULE_PARM_DESC(credit_cnt, "credit waiting count");
++
++static unsigned int roe_reset_limit = 10;
++module_param(roe_reset_limit, uint, 0644);
++MODULE_PARM_DESC(roe_reset_limit,
++	"Soft resets on RESET_ON_ERROR_SENT allowed within 1 s before re-arming stops until the next reset (0: no limit)");
++
++static unsigned int irq_storm_limit = 1000;
++module_param(irq_storm_limit, uint, 0644);
++MODULE_PARM_DESC(irq_storm_limit,
++	"Link (SPI 184) interrupts per second above which the IRQ is disabled until the next reset (0: no guard)");
++
++static bool shmem_unsafe_base;
++module_param(shmem_unsafe_base, bool, 0444);
++MODULE_PARM_DESC(shmem_unsafe_base,
++	"Accept a memory-region other than 0xde000000 + 8 MiB (owner approval only; default 0)");
++
++/* DT clock-names, stock order (kernel_universal5433 exynos5433.dtsi:2150-2162) */
++static const char * const exynos_lli_clk_names[] = {
++	"aclk_cpif_200",
++	"gate_cpifnm_200",
++	"gate_lli_svc_loc", "gate_lli_svc_rem",
++	"gate_lli_ll_init", "gate_lli_be_init",
++	"gate_lli_cmn_cfg",
++	"gate_lli_tx0_cfg", "gate_lli_rx0_cfg",
++	"gate_lli_tx0_symbol", "gate_lli_rx0_symbol",
++};
++
++/* Registers printed by debug_info (3.10 exynos-mipi-lli.h lli_debug_info) */
++static const int lli_debug_info[] = {
++	/* START OF LLI_PA_ATTRIBUTES */
++	EXYNOS_PA_MK0_INSERTION_ENABLE,
++	EXYNOS_PA_WT_START_VALUE,
++	EXYNOS_PA_PHIT_ERROR_COUNTER,
++	EXYNOS_PA_PHIT_RECEIVE_COUNTER_LSB,
++	EXYNOS_PA_PHIT_RECEIVE_COUNTER_MSB,
++	EXYNOS_PA_WORSTCASE_RTT,
++	EXYNOS_PA_CSA_PA_STATUS,
++	EXYNOS_PA_SYSTEM_CLK_PERIOD,
++	EXYNOS_PA_MK0_CONTROL,
++	EXYNOS_PA_NACK_RTT,
++	EXYNOS_PA_SMART_BUFFER_ENABLE,
++	EXYNOS_PA_MPHY_OV_TM_ENABLE,
++	EXYNOS_PA_MPHY_CMN_ENABLE,
++	EXYNOS_PA_USR_SCRAMBLER_ENABLE,
++	EXYNOS_PA_DBG_TACTIVATE_TIMEOUT_CNT,
++	EXYNOS_PA_DBG_PA_SIGNAL_STATUS,
++	EXYNOS_PA_DBG_RETRY_BUFFER_STATUS0,
++	EXYNOS_PA_DBG_RETRY_BUFFER_STATUS1,
++	EXYNOS_PA_DBG_RW_PA_STATE,
++	EXYNOS_PA_DBG_RW_MNT_STATE,
++	EXYNOS_PA_DBG_RW_PLU_STATE,
++	EXYNOS_PA_DBG_RW_ROE_STATE,
++	EXYNOS_PA_DBG_RW_TX_STATE,
++	EXYNOS_PA_PA_DBG_RX_LATCH_MODE,
++	EXYNOS_PA_DBG_PHY_SIGNAL_STATUS,
++	EXYNOS_PA_DBG_TX0_BURST_MK0_COUNT,
++	EXYNOS_PA_DBG_TX0_NACK_MK2_COUNT,
++	EXYNOS_PA_DBG_RX0_BURST_MK0_COUNT,
++	EXYNOS_PA_DBG_RX0_NACK_MK2_COUNT,
++	EXYNOS_PA_DBG_RX0_SYMERROR_COUNT,
++	/* END OF LLI_PA_ATTRIBUTES */
++	/* START OF LLI_NON_PA_ATTRIBUTES */
++	EXYNOS_DME_CSA_SYSTEM_STATUS,
++	EXYNOS_DME_LLI_INTR_ENABLE,
++	EXYNOS_DME_LLI_INTR_STATUS,
++	EXYNOS_DME_LLI_TL_INTR_REASON,
++	EXYNOS_DME_LLI_DL_INTR_REASON,
++	EXYNOS_DME_LLI_PA_INTR_REASON,
++	EXYNOS_DME_LLI_IAL_INTR_REASON0,
++	EXYNOS_DME_LLI_IAL_INTR_REASON1,
++	EXYNOS_DME_DBG_DME_STATE,
++	EXYNOS_DL_DBG_TX_CREDTIS,
++	EXYNOS_DL_DBG_RX_BUFFER_SIZES,
++	EXYNOS_DL_DBG_RX_BUFFER_VACANCIES,
++	EXYNOS_DL_DBG_RX_RESIDUAL_CREDITS,
++	EXYNOS_DL_DBG_SIGNAL_STATUS,
++	/* END OF LLI_NON_PA_ATTRIBUTES */
++};
++
++/* M-PHY standard attributes printed by debug_info (3.10 phy_std_debug_info) */
++static const int phy_std_debug_info[] = {
++	PHY_TX_MODE(0),
++	PHY_TX_HSRATE_SERIES(0),
++	PHY_TX_HSGEAR(0),
++	PHY_TX_PWMGEAR(0),
++	PHY_TX_HIBERN8_CONTROL(0),
++	PHY_TX_LCC_ENABLE(0),
++	PHY_TX_BYPASS_8B10B_ENABLE(0),
++	PHY_TX_LCC_SEQUENCER(0),
++	PHY_TX_FSM_STATE(0),
++	PHY_RX_MODE(0),
++	PHY_RX_HSRATE_SERIES(0),
++	PHY_RX_HSGEAR(0),
++	PHY_RX_PWMGEAR(0),
++	PHY_RX_ENTER_HIBERN8(0),
++	PHY_RX_BYPASS_8B10B_ENABLE(0),
++	PHY_RX_FSM_STATE(0),
++};
++
++static int poll_bit_set(void __iomem *ptr, u32 val, int timeout)
++{
++	u32 reg;
++
++	do {
++		reg = readl(ptr);
++		if (reg & val)
++			return 0;
++
++		udelay(1);
++	} while (timeout-- > 0);
++
++	return -ETIME;
++}
++
++/*
++ * IAL_LL/BE_INIT_ADDR_REMAP: base[31:bit_pos] in bits [31:8], bit_pos =
++ * log2(size) in the low bits, enable bit 7 (3.10 exynos-mipi-lli.c:68-90).
++ */
++#define LLI_REMAP_VALUE(base, bit_pos)					\
++	(((((u32)(base)) >> (bit_pos)) << LLI_REMAP_BASE_ADDR_SHIFT) |	\
++	 (bit_pos) | LLI_REMAP_ENABLE)
++
++/*
++ * The board's cp-shmem@de000000, 8 MiB (bit_pos 23):
++ * 0xde000000 >> 23 = 0x1bc; 0x1bc << 8 = 0x1bc00; | 23 (0x17) | 0x80 =
++ * 0x0001bc97, the value gate G3 must read back (SYNTHESIS D3).  Checked at
++ * build time here and against exynos_lli_cal_remap() at probe.
++ */
++#define LLI_REMAP_REF_BASE	0xde000000u
++#define LLI_REMAP_REF_SIZE	SZ_8M
++#define LLI_REMAP_REF_VALUE	0x0001bc97u
++static_assert(LLI_REMAP_VALUE(LLI_REMAP_REF_BASE, 23) == LLI_REMAP_REF_VALUE);
++static_assert(LLI_REMAP_REF_SIZE == (1u << 23));
++
++/*
++ * The only shared memory region the probe accepts without
++ * shmem_unsafe_base=1: the board's cp-shmem@de000000 (SYNTHESIS D3,
++ * kernel_boot_review.md 5.1).
++ */
++#define LLI_SHMEM_BASE		LLI_REMAP_REF_BASE
++#define LLI_SHMEM_SIZE		LLI_REMAP_REF_SIZE
++/* CP MPU region 3 is 256 MiB (radio_image.md 2.4): no System RAM in it. */
++#define LLI_CP_WINDOW		SZ_256M
++
++/* Returns 0 if the region cannot be remapped. */
++static u32 exynos_lli_cal_remap(phys_addr_t base_addr, phys_addr_t size)
++{
++	u32 bit_pos;
++
++	/* power-of-two size, at least 256 bytes (the base field starts at bit 8) */
++	if (size < BIT(LLI_REMAP_BASE_ADDR_SHIFT) || size > SZ_2G ||
++	    !is_power_of_2((unsigned long)size))
++		return 0;
++
++	/* check base_address is aligned with size */
++	if (base_addr & (size - 1))
++		return 0;
++
++	/* 32-bit register: the whole region below 4 GiB */
++	if ((u64)base_addr + size - 1 > U32_MAX)
++		return 0;
++
++	bit_pos = __ffs((unsigned long)size);
++
++	return LLI_REMAP_VALUE(base_addr, bit_pos);
++}
++
++static int exynos_lli_debug_info(struct mipi_lli *lli)
++{
++	struct exynos_mphy *phy = lli->mphy;
++	int i;
++
++	if (!lli->is_debug_possible)
++		return 0;
++
++	for (i = 0; i < ARRAY_SIZE(lli_debug_info); i++)
++		pr_err("[LLI]0x%x : 0x%08x\n", 0x10F24000 + lli_debug_info[i],
++		       readl(lli->regs + lli_debug_info[i]));
++
++	for (i = 0; i < ARRAY_SIZE(phy_std_debug_info); i++)
++		pr_err("[MPHY-STD]0x%x : 0x%08x\n",
++		       0x10F20000 + (phy_std_debug_info[i] / 4),
++		       readl(phy->loc_regs + phy_std_debug_info[i]));
++
++	return 0;
++}
++
++static void exynos_lli_system_config(struct mipi_lli *lli)
++{
++	if (lli->sys_regs) {
++		lli->sb_mask_active = true;
++		writel(SIG_INT_MASK0, lli->sys_regs + CPIF_LLI_SIG_INT_MASK0);
++		writel(SIG_INT_MASK1, lli->sys_regs + CPIF_LLI_SIG_INT_MASK1);
++	}
++}
++
++static inline void exynos_lli_set_intr_enable(struct mipi_lli *lli)
++{
++	writel(EXYNOS_LLI_INTR_ENABLED, lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
++}
++
++static inline void exynos_lli_set_intr_disable(struct mipi_lli *lli)
++{
++	writel(EXYNOS_LLI_INTR_DISABLED, lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
++}
++
++static inline void exynos_lli_clear_intr_enable(struct mipi_lli *lli)
++{
++	writel(0x0, lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
++}
++
++static inline u32 exynos_lli_get_intr_enable(struct mipi_lli *lli)
++{
++	return readl(lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
++}
++
++/* Every reset invalidates the mount interlock until its SW_RESET_DONE. */
++static inline void exynos_lli_soft_reset(struct mipi_lli *lli)
++{
++	WRITE_ONCE(lli->remap_ok, false);
++	writel(1, lli->regs + EXYNOS_DME_LLI_RESET);
++}
++
++static int exynos_lli_init(struct mipi_lli *lli)
++{
++	/* Set LLI Interrupt Enable */
++	exynos_lli_set_intr_enable(lli);
++
++	/* Reset LLI with a spin lock */
++	exynos_lli_soft_reset(lli);
++
++	return 0;
++}
++
++/* SW_RESET_DONE, hard IRQ context (stock: exynos-mipi-lli.c:282-385). */
++static int exynos_lli_setting(struct mipi_lli *lli)
++{
++	struct exynos_mphy *phy = lli->mphy;
++	u32 remap_addr;
++	int ret;
++
++	/* update lli_link_state as reset */
++	if (atomic_read(&lli->state) & LLI_WAITFORMOUNT)
++		atomic_set(&lli->state, LLI_WAITFORMOUNT);
++	else
++		atomic_set(&lli->state, LLI_UNMOUNTED);
++
++	exynos_lli_system_config(lli);
++
++	/* enable LLI_PHY_CONTROL (syscon regmap: spinlock, IRQ safe) */
++	ret = regmap_write(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, 1);
++	if (ret)
++		pr_err("LLI_PHY_CONTROL write failed: %d\n", ret);
++
++	/* set_system clk period */
++	writel(SYSTEM_CLOCK_PERIOD, lli->regs + EXYNOS_PA_SYSTEM_CLK_PERIOD);
++
++	/* Set DriveTactiveDuration */
++	writel(0xf, lli->regs + EXYNOS_PA_DRIVE_TACTIVATE_DURATION);
++
++	/* computed and checked at probe */
++	remap_addr = lli->remap_addr;
++	if (!remap_addr) {
++		pr_err("remap calculation error\n");
++		return -EINVAL;
++	}
++
++	/* Un-set LL_INIT REMAP Address */
++	writel(remap_addr, lli->regs + EXYNOS_IAL_LL_INIT_ADDR_REMAP);
++
++	/* Set BE_INIT REMAP Address */
++	writel(remap_addr, lli->regs + EXYNOS_IAL_BE_INIT_ADDR_REMAP);
++
++	/* LLI Interrupt enable */
++	exynos_lli_set_intr_enable(lli);
++
++	/* Set BE TC enable */
++	writel(0, lli->regs + EXYNOS_DME_BE_TC_DISABLE);
++
++	/* Set Breaking point enable */
++	writel(0, lli->regs + EXYNOS_PA_DBG_PA_BREAK_POINT_ENABLE);
++
++	/* Set Error count enable */
++	writel(1, lli->regs + EXYNOS_PA_PHIT_ERR_COUNT_ENABLE);
++
++	/* Set Receive count enable */
++	writel(1, lli->regs + EXYNOS_PA_PHIT_RECEIVE_COUNT_ENABLE);
++
++	/* Set Acti Tx/Rx count enable */
++	writel(1, lli->regs + EXYNOS_PA_TX_COUNT);
++	writel(1, lli->regs + EXYNOS_PA_RX_COUNT);
++
++	/*
++	 Set Rx Latch
++	 Edge and number of latches from M-RX to PA.
++	 [0:7] where,
++	 [0] : Rising edge. 1 cycle.
++	 [1] : Rising edge. 2 cycles.
++	 [2] : No latch (Bypass)
++	 [3-7] : Reserved
++	 */
++	writel(2, lli->regs + EXYNOS_PA_PA_DBG_RX_LATCH_MODE);
++
++	writel(0x40, lli->regs + EXYNOS_PA_NACK_RTT);
++	writel(0x0, lli->regs + EXYNOS_PA_MK0_INSERTION_ENABLE);
++	/* SS333 (was #if CONFIG_UMTS_MODEM_SS300 || SS303 || SS333) */
++	writel((128<<0) | (15<<8) | (1<<12), lli->regs + EXYNOS_PA_MK0_CONTROL);
++
++	/* Set Scrambler enable */
++	if (lli->modem_info.scrambler)
++		writel(1, lli->regs + EXYNOS_PA_USR_SCRAMBLER_ENABLE);
++
++	/* MPHY configuration */
++	exynos_mphy_init(phy);
++
++	writel(0x1, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
++	exynos_mphy_cmn_init(phy);
++	writel(0x0, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
++
++	writel(0x1, lli->regs + EXYNOS_PA_MPHY_OV_TM_ENABLE);
++	exynos_mphy_ovtm_init(phy);
++	writel(0x0, lli->regs + EXYNOS_PA_MPHY_OV_TM_ENABLE);
++
++	/* Update PA configuration for MPHY standard attributes */
++	writel(0xFFFFFFFF, lli->regs + EXYNOS_PA_CONFIG_UPDATE);
++
++	/* Set SNF FIFO for LL&BE */
++	writel(((0x1F<<1) | 1), lli->regs + EXYNOS_IAL_LL_SNF_FIFO);
++	writel(((0x1F<<1) | 1), lli->regs + EXYNOS_IAL_BE_SNF_FIFO);
++
++	writel(0x1000, lli->regs + EXYNOS_PA_WORSTCASE_RTT);
++
++	pr_debug("MIPI LLI is initialized\n");
++
++	return 0;
++}
++
++/*
++ * Mount interlock (kernel_boot_review.md 5.1 items 3-4): after the
++ * settings, read the remap registers and LLI_PHY_CON back.  remap_ok only
++ * if the settings were written and all three match.
++ */
++static void exynos_lli_check_remap(struct mipi_lli *lli, bool settings_ok)
++{
++	unsigned int pmu = 0;
++	bool ok;
++
++	lli->remap_ll_rb = readl(lli->regs + EXYNOS_IAL_LL_INIT_ADDR_REMAP);
++	lli->remap_be_rb = readl(lli->regs + EXYNOS_IAL_BE_INIT_ADDR_REMAP);
++	if (regmap_read(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, &pmu))
++		pmu = ~0u;
++	lli->pmu_rb = pmu;
++
++	ok = settings_ok && lli->remap_addr &&
++	     lli->remap_ll_rb == lli->remap_addr &&
++	     lli->remap_be_rb == lli->remap_addr && pmu == 1;
++
++	WRITE_ONCE(lli->remap_ok, ok);
++
++	pr_info("remap LL_INIT 0x%08x BE_INIT 0x%08x (expected 0x%08x), LLI_PHY_CON 0x%x: remap_ok=%d\n",
++		lli->remap_ll_rb, lli->remap_be_rb, lli->remap_addr, pmu, ok);
++}
++
++static int exynos_lli_set_master(struct mipi_lli *lli, bool is_master)
++{
++	lli->is_master = is_master;
++
++	writel((is_master << 1), lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++
++	return 0;
++}
++
++static int exynos_lli_link_startup_mount(struct mipi_lli *lli)
++{
++	u32 regs;
++	int ret = 0;
++
++	if (lli->is_master) {
++		regs = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS);
++		if (regs & LLI_MOUNTED) {
++			pr_debug("LLI master already mounted\n");
++			return ret;
++		}
++
++		regs = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++		writel((0x1 << 2) | regs,
++			lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++	} else {
++		ret = poll_bit_set(lli->regs + EXYNOS_DME_LLI_INTR_STATUS,
++			     INTR_MPHY_HIBERN8_EXIT_DONE,
++			     1000);
++		if (ret) {
++			pr_err("HIBERN8 Exit Failed\n");
++			return ret;
++		}
++
++		regs = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++		writel((0x1 << 2) | regs,
++			lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++	}
++
++	return ret;
++}
++
++static int exynos_lli_get_status(struct mipi_lli *lli)
++{
++	return atomic_read(&lli->state);
++}
++
++/* GPIO sideband build (CONFIG_EXYNOS_MIPI_LLI_GPIO_SIDEBAND=y on 5433) */
++static int exynos_lli_send_signal(struct mipi_lli *lli, u32 cmd)
++{
++	int is_mounted = 0;
++
++	if (atomic_read(&lli->state) != LLI_MOUNTED) {
++		pr_err_ratelimited("LLI not mounted !! mnt_reg = %d %d\n",
++				   is_mounted, lli->pa_err_6);
++		return -EIO;
++	}
++
++	/* For unmount failed issue, we should check the
++	   LLI_MOUNT_CTRL is cleared or not */
++	is_mounted = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS);
++	if (!(is_mounted & LLI_MOUNT_CTRL) || lli->pa_err_6)
++		return -EIO;
++
++	writel(cmd, lli->regs + EXYNOS_TL_SIGNAL_SET_MSB);
++
++	return 0;
++}
++
++static int exynos_lli_reset_signal(struct mipi_lli *lli)
++{
++	writel(0xFFFFFFFF, lli->regs + EXYNOS_TL_SIGNAL_CLR_LSB);
++	writel(0xFFFFFFFF, lli->regs + EXYNOS_TL_SIGNAL_CLR_MSB);
++
++	return 0;
++}
++
++static int exynos_lli_read_signal(struct mipi_lli *lli)
++{
++	u32 intr_lsb, intr_msb;
++
++	intr_lsb = readl(lli->regs + EXYNOS_TL_SIGNAL_STATUS_LSB);
++	intr_msb = readl(lli->regs + EXYNOS_TL_SIGNAL_STATUS_MSB);
++
++	if (intr_lsb)
++		writel(intr_lsb, lli->regs + EXYNOS_TL_SIGNAL_CLR_LSB);
++	if (intr_msb)
++		writel(intr_msb, lli->regs + EXYNOS_TL_SIGNAL_CLR_MSB);
++
++	pr_debug("LSB = %x, MSB = %x\n", intr_lsb, intr_msb);
++
++	return intr_lsb;
++}
++
++static int exynos_lli_intr_enable(struct mipi_lli *lli)
++{
++	if (lli->is_suspended)
++		return -1;
++
++	if (exynos_lli_get_intr_enable(lli) != EXYNOS_LLI_INTR_ENABLED)
++		exynos_lli_set_intr_enable(lli);
++
++	return 0;
++}
++
++static int exynos_lli_intr_disable(struct mipi_lli *lli)
++{
++	if (lli->is_suspended)
++		return -1;
++
++	if (exynos_lli_get_intr_enable(lli) != EXYNOS_LLI_INTR_DISABLED)
++		exynos_lli_set_intr_disable(lli);
++
++	return 0;
++}
++
++/*
++ * Only reached through mipi_lli_suspend/resume (no system sleep callbacks:
++ * without the link PM FSM they were no-ops in 3.10 too).  3.10 also gated
++ * the LLI clocks here; this port keeps them on once hw_init has enabled
++ * them (one clk_bulk_prepare_enable), so these never sleep.
++ */
++static int exynos_lli_suspend(struct mipi_lli *lli)
++{
++	lli->is_suspended = true;
++	lli->is_debug_possible = false;
++
++	/* masking all of lli interrupts */
++	exynos_lli_system_config(lli);
++	exynos_lli_clear_intr_enable(lli);
++
++	/* clearing all of lli sideband signal */
++	exynos_lli_reset_signal(lli);
++
++	/* disable LLI_PHY_CONTROL */
++	regmap_write(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, 0);
++
++	return 0;
++}
++
++static int exynos_lli_resume(struct mipi_lli *lli)
++{
++	/* enable LLI_PHY_CONTROL */
++	regmap_write(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, 1);
++
++	/* re-init all of lli resource */
++	exynos_lli_init(lli);
++
++	lli->is_suspended = false;
++
++	return 0;
++}
++
++static void exynos_mipi_lli_set_automode(struct mipi_lli *lli, bool is_auto)
++{
++	if (is_auto)
++		writel(CSA_AUTO_MODE, lli->regs + EXYNOS_PA_CSA_PA_SET);
++	else
++		writel(CSA_AUTO_MODE, lli->regs + EXYNOS_PA_CSA_PA_CLR);
++}
++
++/*
++ * First and only place the clocks are turned on.  Called with hw_mutex
++ * held and allow_hw=1 (mipi-lli.c).
++ */
++static int exynos_lli_hw_init(struct mipi_lli *lli)
++{
++	unsigned long flags;
++	u32 status;
++	int ret;
++
++	ret = clk_bulk_prepare_enable(lli->num_clks, lli->clks);
++	if (ret) {
++		pr_err("hw_init: clock enable failed: %d\n", ret);
++		return ret;
++	}
++	WRITE_ONCE(lli->clks_enabled, true);
++
++	pr_info("dout_aclk_cpif_200 = %lu\n", clk_get_rate(lli->clks[0].clk));
++
++	/* enable LLI_PHY_CONTROL */
++	ret = regmap_write(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, 1);
++	if (ret) {
++		pr_err("hw_init: LLI_PHY_CONTROL write failed: %d\n", ret);
++		WRITE_ONCE(lli->clks_enabled, false);
++		clk_bulk_disable_unprepare(lli->num_clks, lli->clks);
++		return ret;
++	}
++
++	/* No LLI interrupt before the first reset asks for them. */
++	exynos_lli_clear_intr_enable(lli);
++	status = readl(lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++	if (status)
++		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++
++	pr_info("hw_init: INTR_STATUS was 0x%x, CSA_SYSTEM_STATUS 0x%x\n",
++		status, readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS));
++
++	/* Pairs with smp_load_acquire() in mipi-lli.c lli_prepare_hw(). */
++	smp_store_release(&lli->hw_init_done, true);
++
++	enable_irq(lli->irq);
++
++	spin_lock_irqsave(&lli->lock, flags);
++	if (!lli->sig_irq_active) {
++		enable_irq(lli->irq_sig);
++		lli->sig_irq_active = true;
++	}
++	spin_unlock_irqrestore(&lli->lock, flags);
++
++	return 0;
++}
++
++static void exynos_lli_status_show(struct mipi_lli *lli, struct seq_file *s,
++				   bool regs)
++{
++	unsigned int pmu;
++	int ret;
++
++	seq_printf(s, "afc_valid: %d (afc 0x%x)\n", lli->mphy->afc_valid,
++		   lli->mphy->afc_val);
++	if (!regs)
++		return;
++
++	seq_printf(s, "CSA_SYSTEM_STATUS: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS));
++	seq_printf(s, "INTR_ENABLE: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_DME_LLI_INTR_ENABLE));
++	seq_printf(s, "INTR_STATUS: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_DME_LLI_INTR_STATUS));
++	seq_printf(s, "IAL_LL_INIT_ADDR_REMAP: 0x%08x (expected 0x%08x)\n",
++		   readl(lli->regs + EXYNOS_IAL_LL_INIT_ADDR_REMAP), lli->remap_addr);
++	seq_printf(s, "IAL_BE_INIT_ADDR_REMAP: 0x%08x (expected 0x%08x)\n",
++		   readl(lli->regs + EXYNOS_IAL_BE_INIT_ADDR_REMAP), lli->remap_addr);
++	seq_printf(s, "IAL_LL_TARG_ADDR_REMAP: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_IAL_LL_TARG_ADDR_REMAP));
++	seq_printf(s, "IAL_BE_TARG_ADDR_REMAP: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_IAL_BE_TARG_ADDR_REMAP));
++	seq_printf(s, "IAL_OVERLAP_ADDR_CTRL_EN: 0x%08x\n",
++		   readl(lli->regs + EXYNOS_IAL_OVERLAP_ADDR_CTRL_EN));
++	seq_printf(s, "PA_SYSTEM_CLK_PERIOD: %u\n",
++		   readl(lli->regs + EXYNOS_PA_SYSTEM_CLK_PERIOD));
++
++	ret = regmap_read(lli->pmu, EXYNOS5433_LLI_PHY_CONTROL, &pmu);
++	if (ret)
++		seq_printf(s, "PMU LLI_PHY_CON (0x720): read error %d\n", ret);
++	else
++		seq_printf(s, "PMU LLI_PHY_CON (0x720): 0x%08x\n", pmu);
++}
++
++static const struct lli_driver exynos_lli_driver = {
++	.hw_init = exynos_lli_hw_init,
++	.init = exynos_lli_init,
++	.set_master = exynos_lli_set_master,
++	.link_startup_mount = exynos_lli_link_startup_mount,
++	.get_status = exynos_lli_get_status,
++	.send_signal = exynos_lli_send_signal,
++	.reset_signal = exynos_lli_reset_signal,
++	.read_signal = exynos_lli_read_signal,
++	.debug_info = exynos_lli_debug_info,
++	.intr_enable = exynos_lli_intr_enable,
++	.intr_disable = exynos_lli_intr_disable,
++	.suspend = exynos_lli_suspend,
++	.resume = exynos_lli_resume,
++	.status_show = exynos_lli_status_show,
++};
++
++/*
++ * RESET_ON_ERROR_SENT: 3.10 soft-reset unconditionally (:951-955).  Allow
++ * roe_reset_limit resets per second, then stop re-arming until the next
++ * explicit reset (mipi_lli_reset, debugfs reset, lli_control 1).
++ */
++static bool exynos_lli_roe_reset_allowed(struct mipi_lli *lli)
++{
++	unsigned int limit = READ_ONCE(roe_reset_limit);
++
++	if (READ_ONCE(lli->roe_stopped))
++		return false;
++	if (!limit)
++		return true;
++
++	if (time_after(jiffies, lli->roe_window + HZ)) {
++		lli->roe_window = jiffies;
++		WRITE_ONCE(lli->roe_resets, 0);
++	}
++
++	WRITE_ONCE(lli->roe_resets, lli->roe_resets + 1);
++	if (lli->roe_resets <= limit)
++		return true;
++
++	WRITE_ONCE(lli->roe_stopped, true);
++	pr_err("Error sent: more than %u soft resets within 1 s, re-arming stopped\n",
++	       limit);
++
++	return false;
++}
++
++static irqreturn_t exynos_mipi_lli_threaded_irq(int irq, void *_lli)
++{
++	struct mipi_lli *lli = _lli;
++	struct exynos_mphy *phy = lli->mphy;
++	int credit = 0;
++	int rx_fsm_state, tx_fsm_state, afc_val, csa_status;
++
++	rx_fsm_state = readl(phy->loc_regs + PHY_RX_FSM_STATE(0));
++	tx_fsm_state = readl(phy->loc_regs + PHY_TX_FSM_STATE(0));
++	csa_status = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS);
++	credit = readl(lli->regs + EXYNOS_DL_DBG_TX_CREDTIS);
++
++	writel(0x1, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
++	afc_val = readl(phy->loc_regs + (0x27*4));
++	writel(0x0, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
++
++	pr_info("rx=%x, tx=%x, afc=%x, status=%x, pa_err=%x\n",
++		rx_fsm_state, tx_fsm_state, afc_val, csa_status, lli->pa_err_cnt);
++
++	if (!credit) {
++		u32 delay = 0;
++
++		for (delay = 0 ; delay < READ_ONCE(credit_cnt) ; delay++) {
++			usleep_range(1000, 1000);
++			credit = readl(lli->regs + EXYNOS_DL_DBG_TX_CREDTIS);
++
++			if (credit)
++				break;
++		}
++		pr_info("waiting %ums for CREDITS: rx=%x, tx=%x\n", delay,
++			readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
++			readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
++
++		if (!credit) {
++			pr_err("ERR: Mount failed : %d\n", ++lli->mnt_fail);
++			exynos_lli_debug_info(lli);
++			pr_err("DUMP: ok:%d fail:%d roe:%d\n",
++			       lli->mnt_ok, lli->mnt_fail, lli->roe_cnt);
++
++			return IRQ_HANDLED;
++		}
++	}
++
++	/* Mount with DL credits: the AFC code is valid from now on. */
++	if (!phy->afc_valid) {
++		phy->afc_val = afc_val;
++		phy->afc_valid = true;
++	}
++
++	lli->pa_err_6 = false;
++
++	atomic_set(&lli->state, LLI_MOUNTED);
++	atomic_inc(&lli->mnt_cnt);
++	pr_info("Mount (ok:%d fail:%d roe:%d pa_err:%d)\n",
++		++lli->mnt_ok, lli->mnt_fail, lli->roe_cnt, lli->pa_err_cnt);
++
++	return IRQ_HANDLED;
++}
++
++/*
++ * Pending events are always read and cleared once the clocks are on.  The
++ * actions that program the link (settings at SW_RESET_DONE, mount accept,
++ * automode, soft reset, re-arm after unmount) also need allow_hw=1, so
++ * writing 0 to allow_hw freezes the link without leaving an interrupt
++ * asserted.
++ */
++static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
++{
++	struct mipi_lli *lli = _lli;
++	struct exynos_mphy *phy = lli->mphy;
++	bool hw_ok;
++	u32 status;
++
++	/* Enabled only by hw_init; never read an unclocked block. */
++	if (!mipi_lli_clks_on(lli))
++		return IRQ_NONE;
++
++	atomic_inc(&lli->irq_count);
++	hw_ok = mipi_lli_hw_allowed();
++
++	status = readl(lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++
++	if (mipi_lli_irq_storm(&lli->irq_window, &lli->irq_window_cnt,
++			  READ_ONCE(irq_storm_limit))) {
++		/* mask and clear at the source too, then stop the line */
++		exynos_lli_clear_intr_enable(lli);
++		if (status)
++			writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++		disable_irq_nosync(irq);
++		WRITE_ONCE(lli->irq_storm_off, true);
++		pr_err("irq storm: more than %u link interrupts in 1 s (status 0x%x), irq disabled until the next reset\n",
++		       READ_ONCE(irq_storm_limit), status);
++		return IRQ_HANDLED;
++	}
++
++	if (!status)
++		return IRQ_NONE;
++
++	if (status & INTR_SW_RESET_DONE) {
++		int ret = -EPERM;
++
++		pr_info("SW_RESET_DONE ++\n");
++		if (hw_ok)
++			ret = exynos_lli_setting(lli);
++		else
++			pr_err("allow_hw=0: link settings not written\n");
++
++		/* mount interlock: recomputed at every SW_RESET_DONE */
++		exynos_lli_check_remap(lli, ret == 0);
++
++		lli->is_debug_possible = true;
++
++		if (status & INTR_RESET_ON_ERROR_DETECTED) {
++			pr_info("LLI is wating for mount after LINE-RESET..\n");
++			atomic_set(&lli->state, LLI_WAITFORMOUNT);
++		}
++
++		/* Pairs with smp_load_acquire() in mipi_lli_wait_reset_done(). */
++		smp_store_release(&lli->reset_done, true);
++		wake_up_all(&lli->reset_wq);
++	}
++
++	if (status & INTR_MPHY_HIBERN8_EXIT_DONE) {
++		pr_info("HIBERN8_EXIT_DONE: rx=%x, tx=%x\n",
++			readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
++			readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
++		if (!READ_ONCE(lli->remap_ok)) {
++			/* no mount without a verified remap (CP accesses to AP memory) */
++			pr_err("mount refused (remap %08x/%08x)\n",
++			       readl(lli->regs + EXYNOS_IAL_LL_INIT_ADDR_REMAP),
++			       readl(lli->regs + EXYNOS_IAL_BE_INIT_ADDR_REMAP));
++		} else if (hw_ok) {
++			mdelay(1);
++			writel(LLI_MOUNT_CTRL, lli->regs + EXYNOS_DME_CSA_SYSTEM_SET);
++		}
++	}
++
++	if (status & INTR_MPHY_HIBERN8_ENTER_DONE)
++		pr_info("HIBERN8_ENTER_DONE\n");
++
++	if (status & INTR_PA_PLU_DETECTED)
++		pr_info("PLU_DETECT\n");
++
++	if (status & INTR_PA_PLU_DONE) {
++		pr_info("PLU_DONE\n");
++
++		if (hw_ok && lli->modem_info.automode)
++			exynos_mipi_lli_set_automode(lli, true);
++	}
++
++	if ((status & INTR_RESET_ON_ERROR_DETECTED))
++		pr_err("Error detected ++ roe_cnt = %d\n", ++lli->roe_cnt);
++
++	if (status & INTR_RESET_ON_ERROR_SENT) {
++		pr_err("Error sent ++ roe_cnt = %d\n", ++lli->roe_cnt);
++		/* W1C first: 3.10 reset without clearing (review D1-h). */
++		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++		if (hw_ok && exynos_lli_roe_reset_allowed(lli)) {
++			exynos_lli_soft_reset(lli);
++			return IRQ_HANDLED;
++		}
++
++		/* No reset: mask so that the line stays quiet. */
++		exynos_lli_clear_intr_enable(lli);
++		return IRQ_HANDLED;
++	}
++
++	if (status & INTR_PA_ERROR_INDICATION) {
++		int rx = readl(lli->regs + EXYNOS_DME_LLI_PA_INTR_REASON);
++
++		pr_err_ratelimited("PA_REASON:%d cnt:%d\n", rx, ++lli->pa_err_cnt);
++	}
++
++	if (status & INTR_DL_ERROR_INDICATION) {
++		pr_info("DL_REASON %x\n",
++			readl(lli->regs + EXYNOS_DME_LLI_DL_INTR_REASON));
++	}
++
++	if (status & INTR_TL_ERROR_INDICATION) {
++		pr_info("TL_REASON %x\n",
++			readl(lli->regs + EXYNOS_DME_LLI_TL_INTR_REASON));
++	}
++
++	if (status & INTR_IAL_ERROR_INDICATION) {
++		pr_info("IAL_REASON0 %x, REASON1 %x\n",
++			readl(lli->regs + EXYNOS_DME_LLI_IAL_INTR_REASON0),
++			readl(lli->regs + EXYNOS_DME_LLI_IAL_INTR_REASON1));
++	}
++
++	if (status & INTR_LLI_MOUNT_DONE) {
++		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++		pr_info("Mount intr\n");
++
++		return IRQ_WAKE_THREAD;
++	}
++
++	if (status & INTR_LLI_UNMOUNT_DONE) {
++		atomic_set(&lli->state, LLI_UNMOUNTED);
++		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++		/* no link PM FSM: always re-arm (3.10: when no unmount_cb) */
++		if (hw_ok)
++			exynos_lli_init(lli);
++
++		pr_info("Unmount\n");
++
++		lli->is_debug_possible = false;
++
++		return IRQ_HANDLED;
++	}
++
++	writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
++
++	return IRQ_HANDLED;
++}
++
++/*
++ * memory-region interlocks; refuse to bind unless all hold
++ * (kernel_boot_review.md 5.1 item 1):
++ *  - base 0xde000000, size 8 MiB, unless shmem_unsafe_base=1;
++ *  - power-of-two size on a size-aligned base below 4 GiB, or the remap
++ *    register cannot describe it (3.10 found out only in IRQ context,
++ *    exynos-mipi-lli.c:304-308);
++ *  - no System RAM in the region: a reservation that failed still yields
++ *    an "OF: reserved mem:" line and a lookup (review D3-b);
++ *  - no System RAM in the 256 MiB CP window from the base either, in case
++ *    the IAL does not mask the remap to the region size (review D3-c; the
++ *    board DT makes all DRAM from 0xde000000 up no-map).
++ */
++static int exynos_lli_get_shmem(struct mipi_lli *lli)
++{
++	struct device *dev = lli->dev;
++	struct device_node *rmem_np;
++	struct reserved_mem *rmem;
++
++	rmem_np = of_parse_phandle(dev->of_node, "memory-region", 0);
++	if (!rmem_np)
++		return dev_err_probe(dev, -EINVAL, "lli: no memory-region\n");
++
++	rmem = of_reserved_mem_lookup(rmem_np);
++	of_node_put(rmem_np);
++	if (!rmem)
++		return dev_err_probe(dev, -EINVAL, "lli: memory-region not reserved\n");
++
++	lli->phy_addr = rmem->base;
++	lli->shdmem_size = rmem->size;
++
++	if ((lli->phy_addr != LLI_SHMEM_BASE ||
++	     lli->shdmem_size != LLI_SHMEM_SIZE) && !shmem_unsafe_base)
++		return dev_err_probe(dev, -EINVAL,
++				     "lli: shared memory %pa size %pa, only 0xde000000 size 0x800000 is allowed (shmem_unsafe_base=0)\n",
++				     &lli->phy_addr, &lli->shdmem_size);
++
++	/* Self-test of the arithmetic behind the G3 readback value. */
++	if (exynos_lli_cal_remap(LLI_REMAP_REF_BASE, LLI_REMAP_REF_SIZE) !=
++	    LLI_REMAP_REF_VALUE)
++		return dev_err_probe(dev, -EINVAL, "lli: remap self-test failed\n");
++
++	lli->remap_addr = exynos_lli_cal_remap(lli->phy_addr, lli->shdmem_size);
++	if (!lli->remap_addr)
++		return dev_err_probe(dev, -EINVAL,
++				     "lli: shared memory %pa size %pa: needs a power-of-two size on a size-aligned base below 4 GiB\n",
++				     &lli->phy_addr, &lli->shdmem_size);
++
++	if (region_intersects(lli->phy_addr, lli->shdmem_size,
++			      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
++	    REGION_DISJOINT)
++		return dev_err_probe(dev, -EBUSY,
++				     "lli: shared memory %pa size %pa overlaps System RAM: reservation failed?\n",
++				     &lli->phy_addr, &lli->shdmem_size);
++
++	if (region_intersects(lli->phy_addr, LLI_CP_WINDOW,
++			      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
++	    REGION_DISJOINT)
++		return dev_err_probe(dev, -EBUSY,
++				     "lli: System RAM within 256 MiB above %pa: all DRAM above the shared memory must be no-map\n",
++				     &lli->phy_addr);
++
++	if (lli->shdmem_size != MIPI_LLI_RESERVE_SIZE)
++		dev_warn(dev, "lli: shared memory size %pa, stock is 8 MiB\n",
++			 &lli->shdmem_size);
++
++	dev_info(dev, "lli: shared memory %pa size %pa, remap 0x%08x\n",
++		 &lli->phy_addr, &lli->shdmem_size, lli->remap_addr);
++
++	return 0;
++}
++
++/*
++ * Probe: maps the registers, looks up the PMU regmap, the shared memory,
++ * the clocks and the IRQs (requested disabled), and touches no LLI, M-PHY
++ * or PMU register and no clock gate.  (The driver core has already applied
++ * the node's assigned-clocks: CMU_MIF DIV_MIF3 and CMU_CPIF SRC_SEL_CPIF1,
++ * as 3.10 did at probe.)
++ */
++static int exynos_mipi_lli_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct exynos_mphy *phy;
++	struct mipi_lli *lli;
++	int i, ret;
++
++	lli = devm_kzalloc(dev, sizeof(*lli), GFP_KERNEL);
++	if (!lli)
++		return -ENOMEM;
++
++	phy = devm_kzalloc(dev, sizeof(*phy), GFP_KERNEL);
++	if (!phy)
++		return -ENOMEM;
++
++	lli->dev = dev;
++	phy->dev = dev;
++	lli->mphy = phy;
++	lli->driver = &exynos_lli_driver;
++
++	lli->regs = devm_platform_ioremap_resource_byname(pdev, "lli");
++	if (IS_ERR(lli->regs))
++		return PTR_ERR(lli->regs);
++
++	lli->remote_regs = devm_platform_ioremap_resource_byname(pdev, "remote");
++	if (IS_ERR(lli->remote_regs))
++		return PTR_ERR(lli->remote_regs);
++
++	lli->sys_regs = devm_platform_ioremap_resource_byname(pdev, "sysreg");
++	if (IS_ERR(lli->sys_regs))
++		return PTR_ERR(lli->sys_regs);
++
++	phy->loc_regs = devm_platform_ioremap_resource_byname(pdev, "mphy");
++	if (IS_ERR(phy->loc_regs))
++		return PTR_ERR(phy->loc_regs);
++
++	lli->pmu = exynos_get_pmu_regmap_by_phandle(np, "samsung,pmu-syscon");
++	if (IS_ERR(lli->pmu))
++		return dev_err_probe(dev, PTR_ERR(lli->pmu), "lli: PMU regmap\n");
++
++	ret = exynos_lli_get_shmem(lli);
++	if (ret)
++		return ret;
++
++	lli->num_clks = ARRAY_SIZE(exynos_lli_clk_names);
++	lli->clks = devm_kcalloc(dev, lli->num_clks, sizeof(*lli->clks),
++				 GFP_KERNEL);
++	if (!lli->clks)
++		return -ENOMEM;
++	for (i = 0; i < lli->num_clks; i++)
++		lli->clks[i].id = exynos_lli_clk_names[i];
++	ret = devm_clk_bulk_get(dev, lli->num_clks, lli->clks);
++	if (ret)
++		return dev_err_probe(dev, ret, "lli: clocks\n");
++
++	/* Cached rate, after assigned-clock-rates; nothing is enabled. */
++	dev_info(dev, "lli: dout_aclk_cpif_200 = %lu (clocks off)\n",
++		 clk_get_rate(lli->clks[0].clk));
++
++	lli->irq = platform_get_irq_byname(pdev, "lli");
++	if (lli->irq < 0)
++		return lli->irq;
++
++	lli->irq_sig = platform_get_irq_byname(pdev, "signal");
++	if (lli->irq_sig < 0)
++		return lli->irq_sig;
++
++	lli->modem_info.scrambler = of_property_read_bool(np, "samsung,lli-scrambler");
++	lli->modem_info.automode = of_property_read_bool(np, "samsung,lli-automode");
++	pr_info("scrambler:%d, automode:%d\n",
++		lli->modem_info.scrambler, lli->modem_info.automode);
++
++	exynos_mphy_get_setting(phy, np);
++
++	mutex_init(&lli->hw_mutex);
++	spin_lock_init(&lli->lock);
++	atomic_set(&lli->state, LLI_UNMOUNTED);
++	atomic_set(&lli->mnt_cnt, 0);
++	lli->is_master = false;
++	lli->is_debug_possible = false;
++	init_waitqueue_head(&lli->reset_wq);
++	lli->roe_window = jiffies;
++	lli->irq_window = jiffies;
++	lli->sig_window = jiffies;
++
++	/* Disabled until hw_init: no handler can run on an unclocked block. */
++	ret = devm_request_threaded_irq(dev, lli->irq, exynos_mipi_lli_irq,
++					exynos_mipi_lli_threaded_irq,
++					IRQF_NO_AUTOEN, dev_name(dev), lli);
++	if (ret)
++		return dev_err_probe(dev, ret, "lli: link irq %d\n", lli->irq);
++
++	ret = mipi_lli_add_driver(lli);
++	if (ret)
++		return ret;
++
++	pr_info("Registered MIPI-LLI interface (allow_hw=%d)\n",
++		mipi_lli_hw_allowed());
++
++	return 0;
++}
++
++static const struct of_device_id exynos_mipi_lli_dt_match[] = {
++	{ .compatible = "samsung,exynos5433-mipi-lli" },
++	{},
++};
++/*
++ * No MODULE_DEVICE_TABLE on purpose: the module is never autoloaded from
++ * the DT node; it loads only by hand or as a dependency of the modem
++ * module (SYNTHESIS section 5, rule 15).
++ */
++
++static struct platform_driver exynos_mipi_lli_driver = {
++	.probe = exynos_mipi_lli_probe,
++	.driver = {
++		.name = "exynos-mipi-lli",
++		.of_match_table = exynos_mipi_lli_dt_match,
++		.dev_groups = mipi_lli_groups,
++		/* the LLI may be live: no unbind through sysfs, no remove */
++		.suppress_bind_attrs = true,
++	},
++};
++
++static int __init exynos_mipi_lli_driver_init(void)
++{
++	return platform_driver_register(&exynos_mipi_lli_driver);
++}
++module_init(exynos_mipi_lli_driver_init);
++/* No module_exit: the module cannot be unloaded while the link may be up. */
++
++MODULE_DESCRIPTION("Exynos5433 MIPI-LLI driver (SS333 modem link)");
++MODULE_AUTHOR("Yulgon Kim <yulgon.kim@samsung.com>");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/misc/mipi-lli/exynos-mipi-lli.h b/drivers/misc/mipi-lli/exynos-mipi-lli.h
+new file mode 100644
+index 000000000..6fe76caab
+--- /dev/null
++++ b/drivers/misc/mipi-lli/exynos-mipi-lli.h
+@@ -0,0 +1,254 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * exynos-mipi-lli.h - Exynos MIPI-LLI Header
++ *
++ * Copyright (c) 2013 Samsung Electronics Co., Ltd.
++ *		http://www.samsung.com/
++ *
++ * Port to Linux 6.12: register map unchanged; the 3.10 clock debug table
++ * (machine virtual addresses), the register dump table (now in
++ * exynos-mipi-lli.c) and the dev_err/dev_info/dev_dbg redefinitions (now
++ * pr_fmt "lli: ") are gone.
++ */
++
++#ifndef __DRIVERS_EXYNOS_MIPI_LLI_H
++#define __DRIVERS_EXYNOS_MIPI_LLI_H
++
++/* LLI Configuration System Register */
++#define CPIF_USER_REG0				(0x0000)
++#define CPIF_USER_REG1				(0x0004)
++#define CPIF_USER_REG2				(0x0008)
++#define CPIF_USER_REG3				(0x000C)
++#define CPIF_USER_REG4				(0x0010)
++#define CPIF_SFR_APB				(0x0010)
++#define CPIF_NOC_RCG_EN				(0x0200)
++#define CPIF_XIU_TOP_RCG_EN			(0x0204)
++#define CPIF_AXI_US_RCG_EN			(0x0208)
++#define CPIF_XIU_ASYNC_RCG_EN			(0x020C)
++#define CPIF_EMA_RA1_HD_CON			(0x0300)
++#define CPIF_EMA_RA1_HS_CON			(0x0304)
++#define CPIF_EMA_RA2_HD_CON			(0x0308)
++#define CPIF_EMA_RF1_HD_CON			(0x0310)
++#define CPIF_EMA_RF1_HS_CON			(0x0314)
++#define CPIF_EMA_RF2_HD_CON			(0x0318)
++#define CPIF_EMA_RF2_HS_CON			(0x031C)
++#define CPIF_EMA_CON				(0x0330)
++#define CPIF_WRITE_ASSIST			(0x0400)
++#define CPIF_LLI_SIG_IN0			(0x1000)
++#define CPIF_LLI_SIG_IN1			(0x1004)
++#define CPIF_LLI_SIG_OUT0			(0x1008)
++#define CPIF_LLI_SIG_OUT1			(0x100C)
++#define CPIF_LLI_DBG_SIG_OUT0			(0x1010)
++#define CPIF_LLI_DBG_SIG_OUT1			(0x1014)
++#define CPIF_LLI_SCRAMBLE			(0x1020)
++#define CPIF_LLI_SIG_INT_MASK0			(0x1030)
++#define CPIF_LLI_SIG_INT_MASK1			(0x1034)
++#define CPIF_LLI_WAKEUP				(0x1038)
++#define CPIF_LLI				(0x1040)
++
++/* LLI PA Configuration Attributes */
++#define EXYNOS_PA_TX_COUNT			(0x000)
++#define EXYNOS_PA_RX_COUNT			(0x004)
++#define EXYNOS_PA_MK0_INSERTION_ENABLE		(0x100)
++#define EXYNOS_PA_WT_START_VALUE		(0x104)
++#define EXYNOS_PA_PHIT_ERROR_COUNTER		(0x108)
++#define EXYNOS_PA_PHIT_RECEIVE_COUNT_ENABLE	(0x10c)
++#define EXYNOS_PA_PHIT_ERR_COUNT_ENABLE		(0x110)
++#define EXYNOS_PA_PHIT_RECEIVE_COUNTER_LSB	(0x114)
++#define EXYNOS_PA_PHIT_RECEIVE_COUNTER_MSB	(0x118)
++#define EXYNOS_PA_PHIT_CLEAR_COUNTER		(0x11c)
++#define EXYNOS_PA_ACTIVE_TX_COUNT		(0x120)
++#define EXYNOS_PA_ACTIVE_RX_COUNT		(0x124)
++#define EXYNOS_PA_CONFIG_UPDATE			(0x128)
++#define EXYNOS_PA_MIN_SAVE_CONFIG		(0x12c)
++#define EXYNOS_PA_WORSTCASE_RTT			(0x130)
++#define EXYNOS_PA_DRIVE_TACTIVATE_DURATION	(0x134)
++#define EXYNOS_PA_CSA_PA_STATUS			(0x138)
++#define EXYNOS_PA_CSA_PA_SET			(0x13c)
++#define EXYNOS_PA_CSA_PA_CLR			(0x140)
++#define EXYNOS_PA_PHYTESTCONFIG			(0x148)
++#define EXYNOS_PA_PHYTESTRESULT0		(0x14c)
++#define EXYNOS_PA_PHYTESTRESULT1		(0x150)
++#define EXYNOS_PA_PHYTESTRESULT2		(0x154)
++#define EXYNOS_PA_PHYTESTRESULT3		(0x158)
++#define EXYNOS_PA_PHYTESTRESULT4		(0x15C)
++#define EXYNOS_PA_PHYTESTRESULT5		(0x160)
++#define EXYNOS_PA_PHYTESTRESULT6		(0x164)
++#define EXYNOS_PA_PHYTESTRESULT7		(0x168)
++#define EXYNOS_PA_PHYTESTRESULT8		(0x16C)
++#define EXYNOS_PA_PHYTESTRESULT9		(0x170)
++#define EXYNOS_PA_PHYTESTRESULT10		(0x174)
++#define EXYNOS_PA_PHYTESTRESULT11		(0x178)
++
++/* LLI PA User Attributes */
++#define EXYNOS_PA_SYSTEM_CLK_PERIOD		(0x400)
++#define EXYNOS_PA_SLAVE_AUTOMOUNT		(0x404)
++#define EXYNOS_PA_MK0_CONTROL			(0x408)
++#define EXYNOS_PA_NACK_RTT			(0x40C)
++#define EXYNOS_PA_RETRY_BUFFER_SIZE		(0x410)
++#define EXYNOS_PA_SMART_BUFFER_ENABLE		(0x414)
++#define EXYNOS_PA_MPHY_OV_TM_ENABLE		(0x418)
++#define EXYNOS_PA_MPHY_CMN_ENABLE		(0x41C)
++#define EXYNOS_PA_USR_SCRAMBLER_ENABLE		(0x420)
++#define EXYNOS_PA_USR_SCRAMBLER_FLR_SEQUENCE	(0x424)
++
++/* LLI PA Debug Attributes */
++#define EXYNOS_PA_DBG_TACTIVATE_TIMEOUT_CNT	(0x500)
++#define EXYNOS_PA_DBG_MOUNT_FAIL_THLD		(0x504)
++#define EXYNOS_PA_DBG_SEQ_ERROR_INJECT		(0x508)
++#define EXYNOS_PA_DBG_CRC_ERROR_INJECT		(0x50C)
++#define EXYNOS_PA_DBG_CRC_ERROR_NACK_RTT	(0x510)
++#define EXYNOS_PA_DBG_PA_SIGNAL_STATUS		(0x514)
++#define EXYNOS_PA_DBG_RETRY_BUFFER_STATUS0	(0x518)
++#define EXYNOS_PA_DBG_RETRY_BUFFER_STATUS1	(0x51C)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT0		(0x520)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT1		(0x524)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT2		(0x528)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT3		(0x52C)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT4		(0x530)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT5		(0x534)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT6		(0x538)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT7		(0x53C)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT8		(0x540)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT9		(0x544)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT10		(0x548)
++#define EXYNOS_PA_DBG_TEST_BURST_CNT11		(0x54C)
++#define EXYNOS_PA_DBG_FREEZE_STATE		(0x550)
++#define EXYNOS_PA_DBG_RW_PA_STATE		(0x554)
++#define EXYNOS_PA_DBG_RW_MNT_STATE		(0x558)
++#define EXYNOS_PA_DBG_RW_PLU_STATE		(0x55C)
++#define EXYNOS_PA_DBG_RW_ROE_STATE		(0x560)
++#define EXYNOS_PA_DBG_RW_TEST_STATE		(0x564)
++#define EXYNOS_PA_DBG_RW_TX_STATE		(0x568)
++#define EXYNOS_PA_DBG_PA_BREAK_POINT_ENABLE	(0x56C)
++#define EXYNOS_PA_DBG_PA_BREAK_POINT_STATUS	(0x570)
++#define EXYNOS_PA_PA_DBG_RX_LATCH_MODE		(0x574)
++#define EXYNOS_PA_DBG_PHY_SIGNAL_STATUS		(0x580)
++#define EXYNOS_PA_DBG_TX0_BURST_MK0_COUNT	(0x584)
++#define EXYNOS_PA_DBG_TX0_NACK_MK2_COUNT	(0x588)
++#define EXYNOS_PA_DBG_RX0_BURST_MK0_COUNT	(0x58C)
++#define EXYNOS_PA_DBG_RX0_NACK_MK2_COUNT	(0x590)
++#define EXYNOS_PA_DBG_RX0_SYMERROR_COUNT	(0x594)
++
++/* LLI Control Attributes */
++#define EXYNOS_DME_LL_INIT_PRESENT		(0x800)
++#define EXYNOS_DME_LL_TARG_PRESENT		(0x804)
++#define EXYNOS_DME_BE_INIT_PRESENT		(0x808)
++#define EXYNOS_DME_BE_TARG_PRESENT		(0x80C)
++#define EXYNOS_DME_SVC_TARG_PRESENT		(0x810)
++#define EXYNOS_DME_LL_TC_DISABLE		(0x900)
++#define EXYNOS_DME_BE_TC_DISABLE		(0x904)
++#define EXYNOS_DME_CSA_SYSTEM_STATUS		(0x908)
++#define EXYNOS_DME_CSA_SYSTEM_SET		(0x90C)
++#define EXYNOS_DME_CSA_SYSTEM_CLR		(0x910)
++#define EXYNOS_DME_TL_ADDRESS_MODE		(0x914)
++
++/* DME User Configuration Attributes */
++#define EXYNOS_DME_LLI_INFO			(0x1000)
++#define EXYNOS_DME_LLI_RESET			(0x1004)
++#define EXYNOS_DME_LLI_ROE_REQ			(0x1008)
++#define EXYNOS_DME_LLI_INTR_ENABLE		(0x100C)
++#define EXYNOS_DME_LLI_INTR_STATUS		(0x1010)
++#define EXYNOS_DME_LLI_TL_INTR_REASON		(0x1018)
++#define EXYNOS_DME_LLI_DL_INTR_REASON		(0x101C)
++#define EXYNOS_DME_LLI_PA_INTR_REASON		(0x1020)
++#define EXYNOS_DME_LLI_IAL_INTR_REASON0		(0x1024)
++#define EXYNOS_DME_LLI_IAL_INTR_REASON1		(0x1028)
++
++/* DME User Debug Attributes */
++#define EXYNOS_DME_DBG_DME_STATE		(0x1090)
++#define EXYNOS_DME_DBG_DME_AUTO_RESET		(0x1094)
++
++/* IAL User config Attributes */
++#define EXYNOS_IAL_LL_SNF_FIFO			(0x1100)
++#define EXYNOS_IAL_BE_SNF_FIFO			(0x1104)
++#define EXYNOS_IAL_LL_TARG_ADDR_REMAP		(0x1108)
++#define EXYNOS_IAL_BE_TARG_ADDR_REMAP		(0x110C)
++#define EXYNOS_IAL_LL_INIT_ADDR_REMAP		(0x1110)
++#define EXYNOS_IAL_BE_INIT_ADDR_REMAP		(0x1114)
++#define EXYNOS_IAL_LL_CMD_P_DEBUG		(0x1118)
++#define EXYNOS_IAL_BE_CMD_P_DEBUG		(0x111C)
++#define EXYNOS_IAL_LL_ORDID_BITS_SEL		(0x1120)
++#define EXYNOS_IAL_BE_ORDID_BITS_SEL		(0x1124)
++#define EXYNOS_IAL_TRAN_RTT_EN			(0x1128)
++#define EXYNOS_IAL_LL_TRAN_RTT_CNT		(0x112C)
++#define EXYNOS_IAL_BE_TRAN_RTT_CNT		(0x1130)
++#define EXYNOS_IAL_SVC_LOC_TRAN_RTT_CNT		(0x1134)
++#define EXYNOS_IAL_SVC_REM_TRAN_RTT_CNT		(0x1138)
++#define EXYNOS_IAL_LL_TRAN_CMD_REQ_CNT		(0x113C)
++#define EXYNOS_IAL_BE_TRAN_CMD_REQ_CNT		(0x1140)
++#define EXYNOS_IAL_OVERLAP_ADDR_CTRL_EN		(0x1144)
++
++/* DL User Config Attributes */
++#define EXYNOS_DL_CREDIT_THRESHOLD		(0x1200)
++
++/* DL User Debug Attributes */
++#define EXYNOS_DL_DBG_TX_CREDTIS		(0x1290)
++#define EXYNOS_DL_DBG_RX_BUFFER_SIZES		(0x1294)
++#define EXYNOS_DL_DBG_RX_BUFFER_VACANCIES	(0x1298)
++#define EXYNOS_DL_DBG_RX_RESIDUAL_CREDITS	(0x129C)
++#define EXYNOS_DL_DBG_SIGNAL_STATUS		(0x12A0)
++
++/* TL Signaling Configuration Attributes */
++#define EXYNOS_TL_SIGNAL_REG_NUM		(0x2000)
++#define EXYNOS_TL_SIGNAL_STATUS_LSB		(0x2004)
++#define EXYNOS_TL_SIGNAL_SET_LSB		(0x2008)
++#define EXYNOS_TL_SIGNAL_CLR_LSB		(0x200C)
++#define EXYNOS_TL_SIGNAL_STATUS_MSB		(0x2010)
++#define EXYNOS_TL_SIGNAL_SET_MSB		(0x2014)
++#define EXYNOS_TL_SIGNAL_CLR_MSB		(0x2018)
++
++/* TL Debug Signaling Configuration Attributes */
++#define EXYNOS_TL_DBG_SIGNAL_REG_NUM		(0x2800)
++#define EXYNOS_TL_DBG_SIGNAL_STATUS_LSB		(0x2804)
++#define EXYNOS_TL_DBG_SIGNAL_SET_LSB		(0x2808)
++#define EXYNOS_TL_DBG_SIGNAL_CLR_LSB		(0x280C)
++#define EXYNOS_TL_DBG_SIGNAL_STATUS_MSB		(0x2810)
++#define EXYNOS_TL_DBG_SIGNAL_SET_MSB		(0x2814)
++#define EXYNOS_TL_DBG_SIGNAL_CLR_MSB		(0x2818)
++
++/* LLI DDB Attributes */
++#define EXYNOS_DDB_REVISION			(0x3C00)
++#define EXYNOS_DDB_LEVEL			(0x3C04)
++#define EXYNOS_DDB_DEVICE_CLASS			(0x3C08)
++#define EXYNOS_DDB_MANUFACTURER_ID		(0x3C0C)
++#define EXYNOS_DDB_PRODUCT_ID			(0x3C10)
++#define EXYNOS_DDB_LENGTH			(0x3C14)
++
++/* Bit fields */
++
++/* Global Configuration Register */
++#define INTR_TEST_MODE_EXIT			(1 << 17)
++#define INTR_TEST_MODE_ENTER			(1 << 16)
++#define INTR_SW_RESET_DONE			(1 << 15)
++#define INTR_MOUNT_FAIL				(1 << 14)
++#define INTR_RESET_ON_ERROR_SENT		(1 << 13)
++#define INTR_IAL_ERROR_INDICATION		(1 << 12)
++#define INTR_TL_ERROR_INDICATION		(1 << 11)
++#define INTR_DL_ERROR_INDICATION		(1 << 10)
++#define INTR_PA_ERROR_INDICATION		(1 << 9)
++#define INTR_PA_PLU_DONE			(1 << 8)
++#define INTR_PA_PLU_DETECTED			(1 << 7)
++#define INTR_MPHY_HIBERN8_EXIT_DONE		(1 << 6)
++#define INTR_MPHY_HIBERN8_ENTER_DONE		(1 << 5)
++#define INTR_LINK_UPDATE_CONFIG_DONE		(1 << 4)
++#define INTR_RESET_ON_ERROR_CLEARED_BY_HW	(1 << 3)
++#define INTR_RESET_ON_ERROR_DETECTED		(1 << 2)
++#define INTR_LLI_UNMOUNT_DONE			(1 << 1)
++#define INTR_LLI_MOUNT_DONE			(1 << 0)
++
++#define RESET_ON_ERROR_DETECTED			(1 << 3)
++#define LLI_MOUNT_CTRL				(1 << 2)
++#define MASTER_NOT_SLAVE			(1 << 1)
++#define LLI_MOUNTED				(1 << 0)
++
++#define LLI_REMAP_BASE_ADDR_SHIFT		(8)
++#define LLI_REMAP_ENABLE			(1 << 7)
++
++#define CSA_AUTO_MODE				(1 << 0)
++#define CSA_LINKUPDATECONFIG			(1 << 1)
++#define CSA_TESTMODE				(1 << 2)
++#define CSA_PA_HIBERNATE			(1 << 3)
++#define CSA_PA_PLU_RECEIVED			(1 << 4)
++
++#endif /* __DRIVERS_EXYNOS_MIPI_LLI_H */
+diff --git a/drivers/misc/mipi-lli/mipi-lli.c b/drivers/misc/mipi-lli/mipi-lli.c
+new file mode 100644
+index 000000000..ec11f7b89
+--- /dev/null
++++ b/drivers/misc/mipi-lli/mipi-lli.c
+@@ -0,0 +1,827 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * MIPI-LLI driver
++ *
++ * Copyright (C) 2013 Samsung Electronics Co.Ltd
++ * Author: Yulgon Kim <yulgon.kim@samsung.com>
++ *
++ * Port to Linux 6.12 for the SS333 modem link of the SM-T715
++ * (research/modem/research/analysis/kernel_port_design.md section 2.2):
++ *  - the exported API keeps the 3.10 prototypes; every call is safe
++ *    before the driver is bound;
++ *  - the shared memory is a DT reserved-memory region owned by the
++ *    controller driver; nothing is mapped here any more (3.10
++ *    mipi_lli_vmap and the store commands 5/6/98/99 are gone);
++ *  - allow_hw (default 0) gates every hardware access: with 0 nothing
++ *    turns a clock on or touches an LLI, M-PHY or PMU register;
++ *  - lli_control keeps its show format, the loader polls it;
++ *  - debugfs mipi-lli/{status,hw_init,reset} for the bring-up gates.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/interrupt.h>
++#include <linux/irq.h>
++#include <linux/jiffies.h>
++#include <linux/kstrtox.h>
++#include <linux/mipi-lli.h>
++#include <linux/module.h>
++#include <linux/ratelimit.h>
++#include <linux/seq_file.h>
++#include <linux/sysfs.h>
++#include <linux/wait.h>
++
++static struct mipi_lli *g_lli;
++
++static bool allow_hw;
++module_param(allow_hw, bool, 0644);
++MODULE_PARM_DESC(allow_hw,
++	"Allow LLI clock, register and PMU access (default 0: the driver binds but never touches the hardware)");
++
++static bool lli_debug_cmds;
++module_param(lli_debug_cmds, bool, 0644);
++MODULE_PARM_DESC(lli_debug_cmds,
++	"Accept lli_control commands 1 (re-init), 2 (master), 3 (mount); also needs allow_hw=1");
++
++static unsigned int sig_irq_storm_limit = 10000;
++module_param(sig_irq_storm_limit, uint, 0644);
++MODULE_PARM_DESC(sig_irq_storm_limit,
++	"Signal (SPI 185) interrupts per second above which the IRQ is disabled until mipi_lli_enable_irq() or a reset (0: no guard)");
++
++static struct mipi_lli *lli_get(void)
++{
++	/* Pairs with smp_store_release() in mipi_lli_add_driver(). */
++	return smp_load_acquire(&g_lli);
++}
++
++/**
++ * mipi_lli_hw_allowed - may the MIPI-LLI and modem drivers touch hardware
++ *
++ * Returns the allow_hw module parameter.
++ */
++bool mipi_lli_hw_allowed(void)
++{
++	return READ_ONCE(allow_hw);
++}
++EXPORT_SYMBOL(mipi_lli_hw_allowed);
++
++/* Explicit actions need allow_hw=1 and the clocks on. */
++static bool lli_hw_usable(struct mipi_lli *lli)
++{
++	return lli && mipi_lli_hw_allowed() && mipi_lli_clks_on(lli);
++}
++
++/*
++ * hw_init: clocks on (once), PMU LLI_PHY_CON = 1, LLI interrupts masked and
++ * cleared, IRQs enabled.  Process context only, under hw_mutex.
++ */
++static int mipi_lli_hw_init_locked(struct mipi_lli *lli)
++{
++	lockdep_assert_held(&lli->hw_mutex);
++
++	if (!mipi_lli_hw_allowed())
++		return -EPERM;
++	if (lli->hw_init_done)
++		return 0;
++
++	return lli->driver->hw_init(lli);
++}
++
++static int mipi_lli_hw_init(struct mipi_lli *lli)
++{
++	int ret;
++
++	might_sleep();
++
++	mutex_lock(&lli->hw_mutex);
++	ret = mipi_lli_hw_init_locked(lli);
++	mutex_unlock(&lli->hw_mutex);
++
++	return ret;
++}
++
++/* allow_hw=1 and hw_init done (runs it, and may sleep, if not). */
++static int lli_prepare_hw(struct mipi_lli *lli)
++{
++	if (!mipi_lli_hw_allowed())
++		return -EPERM;
++	/* Pairs with smp_store_release() at the end of hw_init. */
++	if (smp_load_acquire(&lli->hw_init_done))
++		return 0;
++
++	return mipi_lli_hw_init(lli);
++}
++
++static void lli_refused(struct mipi_lli *lli, const char *what, int err)
++{
++	dev_warn_ratelimited(lli->dev, "lli: %s refused (%d): allow_hw=%d hw_init=%d\n",
++			     what, err, mipi_lli_hw_allowed(), lli->hw_init_done);
++}
++
++/*
++ * Explicit soft reset (mipi_lli_reset, debugfs reset, lli_control 1).  Process
++ * context, hw_init done.  Starts a new interlock round (reset_done and
++ * remap_ok cleared until its SW_RESET_DONE), re-arms the
++ * RESET_ON_ERROR_SENT limiter and re-enables an IRQ the storm guards
++ * disabled.
++ */
++static void lli_do_reset(struct mipi_lli *lli)
++{
++	unsigned long flags;
++
++	WRITE_ONCE(lli->reset_done, false);
++	WRITE_ONCE(lli->remap_ok, false);
++	WRITE_ONCE(lli->roe_stopped, false);
++	WRITE_ONCE(lli->roe_resets, 0);
++
++	if (READ_ONCE(lli->irq_storm_off)) {
++		WRITE_ONCE(lli->irq_storm_off, false);
++		enable_irq(lli->irq);
++	}
++
++	spin_lock_irqsave(&lli->lock, flags);
++	if (lli->sig_storm_off && !lli->sig_irq_active) {
++		lli->sig_storm_off = false;
++		enable_irq(lli->irq_sig);
++		lli->sig_irq_active = true;
++	}
++	spin_unlock_irqrestore(&lli->lock, flags);
++
++	lli->driver->init(lli);
++
++	atomic_set(&lli->mnt_cnt, 0);
++}
++
++/**
++ * mipi_lli_remap_ok - mount interlock state
++ *
++ * True when the last SW_RESET_DONE wrote the link settings and read back
++ * the expected IAL_LL/BE_INIT_ADDR_REMAP and LLI_PHY_CON; cleared by every
++ * reset.  The LLI driver accepts a mount only while it holds.
++ */
++bool mipi_lli_remap_ok(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	return lli && READ_ONCE(lli->remap_ok);
++}
++EXPORT_SYMBOL(mipi_lli_remap_ok);
++
++/**
++ * mipi_lli_wait_reset_done - wait for the SW_RESET_DONE of the last reset
++ * @timeout_ms: how long to wait
++ *
++ * For the modem driver, which must release CP_RESET only after this.
++ * Sleeps.  Returns 0 if a SW_RESET_DONE was handled since the last
++ * mipi_lli_reset() and remap_ok holds, -EIO if it was handled but the
++ * readback failed, -ETIMEDOUT if none came, -ENODEV if not bound.
++ */
++int mipi_lli_wait_reset_done(unsigned int timeout_ms)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli)
++		return -ENODEV;
++
++	might_sleep();
++
++	/* Pairs with smp_store_release() in the SW_RESET_DONE handler. */
++	wait_event_timeout(lli->reset_wq, smp_load_acquire(&lli->reset_done),
++			   msecs_to_jiffies(timeout_ms));
++	if (!smp_load_acquire(&lli->reset_done))
++		return -ETIMEDOUT;
++
++	return READ_ONCE(lli->remap_ok) ? 0 : -EIO;
++}
++EXPORT_SYMBOL(mipi_lli_wait_reset_done);
++
++/**
++ * mipi_lli_get_phys_base
++ *
++ * Returns physical base address, 0 while the driver is not bound.
++ */
++unsigned long mipi_lli_get_phys_base(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	/* The probe refuses a region that does not end below 4 GiB. */
++	return lli ? (unsigned long)lli->phy_addr : 0;
++}
++EXPORT_SYMBOL(mipi_lli_get_phys_base);
++
++/**
++ * mipi_lli_get_phys_size
++ *
++ * Returns phys address size, 0 while the driver is not bound.
++ */
++unsigned long mipi_lli_get_phys_size(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	return lli ? (unsigned long)lli->shdmem_size : 0;
++}
++EXPORT_SYMBOL(mipi_lli_get_phys_size);
++
++/**
++ * mipi_lli_suspended
++ *
++ * Returns mipi_lli_is_suspended.
++ */
++int mipi_lli_suspended(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	return lli ? lli->is_suspended : 0;
++}
++EXPORT_SYMBOL(mipi_lli_suspended);
++
++/**
++ * mipi_lli_get_link_status
++ *
++ * Returns mipi_lli_link_status.
++ */
++int mipi_lli_get_link_status(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	return lli ? atomic_read(&lli->state) : LLI_UNMOUNTED;
++}
++EXPORT_SYMBOL(mipi_lli_get_link_status);
++
++/**
++ * mipi_lli_set_link_status
++ * @state: enum mipi_lli_link_status
++ *
++ * Returns 0, -ENODEV while the driver is not bound.
++ */
++int mipi_lli_set_link_status(int state)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli)
++		return -ENODEV;
++
++	atomic_set(&lli->state, state);
++
++	return 0;
++}
++EXPORT_SYMBOL(mipi_lli_set_link_status);
++
++/**
++ * mipi_lli_register_handler
++ * @handler: callback function when signal interrupt is occured.
++ * @data: parameter when handler is callbacked.
++ *
++ * Returns 0 on success, -EINVAL without handler, -ENODEV while the driver
++ * is not bound.
++ */
++int mipi_lli_register_handler(void (*handler)(void *, u32), void *data)
++{
++	struct mipi_lli *lli = lli_get();
++	unsigned long flags;
++
++	if (!handler)
++		return -EINVAL;
++	if (!lli)
++		return -ENODEV;
++
++	/* Register interrupt handler */
++	spin_lock_irqsave(&lli->lock, flags);
++	lli->hd.data = data;
++	lli->hd.handler = handler;
++	spin_unlock_irqrestore(&lli->lock, flags);
++
++	return 0;
++}
++EXPORT_SYMBOL(mipi_lli_register_handler);
++
++/**
++ * mipi_lli_unregister_handler
++ * @handler: callback function when signal interrupt is occured.
++ *
++ * Returns 0 on success, -EINVAL otherwise.
++ */
++int mipi_lli_unregister_handler(void (*handler)(void *, u32))
++{
++	struct mipi_lli *lli = lli_get();
++	unsigned long flags;
++	int ret = 0;
++
++	if (!handler || !lli)
++		return -EINVAL;
++
++	/* Unregister interrupt handler */
++	spin_lock_irqsave(&lli->lock, flags);
++	if (lli->hd.handler != handler) {
++		ret = -EINVAL;
++	} else {
++		lli->hd.data = NULL;
++		lli->hd.handler = NULL;
++	}
++	spin_unlock_irqrestore(&lli->lock, flags);
++
++	return ret;
++}
++EXPORT_SYMBOL(mipi_lli_unregister_handler);
++
++/**
++ * mipi_lli_send_interrupt - sending sideband signal.
++ * @cmd: Send interrupt command
++ *
++ * Does nothing with allow_hw=0 or before hw_init.
++ */
++void mipi_lli_send_interrupt(u32 cmd)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->send_signal(lli, cmd);
++}
++EXPORT_SYMBOL(mipi_lli_send_interrupt);
++
++/**
++ * mipi_lli_reset_interrupt - Clear all sideband signal.
++ */
++void mipi_lli_reset_interrupt(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->reset_signal(lli);
++}
++EXPORT_SYMBOL(mipi_lli_reset_interrupt);
++
++/**
++ * mipi_lli_read_interrupt - reading sideband signal.
++ *
++ * Returns a sideband signal bit that generated by CP (0 without hardware
++ * access).
++ */
++u32 mipi_lli_read_interrupt(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return 0;
++
++	return lli->driver->read_signal(lli);
++}
++EXPORT_SYMBOL(mipi_lli_read_interrupt);
++
++/**
++ * mipi_lli_debug_info - Print debugging information for LLI.
++ */
++void mipi_lli_debug_info(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->debug_info(lli);
++}
++EXPORT_SYMBOL(mipi_lli_debug_info);
++
++/**
++ * mipi_lli_reset - Reset all resource for the first mount
++ *
++ * Needs allow_hw=1; runs hw_init first if needed, and may then sleep.
++ */
++void mipi_lli_reset(void)
++{
++	struct mipi_lli *lli = lli_get();
++	int ret;
++
++	if (!lli)
++		return;
++
++	ret = lli_prepare_hw(lli);
++	if (ret) {
++		lli_refused(lli, "reset", ret);
++		return;
++	}
++
++	lli_do_reset(lli);
++}
++EXPORT_SYMBOL(mipi_lli_reset);
++
++/**
++ * mipi_lli_reload - Reload all resource for re-init
++ *
++ * Atomic context (modem_v1 calls it under a spinlock): never runs hw_init,
++ * does nothing before it.
++ */
++void mipi_lli_reload(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->init(lli);
++}
++EXPORT_SYMBOL(mipi_lli_reload);
++
++static ssize_t lli_control_show(struct device *dev,
++				struct device_attribute *attr, char *buf)
++{
++	struct mipi_lli *lli = dev_get_drvdata(dev);
++
++	/* Exact 3.10 format: the loader polls for "MIPI-LLI 1". */
++	return sysfs_emit(buf, "MIPI-LLI %x\n", lli->driver->get_status(lli));
++}
++
++/*
++ * 0 = debug dump (allow_hw=1 and hw_init done).  1 = re-init, 2 = set
++ * master, 3 = mount: only with lli_debug_cmds=1 and allow_hw=1, never during
++ * a CP session (SYNTHESIS section 5, rule 8).  Store commands 4, 5, 6, 98 and
++ * 99 of 3.10 are gone.
++ */
++static ssize_t lli_control_store(struct device *dev,
++				 struct device_attribute *attr,
++				 const char *buf, size_t count)
++{
++	struct mipi_lli *lli = dev_get_drvdata(dev);
++	int command, ret = 0;
++
++	if (kstrtoint(buf, 10, &command))
++		return -EINVAL;
++
++	if (!mipi_lli_hw_allowed() ||
++	    (command != 0 && !READ_ONCE(lli_debug_cmds))) {
++		dev_err(dev, "lli: lli_control %d refused: allow_hw=%d lli_debug_cmds=%d\n",
++			command, mipi_lli_hw_allowed(), READ_ONCE(lli_debug_cmds));
++		return -EPERM;
++	}
++
++	mutex_lock(&lli->hw_mutex);
++
++	switch (command) {
++	case 0:
++		if (mipi_lli_clks_on(lli))
++			lli->driver->debug_info(lli);
++		else
++			ret = -EAGAIN;
++		break;
++	case 1:
++		ret = mipi_lli_hw_init_locked(lli);
++		if (!ret)
++			lli_do_reset(lli);
++		break;
++	case 2:
++		ret = mipi_lli_hw_init_locked(lli);
++		if (!ret)
++			lli->driver->set_master(lli, true);
++		break;
++	case 3:
++		ret = mipi_lli_hw_init_locked(lli);
++		if (!ret)
++			ret = lli->driver->link_startup_mount(lli);
++		break;
++	default:
++		dev_err(dev, "Un-support control command\n");
++		ret = -EINVAL;
++		break;
++	}
++
++	mutex_unlock(&lli->hw_mutex);
++
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_RW(lli_control);
++
++static struct attribute *mipi_lli_attrs[] = {
++	&dev_attr_lli_control.attr,
++	NULL,
++};
++
++static const struct attribute_group mipi_lli_group = {
++	.attrs = mipi_lli_attrs,
++};
++
++const struct attribute_group *mipi_lli_groups[] = {
++	&mipi_lli_group,
++	NULL,
++};
++
++static irqreturn_t mipi_lli_sig_irq(int irq, void *_dev)
++{
++	struct mipi_lli *lli = _dev;
++	struct mipi_lli_ipc_handler hd;
++	u32 intr;
++
++	/* Enabled only by hw_init; never read an unclocked block. */
++	if (!mipi_lli_clks_on(lli))
++		return IRQ_NONE;
++
++	atomic_inc(&lli->irq_sig_count);
++
++	intr = lli->driver->read_signal(lli);
++
++	if (mipi_lli_irq_storm(&lli->sig_window, &lli->sig_window_cnt,
++			       READ_ONCE(sig_irq_storm_limit))) {
++		spin_lock(&lli->lock);
++		if (lli->sig_irq_active) {
++			disable_irq_nosync(irq);
++			lli->sig_irq_active = false;
++			lli->sig_storm_off = true;
++		}
++		spin_unlock(&lli->lock);
++		dev_err(lli->dev, "lli: irq storm: more than %u signal interrupts in 1 s, irq disabled\n",
++			READ_ONCE(sig_irq_storm_limit));
++		return IRQ_HANDLED;
++	}
++
++	spin_lock(&lli->lock);
++	hd = lli->hd;
++	spin_unlock(&lli->lock);
++
++	if (hd.handler)
++		hd.handler(hd.data, intr);
++
++	return IRQ_HANDLED;
++}
++
++/* Quiesce: allowed whenever the IRQ could be enabled. */
++void mipi_lli_disable_irq(void)
++{
++	struct mipi_lli *lli = lli_get();
++	unsigned long flags;
++
++	if (!lli)
++		return;
++
++	spin_lock_irqsave(&lli->lock, flags);
++
++	if (lli->sig_irq_active) {
++		disable_irq_nosync(lli->irq_sig);
++		lli->sig_irq_active = false;
++	}
++
++	spin_unlock_irqrestore(&lli->lock, flags);
++}
++EXPORT_SYMBOL(mipi_lli_disable_irq);
++
++void mipi_lli_enable_irq(void)
++{
++	struct mipi_lli *lli = lli_get();
++	unsigned long flags;
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	spin_lock_irqsave(&lli->lock, flags);
++
++	if (!lli->sig_irq_active) {
++		enable_irq(lli->irq_sig);
++		lli->sig_irq_active = true;
++		lli->sig_storm_off = false;
++	}
++
++	spin_unlock_irqrestore(&lli->lock, flags);
++}
++EXPORT_SYMBOL(mipi_lli_enable_irq);
++
++/**
++ * mipi_lli_intr_enable
++ *
++ * Needs allow_hw=1; runs hw_init first if needed, and may then sleep.
++ */
++void mipi_lli_intr_enable(void)
++{
++	struct mipi_lli *lli = lli_get();
++	int ret;
++
++	if (!lli)
++		return;
++
++	ret = lli_prepare_hw(lli);
++	if (ret) {
++		lli_refused(lli, "intr_enable", ret);
++		return;
++	}
++
++	lli->driver->intr_enable(lli);
++}
++EXPORT_SYMBOL(mipi_lli_intr_enable);
++
++/**
++ * mipi_lli_intr_disable
++ *
++ * Quiesce: allowed whenever the clocks are on, does nothing otherwise.
++ */
++void mipi_lli_intr_disable(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli || !mipi_lli_clks_on(lli))
++		return;
++
++	lli->driver->intr_disable(lli);
++}
++EXPORT_SYMBOL(mipi_lli_intr_disable);
++
++/*
++ * mipi_lli_suspend must call by modem_if.
++ */
++void mipi_lli_suspend(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->suspend(lli);
++}
++EXPORT_SYMBOL(mipi_lli_suspend);
++
++/*
++ * mipi_lli_resume must call by modem_if.
++ */
++void mipi_lli_resume(void)
++{
++	struct mipi_lli *lli = lli_get();
++
++	if (!lli_hw_usable(lli))
++		return;
++
++	lli->driver->resume(lli);
++}
++EXPORT_SYMBOL(mipi_lli_resume);
++
++/* --- debugfs ------------------------------------------------------------ */
++
++static const char *lli_state_name(int state)
++{
++	switch (state) {
++	case LLI_UNMOUNTED:	return "LLI_UNMOUNTED";
++	case LLI_MOUNTED:	return "LLI_MOUNTED";
++	case LLI_WAITFORMOUNT:	return "LLI_WAITFORMOUNT";
++	default:		return "?";
++	}
++}
++
++static void lli_show_irq(struct seq_file *s, const char *name, int irq,
++			 atomic_t *count)
++{
++	struct irq_data *d = irq_get_irq_data(irq);
++	unsigned long hwirq = d ? irqd_to_hwirq(d) : 0;
++
++	/* GIC: hwirq = SPI number + 32 */
++	seq_printf(s, "irq %s (GIC SPI %lu, virq %d): %d\n", name,
++		   hwirq >= 32 ? hwirq - 32 : hwirq, irq, atomic_read(count));
++}
++
++static int lli_status_show(struct seq_file *s, void *unused)
++{
++	struct mipi_lli *lli = s->private;
++	int state = atomic_read(&lli->state);
++
++	mutex_lock(&lli->hw_mutex);
++
++	seq_printf(s, "allow_hw: %d\n", mipi_lli_hw_allowed());
++	seq_printf(s, "lli_debug_cmds: %d\n", READ_ONCE(lli_debug_cmds));
++	seq_printf(s, "hw_init: %s\n", lli->hw_init_done ? "done" : "not done");
++	seq_printf(s, "clocks: %s\n", mipi_lli_clks_on(lli) ? "on" : "off");
++	seq_printf(s, "link: %s (%d)\n", lli_state_name(state), state);
++	seq_printf(s, "shmem: %pa size %pa, remap 0x%08x\n",
++		   &lli->phy_addr, &lli->shdmem_size, lli->remap_addr);
++	seq_printf(s, "remap_ok: %d (reset_done %d; last readback LL 0x%08x BE 0x%08x LLI_PHY_CON 0x%x)\n",
++		   READ_ONCE(lli->remap_ok), READ_ONCE(lli->reset_done),
++		   lli->remap_ll_rb, lli->remap_be_rb, lli->pmu_rb);
++	seq_printf(s, "mount: ok %d fail %d roe %d pa_err %d%s\n",
++		   lli->mnt_ok, lli->mnt_fail, lli->roe_cnt, lli->pa_err_cnt,
++		   READ_ONCE(lli->roe_stopped) ? " (error soft reset stopped)" : "");
++	lli_show_irq(s, "lli", lli->irq, &lli->irq_count);
++	lli_show_irq(s, "signal", lli->irq_sig, &lli->irq_sig_count);
++	seq_printf(s, "storm guard: lli %s, signal %s\n",
++		   READ_ONCE(lli->irq_storm_off) ? "tripped" : "ok",
++		   READ_ONCE(lli->sig_storm_off) ? "tripped" : "ok");
++
++	/* Registers only with the clocks on (hw_init done). */
++	lli->driver->status_show(lli, s, mipi_lli_clks_on(lli));
++	if (!mipi_lli_clks_on(lli))
++		seq_puts(s, "registers: not read (clocks off)\n");
++
++	mutex_unlock(&lli->hw_mutex);
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(lli_status);
++
++static int lli_debugfs_trigger(const char __user *ubuf, size_t count)
++{
++	bool val;
++	int ret;
++
++	ret = kstrtobool_from_user(ubuf, count, &val);
++	if (ret)
++		return ret;
++
++	return val ? 0 : -EINVAL;
++}
++
++/* echo 1 > hw_init: clocks on, PMU LLI_PHY_CON = 1, IRQs on.  allow_hw=1. */
++static ssize_t lli_hw_init_write(struct file *file, const char __user *ubuf,
++				 size_t count, loff_t *ppos)
++{
++	struct mipi_lli *lli = file->private_data;
++	int ret;
++
++	ret = lli_debugfs_trigger(ubuf, count);
++	if (ret)
++		return ret;
++	if (!mipi_lli_hw_allowed())
++		return -EPERM;
++
++	ret = mipi_lli_hw_init(lli);
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations lli_hw_init_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= lli_hw_init_write,
++	.llseek	= noop_llseek,
++};
++
++/*
++ * echo 1 > reset: hw_init + intr_enable + soft reset, i.e. what modem_v1's
++ * ld->reset does, without the CP power sequence.  allow_hw=1.  Gate G3:
++ * run it with the CP held in reset, then read the remap registers back in
++ * status.
++ */
++static ssize_t lli_reset_write(struct file *file, const char __user *ubuf,
++			       size_t count, loff_t *ppos)
++{
++	struct mipi_lli *lli = file->private_data;
++	int ret;
++
++	ret = lli_debugfs_trigger(ubuf, count);
++	if (ret)
++		return ret;
++	if (!mipi_lli_hw_allowed())
++		return -EPERM;
++
++	mutex_lock(&lli->hw_mutex);
++	ret = mipi_lli_hw_init_locked(lli);
++	if (!ret) {
++		dev_info(lli->dev, "lli: debugfs reset\n");
++		lli->driver->intr_enable(lli);
++		lli_do_reset(lli);
++	}
++	mutex_unlock(&lli->hw_mutex);
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations lli_reset_fops = {
++	.owner	= THIS_MODULE,
++	.open	= simple_open,
++	.write	= lli_reset_write,
++	.llseek	= noop_llseek,
++};
++
++static void mipi_lli_debugfs_init(struct mipi_lli *lli)
++{
++	lli->debugfs = debugfs_create_dir("mipi-lli", NULL);
++	debugfs_create_file("status", 0400, lli->debugfs, lli, &lli_status_fops);
++	debugfs_create_file("hw_init", 0200, lli->debugfs, lli, &lli_hw_init_fops);
++	debugfs_create_file("reset", 0200, lli->debugfs, lli, &lli_reset_fops);
++}
++
++/*
++ * Called at the end of the controller probe.  No hardware access: the
++ * signal IRQ is requested disabled (IRQF_NO_AUTOEN) and only hw_init
++ * enables it.
++ */
++int mipi_lli_add_driver(struct mipi_lli *lli)
++{
++	struct device *dev = lli->dev;
++	int ret;
++
++	if (lli_get())
++		return -EBUSY;
++
++	ret = devm_request_irq(dev, lli->irq_sig, mipi_lli_sig_irq,
++			       IRQF_NO_AUTOEN, dev_name(dev), lli);
++	if (ret)
++		return dev_err_probe(dev, ret, "signal irq %d\n", lli->irq_sig);
++	lli->sig_irq_active = false;
++
++	dev_info(dev, "share IPC memory phys = %pa, size = %pa\n",
++		 &lli->phy_addr, &lli->shdmem_size);
++
++	dev_set_drvdata(dev, lli);
++	mipi_lli_debugfs_init(lli);
++
++	smp_store_release(&g_lli, lli);
++
++	return 0;
++}
+diff --git a/include/linux/mipi-lli.h b/include/linux/mipi-lli.h
+new file mode 100644
+index 000000000..7521d1ff2
+--- /dev/null
++++ b/include/linux/mipi-lli.h
+@@ -0,0 +1,221 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * MIPI-LLI driver
++ *
++ * Copyright (C) 2013 Samsung Electronics Co.Ltd
++ * Author: Yulgon Kim <yulgon.kim@samsung.com>
++ *
++ * Port to Linux 6.12 for the Exynos5433 / SS333 modem link of the SM-T715
++ * (32-bit LPAE kernel): the exported API keeps the 3.10 prototypes used by
++ * modem_v1; mipi_lli_get_pm_svc() is gone (no link PM FSM in this port)
++ * and mipi_lli_hw_allowed() is new.
++ */
++
++#ifndef __MIPI_LLI_H
++#define __MIPI_LLI_H
++
++#include <linux/atomic.h>
++#include <linux/jiffies.h>
++#include <linux/mutex.h>
++#include <linux/sizes.h>
++#include <linux/spinlock.h>
++#include <linux/types.h>
++#include <linux/wait.h>
++
++#define MIPI_LLI_RESERVE_SIZE SZ_8M
++
++enum mipi_lli_link_status {
++	LLI_UNMOUNTED,
++	LLI_MOUNTED,
++	LLI_WAITFORMOUNT,
++};
++
++struct attribute_group;
++struct clk_bulk_data;
++struct dentry;
++struct device;
++struct exynos_mphy;
++struct regmap;
++struct seq_file;
++
++struct mipi_lli_ipc_handler {
++	void *data;
++	void (*handler)(void *, u32);
++};
++
++struct mipi_lli_modem {
++	bool	scrambler;
++	bool	automode;
++};
++
++struct mipi_lli {
++	const struct lli_driver *driver;	/* hw-specific hooks */
++
++	struct mipi_lli_modem	modem_info;
++	struct clk_bulk_data	*clks;
++	int			num_clks;
++
++	int			irq;		/* link (DME) irq */
++	int			irq_sig;	/* TL signal (doorbell) irq */
++	bool			sig_irq_active;
++	bool			sb_mask_active; /* sideband signal mask active */
++	void __iomem		*regs;		/* PA/DME/IAL/DL/TL */
++	void __iomem		*remote_regs;	/* remote window, unused */
++	void __iomem		*sys_regs;	/* SYSREG_CPIF */
++	struct regmap		*pmu;		/* PMU syscon (LLI_PHY_CON) */
++	struct exynos_mphy	*mphy;
++
++	struct mutex		hw_mutex;	/* hw_init and explicit actions */
++	spinlock_t		lock;
++	struct device		*dev;
++	struct dentry		*debugfs;
++
++	phys_addr_t		phy_addr;	/* shared memory (memory-region) */
++	phys_addr_t		shdmem_size;
++	u32			remap_addr;	/* IAL_LL/BE_INIT_ADDR_REMAP */
++	atomic_t		state;
++	atomic_t		mnt_cnt;
++	bool			is_master;
++	bool			is_suspended;
++	bool			is_debug_possible;
++
++	/*
++	 * clks_enabled: the LLI clocks are on, so LLI/M-PHY registers may be
++	 * accessed.  Set only by hw_init, which needs allow_hw=1.
++	 */
++	bool			clks_enabled;
++	bool			hw_init_done;
++	bool			pa_err_6;
++
++	/*
++	 * Mount interlock, recomputed at every SW_RESET_DONE: remap_ok = the
++	 * settings were written and IAL_LL/BE_INIT_ADDR_REMAP read back
++	 * remap_addr and PMU LLI_PHY_CON reads 1.  LLI_MOUNT_CTRL is written
++	 * only while it holds.  reset_done: a SW_RESET_DONE was handled since
++	 * the last explicit reset (mipi_lli_reset and friends).
++	 */
++	bool			remap_ok;
++	bool			reset_done;
++	u32			remap_ll_rb;	/* last readbacks */
++	u32			remap_be_rb;
++	u32			pmu_rb;
++	wait_queue_head_t	reset_wq;
++
++	/* RESET_ON_ERROR_SENT soft-reset limiter */
++	unsigned long		roe_window;
++	unsigned int		roe_resets;
++	bool			roe_stopped;
++
++	/* IRQ storm guards (per second) */
++	unsigned long		irq_window;
++	unsigned int		irq_window_cnt;
++	bool			irq_storm_off;	/* link irq disabled by the guard */
++	unsigned long		sig_window;
++	unsigned int		sig_window_cnt;
++	bool			sig_storm_off;	/* signal irq disabled by the guard */
++
++	/* counters (statics in 3.10) */
++	int			mnt_ok;
++	int			mnt_fail;
++	int			roe_cnt;
++	int			pa_err_cnt;
++	atomic_t		irq_count;
++	atomic_t		irq_sig_count;
++
++	struct mipi_lli_ipc_handler hd;
++};
++
++struct lli_driver {
++	int	(*hw_init)(struct mipi_lli *lli);
++	int	(*init)(struct mipi_lli *lli);
++	int	(*set_master)(struct mipi_lli *lli, bool is_master);
++	int	(*link_startup_mount)(struct mipi_lli *lli);
++	int	(*get_status)(struct mipi_lli *lli);
++
++	int	(*send_signal)(struct mipi_lli *lli, u32 cmd);
++	int	(*reset_signal)(struct mipi_lli *lli);
++	int	(*read_signal)(struct mipi_lli *lli);
++	int	(*debug_info)(struct mipi_lli *lli);
++
++	int	(*intr_enable)(struct mipi_lli *lli);
++	int	(*intr_disable)(struct mipi_lli *lli);
++
++	int	(*suspend)(struct mipi_lli *lli);
++	int	(*resume)(struct mipi_lli *lli);
++
++	/* software state; registers too if @regs (clocks on) */
++	void	(*status_show)(struct mipi_lli *lli, struct seq_file *s, bool regs);
++};
++
++/* Inside the module only (between exynos-mipi-lli.c and mipi-lli.c). */
++int mipi_lli_add_driver(struct mipi_lli *lli);
++extern const struct attribute_group *mipi_lli_groups[];
++
++/*
++ * LLI/M-PHY registers may be accessed: the LLI clocks are on.  Only hw_init
++ * turns them on, and only with allow_hw=1.
++ */
++static inline bool mipi_lli_clks_on(const struct mipi_lli *lli)
++{
++	return READ_ONCE(lli->clks_enabled);
++}
++
++/* IRQ storm guard: more than @limit calls within 1 s?  (@limit 0: never.) */
++static inline bool mipi_lli_irq_storm(unsigned long *window, unsigned int *cnt,
++				      unsigned int limit)
++{
++	if (!limit)
++		return false;
++
++	if (time_after(jiffies, *window + HZ)) {
++		*window = jiffies;
++		*cnt = 0;
++	}
++
++	return ++(*cnt) > limit;
++}
++
++/*
++ * Exported API (modem_v1).  Every call is safe before the driver is bound
++ * (it does nothing, or returns 0 / LLI_UNMOUNTED); mipi_lli_get_phys_base()
++ * and mipi_lli_get_phys_size() return 0 until then, which callers use to
++ * defer their probe.  With the allow_hw module parameter at 0 no call
++ * touches the hardware.  mipi_lli_reset() and mipi_lli_intr_enable() may
++ * sleep the first time (they run hw_init) and mipi_lli_wait_reset_done()
++ * sleeps; every other call can be made from atomic context.
++ *
++ * Mount interlock: the driver accepts a CP mount (writes LLI_MOUNT_CTRL)
++ * only while mipi_lli_remap_ok(); after mipi_lli_reset(), the modem driver
++ * calls mipi_lli_wait_reset_done() and releases CP_RESET only on 0.
++ */
++extern unsigned long mipi_lli_get_phys_base(void);
++extern unsigned long mipi_lli_get_phys_size(void);
++
++extern int mipi_lli_get_link_status(void);
++extern int mipi_lli_set_link_status(int status);
++extern int mipi_lli_suspended(void);
++extern int mipi_lli_register_handler(void (*handler)(void *, u32), void *data);
++extern int mipi_lli_unregister_handler(void (*handler)(void *, u32));
++extern void mipi_lli_send_interrupt(u32 cmd);
++extern void mipi_lli_reset_interrupt(void);
++extern u32 mipi_lli_read_interrupt(void);
++extern void mipi_lli_debug_info(void);
++extern void mipi_lli_intr_enable(void);
++extern void mipi_lli_intr_disable(void);
++extern void mipi_lli_reset(void);
++extern void mipi_lli_reload(void);
++
++extern void mipi_lli_suspend(void);
++extern void mipi_lli_resume(void);
++
++extern void mipi_lli_disable_irq(void);
++extern void mipi_lli_enable_irq(void);
++
++extern bool mipi_lli_hw_allowed(void);
++extern bool mipi_lli_remap_ok(void);
++extern int mipi_lli_wait_reset_done(unsigned int timeout_ms);
++
++#define lli_err(dev, fmt, ...)	dev_err(dev, fmt, ##__VA_ARGS__)
++#define lli_info(dev, fmt, ...)	dev_info(dev, fmt, ##__VA_ARGS__)
++
++#endif /* __MIPI_LLI_H */

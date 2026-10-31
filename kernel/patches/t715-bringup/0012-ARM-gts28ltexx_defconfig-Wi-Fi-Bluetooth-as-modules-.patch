@@ -1,0 +1,140 @@
+From 7ba58ac33a747fbd49154c878961e320720a86f7 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 12/24] ARM: gts28ltexx_defconfig: Wi-Fi/Bluetooth as modules,
+ LPASS, debugfs
+
+- Radio drivers as modules, loaded after the initramfs watchdog guard
+  (a built-in probe that hangs loops the board through RECOVERY):
+  PCI_EXYNOS, CFG80211, BRCMFMAC, RFKILL, BT, BT_HCIUART (+BCM),
+  BT_RFCOMM (+TTY), BT_BNEP (+filters), BT_HIDP, SERIAL_SAMSUNG,
+  MFD_EXYNOS_LPASS (parent of UART3 and I2S0).
+- Built in: REGULATOR_FIXED_VOLTAGE, PHY_EXYNOS_PCIE, SERIAL_DEV_BUS
+  and its tty port controller.
+- Bring-up aids: MODULE_UNLOAD, DEBUG_FS.
+- gts28ltexx_m5.config emptied: its symbols live in the defconfig now,
+  as modules.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 30 +++++++++++++
+ arch/arm/configs/gts28ltexx_m5.config | 64 +++------------------------
+ 2 files changed, 37 insertions(+), 57 deletions(-)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index d62f62dec..92d75aa67 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -66,6 +66,7 @@ CONFIG_CMDLINE_EXTEND=y
+ CONFIG_VFP=y
+ CONFIG_NEON=y
+ CONFIG_MODULES=y
++CONFIG_MODULE_UNLOAD=y
+ CONFIG_NET=y
+ CONFIG_PACKET=y
+ CONFIG_UNIX=y
+@@ -231,3 +232,32 @@ CONFIG_INPUT_UINPUT=y
+ CONFIG_IIO=y
+ CONFIG_IIO_ST_LSM6DSX=y
+ CONFIG_YAMAHA_YAS530=y
++
++# Milestone 5, Wi-Fi and Bluetooth (BCM4358, docs/WIFI_BT_M5.md).  Every
++# driver that talks to the radios stays a MODULE, like panfrost: a
++# built-in probe that hangs (PCIe link training, firmware download) runs
++# before the initramfs watchdog guard and loops the board through
++# RECOVERY.  PCI_EXYNOS, CFG80211 and BRCMFMAC are already =m above.
++# The fixed-regulator driver and the PCIe PHY only map registers and
++# drive WLAN_EN at probe, so they are built in.
++CONFIG_REGULATOR_FIXED_VOLTAGE=y
++CONFIG_PHY_EXYNOS_PCIE=y
++CONFIG_RFKILL=m
++CONFIG_BT=m
++CONFIG_BT_HCIUART=m
++CONFIG_BT_HCIUART_BCM=y
++# Bluetooth profiles used by bluetoothd (serial, OBEX, PAN, HID).
++CONFIG_BT_RFCOMM=m
++CONFIG_BT_RFCOMM_TTY=y
++CONFIG_BT_BNEP=m
++CONFIG_BT_BNEP_MC_FILTER=y
++CONFIG_BT_BNEP_PROTO_FILTER=y
++CONFIG_BT_HIDP=m
++CONFIG_SERIAL_DEV_BUS=y
++CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
++CONFIG_SERIAL_SAMSUNG=m
++# UART3 (Bluetooth) and I2S0 (audio) sit inside the LPASS block, whose
++# MFD driver creates their devices.
++CONFIG_MFD_EXYNOS_LPASS=m
++# debugfs: gpio, pinctrl, clk and regulator summaries for board bring-up.
++CONFIG_DEBUG_FS=y
+diff --git a/arch/arm/configs/gts28ltexx_m5.config b/arch/arm/configs/gts28ltexx_m5.config
+index b1c118738..c7b50da8a 100644
+--- a/arch/arm/configs/gts28ltexx_m5.config
++++ b/arch/arm/configs/gts28ltexx_m5.config
+@@ -2,60 +2,10 @@
+ #
+ # Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433) - milestone 5
+ #
+-# Fragment merged on top of gts28ltexx_defconfig by
+-#   make gts28ltexx_defconfig gts28ltexx_m5.config
+-# (run by scripts/kbuild-mainline.sh --fragment gts28ltexx_m5.config).
+-#
+-# The defconfig already carries the milestone-2 base (PMIC, eMMC, USB
+-# gadget).  This fragment adds the Wi-Fi/Bluetooth milestone-5 symbols:
+-#
+-#  - Exynos5433 PCIe host + PHY for the BCM4358 (14e4:43ec), built-in:
+-#    the Wi-Fi chip is behind it and modules are not usable at the
+-#    milestone's rootfs stage (no module loading set up).
+-#  - brcmfmac (BRCMFMAC + BRCMFMAC_PCIE) built-in.  BRCMFMAC=y also
+-#    avoids a firmware/module request for brcmfmac-wcc (fwvid vendor
+-#    ops for the 0x43ec/WCC match are registered in the same vmlinux
+-#    when built-in).  Firmware loading at boot is not a problem: the
+-#    kernel request goes through the usual firmware loader and is
+-#    satisfied from the rootfs once mounted; until then the driver
+-#    probes fine and only the firmware request waits/fails.
+-#  - Bluetooth HCI UART (BT_HCIUART_BCM, which selects BT_BCM and
+-#    BT_HCIUART_H4) built-in.
+-#  - Serial device bus for the hci_bcm serial client (SERIAL_DEV_BUS=y
+-#    because SERIAL_DEV_CTRL_TTYPORT depends on SERIAL_DEV_BUS != m).
+-#  - RFKILL for radio kill-switch wiring.
+-#
+-# Symbols flipped from =m by this fragment: CFG80211 (defconfig =m).
+-# Newly enabled (not set in gts28ltexx_defconfig): SERIAL_SAMSUNG
+-# (no Kconfig default; needed for ttySAC3), RFKILL, BT.
+-
+-# PCIe host + PHY for the BCM4358 (mainline 6.12: PCI_EXYNOS is =m in
+-# gts28ltexx_defconfig, PHY_EXYNOS_PCIE is a bool that depends on
+-# PCI_EXYNOS).
+-CONFIG_PCI=y
+-CONFIG_PCI_MSI=y
+-CONFIG_PCI_EXYNOS=y
+-CONFIG_PHY_EXYNOS_PCIE=y
+-
+-# Wi-Fi: brcmfmac with PCIe bus support.
+-CONFIG_CFG80211=y
+-CONFIG_BRCMFMAC=y
+-CONFIG_BRCMFMAC_PCIE=y
+-
+-# Bluetooth: hci_uart with the Broadcom protocol (selects BT_BCM and
+-# BT_HCIUART_H4).
+-CONFIG_BT=y
+-CONFIG_BT_HCIUART=y
+-CONFIG_BT_HCIUART_BCM=y
+-
+-# Serial device bus (hci_bcm attaches through serdev); TTYPORT needs
+-# SERIAL_DEV_BUS != m, hence =y.
+-CONFIG_SERIAL_DEV_BUS=y
+-CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+-
+-# Samsung serial driver for ttySAC3 (not in defconfig, no Kconfig
+-# default; Bluetooth lives on that UART).
+-CONFIG_SERIAL_SAMSUNG=y
+-
+-# Radio kill switch.
+-CONFIG_RFKILL=y
++# Superseded: the Wi-Fi/Bluetooth symbols now live in gts28ltexx_defconfig,
++# with every radio driver (PCI_EXYNOS, CFG80211, BRCMFMAC, BT, BT_HCIUART,
++# SERIAL_SAMSUNG, MFD_EXYNOS_LPASS) as a module.  Do not switch them back
++# to =y: a built-in probe that hangs runs before the initramfs watchdog
++# guard and loops the board through RECOVERY (docs/WIFI_BT_M5.md).
++# The milestone-5 device tree is exynos5433-gts28ltexx-m5.dtb from the
++# default build; this fragment is kept empty so old commands still work.

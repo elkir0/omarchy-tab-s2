@@ -1,0 +1,161 @@
+From eecbad47d1fa6c3f72aa82cf8a3bac854fbf0d9f Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 02/16] clk: samsung: exynos5433: add the CMU_CPIF MIPI-LLI
+ clocks
+
+Model what the MIPI-LLI driver of the SS333 modem link needs in
+CMU_CPIF, from kernel_universal5433 drivers/clk/samsung/clk-exynos5433.c:
+
+ - phyclk_lli_tx0/rx0_symbol, fixed 150 MHz outputs of the LLI M-PHY
+   (:1334-1335);
+ - mout_phyclk_lli_tx0/rx0_symbol_user, SRC_SEL_CPIF1 bits 4 and 8,
+   {oscclk, phyclk_lli_*_symbol} (:1471-1472);
+ - the ENABLE_IP_CPIF0 gates gate_lli_svc_loc/svc_rem/ll_init/be_init
+   (bits 1-4), gate_lli_cmn_cfg/tx0_cfg/rx0_cfg (7-9),
+   gate_lli_tx0/rx0_symbol (10-11) and the ENABLE_IP_CPIF1 gate
+   gate_cpifnm_200 (bit 0) (:2530-2540, 2553), with no parent and no
+   flags as in that tree.
+
+SRC_SEL_CPIF1 and ENABLE_IP_CPIF0/1 join the registers saved and
+restored across system suspend.
+
+For gts28ltexx nothing changes until the MIPI-LLI module binds:
+registration only reads SRC_SEL_CPIF1, no new clock is critical,
+nothing is reparented at boot, and the board boots with
+clk_ignore_unused.  A board booted without clk_ignore_unused now has
+these gates switched off at late init when nothing uses them, like every
+other modelled gate; no mainline board uses the CPIF LLI block.
+
+Also name the PMU word the LLI driver writes, LLI_PHY_CON = PMU + 0x720
+(kernel_universal5433 arch/arm/mach-exynos/include/mach/
+regs-pmu-exynos5433.h:36), which mainline only knows as the 5250/5420
+EXYNOS5_DPTX_PHY_CONTROL.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/samsung/clk-exynos5433.c        | 61 +++++++++++++++++++++
+ include/linux/soc/samsung/exynos-regs-pmu.h |  1 +
+ 2 files changed, 62 insertions(+)
+
+diff --git a/drivers/clk/samsung/clk-exynos5433.c b/drivers/clk/samsung/clk-exynos5433.c
+index ec83641de..77de57919 100644
+--- a/drivers/clk/samsung/clk-exynos5433.c
++++ b/drivers/clk/samsung/clk-exynos5433.c
+@@ -843,8 +843,11 @@ CLK_OF_DECLARE(exynos5433_cmu_top, "samsung,exynos5433-cmu-top",
+ #define MPHY_PLL_CON1		0x0104
+ #define MPHY_PLL_FREQ_DET	0x010c
+ #define MUX_SEL_CPIF0		0x0200
++#define SRC_SEL_CPIF1		0x0204
+ #define DIV_CPIF		0x0600
+ #define ENABLE_SCLK_CPIF	0x0a00
++#define ENABLE_IP_CPIF0		0x0b00
++#define ENABLE_IP_CPIF1		0x0b04
+ 
+ static const unsigned long cpif_clk_regs[] __initconst = {
+ 	MPHY_PLL_LOCK,
+@@ -852,8 +855,11 @@ static const unsigned long cpif_clk_regs[] __initconst = {
+ 	MPHY_PLL_CON1,
+ 	MPHY_PLL_FREQ_DET,
+ 	MUX_SEL_CPIF0,
++	SRC_SEL_CPIF1,
+ 	DIV_CPIF,
+ 	ENABLE_SCLK_CPIF,
++	ENABLE_IP_CPIF0,
++	ENABLE_IP_CPIF1,
+ };
+ 
+ static const struct samsung_clk_reg_dump cpif_suspend_regs[] = {
+@@ -865,6 +871,19 @@ static const struct samsung_clk_reg_dump cpif_suspend_regs[] = {
+ 
+ /* list of all parent clock list */
+ PNAME(mout_mphy_pll_p)		= { "oscclk", "fout_mphy_pll", };
++PNAME(mout_phyclk_lli_tx0_symbol_user_p) = { "oscclk", "phyclk_lli_tx0_symbol", };
++PNAME(mout_phyclk_lli_rx0_symbol_user_p) = { "oscclk", "phyclk_lli_rx0_symbol", };
++
++/*
++ * MIPI-LLI symbol clocks: outputs of the LLI M-PHY, 150 MHz once the PHY
++ * runs (kernel_universal5433 drivers/clk/samsung/clk-exynos5433.c:1334-1335).
++ */
++static const struct samsung_fixed_rate_clock cpif_fixed_clks[] __initconst = {
++	FRATE(CLK_PHYCLK_LLI_TX0_SYMBOL, "phyclk_lli_tx0_symbol", NULL, 0,
++			150000000),
++	FRATE(CLK_PHYCLK_LLI_RX0_SYMBOL, "phyclk_lli_rx0_symbol", NULL, 0,
++			150000000),
++};
+ 
+ static const struct samsung_pll_clock cpif_pll_clks[] __initconst = {
+ 	PLL(pll_35xx, CLK_FOUT_MPHY_PLL, "fout_mphy_pll", "oscclk",
+@@ -875,6 +894,18 @@ static const struct samsung_mux_clock cpif_mux_clks[] __initconst = {
+ 	/* MUX_SEL_CPIF0 */
+ 	MUX(CLK_MOUT_MPHY_PLL, "mout_mphy_pll", mout_mphy_pll_p, MUX_SEL_CPIF0,
+ 			0, 1),
++
++	/*
++	 * SRC_SEL_CPIF1 (kernel_universal5433 clk-exynos5433.c:1471-1472).
++	 * Registering them reads the register only; the MIPI-LLI driver's
++	 * DT node selects the PHY symbol clocks (assigned-clock-parents).
++	 */
++	MUX(CLK_MOUT_PHYCLK_LLI_TX0_SYMBOL_USER,
++			"mout_phyclk_lli_tx0_symbol_user",
++			mout_phyclk_lli_tx0_symbol_user_p, SRC_SEL_CPIF1, 4, 1),
++	MUX(CLK_MOUT_PHYCLK_LLI_RX0_SYMBOL_USER,
++			"mout_phyclk_lli_rx0_symbol_user",
++			mout_phyclk_lli_rx0_symbol_user_p, SRC_SEL_CPIF1, 8, 1),
+ };
+ 
+ static const struct samsung_div_clock cpif_div_clks[] __initconst = {
+@@ -889,11 +920,41 @@ static const struct samsung_gate_clock cpif_gate_clks[] __initconst = {
+ 			ENABLE_SCLK_CPIF, 9, CLK_IGNORE_UNUSED, 0),
+ 	GATE(CLK_SCLK_UFS_MPHY, "sclk_ufs_mphy", "div_sclk_mphy",
+ 			ENABLE_SCLK_CPIF, 4, 0, 0),
++
++	/*
++	 * ENABLE_IP_CPIF0/1: the gates the MIPI-LLI driver holds while the
++	 * link is in use (kernel_universal5433 clk-exynos5433.c:2530-2540,
++	 * 2553).  No parent and no flags, as in that tree: nothing enables
++	 * them until the driver does, and clk_ignore_unused keeps whatever
++	 * the bootloader left.
++	 */
++	GATE(CLK_GATE_LLI_SVC_LOC, "gate_lli_svc_loc", NULL,
++			ENABLE_IP_CPIF0, 1, 0, 0),
++	GATE(CLK_GATE_LLI_SVC_REM, "gate_lli_svc_rem", NULL,
++			ENABLE_IP_CPIF0, 2, 0, 0),
++	GATE(CLK_GATE_LLI_LL_INIT, "gate_lli_ll_init", NULL,
++			ENABLE_IP_CPIF0, 3, 0, 0),
++	GATE(CLK_GATE_LLI_BE_INIT, "gate_lli_be_init", NULL,
++			ENABLE_IP_CPIF0, 4, 0, 0),
++	GATE(CLK_GATE_LLI_CMN_CFG, "gate_lli_cmn_cfg", NULL,
++			ENABLE_IP_CPIF0, 7, 0, 0),
++	GATE(CLK_GATE_LLI_TX0_CFG, "gate_lli_tx0_cfg", NULL,
++			ENABLE_IP_CPIF0, 8, 0, 0),
++	GATE(CLK_GATE_LLI_RX0_CFG, "gate_lli_rx0_cfg", NULL,
++			ENABLE_IP_CPIF0, 9, 0, 0),
++	GATE(CLK_GATE_LLI_TX0_SYMBOL, "gate_lli_tx0_symbol", NULL,
++			ENABLE_IP_CPIF0, 10, 0, 0),
++	GATE(CLK_GATE_LLI_RX0_SYMBOL, "gate_lli_rx0_symbol", NULL,
++			ENABLE_IP_CPIF0, 11, 0, 0),
++	GATE(CLK_GATE_CPIFNM_200, "gate_cpifnm_200", NULL,
++			ENABLE_IP_CPIF1, 0, 0, 0),
+ };
+ 
+ static const struct samsung_cmu_info cpif_cmu_info __initconst = {
+ 	.pll_clks		= cpif_pll_clks,
+ 	.nr_pll_clks		= ARRAY_SIZE(cpif_pll_clks),
++	.fixed_clks		= cpif_fixed_clks,
++	.nr_fixed_clks		= ARRAY_SIZE(cpif_fixed_clks),
+ 	.mux_clks		= cpif_mux_clks,
+ 	.nr_mux_clks		= ARRAY_SIZE(cpif_mux_clks),
+ 	.div_clks		= cpif_div_clks,
+diff --git a/include/linux/soc/samsung/exynos-regs-pmu.h b/include/linux/soc/samsung/exynos-regs-pmu.h
+index ce1a3790d..c0fb498b0 100644
+--- a/include/linux/soc/samsung/exynos-regs-pmu.h
++++ b/include/linux/soc/samsung/exynos-regs-pmu.h
+@@ -641,6 +641,7 @@
+ 
+ /* For Exynos5433 */
+ #define EXYNOS5433_EINT_WAKEUP_MASK				(0x060C)
++#define EXYNOS5433_LLI_PHY_CONTROL				(0x0720)
+ #define EXYNOS5433_USBHOST30_PHY_CONTROL			(0x0728)
+ #define EXYNOS5433_PAD_RETENTION_AUD_OPTION			(0x3028)
+ #define EXYNOS5433_PAD_RETENTION_MMC2_OPTION			(0x30C8)

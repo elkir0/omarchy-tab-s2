@@ -1,0 +1,21 @@
+# Never versioned: the device's dumps (dumps/, a link to a private folder,
+# or $T715_DUMPS_DIR) and backups (EFS = IMEI, personal data).
+/dumps
+
+# The kernel tree: a case-sensitive APFS volume mounted on src/ (or a
+# link to one), see kernel/README.md
+/src
+/.src.sparsebundle/
+
+# Build outputs
+/out/
+image/out/
+image/cache/
+legacy/phosh/rootfs/
+legacy/phosh/cache/
+legacy/phosh/*.tar.gz
+*.img
+*.tar
+
+.DS_Store
+__pycache__/

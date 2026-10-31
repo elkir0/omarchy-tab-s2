@@ -1,0 +1,64 @@
+# SM-T715 (armv7h) rebuild of Arch's hyprgraphics 0.5.1-4 with one fix.
+#
+# Why: Hyprland 0.56.2 deadlocks on the tablet when it renders text (debug
+# overlay, error bar, notifications): CAsyncResourceGatherer::await() loses
+# the wakeup when the gather thread finishes the resource between enqueue()
+# and await(). Upstream issue https://github.com/hyprwm/hyprgraphics/issues/53
+# (PR #52), unfixed in 0.5.1. On-device report: docs/journal/ONDEVICE-2026-10-28.md
+# (blocker 2); package notes: docs/image/PACKAGES.md. The patch only touches
+# src/resource/AsyncResourceGatherer.cpp: same SONAME and ABI.
+#
+# Base: https://gitlab.archlinux.org/archlinux/packaging/packages/hyprgraphics
+# tag 0.5.1-4, which ALARM builds unchanged for armv7h. Changes: pkgrel 4.1,
+# armv7h added to arch, the patch in source=() and prepare().
+# Build: tools/build-pkg hyprgraphics. Test: tests/test_hyprgraphics.sh.
+
+# Maintainer: Caleb Maclennan <caleb@alerque.com>
+
+pkgname=hyprgraphics
+pkgver=0.5.1
+pkgrel=4.1
+pkgdesc='hyprland graphics resources and utilities'
+arch=(x86_64 aarch64 armv7h)
+url="https://github.com/hyprwm/$pkgname"
+license=(BSD-3-Clause)
+depends=(cairo # libcairo.so
+         file libmagic.so
+         libgcc # libgcc_s.so
+         'libstdc++' # libstdc++.so
+         glibc # libc.so libm.so
+         hyprutils libhyprutils.so
+         libjpeg-turbo libjpeg.so
+         libjxl libjxl.so libjxl_threads.so
+         libpng # libpng.so
+         librsvg
+         libwebp libwebp.so
+         libglvnd
+         pango libpangocairo-1.0.so
+         pixman)
+makedepends=(cmake)
+provides=("lib$pkgname.so")
+_archive="$pkgname-$pkgver"
+source=("$url/archive/v$pkgver/$_archive.tar.gz"
+        hyprgraphics-0.5.1-fix-await-lost-wakeup.patch)
+sha256sums=('861ecaad872835922dd5745a612d7a4cc7bfc4babb1d06bc92bc63c2ac013b74'
+            '00bb96ae49bd2d49afa7ebc026e4185c507fe5a7a83e38e7a9c1b0b61a0499bb')
+
+prepare() {
+	cd "$_archive"
+	patch -Np1 -i ../hyprgraphics-0.5.1-fix-await-lost-wakeup.patch
+}
+
+build() {
+	cd "$_archive"
+	cmake -B build \
+		-D CMAKE_INSTALL_PREFIX=/usr \
+		-D CMAKE_BUILD_TYPE=Release
+	cmake --build build
+}
+
+package() {
+	cd "$_archive"
+	DESTDIR="$pkgdir" cmake --install build
+	install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE
+}

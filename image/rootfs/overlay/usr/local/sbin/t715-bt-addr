@@ -1,0 +1,76 @@
+#!/bin/sh
+# t715-bt-addr: give the SM-T715's BCM4358 Bluetooth controller a stable
+# address of its own.
+#
+# The chip comes up with Broadcom's default address (43:58:A3:...), which
+# the kernel accepts as a public address, so every such chip would share
+# it.  The real address lives in the EFS partition, which Linux must never
+# write and does not read.  Instead the address is derived on the tablet
+# from the eMMC CID (a per-device constant), hashed with a fixed label so
+# the CID cannot be recovered from it, with the locally-administered bit
+# set.  The same tablet therefore always gets the same address.  Neither
+# the CID nor the address is logged.
+#
+# mgmt only changes the public address of a powered-off controller; the
+# kernel then re-runs the setup with the new address and bluetoothd powers
+# the adapter on again.
+#
+# Usage: t715-bt-addr hciN  (started by t715-bt-addr@hciN.service, which
+# 90-t715-bt-addr.rules pulls in when the controller appears)
+set -eu
+
+idx=${1:-hci0}
+idx=${idx#hci}
+log() { echo "t715-bt-addr: $*"; }
+
+if ! cid=$(cat /sys/block/mmcblk0/device/cid 2>/dev/null) || [ -z "$cid" ]; then
+    log "no eMMC CID, hci$idx keeps its address"
+    exit 0
+fi
+
+h=$(printf 't715-bt-addr:%s' "$cid" | sha256sum | cut -c1-12)
+b0=$(( (0x$(printf '%s' "$h" | cut -c1-2) & 0xfc) | 0x02 ))
+addr=$(printf '%02X' "$b0")
+for c in 3 5 7 9 11; do
+    addr=$addr:$(printf '%s' "$h" | cut -c"$c-$((c + 1))" | tr a-f A-F)
+done
+
+# hci_bcm registers the controller before its setup (patch download,
+# about 6 s) is over; until then mgmt does not list the index.
+cur=
+i=0
+while [ "$i" -lt 60 ]; do
+    if info=$(btmgmt --index "$idx" info 2>/dev/null) &&
+        cur=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*addr \([0-9A-Fa-f:]*\) .*/\1/p') &&
+        [ -n "$cur" ]; then
+        break
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+if [ -z "$cur" ]; then
+    log "hci$idx did not show up in mgmt within 60 s"
+    exit 0
+fi
+if [ "$cur" = "$addr" ]; then
+    log "hci$idx already has its generated address"
+    exit 0
+fi
+
+# Right after its setup the kernel still powers the controller up on its
+# own (auto-off window) and bluetoothd powers it on as soon as it shows
+# up: the change can be refused, so power off and retry for a while.
+n=0
+while :; do
+    btmgmt --index "$idx" power off >/dev/null 2>&1 || true
+    if btmgmt --index "$idx" public-addr "$addr" >/dev/null 2>&1; then
+        log "hci$idx: generated address set"
+        exit 0
+    fi
+    n=$((n + 1))
+    if [ "$n" -ge 10 ]; then
+        log "hci$idx: setting the generated address failed"
+        exit 1
+    fi
+    sleep 1
+done

@@ -1,0 +1,262 @@
+From 9510f7e46ce7d4a83bf22a5168e9cc9d58bbabc6 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH] ARM: gts28ltexx: GPU devfreq in the daily board, capped at
+ 420 MHz
+
+Include exynos5433-gts28ltexx-gpufreq.dtsi in the board, after
+exynos5433-gts28ltexx-gpu.dtsi (which deletes the GPU's
+operating-points-v2; the gpufreq dtsi sets it again), as the test
+branch does, and cap the GPU at 420 MHz in the device tree.
+
+Why 420 MHz: mainline never programs the G3D adaptive body bias, and
+PMU + 0x0790 reads 0x8000008d on the tablet, stock's idle reverse-bias
+value, where stock runs the GPU at 0x80000088.  Until the kernel writes
+that value at G3D power-on, the of 2026-10-29 chose 420 MHz
+for the daily kernel (Omarchy repo docs/ONDEVICE-2026-10-29.md, "GPU
+frequency:").  The kernel is shared by the Phosh and the
+Omarchy root images, so the cap is in the device tree, not in a udev
+rule.
+
+The board deletes the 500, 550, 600 and 700 MHz OPPs after the include
+and overrides every GPU cooling-map, so the gpufreq dtsi stays the full
+8-OPP design for test builds and for raising the cap later.  With 4
+OPPs the devfreq cooling states are 0 = 420, 1 = 350, 2 = 266,
+3 = 160 MHz (max_state 3; the dtsi's states 4-7 would fail to bind):
+
+  trip              dtsi (8 OPPs)     board (4 OPPs)
+  apollo  81 C      4 (420 MHz)       1 (350 MHz)
+  apollo  86 C      7 (160 MHz)       3 (160 MHz)
+  g3d     95 C      4 (420 MHz)       1 (350 MHz)
+  g3d    100 C      5 (350 MHz)       2 (266 MHz)
+  g3d    105 C      6 (266 MHz)       3 (160 MHz)
+  g3d    110 C      7 (160 MHz)       3 (160 MHz)
+
+The g3d trips stay inert while tmu_g3d is disabled.  Hot and critical
+trips are unchanged.
+
+Fold the two settings of gts28ltexx_gpufreq.config that the defconfig
+lacked (DEVFREQ_GOV_SIMPLE_ONDEMAND=y, DEVFREQ_THERMAL=y) into
+gts28ltexx_defconfig, plus PM_DEVFREQ=y for clarity (panfrost already
+selects it), so the daily build needs no fragment.  The fragment stays,
+now redundant.  Comments of the gpu and gpufreq dtsi updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-gpu.dtsi    | 23 +++---
+ .../exynos5433-gts28ltexx-gpufreq.dtsi        | 19 +++--
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 74 ++++++++++++++++++-
+ arch/arm/configs/gts28ltexx_defconfig         | 11 +++
+ arch/arm/configs/gts28ltexx_gpufreq.config    |  3 +
+ 5 files changed, 114 insertions(+), 16 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+index 9bbbbebab..aac5bd86a 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+@@ -6,6 +6,9 @@
+  * mainline panfrost driver, with no frequency or voltage scaling: the GPU
+  * runs at the clock the G3D clock unit already has, on BUCK6 at the voltage
+  * the bootloader left.  docs/GPU.md has the source table and the reasoning.
++ * The board then includes exynos5433-gts28ltexx-gpufreq.dtsi, which sets
++ * a new OPP table and turns scaling on (capped at 420 MHz by the board,
++ * docs/GPU.md section 10).
+  *
+  * Stock reference (01_dumps/live_fdt.dts:1830-1836, node "mali"): same
+  * registers (0x14ac0000, 0x5000), same interrupts in the same order (SPI
+@@ -21,21 +24,23 @@ &gpu {
+ 	 * and the regulator the stock Mali platform code drives
+ 	 * (kernel_universal5433 drivers/gpu/arm/t7xx/r22p0/platform/exynos/
+ 	 * gpu_exynos5433.c:683, regulator_get(NULL, "vdd_g3d")).  The board
+-	 * file keeps it always-on at the bootloader voltage (600-1500 mV
+-	 * window, no voltage request from anyone).  With no OPP table below,
++	 * file keeps it always-on (600-1500 mV window).  With no OPP table,
+ 	 * panfrost only takes an enable reference on it
+-	 * (panfrost_device.c:86-117, 225-230) and never sets a voltage.
+-	 * The phandle also orders the GPU probe after the PMIC.
++	 * (panfrost_device.c:86-117, 225-230), never sets a voltage, and the
++	 * rail stays at the bootloader voltage; with the gpufreq dtsi's
++	 * table, panfrost sets the OPP voltages.  The phandle also orders the
++	 * GPU probe after the PMIC.
+ 	 */
+ 	mali-supply = <&buck6_reg>;
+ 	status = "okay";
+ 
+ 	/*
+-	 * No OPP table, hence no devfreq: panfrost_devfreq_init() returns 0
+-	 * when the device has no table (panfrost_devfreq.c:151-157) and the
+-	 * GPU keeps the clock rate it finds at probe.  The SoC table is the
+-	 * stock Mali driver's default table (gpu_exynos5433.c:46-55); stock
+-	 * replaces its voltages by per-chip ASV values at boot
++	 * The SoC's OPP table is deleted (the gpufreq dtsi sets another one).
++	 * Without a table there is no devfreq: panfrost_devfreq_init()
++	 * returns 0 when the device has no table (panfrost_devfreq.c:151-157)
++	 * and the GPU keeps the clock rate it finds at probe.  The SoC table
++	 * is the stock Mali driver's default table (gpu_exynos5433.c:46-55);
++	 * stock replaces its voltages by per-chip ASV values at boot
+ 	 * (gpu_dvfs_governor.c:263-284), and at 700 MHz it is below the
+ 	 * stock value of the slowest group in table version 1 (1150000 vs
+ 	 * 1162500 uV, mach/asv-exynos5433.h:539).  This chip's ASV group is
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
+index d2c1a6cfb..29f1e03f7 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
+@@ -3,11 +3,17 @@
+  * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - GPU frequency
+  * scaling (panfrost devfreq) and GPU thermal throttling
+  *
+- * NOT included by the board yet.  Include it AFTER
+- * exynos5433-gts28ltexx-gpu.dtsi (that file deletes the GPU's
+- * operating-points-v2 property, this one sets it again), together with
+- * arch/arm/configs/gts28ltexx_gpufreq.config.  docs/GPU.md section 10
+- * has the value-by-value source table and the device test plan.
++ * The full design: 8 OPPs, 160-700 MHz, cooling states numbered for
++ * 8 OPPs.  The board includes it AFTER exynos5433-gts28ltexx-gpu.dtsi
++ * (that file deletes the GPU's operating-points-v2 property, this one
++ * sets it again).  The devfreq options it needs are in
++ * gts28ltexx_defconfig (arch/arm/configs/gts28ltexx_gpufreq.config, which
++ * has the same options, is now redundant).  The daily board caps the GPU
++ * at 420 MHz: after the include it deletes the 500, 550, 600 and 700 MHz
++ * OPPs and renumbers every GPU cooling-map (exynos5433-gts28ltexx.dts,
++ * section 12).  Keep this file whole so that test builds can use all 8
++ * OPPs.  docs/GPU.md section 10 has the value-by-value source table and
++ * the device test plan, section 10.11 the daily cap.
+  *
+  * Path abbreviations in the comments:
+  *   stock/   = 02_sources/kernel_universal5433/
+@@ -78,7 +84,8 @@
+  * drivers/thermal/devfreq_cooling.c:348-375, 110): 0 = 700, 1 = 600,
+  * 2 = 550, 3 = 500, 4 = 420, 5 = 350, 6 = 266, 7 = 160 MHz.  The
+  * cooling-maps below use these numbers: renumber them if an OPP is added,
+- * removed or disabled.
++ * removed or disabled (the daily board does, for its 420 MHz cap:
++ * 0 = 420, 1 = 350, 2 = 266, 3 = 160 MHz).
+  */
+ / {
+ 	gpu_opp_table_gts28: opp-table-gpu {
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 6f8ec3153..423e26b4a 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -847,12 +847,84 @@ &framebuffer {
+ /* ==================================================================== */
+ 
+ /*
+- * No OPP table: Linux never changes the GPU voltage or clock (docs/GPU.md).
+  * Validated on the tablet on 2026-10-28: Mali-T760 id 0x750 r0p1, 6 shader
+  * cores, boot clock 266 MHz with vdd_g3d (BUCK6) at 937 500 uV, Mesa
+  * "Mali-T760 MC6 (Panfrost)" GLES 3.1 renderer in phoc, no GPU faults.
++ *
++ * Frequency scaling: the OPP table, panfrost as a devfreq cooling device
++ * and the GPU passive trips come from exynos5433-gts28ltexx-gpufreq.dtsi
++ * (docs/GPU.md section 10); the devfreq options are in
++ * gts28ltexx_defconfig.  It must come after exynos5433-gts28ltexx-gpu.dtsi:
++ * that file deletes the GPU's operating-points-v2 property, the gpufreq
++ * one sets it again.
+  */
+ #include "exynos5433-gts28ltexx-gpu.dtsi"
++#include "exynos5433-gts28ltexx-gpufreq.dtsi"
++
++/*
++ * Daily cap: 420 MHz (docs/GPU.md section 10.11).  Mainline never
++ * programs the G3D adaptive body bias: PMU + 0x0790 keeps 0x8000008d,
++ * the reverse bias stock applies only while the GPU idles, where stock
++ * runs the GPU at 0x80000088 (no bias).  Until the kernel writes that
++ * value at G3D power-on, the four fastest OPPs of the gpufreq dtsi are
++ * deleted.  They are deleted here and not in the dtsi, so that file
++ * stays the full design (8 OPPs, 160-700 MHz) for test builds and for
++ * raising the cap later.  The cap is in the device tree, not in a udev
++ * rule, because this kernel is shared by the Phosh and Omarchy root
++ * images.
++ */
++&gpu_opp_table_gts28 {
++	/delete-node/ opp-500000000;
++	/delete-node/ opp-550000000;
++	/delete-node/ opp-600000000;
++	/delete-node/ opp-700000000;
++};
++
++/*
++ * GPU cooling states, renumbered for the 4 remaining OPPs.  devfreq
++ * cooling counts from the fastest OPP (drivers/thermal/devfreq_cooling.c):
++ * 0 = 420, 1 = 350, 2 = 266, 3 = 160 MHz, max_state 3.  The gpufreq dtsi
++ * numbers its maps for 8 OPPs (states 4-7): a state above 3 would make
++ * the binding fail (thermal_of.c), so every GPU map is overridden here.
++ * A state-0 cap would do nothing at 420 MHz, so each trip caps one step
++ * below the dtsi's level, down to 160 MHz:
++ *   apollo  81 C: 420 -> 350 MHz (1)    86 C: 160 MHz (3)
++ *   g3d     95 C: 420 -> 350 MHz (1)   100 C: 350 -> 266 MHz (2)
++ *          105 C: 266 -> 160 MHz (3)   110 C: 160 MHz (3)
++ * The g3d trips stay inert while tmu_g3d is disabled.  The hot and
++ * critical trips (exynos5433-gts28ltexx-thermal.dtsi) are unchanged.
++ */
++&g3d_thermal {
++	cooling-maps {
++		map-gpu-throttle1 {
++			cooling-device = <&gpu 1 1>;
++		};
++
++		map-gpu-throttle2 {
++			cooling-device = <&gpu 2 2>;
++		};
++
++		map-gpu-throttle3 {
++			cooling-device = <&gpu 3 3>;
++		};
++
++		map-gpu-throttle4 {
++			cooling-device = <&gpu 3 3>;
++		};
++	};
++};
++
++&apollo_thermal {
++	cooling-maps {
++		map-gpu-throttle1 {
++			cooling-device = <&gpu 1 1>;
++		};
++
++		map-gpu-throttle4 {
++			cooling-device = <&gpu 3 3>;
++		};
++	};
++};
+ 
+ /* ==================================================================== */
+ /* 13. Bluetooth (BCM4358 on UART3, hci_bcm)                            */
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index d42856ce2..8f716529d 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -173,6 +173,17 @@ CONFIG_RMI4_F12=y
+ # RECOVERY again).  Loaded by hand / by the initramfs after the guard.
+ CONFIG_DRM_PANFROST=m
+ 
++# GPU frequency scaling (docs/GPU.md section 10; the board includes
++# exynos5433-gts28ltexx-gpufreq.dtsi, capped at 420 MHz), folded in from
++# gts28ltexx_gpufreq.config.  PM_DEVFREQ is also selected by panfrost and
++# selects PM_OPP.  panfrost's governor built in, so devfreq_add_device()
++# needs no request_module() at panfrost load (drivers/devfreq/devfreq.c);
++# the devfreq cooling device, without which the GPU cooling-maps never
++# bind (include/linux/devfreq_cooling.h stub).
++CONFIG_PM_DEVFREQ=y
++CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
++CONFIG_DEVFREQ_THERMAL=y
++
+ # Requested by the Omarchy (Hyprland) track, built in because the rootfs
+ # ships no modules.  Firewall for ufw / iptables-nft (omarchy-mobile's
+ # kernel fragment):
+diff --git a/arch/arm/configs/gts28ltexx_gpufreq.config b/arch/arm/configs/gts28ltexx_gpufreq.config
+index b8071feb8..e32bbcfe6 100644
+--- a/arch/arm/configs/gts28ltexx_gpufreq.config
++++ b/arch/arm/configs/gts28ltexx_gpufreq.config
+@@ -5,6 +5,9 @@
+ # scripts/kbuild-mainline.sh --fragment), together with
+ # arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi.
+ # docs/GPU.md section 10 has the rationale and the device test plan.
++# These options are now also in gts28ltexx_defconfig (the board includes
++# the dtsi), so merging this fragment changes nothing; kept for builds of
++# older trees.
+ 
+ # panfrost stays a module, as in gts28ltexx_defconfig: built in, its probe
+ # runs before the initramfs watchdog guard, and the first built-in boot

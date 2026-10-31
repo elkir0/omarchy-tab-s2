@@ -1,0 +1,109 @@
+SM-T715 tablet: the phone's modem pieces, on shannond's ModemManager facade.
+
+Puts the mobile data tile back (the SS333 modem now works) and drives it
+through NetworkManager's gsm connection, since omamobile-sit is the Pixel's
+modem daemon: tile-state.sh probes nmcli (and shannonctl for the technology),
+tile-action.sh brings the connection up or down. Against omarchy-mobile
+5f7ba48, packages/omamobile-shell, on top of patches 0001-0004 (applied with
+patch -p1 in that directory).
+
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,13 +12,14 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
+-// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no mobile data,
+-// hotspot, torch, location or NFC (the tablet's modem, GNSS, flash LED and
+-// NFC are not driven, and Hotspot would drop the only Wi-Fi link), no
+-// fingerprint sensor, and no rotation lock until rotation exists (P3).
++// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no hotspot, torch,
++// location or NFC (GNSS, flash LED and NFC are not driven, and Hotspot would
++// drop the only Wi-Fi link), no fingerprint sensor, and no rotation lock until
++// rotation exists (P3). Mobile data goes through NetworkManager.
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
++  { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
+   { id: "dnd", label: "Do not disturb" },
+   { id: "battery-saver", label: "Battery saver" },
+@@ -42,9 +43,9 @@
+ // the image, and turning it off would let the idle lock come up, which
+ // needs a PIN pad: P4).
+ var DEFAULT_LAYOUT = [
+-  "wifi", "bluetooth", "dnd", "airplane",
+-  "battery-saver", "dark-theme", "night-light", "keyboard",
+-  "clipboard", "screenshot"
++  "wifi", "bluetooth", "mobile-data", "dnd",
++  "airplane", "battery-saver", "dark-theme", "night-light",
++  "keyboard", "clipboard", "screenshot"
+ ]
+ 
+ var QUICK_COUNT = 4
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -86,7 +86,10 @@
+     fi
+     ;;
+   mobile-data)
+-    exec omamobile-sit data "$want"
++    # The first gsm connection (t715-mobile on the SM-T715).
++    con=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2 == "gsm" { print $1; exit }')
++    [ -n "$con" ] || exit 1
++    if [ "$want" = on ]; then exec nmcli -w 150 connection up "$con"; else exec nmcli connection down "$con"; fi
+     ;;
+   dictation)
+     # voxtype types what it hears into the focused window. A direction, not
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -15,9 +15,9 @@
+ #   nightlight    on while hyprsunset runs warmer than identity
+ #   stayawake     on while Omarchy's stay-awake indicator exists
+ #   record        on while omamobile-screenrecord (wf-recorder) records
+-#   data          on while omamobile-sit-data.service is active; none
+-#                 without omamobile-sitd running
+-#   data_status   the operator and technology, when registered
++#   data          on while NetworkManager's gsm connection is up; none
++#                 without a gsm device and connection
++#   data_status   the technology, when registered
+ #   dictation     voxtype: on while recording, busy while transcribing, off
+ #                 when idle; down when its user service isn't running, none
+ #                 without voxtype (it is an optional Omarchy install)
+@@ -99,20 +99,25 @@
+   echo "dictation=none"
+ fi
+ 
+-# data: the daemon's public state is world-readable; the bearer service's
+-# state is what "data on|off" switches.
+-state=/run/omamobile-sit/state.json
+-if have omamobile-sit && [ -r "$state" ] && have python3; then
+-  if systemctl is-active --quiet omamobile-sit-data.service 2>/dev/null; then echo "data=on"; else echo "data=off"; fi
+-  python3 -I -c '
++# data: the NetworkManager gsm connection on the modem (SM-T715: the modem is
++# served by shannond's ModemManager facade, not omamobile-sit). None without a
++# gsm device or connection.
++if have nmcli && [ -n "$(t nmcli -t -f TYPE device | grep -x gsm)" ] &&
++   [ -n "$(t nmcli -t -f TYPE connection show | grep -x gsm)" ]; then
++  if [ -n "$(t nmcli -t -f TYPE connection show --active | grep -x gsm)" ]; then
++    echo "data=on"
++  else
++    echo "data=off"
++  fi
++  tech=$(t shannonctl status | python3 -I -c '
+ import json, sys
+ try:
+-    m = json.load(open(sys.argv[1])).get("modem") or {}
+-except (OSError, ValueError):
++    r = json.load(sys.stdin)["reg"]
++except (KeyError, ValueError):
+     sys.exit(0)
+-words = [str(m.get(k)) for k in ("operator", "tech") if m.get(k)]
+-print("data_status=" + " ".join(words))
+-' "$state"
++print({"lte": "LTE", "umts": "3G", "gsm": "2G"}.get(r.get("rat"), ""))
++')
++  [ -z "$tech" ] || echo "data_status=$tech"
+ else
+   echo "data=none"
+ fi

@@ -1,0 +1,28 @@
+From eb1ea00e2b66bdeb5ccaae1ba9b92b0ef17f103d Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 16/16] ARM: configs: gts28ltexx: enable Landlock
+
+pacman's download sandbox needs it: without it pacman stops with "Landlock
+is not supported by the kernel" and nothing can be installed on the device.
+Landlock is the only LSM enabled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index d42856ce2..7d882cc0c 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -301,3 +301,9 @@ CONFIG_GPIO_ARIZONA=m
+ CONFIG_DMADEVICES=y
+ CONFIG_PL330_DMA=m
+ CONFIG_SND_SOC_SAMSUNG_GTS28_WM1814=m
++
++# pacman's download sandbox restricts itself with Landlock, and refuses to run
++# without it. Landlock alone: this kernel has no other LSM.
++CONFIG_SECURITY=y
++CONFIG_SECURITY_LANDLOCK=y
++CONFIG_LSM="landlock"

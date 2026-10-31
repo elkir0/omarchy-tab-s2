@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily update of Chromium's Debian root
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

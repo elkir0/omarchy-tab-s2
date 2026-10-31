@@ -1,0 +1,2453 @@
+From 5a8861cbc6c722b10a798c71e9745fffd0c8b417 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 06/24] ARM: dts: samsung: add Samsung Galaxy Tab S2 8.0 LTE
+ (SM-T715)
+
+Board file validated on the device: bootloader interface (one-cell root,
+DTBH keys, memory and reservations), SMP, watchdog, S2MPS13 PMIC, eMMC,
+USB device with the SM5703 MUIC, thermal trips, PS_HOLD power-off, native
+display, touchscreen, keys and Mali-T760 GPU; plus the still-untested
+Wi-Fi/Bluetooth, audio and sensor fragments, and gts28ltexx_defconfig.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/Makefile            |   4 +
+ .../samsung/exynos5433-gts28ltexx-gpu.dtsi    |  46 +
+ .../dts/samsung/exynos5433-gts28ltexx-m3.dtsi | 156 ++++
+ .../dts/samsung/exynos5433-gts28ltexx-m4.dtsi | 167 ++++
+ .../dts/samsung/exynos5433-gts28ltexx-m5.dts  |  13 +
+ .../dts/samsung/exynos5433-gts28ltexx-m5.dtsi | 288 +++++++
+ .../dts/samsung/exynos5433-gts28ltexx-m6.dts  |  15 +
+ .../dts/samsung/exynos5433-gts28ltexx-m6.dtsi | 129 +++
+ .../dts/samsung/exynos5433-gts28ltexx-m7.dts  |  14 +
+ .../dts/samsung/exynos5433-gts28ltexx-m7.dtsi | 125 +++
+ .../exynos5433-gts28ltexx-thermal.dtsi        | 218 +++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 809 ++++++++++++++++++
+ arch/arm/configs/gts28ltexx_defconfig         | 173 ++++
+ arch/arm/configs/gts28ltexx_m5.config         |  61 ++
+ arch/arm/configs/gts28ltexx_m6.config         |  58 ++
+ arch/arm/configs/gts28ltexx_m7.config         |  29 +
+ 16 files changed, 2305 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m4.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-thermal.dtsi
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+ create mode 100644 arch/arm/configs/gts28ltexx_defconfig
+ create mode 100644 arch/arm/configs/gts28ltexx_m5.config
+ create mode 100644 arch/arm/configs/gts28ltexx_m6.config
+ create mode 100644 arch/arm/configs/gts28ltexx_m7.config
+
+diff --git a/arch/arm/boot/dts/samsung/Makefile b/arch/arm/boot/dts/samsung/Makefile
+index 7becf3665..31095ba48 100644
+--- a/arch/arm/boot/dts/samsung/Makefile
++++ b/arch/arm/boot/dts/samsung/Makefile
+@@ -43,6 +43,10 @@ dtb-$(CONFIG_ARCH_EXYNOS5) += \
+ 	exynos5422-odroidxu3-lite.dtb \
+ 	exynos5422-odroidxu4.dtb \
+ 	exynos5422-samsung-k3g.dtb \
++	exynos5433-gts28ltexx.dtb \
++	exynos5433-gts28ltexx-m5.dtb \
++	exynos5433-gts28ltexx-m6.dtb \
++	exynos5433-gts28ltexx-m7.dtb \
+ 	exynos5800-peach-pi.dtb
+ dtb-$(CONFIG_ARCH_S3C64XX) += \
+ 	s3c6410-mini6410.dtb \
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+new file mode 100644
+index 000000000..9bbbbebab
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - Mali-T760 GPU
++ *
++ * Enables the SoC's gpu@14ac0000 node (exynos5433.dtsi:1186-1235) for the
++ * mainline panfrost driver, with no frequency or voltage scaling: the GPU
++ * runs at the clock the G3D clock unit already has, on BUCK6 at the voltage
++ * the bootloader left.  docs/GPU.md has the source table and the reasoning.
++ *
++ * Stock reference (01_dumps/live_fdt.dts:1830-1836, node "mali"): same
++ * registers (0x14ac0000, 0x5000), same interrupts in the same order (SPI
++ * 282/283/281 = job/mmu/gpu), core clock aclk_g3d (mainline CLK_ACLK_G3D),
++ * power domain pd-g3d@105c4060 (mainline pd_g3d).  All of that is already
++ * in the SoC node; only the supply, the OPP table and the status change
++ * here.
++ */
++
++&gpu {
++	/*
++	 * GPU rail: BUCK6, "vdd_g3d" in the stock tree (live_fdt.dts:2399-2407)
++	 * and the regulator the stock Mali platform code drives
++	 * (kernel_universal5433 drivers/gpu/arm/t7xx/r22p0/platform/exynos/
++	 * gpu_exynos5433.c:683, regulator_get(NULL, "vdd_g3d")).  The board
++	 * file keeps it always-on at the bootloader voltage (600-1500 mV
++	 * window, no voltage request from anyone).  With no OPP table below,
++	 * panfrost only takes an enable reference on it
++	 * (panfrost_device.c:86-117, 225-230) and never sets a voltage.
++	 * The phandle also orders the GPU probe after the PMIC.
++	 */
++	mali-supply = <&buck6_reg>;
++	status = "okay";
++
++	/*
++	 * No OPP table, hence no devfreq: panfrost_devfreq_init() returns 0
++	 * when the device has no table (panfrost_devfreq.c:151-157) and the
++	 * GPU keeps the clock rate it finds at probe.  The SoC table is the
++	 * stock Mali driver's default table (gpu_exynos5433.c:46-55); stock
++	 * replaces its voltages by per-chip ASV values at boot
++	 * (gpu_dvfs_governor.c:263-284), and at 700 MHz it is below the
++	 * stock value of the slowest group in table version 1 (1150000 vs
++	 * 1162500 uV, mach/asv-exynos5433.h:539).  This chip's ASV group is
++	 * not known (docs/THERMAL.md section 8.1).
++	 */
++	/delete-property/ operating-points-v2;
++	/delete-node/ opp-table;
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
+new file mode 100644
+index 000000000..dbec75873
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m3.dtsi
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 3:
++ * native display.  Enable the mainline Exynos DRM display pipeline
++ * (DECON -> MIC -> MIPI-DSI -> Samsung S6E3HA2 1536x2048 AMOLED panel)
++ * and clock it from cmu_disp / cmu_mif, following the upstream TM2
++ * board as the reference for the same SoC (exynos5433-tm2.dts /
++ * exynos5433-tm2-common.dtsi).  See docs/DISPLAY_M3.md for the full
++ * source-value table and the DSI clock arithmetic.
++ *
++ * Everything here comes from the stock device tree
++ * (01_dumps/live_fdt.dts, line numbers cited per value) and Samsung's
++ * downstream kernel (02_sources/kernel_universal5433).
++ *
++ * Deliberately NOT touched:
++ *   - &framebuffer (simple-framebuffer): milestone 1 owns it; the DRM
++ *     pipeline takes over from simpledrm once it probes.
++ *   - &decon_tv / HDMI: out of scope for this board.
++ */
++
++#include <dt-bindings/clock/exynos5433.h>
++#include <dt-bindings/gpio/gpio.h>
++
++/*
++ * Panel TE (tearing effect) input pin, stock "disp_teson"
++ * (live_fdt.dts:5926-5931): gpg0-1 in display TES function
++ * (pin-function 0x02, EXYNOS_PIN_FUNC_2).  DECON receives TE through
++ * this display-domain mux (I80 hardware trigger via syscon_disp), not
++ * as a GPIO interrupt: the exynos5433-decon match data sets I80_HW_TRG
++ * and only falls back to a "te" platform IRQ if the DT node provides
++ * one, which it does not (exynos5433_drm_decon.c:748-752; the SoC dtsi
++ * decon node carries only fifo/vsync/lcd_sys IRQs).
++ */
++&pinctrl_peric {
++	disp_teson: disp-teson-pins {
++		samsung,pins = "gpg0-1";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
++	};
++};
++
++/*
++ * Display clocks, modelled on the TM2 board's &cmu_disp override
++ * (exynos5433-tm2.dts:25-53) minus every decon_tv entry, which this
++ * board never uses (no HDMI).  The parent topology is TM2's verbatim.
++ *
++ * Rates - pixel clock chain for the 1536x2048@60 panel mode
++ * (pixel clock 190682 kHz, see the panel driver):
++ *   CLK_FOUT_DISP_PLL = 1500 MHz: an exact exynos5433_pll_rates[]
++ *   entry (clk-exynos5433.c:748, PMS 250/4/0).
++ *   CLK_DIV_SCLK_DECON_VCLK_DISP = 1500 MHz / 8 = 187.5 MHz, giving a
++ *   ~59 Hz refresh: the closest achievable to 60 Hz, because the PLL
++ *   table has no ~190.68 MHz entry (the alternative, 1600/8 = 200 MHz,
++ *   would give ~63 Hz) and the divider is 3 bits wide, so /8 fits
++ *   (clk-exynos5433.c:2732).
++ *   Mainline DECON never calls clk_set_rate (exynos5433_drm_decon.c);
++ *   DT assigned-clocks are the only way to program this divider.
++ * Zero-rate entries are skipped by the clock core (clk-conf.c
++ * __set_clk_rates, "if (rate)"), so they only pad the parents array.
++ */
++&cmu_disp {
++	assigned-clocks = <&cmu_disp CLK_FOUT_DISP_PLL>,
++			  <&cmu_disp CLK_DIV_SCLK_DECON_VCLK_DISP>,
++			  <&cmu_disp CLK_MOUT_ACLK_DISP_333_USER>,
++			  <&cmu_disp CLK_MOUT_SCLK_DSIM0_USER>,
++			  <&cmu_disp CLK_MOUT_SCLK_DSIM0>,
++			  <&cmu_disp CLK_MOUT_SCLK_DECON_ECLK_USER>,
++			  <&cmu_disp CLK_MOUT_SCLK_DECON_ECLK>,
++			  <&cmu_disp CLK_MOUT_PHYCLK_MIPIDPHY0_RXCLKESC0_USER>,
++			  <&cmu_disp CLK_MOUT_PHYCLK_MIPIDPHY0_BITCLKDIV8_USER>,
++			  <&cmu_disp CLK_MOUT_DISP_PLL>;
++	assigned-clock-parents = <0>, <0>,
++				 <&cmu_mif CLK_ACLK_DISP_333>,
++				 <&cmu_mif CLK_SCLK_DSIM0_DISP>,
++				 <&cmu_disp CLK_MOUT_SCLK_DSIM0_USER>,
++				 <&cmu_mif CLK_SCLK_DECON_ECLK_DISP>,
++				 <&cmu_disp CLK_MOUT_SCLK_DECON_ECLK_USER>,
++				 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_RXCLKESC0_PHY>,
++				 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8_PHY>,
++				 <&cmu_disp CLK_FOUT_DISP_PLL>;
++	assigned-clock-rates = <1500000000>, <187500000>, <0>, <0>, <0>,
++				<0>, <0>, <0>, <0>, <0>;
++};
++
++&decon {
++	status = "okay";
++};
++
++&mic {
++	status = "okay";
++};
++
++/*
++ * DSI host.  Stock mipi_dsi node (live_fdt.dts:1025-1043):
++ * eot_disable = 1 (no EoT packets, live_fdt.dts:1026), e_no_data_lane
++ * = 3 (4 lanes, live_fdt.dts:1042), e_interface = 0 (DSIM_COMMAND,
++ * i.e. CPU/I80 interface, live_fdt.dts:1035), e_pixel_format = 7
++ * (RGB888, live_fdt.dts:1034).
++ *
++ * DSI PLL clocks - see docs/DISPLAY_M3.md for the full derivation:
++ *   samsung,burst-clock-frequency = 512 MHz.  Stock
++ *   timing,dsi-hs-clk = <1024> MHz (live_fdt.dts:1046) is a lane-rate
++ *   request that the downstream driver halves (target 512 MHz) before
++ *   programming PLLCTRL with PMS (p=3, m=64, s=0) = 512 MHz VCO
++ *   (dsim_reg_calculate_pms, dsim_reg_5430.c).  Mainline
++ *   samsung_dsim_pll_find_pms(fin=24 MHz, fout=512 MHz) returns the
++ *   same (3, 64, 0), exactly: 64 * 24 / 3 = 512.  Asking for 1024 MHz
++ *   instead would yield (2, 85, 0) = 1020 MHz (m is capped at 125), a
++ *   different register value than stock.  512 MHz burst = 1024 Mbps
++ *   per lane (DDR), matching stock's lane rate.
++ *   samsung,esc-clock-frequency = 16 MHz: byte clock 64 MHz / 4, the
++ *   TM2 upstream value for the same SoC.  Stock DT asks for 7 MHz
++ *   (esc_clk = 0x6acfc0, live_fdt.dts:1037), but mainline computes the
++ *   escape divider as DIV_ROUND_UP(byte, esc) and clamps esc <= 20 MHz
++ *   (samsung-dsim.c samsung_dsim_enable_clock); 16 MHz is the value
++ *   proven on mainline for this DSI block.
++ *   samsung,pll-clock-frequency = 24 MHz: PLL reference (fin), TM2
++ *   upstream value; the SoC OSCCLK is 24 MHz.
++ *
++ * Supplies: downstream decon_mipi_dsi.c manages no DSIM regulators
++ * (the DSIM core rail is board-wired, always on).  Mainline
++ * samsung-dsim bulk-gets "vddcore" and "vddio"; with no vddcore node
++ * in the DT the regulator core supplies a dummy (regulator core,
++ * of_have_populated_dt() full constraints), and vddio is the 1.8 V
++ * panel I/O rail VDD3 (ldo39), as on the panel side.
++ */
++&dsi {
++	status = "okay";
++	vddio-supply = <&ldo39_reg>;
++	samsung,burst-clock-frequency = <512000000>;
++	samsung,esc-clock-frequency = <16000000>;
++	samsung,pll-clock-frequency = <24000000>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&disp_teson>;
++
++	/*
++	 * Stock panel node s6e3ha2_qxga (live_fdt.dts:1045-1061):
++	 * resolution 0x600 x 0x800 = 1536x2048 (live_fdt.dts:1054),
++	 * refresh 60 (live_fdt.dts:1058), size 0x7a x 0xa3 = 122 x 163 mm
++	 * (live_fdt.dts:1057), h-porch <1,1,1> (live_fdt.dts:1060),
++	 * v-porch <15,1,1> (live_fdt.dts:1055), dsi-hs-clk 1024 MHz
++	 * (live_fdt.dts:1046).  Reset gpg0-0 active low
++	 * (decon_board_gts28 reset_display_driver_panel,
++	 * live_fdt.dts:1074-1076); supplies VDD3_1.8V (ldo39),
++	 * VDDR_1.6V (ldo37), VCI_3.0V (ldo25)
++	 * (live_fdt.dts:1080-1082).  No ports needed: the DSI child is
++	 * implicit, as on TM2 (exynos5433-tm2.dts panel@0).
++	 */
++	panel@0 {
++		compatible = "samsung,s6e3ha2-tabs2";
++		reg = <0>;
++		vdd3-supply = <&ldo39_reg>;
++		vddr-supply = <&ldo37_reg>;
++		vci-supply = <&ldo25_reg>;
++		reset-gpios = <&gpg0 0 GPIO_ACTIVE_LOW>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m4.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m4.dtsi
+new file mode 100644
+index 000000000..d731df128
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m4.dtsi
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 4
++ *
++ * Input devices: Synaptics RMI4 touchscreen and the GPIO keys (power,
++ * volume up/down, home).  All values are transcribed from the device's
++ * live device tree (01_dumps/live_fdt.dts) and mapped onto the mainline
++ * bindings; see docs/INPUT_M4.md for the value-by-value source table.
++ * The Coreriver tc300 touch-key controller on the same panel has no
++ * mainline driver and is deliberately left out.
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++
++/ {
++	/*
++	 * live_fdt.dts:7021-7060 "gpio_keys" node.  The stock tree gives
++	 * every button a 3-cell GPIO specifier whose flag cell is 0x0f;
++	 * bit 0 is OF_GPIO_ACTIVE_LOW, so all four keys are active low
++	 * (same wiring as the TM2 board, exynos5433-tm2-common.dtsi:56).
++	 * No debounce-interval in the stock tree: the downstream driver
++	 * defaults to 10 ms (drivers/input/keyboard/gpio_keys.c:859).
++	 */
++	gpio-keys {
++		compatible = "gpio-keys";
++
++		button-volume-up {
++			/* live_fdt.dts:7027-7033: <gpa2 0 0x0f>, 0x73 */
++			label = "gpio-keys: KEY_VOLUMEUP";
++			gpios = <&gpa2 0 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_VOLUMEUP>;
++			debounce-interval = <10>;
++		};
++
++		button-volume-down {
++			/* live_fdt.dts:7044-7050: <gpa2 1 0x0f>, 0x72 */
++			label = "gpio-keys: KEY_VOLUMEDOWN";
++			gpios = <&gpa2 1 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_VOLUMEDOWN>;
++			debounce-interval = <10>;
++		};
++
++		button-home {
++			/* live_fdt.dts:7035-7042: <gpa0 3 0x0f>, 0xac,
++			 * gpio-key,wakeup = <1>. */
++			label = "gpio-keys: KEY_HOMEPAGE";
++			gpios = <&gpa0 3 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_HOMEPAGE>;
++			debounce-interval = <10>;
++			wakeup-source;
++		};
++
++		button-power {
++			/* live_fdt.dts:7052-7058: <gpa2 7 0x0f>, 0x74,
++			 * gpio-key,wakeup = <1>. */
++			label = "gpio-keys: KEY_POWER";
++			gpios = <&gpa2 7 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_POWER>;
++			debounce-interval = <10>;
++			wakeup-source;
++		};
++	};
++};
++
++/*
++ * HSI2C channel 5 carries the Synaptics touchscreen.
++ * live_fdt.dts:1645-1676: hsi2c@14ED0000 (compatible
++ * "samsung,exynos5-hsi2c", samsung,i2c-max-bus-freq 0x61a80 = 400000) -
++ * mainline label hsi2c_5 (exynos5433.dtsi i2c@14ed0000), whose default
++ * pinctrl hs_i2c5_bus already matches the stock hs-i2c5-bus group
++ * (gpj1-0/gpj1-1, func 4, pull-up).  The stock "samsung,check-transdone-int"
++ * and "samsung,i2c-sda-delay" quirks are not read by the mainline
++ * i2c-exynos5 driver and are left out.
++ */
++&hsi2c_5 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	touchscreen@20 {
++		/* live_fdt.dts:1660-1675, reg <0x20>, compatible
++		 * "synaptics,rmi4" = mainline "syna,rmi4-i2c". */
++		compatible = "syna,rmi4-i2c";
++		reg = <0x20>;
++
++		/*
++		 * Stock "synaptics,irq_gpio = <0x42 0x01 0x00>" = gpa1-1
++		 * (live_fdt.dts:1674, bank phandle 0x42 at line 145); the
++		 * stock driver requests it with irq_type 0x2008 =
++		 * IRQF_TRIGGER_LOW | IRQF_ONESHOT
++		 * (synaptics,irq_type at live_fdt.dts:1669, decode in
++		 * drivers/input/touchscreen/synaptics_dsx2/
++		 * synaptics_i2c_rmi.c:1526 and linux/interrupt.h).  The
++		 * mainline core takes the trigger type from the DT and adds
++		 * IRQF_ONESHOT itself (drivers/input/rmi4/rmi_driver.c:221),
++		 * so the DT only carries IRQ_TYPE_LEVEL_LOW.
++		 */
++		interrupt-parent = <&gpa1>;
++		interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
++
++		/*
++		 * Stock rails named "tsp_avdd" (analog, 3.3 V) and "tsp_io"
++		 * (IO/digital, 1.85 V), live_fdt.dts:1661/1665 -> S2MPS13
++		 * LDO30/LDO31 of the board file (PMIC section).  The
++		 * mainline driver enables vdd then vio in bulk, matching
++		 * the downstream avdd-then-dvdd power-on order
++		 * (synaptics_i2c_rmi.c:3704-3712).
++		 */
++		vdd-supply = <&ldo30_reg>;
++		vio-supply = <&ldo31_reg>;
++
++		/*
++		 * Stock power-on sequence: rails enabled, then 150 ms
++		 * margin before the first I2C access
++		 * (SYNAPTICS_POWER_MARGIN_TIME, synaptics_i2c_rmi.h:127,
++		 * used at synaptics_i2c_rmi.c:3969).  The stock node has no
++		 * reset GPIO (only "synaptics,irq_gpio"), so no
++		 * reset-gpios; the mainline rmi_i2c driver would not read
++		 * one either.
++		 */
++		syna,startup-delay-ms = <150>;
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		/* RMI4 function 01, always present.  No nosleep/doze tuning
++		 * in the stock tree, so none is invented here. */
++		rmi4-f01@1 {
++			reg = <0x1>;
++		};
++
++		/*
++		 * The stock driver handles both 2D-sensor functions, F11
++		 * and F12 (synaptics_i2c_rmi.c:1345/2886 and :1353/2908);
++		 * which one the panel's firmware exposes cannot be told
++		 * without the device, so both sub-nodes carry the stock
++		 * coordinates and the core binds whichever function is
++		 * found in the PDT.  Coordinates from "synaptics,max_coords
++		 * = <0x600 0x800>" (live_fdt.dts:1671) = 1536 x 2048.  The
++		 * stock tree declares no axis inversion or swap, so none is
++		 * set here; the mainline driver reads the real max values
++		 * from the sensor's control registers.
++		 */
++		rmi4-f11@11 {
++			reg = <0x11>;
++			touchscreen-size-x = <1536>;
++			touchscreen-size-y = <2048>;
++		};
++
++		rmi4-f12@12 {
++			reg = <0x12>;
++			touchscreen-size-x = <1536>;
++			touchscreen-size-y = <2048>;
++		};
++
++		/*
++		 * Left out, with reasons:
++		 * - "synaptics,firmware_name"/"firmware_name2"/
++		 *   "project_name" (live_fdt.dts:1670-1673): firmware
++		 *   reflashing is RMI4_F34 scope, not an input milestone.
++		 * - "synaptics,num_lines = <0x29 0x1f>" (live_fdt.dts:1664):
++		 *   downstream-only tuning; mainline reads the sensor
++		 *   geometry from the F11/F12 registers.
++		 */
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+new file mode 100644
+index 000000000..7647996c5
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
++ *
++ * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus
++ * Wi-Fi (BCM4358 on PCIe, brcmfmac) and Bluetooth (BCM4358 on UART3,
++ * hci_bcm) from exynos5433-gts28ltexx-m5.dtsi.  See docs/WIFI_BT_M5.md.
++ */
++
++/dts-v1/;
++
++#include "exynos5433-gts28ltexx.dts"
++#include "exynos5433-gts28ltexx-m5.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+new file mode 100644
+index 000000000..755a84365
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+@@ -0,0 +1,288 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
++ *
++ * Wi-Fi: Broadcom BCM4358 on PCIe (brcmfmac), Bluetooth: BCM4358 on
++ * UART3 (hci_bcm).
++ *
++ * The stock kernel toggled the radio-enable GPIOs from vendor glue
++ * (bcmdhd dhd_custom_exynos.c, bcm4358.c) that has no mainline
++ * equivalent, so the sequencing is expressed with mainline mechanisms:
++ *
++ *  - wlan_reg_on (WLAN_EN, gpj2-0): the stock "samsung,brcm-wlan" gpio
++ *    0 (live_fdt.dts:4733-4738).  Mainline pci-exynos.c gets+enables
++ *    vdd18/vdd10 before host init and link training
++ *    (drivers/pci/controller/dwc/pci-exynos.c:307-314), so wiring the
++ *    GPIO rail as the required vdd18-supply is the one mainline hook
++ *    that powers the chip before perst is released.  always-on +
++ *    boot-on keep it up for the chip's lifetime, matching stock bcmdhd
++ *    which leaves WLAN_EN asserted once Wi-Fi is on.
++ *
++ *  - pcie_vdd10: the binding requires a 1.0 V PCIe rail
++ *    (samsung,exynos-pcie.yaml), but the live tree names no rail for
++ *    the PCIe block - this SoC's PMIC description has no LDO6/LDO7
++ *    (live_fdt.dts:2345-3080), so TM2's rails cannot be transcribed.
++ *    A dummy always-on fixed regulator restates the bootloader's
++ *    leave-on state (same policy as the usbdrd30 comment in
++ *    exynos5433-gts28ltexx.dts, PMIC section).
++ *
++ *  - BT_EN (gpd4-0) has a single writer: hci_bcm's shutdown-gpios.
++ *    No vbat/vddio supplies are given to hci_bcm: the binding makes
++ *    them optional and the live tree does not name those rails, so the
++ *    driver runs them as NULL instead of borrowing rails from another
++ *    board.
++ *
++ * All GPIOs, pins, clocks, IRQs and the baud rate are transcribed from
++ * the device's live device tree (01_dumps/live_fdt.dts) and the vendor
++ * configuration preserved in this repo (04_arch_rootfs overlay); see
++ * docs/WIFI_BT_M5.md for the value-by-value source table and the
++ * firmware-file derivations.
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/clock/samsung,s2mps11.h>
++
++/ {
++	aliases {
++		serial3 = &serial_3;
++	};
++
++	/*
++	 * WLAN_EN (gpj2-0): gpio 0 of the stock wlan node
++	 * (live_fdt.dts:4733-4738).  Downstream bcmdhd drives it high and
++	 * sleeps before touching the chip (dhd_custom_exynos.c:
++	 * gpio_direction_output(wlan_pwr_on, 1), then msleep
++	 * WIFI_TURNON_DELAY = 200, line 64).  No mainline driver owns this
++	 * GPIO, so it is modelled as a fixed 1.8 V rail consumed as the
++	 * PCIe controller's vdd18 supply.  The 1.8 V level is the generic
++	 * PCIe vdd18 level of the binding; the live tree does not name the
++	 * rail behind the pin, so no PMIC rail is claimed.
++	 */
++	wlan_reg_on: regulator-wlan-reg-on {
++		compatible = "regulator-fixed";
++		regulator-name = "wlan_reg_on";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		gpio = <&gpj2 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-always-on;
++		regulator-boot-on;
++		/* WIFI_TURNON_DELAY, dhd_custom_exynos.c:64 (200 ms). */
++		startup-delay-us = <200000>;
++	};
++
++	/*
++	 * PCIe vdd10: binding-required 1.0 V rail.  The live tree names no
++	 * rail for the PCIe block; this always-on placeholder restates the
++	 * bootloader's leave-on state rather than borrowing TM2's ldo6.
++	 */
++	pcie_vdd10: regulator-pcie-vdd10 {
++		compatible = "regulator-fixed";
++		regulator-name = "pcie_vdd10";
++		regulator-min-microvolt = <1000000>;
++		regulator-max-microvolt = <1000000>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++};
++
++/*
++ * PCIe host (fsys domain): stock pcie@15700000 (live_fdt.dts:7062-7077,
++ * "samsung,exynos5433-pcie"/"snps,dw-pcie", GIC SPI 245).  The stock
++ * node's pinctrl-0 = <pcie_bus cfg-wlanen pcie_wake wlan_host_wake>
++ * (four phandles, live_fdt.dts:7071); we mirror those four groups with
++ * mainline pinctrl settings.
++ *
++ * Mainline pci-exynos.c has no perst-GPIO support: the link reset flows
++ * from the controller registers (exynos_pcie_assert/deassert_core_reset),
++ * and the required vdd10/vdd18 supplies are the only pre-link power
++ * hook.  assigned-clocks restate TM2's 100 MHz refclk muxing
++ * (exynos5433-tm2-common.dtsi &pcie); the live tree leaves the CMU muxes
++ * as the bootloader set them.
++ */
++&pcie {
++	status = "okay";
++
++	pinctrl-names = "default";
++	/*
++	 * pcie_bus: SoC-level group gpr3-4/5/6 func 3 pull-up
++	 * (exynos5433-pinctrl.dtsi:340; same pins as the stock pcie_bus
++	 * group, live_fdt.dts:3849-3855).
++	 * wlan_en_pins / pcie_wake_pins / wlan_host_wake_pins: board groups
++	 * defined below, transcribed from the stock cfg-wlanen, pcie_wake
++	 * and wlan_host_wake groups.
++	 */
++	pinctrl-0 = <&pcie_bus &wlan_en_pins &pcie_wake_pins
++		     &wlan_host_wake_pins>;
++
++	vdd10-supply = <&pcie_vdd10>;
++	vdd18-supply = <&wlan_reg_on>;
++
++	assigned-clocks = <&cmu_fsys CLK_MOUT_SCLK_PCIE_100_USER>,
++			  <&cmu_top CLK_MOUT_SCLK_PCIE_100>;
++	assigned-clock-parents = <&cmu_top CLK_SCLK_PCIE_100_FSYS>,
++				 <&cmu_top CLK_MOUT_BUS_PLL_USER>;
++	assigned-clock-rates = <0>, <100000000>;
++
++	interrupt-map-mask = <0 0 0 0>;
++	interrupt-map = <0 0 0 0 &gic GIC_SPI 245 IRQ_TYPE_LEVEL_HIGH>;
++
++	/*
++	 * Stock config space reads 14e4:43ec (dmesg.txt:312
++	 * "device_vendor_id reg : 43ec14e4"), which mainline brcmfmac
++	 * matches via its BRCM_PCIE_4356_DEVICE_ID entry (pcie.c:2688).
++	 * Firmware choice is chip-ID-driven, not PCI-ID-driven: 0x4358 is
++	 * read from the chipcommon register at probe (chip.c:989),
++	 * yielding brcmfmac4358-pcie.
++	 *
++	 * The node carries a pci<vendor>,<device> compatible, as the PCI
++	 * bus binding requires for every function node (pci-device.yaml,
++	 * applied through pci-bus-common's patternProperties) and as the
++	 * Apple precedent does (t8103-jxxx.dtsi wifi@0,0 with
++	 * "pci14e4,4425"); 0x43ec is not in the fmac binding enum, so
++	 * "brcm,bcm4329-fmac" is not usable here without a schema finding.
++	 * Device matching is not affected: on PCI, brcmfmac binds through
++	 * its pci_device_id table, not DT.
++	 *
++	 * reg <0x10000 ...> = bus 1, device 0, function 0 - the stock
++	 * kernel enumerates the EP at 0000:01:00.0 (same idiom as the
++	 * Apple t8103-jxxx.dtsi wifi@0,0 node).
++	 *
++	 * No interrupts property: brcmf_of_probe parses IRQs for SDIO
++	 * only and returns early for other buses (brcmfmac/of.c:129), so
++	 * a DT OOB IRQ would be ignored by the PCIe driver anyway.
++	 * brcm,board-type is honoured even on PCI: brcmf_of_probe reads
++	 * it before its brcm,bcm4329-fmac gate (of.c:83 vs the
++	 * of_device_is_compatible() return at of.c:109-110), shortening
++	 * the NVRAM lookup to brcmfmac4358-pcie.gts28ltexx.txt
++	 * (firmware.c brcm_alt_fw_path).
++	 */
++	wifi@0,0 {
++		compatible = "pci14e4,43ec";
++		reg = <0x10000 0x0 0x0 0x0 0x0>;
++		brcm,board-type = "gts28ltexx";
++	};
++};
++
++&pcie_phy {
++	status = "okay";
++};
++
++/*
++ * Board pin groups, transcribed from the stock groups, placed inside
++ * their pinctrl controller nodes (only controller children become
++ * pin groups): cfg-wlanen (live_fdt.dts:5626-5632) and pcie_wake
++ * (402-407) / wlan_host_wake (666-672) / cfg-hostwake (438-444) /
++ * cfg-btwake (3496-3501) / cfg-en (6196-6201).  The stock power-down
++ * cells (samsung,pin-con-pdn / pin-pud-pdn) are kept out, like the
++ * rest of mainline exynos5433 boards.
++ */
++&pinctrl_ese {
++	wlan_en_pins: wlan-en-pins {
++		samsung,pins = "gpj2-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR4>;
++	};
++};
++
++&pinctrl_alive {
++	pcie_wake_pins: pcie-wake-pins {
++		samsung,pins = "gpf1-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++
++	wlan_host_wake_pins: wlan-host-wake-pins {
++		samsung,pins = "gpf3-1";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++	};
++
++	bt_host_wake_pins: bt-host-wake-pins {
++		samsung,pins = "gpa2-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_fsys {
++	bt_wake_pins: bt-wake-pins {
++		samsung,pins = "gpr3-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_peric {
++	bt_en_pins: bt-en-pins {
++		samsung,pins = "gpd4-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++	};
++};
++
++/*
++ * Bluetooth: stock serial@11460000 (live_fdt.dts:3988-4001) = mainline
++ * serial_3 = ttySAC3 (getprop.txt:240 ro.bluetooth.tty=ttySAC3), with
++ * the stock "broadcom,bcm4358" child (live_fdt.dts:4198-4203).  TM2
++ * wires the same three control pins on the same UART
++ * (exynos5433-tm2-common.dtsi &serial_3 bluetooth node).
++ */
++&serial_3 {
++	status = "okay";
++
++	bluetooth {
++		/*
++		 * No bcm4358 entry in hci_bcm's of_match table
++		 * (hci_bcm.c:1597-1612); brcm,bcm43540-bt carries
++		 * bcm4354_device_data with .no_early_set_baudrate = true,
++		 * matching the stock fixed-baud attach flow: the vendor
++		 * stack opens ttySAC3 at 921600 and loads the .hcd at
++		 * that speed.
++		 *
++		 * No brcm,requires-autobaud-mode: the stock flow never
++		 * autobauds.
++		 */
++		compatible = "brcm,bcm43540-bt";
++
++		/* BT_EN: stock gpio 0 / cfg-en, gpd4-0 (live_fdt.dts:4198
++		 * -4203, 6196-6201). */
++		shutdown-gpios = <&gpd4 0 GPIO_ACTIVE_HIGH>;
++		/* BT_WAKE: stock gpio 1 / cfg-btwake, gpr3-7. */
++		device-wakeup-gpios = <&gpr3 7 GPIO_ACTIVE_HIGH>;
++		/*
++		 * HOST_WAKE: stock gpio 2 / cfg-hostwake, gpa2-2.
++		 * interrupt-names "host-wakeup" is what hci_bcm looks up
++		 * (hci_bcm.c:1245, of_irq_get_byname(node,
++		 * "host-wakeup")); rising edge matches the downstream
++		 * IRQF_TRIGGER_RISING request (bcm4358.c).  interrupts
++		 * rather than the deprecated host-wakeup-gpios.
++		 */
++		interrupt-parent = <&gpa2>;
++		interrupts = <2 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "host-wakeup";
++
++		/*
++		 * 32.768 kHz BT clock from the PMIC: s2mps13_osc output 2
++		 * ("s2mps13_bt", exynos5433-gts28ltexx.dts, PMIC section;
++		 * S2MPS11_CLK_BT = 2 in samsung,s2mps11.h).  "extclk" is
++		 * the deprecated spelling of "txco" but resolves through
++		 * bcm_get_txco's fallback (hci_bcm.c:1067-1082) and is
++		 * what TM2 uses; the stock BT node carries no clocks
++		 * property, the source follows the TM2 wiring for the
++		 * same chip family.
++		 */
++		clocks = <&s2mps13_osc S2MPS11_CLK_BT>;
++		clock-names = "extclk";
++
++		/* Stock attach baud (04_arch_rootfs overlay
++		 * etc/default/brcm-bluetooth BT_BAUD=921600; vendor
++		 * getprop ro.bluetooth.tty + libbt_vndcfg.txt). */
++		max-speed = <921600>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&bt_host_wake_pins &bt_wake_pins &bt_en_pins>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
+new file mode 100644
+index 000000000..07c27eed5
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dts
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 6a
++ *
++ * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus the
++ * audio hardware description (WM1814 codec on hsi2c_3, I2S0) from
++ * exynos5433-gts28ltexx-m6.dtsi.  No sound node yet: this milestone
++ * documents the hardware the machine driver will need, it does not
++ * instantiate a card.  See docs/AUDIO_M6.md.
++ */
++
++/dts-v1/;
++
++#include "exynos5433-gts28ltexx.dts"
++#include "exynos5433-gts28ltexx-m6.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi
+new file mode 100644
+index 000000000..923afffff
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m6.dtsi
+@@ -0,0 +1,129 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 6a
++ *
++ * Audio hardware description: the Cirrus/Wolfson WM1814 codec on HSI2C
++ * channel 3 (0x14e70000) plus the Exynos5433 I2S0 controller that the
++ * (future) machine driver will bind it to.  This milestone only
++ * describes the hardware - there is deliberately no sound node, so
++ * nothing binds yet.  All values are transcribed from the device's
++ * live device tree (01_dumps/live_fdt.dts) and mapped onto the
++ * mainline bindings; see docs/AUDIO_M6.md for the value-by-value
++ * source table and the machine-driver specification.
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/mfd/arizona.h>
++
++/*
++ * HSI2C channel 3 carries the WM1814 audio codec.
++ * live_fdt.dts: hsi2c@14E70000 (lines 1959-1972, compatible
++ * "samsung,exynos5-hsi2c", samsung,check-transdone-int, status okay) -
++ * mapped by register address to the mainline label hsi2c_3.  The
++ * mainline default pinctrl hs_i2c3_bus (gpd1-3/gpd1-2, FUNC_3,
++ * PULL_UP) reproduces the stock codec-i2c group; the stock
++ * samsung,check-transdone-int quirk has no mainline binding and no
++ * mainline user, so it is left out (see docs/AUDIO_M6.md).
++ */
++&hsi2c_3 {
++	status = "okay";
++
++	wm1814: audio-codec@1a {
++		compatible = "wlf,wm1814";
++		reg = <0x1a>;
++
++		interrupt-parent = <&gpa0>;
++		/* Pin gpa0-4; the live tree's type cell (0) carries no
++		 * type and the downstream arizona driver hard-codes
++		 * IRQF_TRIGGER_LOW; same wiring as TM2. */
++		interrupts = <4 IRQ_TYPE_LEVEL_LOW>;
++
++		/* MCLK1 = 24 MHz from the PMU CLKOUT pin (TM2 wiring);
++		 * MCLK2 (32k) is not described - the live tree does not
++		 * say where it comes from on this board.  The dmic-ref
++		 * MICBIAS1 constant is 1 in the live tree's raw cell too
++		 * (input 2 -> ref 1, input 3 -> ref 0). */
++		clocks = <&pmu_system_controller 0>;
++		clock-names = "mclk1";
++
++		gpio-controller;
++		#gpio-cells = <2>;
++		interrupt-controller;
++		#interrupt-cells = <2>;
++		#sound-dai-cells = <1>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&codec_reset_pins &codec_ldoena_pins
++			     &codec_irq_pins>;
++
++		wlf,reset = <&gpc0 7 GPIO_ACTIVE_HIGH>;
++		wlf,ldoena = <&gpf0 0 GPIO_ACTIVE_HIGH>;
++
++		/* core supplies; every rail is the S2MPS13 LDO18
++		 * (V_CODEC_1.8V_AP) in the live tree. */
++		AVDD-supply = <&ldo18_reg>;
++		LDOVDD-supply = <&ldo18_reg>;
++		DBVDD1-supply = <&ldo18_reg>;
++		DBVDD2-supply = <&ldo18_reg>;
++		DBVDD3-supply = <&ldo18_reg>;
++		CPVDD-supply = <&ldo18_reg>;
++		SPKVDDL-supply = <&ldo18_reg>;
++		SPKVDDR-supply = <&ldo18_reg>;
++
++		wlf,inmode = <ARIZONA_INMODE_DIFF ARIZONA_INMODE_DIFF
++			      ARIZONA_INMODE_DIFF ARIZONA_INMODE_DIFF>;
++		wlf,dmic-ref = <2 ARIZONA_DMIC_MICBIAS1 3 0>;
++		wlf,out-mono = <0 1 1 0 0 0>;
++		wlf,max-channels-clocked = <2 0 0>;
++
++		wlf,micd-detect-debounce = <300>;
++		wlf,micd-bias-start-time = <0x1>;
++		wlf,micd-rate = <0x7>;
++		wlf,micd-force-micbias;
++		wlf,micd-configs = <0x0 1 0>;
++		wlf,micd-timeout-ms = <1000>;
++		wlf,micd-software-compare;
++		wlf,gpsw = <ARIZONA_GPSW_CLAMP_DISABLED>;
++
++		wlf,gpio-defaults = <0xa101 0xa101 0xa101 0xa101 0x8101>;
++	};
++};
++
++/*
++ * PMU CLKOUT feeds the codec MCLK1 pin; parent it on the 24 MHz board
++ * oscillator, as TM2 does (exynos5433-tm2-common.dtsi:1248-1250).
++ * The downstream mach-exynos code programmes the same gate by writing
++ * 0x1000 to EXYNOS_PMU_DEBUG.
++ */
++&pmu_system_controller {
++	assigned-clocks = <&pmu_system_controller 0>;
++	assigned-clock-parents = <&xxti>;
++};
++
++/* I2S0 (LPASS) is the SoC side of the codec link. */
++&i2s0 {
++	status = "okay";
++};
++
++&pinctrl_alive {
++	codec_irq_pins: codec-irq-pins {
++		samsung,pins = "gpa0-4";
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_imem {
++	codec_ldoena_pins: codec-ldoena-pins {
++		samsung,pins = "gpf0-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++	};
++};
++
++&pinctrl_peric {
++	codec_reset_pins: codec-reset-pins {
++		samsung,pins = "gpc0-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
+new file mode 100644
+index 000000000..ff188ef02
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dts
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 7
++ *
++ * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus the
++ * motion sensors and cover Hall switch (LSM6DS3 IMU, YAS537 magnetometer
++ * on hsi2c_10, gpio-keys SW_LID) from exynos5433-gts28ltexx-m7.dtsi.
++ * See docs/SENSORS_M7.md.
++ */
++
++/dts-v1/;
++
++#include "exynos5433-gts28ltexx.dts"
++#include "exynos5433-gts28ltexx-m7.dtsi"
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi
+new file mode 100644
+index 000000000..7b62f45cd
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m7.dtsi
+@@ -0,0 +1,125 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 7
++ *
++ * Motion sensors and cover Hall switch: LSM6DS3 6-axis IMU + YAS537
++ * magnetometer on HSI2C channel 10, and the flip-cover Hall switch as a
++ * gpio-keys EV_SW/SW_LID input.  All values are transcribed from the
++ * device's live device tree (01_dumps/live_fdt.dts) and mapped onto the
++ * mainline bindings; see docs/SENSORS_M7.md for the value-by-value
++ * source table.  Only existing mainline drivers are used (st_lsm6dsx,
++ * yamaha-yas530, gpio-keys).  The cm36652 light/proximity sensor has no
++ * mainline driver (cm36651 is a different die: single 0x60 address,
++ * word-wide registers) and is deliberately left out, as is the sx9310
++ * grip sensor.
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++
++/ {
++	/*
++	 * live_fdt.dts:5367-5373 "hall" node (compatible "hall"):
++	 * hall,gpio_flip_cover = <0x4b 0x01 0x00> = gpa0-1 (bank phandle
++	 * 0x4b at live_fdt.dts:181-189).  The stock driver reports
++	 * SW_LID = !gpio_get_value() (drivers/input/hall.c:168/201), i.e.
++	 * raw GPIO low = cover closed.  Mainline gpio-keys reports the
++	 * gpiod logical value directly as the switch state, so
++	 * GPIO_ACTIVE_LOW gives SW_LID = !raw - exactly the stock mapping.
++	 * Debounce 10 ms: the stock path with SENSORS_HALL_IRQ_CTRL=y and
++	 * SEC_FACTORY unset runs the delayed work after HZ/100
++	 * (hall.c:214).  wakeup-source: required for cover-unlock wakeup;
++	 * the stock driver requests irq wake in suspend (hall.c:465).
++	 * The stock "hall-irq" pinctrl group (gpa0-1 func 0xf, pud none,
++	 * live_fdt.dts:428-434) is not transcribed: gpio-keys binds the
++	 * GPIO as an interrupt itself, like the m4 keys on the same
++	 * alive bank.
++	 */
++	hall-sensor {
++		compatible = "gpio-keys";
++
++		switch-flip-cover {
++			label = "hall-sensor: SW_LID";
++			gpios = <&gpa0 1 GPIO_ACTIVE_LOW>;
++			linux,input-type = <EV_SW>;
++			linux,code = <SW_LID>;
++			debounce-interval = <10>;
++			wakeup-source;
++		};
++	};
++};
++
++/*
++ * HSI2C channel 10 carries both motion sensors.
++ * live_fdt.dts:1925-1958: hsi2c@14DE0000 (compatible
++ * "samsung,exynos5-hsi2c", samsung,i2c-max-bus-freq 0x61a80 = 400000)
++ * - mainline label hsi2c_10 (exynos5433.dtsi i2c@14de0000), whose
++ * default pinctrl hs_i2c10_bus already matches the stock hs-i2c10-bus
++ * group (gpg3-0/gpg3-1, func 4).  The stock "samsung,check-transdone-int"
++ * and "samsung,i2c-sda-delay" quirks are not read by the mainline
++ * i2c-exynos5 driver and are left out.
++ */
++&hsi2c_10 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	imu@6b {
++		/*
++		 * live_fdt.dts:1946-1955 lsm6ds3@6b: reg <0x6b>,
++		 * compatible "st,lsm6ds3" (same string in the mainline
++		 * st,lsm6dsx binding).  Stock st,irq_gpio = <0x4b 0x00
++		 * 0x00> = gpa0-0; the stock driver hardcodes
++		 * IRQF_TRIGGER_HIGH (drivers/iio/imu/st_lsm6ds3_trigger.c
++		 * :268-269), and the mainline driver takes the trigger
++		 * type from the DT interrupt specifier, hence
++		 * IRQ_TYPE_LEVEL_HIGH.  st,drdy-int-pin = <1> verbatim
++		 * (live_fdt.dts:1953).
++		 *
++		 * mount-matrix from the stock "st,orientation = <1 2 1
++		 * 2 1 1 1 1 0>": the stock driver stores each cell
++		 * minus 1 (st_lsm6ds3_core.c:3518) and applies the
++		 * result row-per-output-axis
++		 * (st_lsm6ds3_buffer.c:30-46), the same convention as
++		 * the mainline mount-matrix binding.  <1 2 1 2 1 1 1 1
++		 * 0> - 1 = {0,1,0; 1,0,0; 0,0,-1}: x' = y, y' = x,
++		 * z' = -z.  No supply properties: the stock node names
++		 * no rails and the stock driver's regulator enable is
++		 * commented out (st_lsm6ds3_core.c:3637).
++		 */
++		compatible = "st,lsm6ds3";
++		reg = <0x6b>;
++		interrupt-parent = <&gpa0>;
++		interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
++		st,drdy-int-pin = <1>;
++
++		mount-matrix = "0", "1", "0",
++			       "1", "0", "0",
++			       "0", "0", "-1";
++	};
++
++	magnetometer@2e {
++		/*
++		 * live_fdt.dts:1939-1944 yas537@2e: reg <0x2e>,
++		 * compatible "yas_magnetometer" -> mainline
++		 * "yamaha,yas537".  mount-matrix from the stock
++		 * "yas,orientation = <7>": the position indexes
++		 * YAS537_TRANSFORMATION[] (yas_mag_drv-yas537.c:108-117);
++		 * row 7 = {0,-1,0; -1,0,0; 0,0,-1}, applied
++		 * row-per-output-axis (yas_mag_drv-yas537.c:464-471), the
++		 * same convention as the mainline mount-matrix binding.
++		 * The per-device yas,softiron/yas,softiron_sign
++		 * calibration matrices are factory data and are
++		 * deliberately not copied.  No interrupts, no supplies,
++		 * no reset GPIO: the stock node has none, and the
++		 * yamaha,yas530 binding forbids reset-gpios for
++		 * non-yas530 parts anyway.
++		 */
++		compatible = "yamaha,yas537";
++		reg = <0x2e>;
++
++		mount-matrix = "0", "-1", "0",
++			       "-1", "0", "0",
++			       "0", "0", "-1";
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-thermal.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-thermal.dtsi
+new file mode 100644
+index 000000000..d37fd1c32
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-thermal.dtsi
+@@ -0,0 +1,218 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - thermal protection
++ *
++ * Enables the five TMU (thermal management unit) instances the stock
++ * kernel drives and adds a "hot" and a "critical" trip to each of the
++ * five SoC thermal zones that exynos5433-tmu.dtsi (included at the end
++ * of the SoC dtsi, exynos5433.dtsi:2003) already declares for them.
++ *
++ * No cooling device is added: CPU frequency scaling stays undescribed
++ * (no cpu-supply, no cpufreq), because the SoC OPP voltages are not
++ * valid for every ASV group of this chip and the mainline kernel has no
++ * Exynos5433 ASV support.  The cooling-maps of exynos5433-tmu.dtsi stay
++ * unbound.  See docs/THERMAL.md, which has the value-by-value source
++ * table.
++ *
++ * Stock reference: one node, tmu@10060000, in the running tree
++ * (01_dumps/live_fdt.dts:4235-4335), identical to the stock source
++ * (kernel_universal5433 arch/arm/boot/dts/exynos5433.dtsi:1985-2086);
++ * the gts28 board files do not override it.
++ */
++
++/*
++ * The five TMU instances, mapped by register address.  Stock
++ * (live_fdt.dts:4237 reg, 4248 interrupts, 4243 clocks):
++ *   0x10060000 SPI 95  pclk_tmu0_apbif   mainline tmu_atlas0
++ *   0x10068000 SPI 96  pclk_tmu0_apbif   mainline tmu_atlas1
++ *   0x10070000 SPI 99  pclk_tmu1_apbif   mainline tmu_g3d
++ *   0x10078000 SPI 115 pclk_tmu1_apbif   mainline tmu_apollo
++ *   0x1007c000 SPI 94  pclk_tmu1_apbif   mainline tmu_isp
++ * The mainline nodes (exynos5433.dtsi:750-803) have the same addresses,
++ * interrupts and CMU_PERIS TMU0/TMU1 clocks.  The stock driver names
++ * the sensors "0: EAGLE0, 1: EAGLE1, 2: G3D, 3: KFC, 4: ISP"
++ * (drivers/thermal/exynos_thermal.c:1750-1751): EAGLE = A57 (atlas),
++ * KFC = A53 (apollo).
++ *
++ * No vtmu-supply: neither the stock tree (no supply property in the
++ * tmu node) nor the stock driver or board code (no regulator call in
++ * drivers/thermal/exynos_thermal.c or cal_tmu.c) names a TMU rail.  TM2
++ * uses its LDO3 (exynos5433-tm2-common.dtsi:1340-1353), but that is
++ * another board's wiring, and the mainline driver treats the supply as
++ * optional (exynos_tmu.c:1023-1033).  This board's LDO3
++ * (VDD1_E_1.8V_AP) is always-on anyway
++ * (exynos5433-gts28ltexx.dts, PMIC section).
++ *
++ * Calibration (gain 8, reference voltage 16, noise-cancel mode 4,
++ * default efuse 75) is not a DT property in mainline: the driver
++ * hard-codes the same values as the stock tree (exynos_tmu.c:911-930
++ * vs live_fdt.dts:4240,4244,4247,4251) and reads the trim from each
++ * instance's TRIMINFO register.  Differences from stock are listed in
++ * docs/THERMAL.md (open risks).
++ */
++&tmu_atlas0 {
++	status = "okay";
++};
++
++&tmu_atlas1 {
++	status = "okay";
++};
++
++/*
++ * Disabled after the first boot on the tablet (2026-10-28): this sensor
++ * reads nonsense with the mainline calibration (g3d -60 C, isp -155 C at
++ * idle, while the CPU sensors read 43-45 C).  See docs/THERMAL.md, risk 3
++ * (reference voltage / OTP trim differences with the stock driver).
++ */
++&tmu_g3d {
++	status = "disabled";
++};
++
++&tmu_apollo {
++	status = "okay";
++};
++
++/*
++ * Disabled after the first boot on the tablet (2026-10-28): this sensor
++ * reads nonsense with the mainline calibration (g3d -60 C, isp -155 C at
++ * idle, while the CPU sensors read 43-45 C).  See docs/THERMAL.md, risk 3
++ * (reference voltage / OTP trim differences with the stock driver).
++ */
++&tmu_isp {
++	status = "disabled";
++};
++
++/*
++ * Trips.
++ *
++ * critical, 115 C, every zone: the stock "H/W Tripping temp",
++ * trigger_level_7 = 115 (stock exynos5433.dtsi:2048-2051,
++ * live_fdt.dts:4266-4269), which the stock kernel writes as level 7 of
++ * THD_TEMP_RISE7_4 in each of the five instances
++ * (exynos_thermal.c:855-885) with THERM_TRIP_EN set (cal_tmu.c:116).
++ * Mainline programs its critical trip into that same register and bit
++ * (exynos_tmu.c:286-300, 497-504), so the hardware trip stays where
++ * stock had it.  Above it the TMU has the PMU drop power on its own;
++ * the kernel also requests an orderly power-off
++ * (thermal_core.c:389-410), which only matters if the hardware trip
++ * does not act.  Also the stock GPU "tripping" level, GPU_TH_TEMP5 =
++ * 115 (mach/tmu.h:45).
++ *
++ * hot, 110 C (atlas0, atlas1, g3d, isp): the stock software trip,
++ * SWTRIP_TEMP = 110 (exynos_thermal.c:74-76, CONFIG_EXYNOS_SWTRIP=y in
++ * lineage_gts28ltexx_defconfig:2425), = HOT_CRITICAL_TEMP
++ * (mach/tmu.h:24), = trigger_level_5 (stock exynos5433.dtsi:2040-2043,
++ * live_fdt.dts:4276-4279), = last GPU throttle step GPU_TH_TEMP4
++ * (mach/tmu.h:44).  Mainline takes no in-kernel action on a "hot"
++ * trip of a DT zone (thermal_core.c:417-426, no .hot op in
++ * thermal_of.c); it is a notification point for userspace.
++ *
++ * hot, 86 C (apollo only): the stock driver replaces the maximum
++ * temperature by 112 C as soon as the KFC (A53) sensor reads above
++ * 85 C, i.e. it raises its software trip and its last throttle step
++ * at KFC > 85 C (exynos_thermal.c:991-1000, then 1003-1025).  Readings
++ * are whole degrees, so "> 85" is ">= 86".
++ *
++ * hysteresis 2 C: stock threshold_falling = 2 (live_fdt.dts:4246),
++ * applied to every trigger level (exynos_thermal.c:866-876).
++ *
++ * polling 500 ms / 100 ms: the stock zone's IDLE_INTERVAL and
++ * PASSIVE_INTERVAL (cal_tmu.h:131-133, used at
++ * exynos_thermal.c:740-742).  The SoC zones are interrupt-only
++ * (polling 0, exynos5433-tmu.dtsi); polling makes a lost TMU interrupt
++ * unable to hide a critical temperature.
++ */
++&atlas0_thermal {
++	polling-delay-passive = <100>;
++	polling-delay = <500>;
++
++	trips {
++		atlas0_hot: atlas0-hot {
++			temperature = <110000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "hot";
++		};
++
++		atlas0_crit: atlas0-crit {
++			temperature = <115000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "critical";
++		};
++	};
++};
++
++&atlas1_thermal {
++	polling-delay-passive = <100>;
++	polling-delay = <500>;
++
++	trips {
++		atlas1_hot: atlas1-hot {
++			temperature = <110000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "hot";
++		};
++
++		atlas1_crit: atlas1-crit {
++			temperature = <115000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "critical";
++		};
++	};
++};
++
++&g3d_thermal {
++	polling-delay-passive = <100>;
++	polling-delay = <500>;
++
++	trips {
++		g3d_hot: g3d-hot {
++			temperature = <110000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "hot";
++		};
++
++		g3d_crit: g3d-crit {
++			temperature = <115000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "critical";
++		};
++	};
++};
++
++&apollo_thermal {
++	polling-delay-passive = <100>;
++	polling-delay = <500>;
++
++	trips {
++		apollo_hot: apollo-hot {
++			temperature = <86000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "hot";
++		};
++
++		apollo_crit: apollo-crit {
++			temperature = <115000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "critical";
++		};
++	};
++};
++
++&isp_thermal {
++	polling-delay-passive = <100>;
++	polling-delay = <500>;
++
++	trips {
++		isp_hot: isp-hot {
++			temperature = <110000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "hot";
++		};
++
++		isp_crit: isp-crit {
++			temperature = <115000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "critical";
++		};
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+new file mode 100644
+index 000000000..e759bc48d
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -0,0 +1,809 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433
++ *
++ * Device tree for a 32-bit (ARMv7/LPAE) mainline kernel.  The
++ * Exynos5433 is an ARMv8 SoC, but the device's signed bootloader
++ * (sboot) can only boot a 32-bit kernel, so this board includes the
++ * ARM64 SoC description; the register map and interrupt assignments
++ * are identical in AArch32 execution state.
++ *
++ * Validated on the tablet (2026-10-28, "boot3" test image booted from
++ * RECOVERY): Arch Linux with 8 cores (SMP), S2MPS13 PMIC, eMMC in
++ * HS200, USB device (ECM) through the SM5703 MUIC, watchdog, sec_log
++ * console and ramoops.  Pairs with arch/arm/configs/gts28ltexx_defconfig.
++ * docs/BOARD_DT.md maps each section below to its source document.
++ *
++ * Sections:
++ *   1. Bootloader interface and memory
++ *   2. Reserved memory
++ *   3. Clocks and timers
++ *   4. CPUs and SMP
++ *   5. Watchdog
++ *   6. PMIC (S2MPS13)
++ *   7. eMMC
++ *   8. USB device port (DWC3, PHY clocks, SM5703 MUIC)
++ */
++
++/dts-v1/;
++
++#include <arm64/exynos/exynos5433.dtsi>
++#include <dt-bindings/clock/exynos5433.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++
++/* ==================================================================== */
++/* 1. Bootloader interface and memory                                   */
++/* ==================================================================== */
++
++/ {
++	model = "Samsung Galaxy Tab S2 8.0 LTE (SM-T715)";
++	compatible = "samsung,gts28ltexx", "samsung,exynos5433";
++
++	/*
++	 * sboot patches this tree in place assuming one address cell and one
++	 * size cell, like the stock device tree: it overwrites /memory/reg
++	 * and adds one-cell linux,initrd-start/end.  The arm64 SoC dtsi uses
++	 * two cells, so the root is switched back to one cell (the soc bus
++	 * ranges are re-expressed below).
++	 */
++	#address-cells = <1>;
++	#size-cells = <1>;
++
++	/* Samsung DTBH selection keys (stock rev9-255 entry, live_fdt.dts:6-14) */
++	model_info-chip = <0x1539>;
++	model_info-platform = "gts28";
++	model_info-subtype = "gts28_eur_open";
++	model_info-hw_rev = <9>;
++	model_info-hw_rev_end = <0xff>;
++
++	/*
++	 * samsung-pinctrl picks each bank set by its alias index
++	 * (pinctrl-samsung.c of_alias_get_id(node, "pinctrl")) and fails
++	 * the probe without one; same table as the TM2 board
++	 * (exynos5433-tm2-common.dtsi:20-35).  mmc0 makes the eMMC
++	 * mmcblk0.  i2c20 numbers the MUIC's bit-banged bus (section 8).
++	 */
++	aliases {
++		mmc0 = &mshc_0;
++		pinctrl0 = &pinctrl_alive;
++		pinctrl1 = &pinctrl_aud;
++		pinctrl2 = &pinctrl_cpif;
++		pinctrl3 = &pinctrl_ese;
++		pinctrl4 = &pinctrl_finger;
++		pinctrl5 = &pinctrl_fsys;
++		pinctrl6 = &pinctrl_imem;
++		pinctrl7 = &pinctrl_nfc;
++		pinctrl8 = &pinctrl_peric;
++		pinctrl9 = &pinctrl_touch;
++		i2c20 = &i2c_muic;
++	};
++
++	/*
++	 * Must be named exactly "memory": sboot looks it up and replaces reg
++	 * with the banks below (live_fdt.dts memory node).
++	 */
++	memory {
++		device_type = "memory";
++		reg = <0x20000000 0x20000000>,
++		      <0x40000000 0x20000000>,
++		      <0x60000000 0x20000000>,
++		      <0x80000000 0x20000000>,
++		      <0xa0000000 0x20000000>,
++		      <0xc0000000 0x1e980000>;
++	};
++
++	chosen {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/*
++		 * sboot replaces this with its own line; the kernel's own
++		 * options come from CONFIG_CMDLINE (CONFIG_CMDLINE_EXTEND,
++		 * see gts28ltexx_defconfig).  Kept consistent with it anyway:
++		 * no "nosmp".
++		 */
++		bootargs = "console=tty0 loglevel=8 clk_ignore_unused pd_ignore_unused panic=5 oops=panic";
++
++		framebuffer: framebuffer@67000000 {
++			compatible = "simple-framebuffer";
++			reg = <0x67000000 0xc00000>;
++			width = <1536>;
++			height = <2048>;
++			stride = <6144>;
++			format = "a8r8g8b8";
++			status = "okay";
++
++			/*
++			 * Keep the panel powered while the bootloader
++			 * framebuffer is in use: these rails are boot-on but
++			 * not always-on (live_fdt.dts LDO25/37/39), so without
++			 * a consumer the regulator core would switch them off
++			 * ~30 s after boot.  simple-framebuffer enables every
++			 * *-supply it lists.
++			 */
++			vci-supply = <&ldo25_reg>;
++			vddr-supply = <&ldo37_reg>;
++			vdd3-supply = <&ldo39_reg>;
++		};
++	};
++};
++
++/* One-cell root: soc@0 maps its 1-cell bus 1:1 onto the 1-cell root. */
++&soc {
++	ranges = <0x0 0x0 0x18000000>;
++};
++
++/* ==================================================================== */
++/* 2. Reserved memory                                                   */
++/* ==================================================================== */
++
++/ {
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/* Bootloader framebuffer (s3cfb.bootloaderfb), keep out of the allocator. */
++		fb_reserved: fb@67000000 {
++			reg = <0x67000000 0xc00000>;
++			no-map;
++		};
++
++		/*
++		 * Samsung sec_log ring (sec_log=0x200000@0x26000000 on the
++		 * bootloader command line): magic and write pointer at
++		 * base - 8, ring at base (kernel_universal5433
++		 * drivers/staging/samsung/sec_log.c:106-171).  Rounded down
++		 * to a page boundary; the stock kernel turns its content into
++		 * /proc/last_kmsg after the next boot.
++		 */
++		sec-log@25fff000 {
++			reg = <0x25fff000 0x201000>;
++			no-map;
++		};
++
++		/*
++		 * RAM log area (sec_pstore=0x100000@0x26446000), laid out so
++		 * that the stock kernel exposes this kernel's console after a
++		 * reboot to Android.  Stock ramoops uses the same region with
++		 * record_size 512K, no console, pmsg_size 512K
++		 * (kernel_universal5433 drivers/staging/samsung/sec_log_pmsg.c:353-374),
++		 * i.e. [dump 512K][pmsg 512K] (fs/pstore/ram.c:486-504).  Here:
++		 * [dump 512K][console 512K], so the console zone header sits
++		 * where stock looks for its pmsg zone, with the same signature
++		 * (0 ^ DBGC) and header layout, and shows up there as
++		 * /sys/fs/pstore/pmsg-ramoops-0.
++		 */
++		ramoops@26446000 {
++			compatible = "ramoops";
++			reg = <0x26446000 0x100000>;
++			record-size = <0x80000>;
++			console-size = <0x80000>;
++			pmsg-size = <0>;
++			ecc-size = <0>;
++			no-map;
++		};
++
++		/* Other sboot RAM logs (sec_tima_log=0x200000@0x26202000,
++		 * sec_avc_log=0x40000@0x26404000 on the stock command line). */
++		sec-tima-log@26202000 {
++			reg = <0x26202000 0x200000>;
++			no-map;
++		};
++
++		sec-avc-log@26404000 {
++			reg = <0x26404000 0x40000>;
++			no-map;
++		};
++
++		/*
++		 * Fixed ION carveouts of the stock kernel (live_fdt.dts:1911,
++		 * "contig" heaps; video/sectbl/mfc_fw/video_ext are "secure",
++		 * i.e. may be TrustZone-protected).  Kept out of the kernel's
++		 * reach until their protection state is known.
++		 */
++		ion-carveout@cf900000 {
++			reg = <0xcf900000 0xe700000>;	/* mfc_nfw .. common */
++			no-map;
++		};
++
++		ion-carveout@de800000 {
++			reg = <0xde800000 0x120000>;	/* mfc_sh, secdma */
++			no-map;
++		};
++	};
++};
++
++/* ==================================================================== */
++/* 3. Clocks and timers                                                 */
++/* ==================================================================== */
++
++/*
++ * XXTI oscillator: the SoC dtsi leaves the rate to the board.  24 MHz,
++ * live_fdt.dts:1346 (stock oscclk) and exynos5433-tm2-common.dtsi:1376.
++ */
++&xxti {
++	clock-frequency = <24000000>;
++};
++
++/* The ARM architected timer is unavailable; use the Exynos MCT instead. */
++&timer {
++	status = "disabled";
++};
++
++/* ==================================================================== */
++/* 4. CPUs and SMP                                                      */
++/* ==================================================================== */
++
++/*
++ * All eight cores are started by the 32-bit Exynos secondary-CPU code
++ * (arch/arm/mach-exynos/platsmp.c) the way the vendor kernel does it;
++ * see docs/SMP_BRINGUP.md section 8.
++ *
++ * No PSCI node and no enable-method.  The 32-bit kernel takes the
++ * Exynos smp_ops from the machine descriptor
++ * (arch/arm/mach-exynos/exynos.c, .smp = smp_ops(exynos_smp_ops);
++ * arch/arm/kernel/setup.c falls back to it when PSCI is unavailable) and
++ * no arm32 CPU method matches "psci" or any Exynos string, so the
++ * properties would be ignored; the PSCI node must stay deleted because
++ * the bootloader offers no PSCI to a 32-bit kernel.
++ */
++/ {
++	/delete-node/ psci;
++
++	/*
++	 * Secure monitor handshake page.  Verbatim from the running stock
++	 * tree, 01_dumps/live_fdt.dts:1583-1586 (also stock
++	 * arch/arm/boot/dts/exynos5433.dtsi:205-208).  Registers the Exynos
++	 * firmware ops (arch/arm/mach-exynos/firmware.c); the vendor kernel
++	 * writes the secondary entry point at +0x1c of this window
++	 * (kernel_universal5433 arch/arm/mach-exynos/firmware.c:36-42).
++	 */
++	firmware@207b000 {
++		compatible = "samsung,secure-firmware";
++		reg = <0x0207b000 0x1000>;
++	};
++};
++
++&cpu0 { /delete-property/ enable-method; };
++&cpu1 { /delete-property/ enable-method; };
++&cpu2 { /delete-property/ enable-method; };
++&cpu3 { /delete-property/ enable-method; };
++&cpu4 { /delete-property/ enable-method; };
++&cpu5 { /delete-property/ enable-method; };
++&cpu6 { /delete-property/ enable-method; };
++&cpu7 { /delete-property/ enable-method; };
++
++&soc {
++	/*
++	 * The same page as seen by the mainline code: the firmware op writes
++	 * through the global sysram-ns mapping (firmware.c,
++	 * exynos_set_cpu_boot_addr(), via exynos.c exynos_sysram_init()).
++	 * 0x0207b000 is the vendor EXYNOS5433_PA_SYSRAM_NS
++	 * (kernel_universal5433 arch/arm/mach-exynos/include/mach/map.h:44,
++	 * 4 KiB iodesc at common.c:685-688) and the live firmware node
++	 * address above.  No "mmio-sram" parent: the size of the whole SRAM
++	 * is not established, and only this page is used.  The secure
++	 * sysram (vendor 0x02020000, per-core fallback registers) is not
++	 * described: the vendor kernel never used it on this SoC.
++	 */
++	smp-sram@207b000 {
++		compatible = "samsung,exynos4210-sysram-ns";
++		reg = <0x0207b000 0x1000>;
++	};
++};
++
++/* ==================================================================== */
++/* 5. Watchdog                                                          */
++/* ==================================================================== */
++
++/*
++ * The mainline exynos5433.dtsi has no watchdog node, so a hung kernel
++ * never resets the board.  Node transcribed from the device's live
++ * device tree (01_dumps/live_fdt.dts ~L1678: watchdog@10020000, reg
++ * <0x10020000 0x100>, interrupt <0 0x65 0>, clocks <0x10 0x366> and
++ * <0x10 0x9b0>, timeout-sec 30, pmu_wdt_reset_type 3) onto the
++ * mainline binding, with the PMU registers handled by the new
++ * samsung,exynos5433-wdt driver variant instead of the stock
++ * pmu_wdt_reset_type property.  See docs/WATCHDOG.md.
++ *
++ * Clock mapping: stock rate_watchdog (id 870, pclk_wdt_kfc /
++ * ENABLE_PCLK_PERIS bit 17, downstream
++ * drivers/clk/samsung/clk-exynos5433.c:184,2248) and gate_watchdog
++ * (id 2480, gate_wdt_kfc / ENABLE_IP_PERIS0 bit 5, same file L439,2883)
++ * both gate the same CMU_PERIS bit 17 clock, which mainline provides
++ * as CLK_PCLK_WDT_APOLLO (include/dt-bindings/clock/exynos5433.h:472,
++ * drivers/clk/samsung/clk-exynos5433.c:1850).  Mainline does not model
++ * the ENABLE_IP_PERIS0 IP gate, so a single clock is listed.
++ *
++ * The driver only starts the timer at probe with
++ * s3c2410_wdt.tmr_atboot=1 on the command line (CONFIG_CMDLINE in
++ * gts28ltexx_defconfig).
++ */
++&soc {
++	watchdog: watchdog@10020000 {
++		compatible = "samsung,exynos5433-wdt";
++		reg = <0x10020000 0x100>;
++		interrupts = <GIC_SPI 101 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&cmu_peris CLK_PCLK_WDT_APOLLO>;
++		clock-names = "watchdog";
++		samsung,syscon-phandle = <&pmu_system_controller>;
++		timeout-sec = <30>;
++	};
++};
++
++/* ==================================================================== */
++/* 6. PMIC (S2MPS13)                                                    */
++/* ==================================================================== */
++
++/*
++ * All PMIC values are transcribed from the device's live device tree
++ * (01_dumps/live_fdt.dts) and mapped onto the mainline bindings; see
++ * docs/DT_M2.md for the value-by-value source table.
++ *
++ * HSI2C channel 0 carries the S2MPS13 PMIC.
++ * live_fdt.dts: hsi2c@14E40000 (compatible "samsung,exynos5-hsi2c",
++ * hs-mode, clock-frequency 2500000) - mainline label hsi2c_0.
++ */
++&hsi2c_0 {
++	status = "okay";
++
++	pmic@66 {
++		compatible = "samsung,s2mps13-pmic";
++		interrupt-parent = <&gpa0>;
++		/* Pin gpa0-7; the downstream driver hard-codes
++		 * IRQF_TRIGGER_LOW, the live tree's type cell (0) carries
++		 * no type.  Same wiring as TM2: IRQ_TYPE_LEVEL_LOW. */
++		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
++		reg = <0x66>;
++
++		s2mps13_osc: clocks {
++			compatible = "samsung,s2mps13-clk";
++			#clock-cells = <1>;
++			clock-output-names = "s2mps13_ap", "s2mps13_cp",
++					     "s2mps13_bt";
++		};
++
++		regulators {
++			buck1_reg: BUCK1 {
++				regulator-name = "vdd_mif";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			buck2_reg: BUCK2 {
++				regulator-name = "vdd_eagle";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			buck3_reg: BUCK3 {
++				regulator-name = "vdd_kfc";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			buck4_reg: BUCK4 {
++				regulator-name = "vdd_int";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			buck5_reg: BUCK5 {
++				regulator-name = "vdd_disp_cam0";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			buck6_reg: BUCK6 {
++				regulator-name = "vdd_g3d";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			ldo11_reg: LDO11 {
++				regulator-name = "vdd_int_m";
++				regulator-min-microvolt = <600000>;
++				regulator-max-microvolt = <1500000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			/*
++			 * LDO17 and LDO2 are the SD slot rails (stock dmesg
++			 * "15560000.dwmmc2: vmmc on, vqmmc on"), not the
++			 * eMMC's: see section 7.
++			 */
++			ldo17_reg: LDO17 {
++				regulator-name = "vmmc";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			ldo18_reg: LDO18 {
++				regulator-name = "V_CODEC_1.8V_AP";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++				regulator-always-on;
++			};
++
++			ldo19_reg: LDO19 {
++				regulator-name = "GRIP_1.8V";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++				regulator-always-on;
++				regulator-boot-on;
++			};
++
++			ldo2_reg: LDO2 {
++				regulator-name = "vqmmc";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <3300000>;
++				regulator-boot-on;
++				regulator-ramp-delay = <12000>;
++			};
++
++			ldo20_reg: LDO20 {
++				regulator-name = "VCC_2.8V_AP";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++				regulator-always-on;
++				regulator-boot-on;
++			};
++
++			ldo21_reg: LDO21 {
++				regulator-name = "VT_CAM_1.8V";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++			};
++
++			ldo22_reg: LDO22 {
++				regulator-name = "CAM_IO_1.8V_AP";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++			};
++
++			ldo23_reg: LDO23 {
++				regulator-name = "CAM_SEN_CORE_1.2V_AP";
++				regulator-min-microvolt = <1300000>;
++				regulator-max-microvolt = <1300000>;
++			};
++
++			ldo25_reg: LDO25 {
++				regulator-name = "VCI_3.0V";
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
++				regulator-boot-on;
++			};
++
++			ldo26_reg: LDO26 {
++				regulator-name = "CAM_AF_2.8V_AP";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			ldo27_reg: LDO27 {
++				regulator-name = "VT_CAM_2.8V";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			ldo29_reg: LDO29 {
++				regulator-name = "CAM_SEN_A2.8V_AP";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			ldo3_reg: LDO3 {
++				regulator-name = "VDD1_E_1.8V_AP";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++				regulator-always-on;
++			};
++
++			ldo30_reg: LDO30 {
++				regulator-name = "tsp_avdd";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++
++			ldo31_reg: LDO31 {
++				regulator-name = "tsp_io";
++				regulator-min-microvolt = <1850000>;
++				regulator-max-microvolt = <1850000>;
++			};
++
++			ldo32_reg: LDO32 {
++				regulator-name = "vtouch_1.8v";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++				regulator-boot-on;
++			};
++
++			ldo33_reg: LDO33 {
++				regulator-name = "vtouch_3.3v";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++
++			ldo34_reg: LDO34 {
++				regulator-name = "VCC_1.8V_MHL";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++			};
++
++			ldo35_reg: LDO35 {
++				regulator-name = "VCC_3.0V_MOTOR_AP";
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
++			};
++
++			ldo36_reg: LDO36 {
++				regulator-name = "VSIL_1.2A";
++				regulator-min-microvolt = <1250000>;
++				regulator-max-microvolt = <1250000>;
++			};
++
++			ldo37_reg: LDO37 {
++				regulator-name = "VDDR_1.6V";
++				regulator-min-microvolt = <1600000>;
++				regulator-max-microvolt = <1600000>;
++				regulator-boot-on;
++			};
++
++			ldo38_reg: LDO38 {
++				regulator-name = "VCC_3.3V_MHL";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++
++			ldo39_reg: LDO39 {
++				regulator-name = "VDD3_1.8V";
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
++				regulator-boot-on;
++			};
++
++			ldo40_reg: LDO40 {
++				regulator-name = "VLED_2.8V";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++		};
++	};
++};
++
++/* ==================================================================== */
++/* 7. eMMC                                                              */
++/* ==================================================================== */
++
++/*
++ * Internal eMMC on mshc_0 (dwmmc0@15540000).
++ * live_fdt.dts: bus-width 8, ciu-div 3, sdr <3 0 2 0>, ddr <3 0 3 2>,
++ * fifo-depth 0x80, card-detect-delay 200, broken-cd,
++ * supports-highspeed, supports-hs200-1-8v-mode.
++ * The downstream 4-cell timings <div f_drv drv sample> decode to the
++ * mainline 2-cell <sample drv> form (see docs/DT_M2.md).
++ *
++ * On the model of the TM2 board, which runs this SoC's eMMC controller
++ * in HS400 on mainline (exynos5433-tm2-common.dtsi:951-971), with this
++ * tablet's values where it has its own:
++ *  - no vmmc/vqmmc: the stock eMMC node is fixed_volt
++ *    (live_fdt.dts:4050) and LDO17/LDO2 are the SD slot rails (stock
++ *    dmesg "15560000.dwmmc2: vmmc on, vqmmc on"); TM2 lists none
++ *    either.  With LDO2 attached, the first test boots ran the I/O at
++ *    3.3 V and every 50 MHz data read timed out (DRTO).
++ *  - CIU clock 800 MHz: the stock kernel goes straight from 400 kHz to
++ *    HS400 with a 200 MHz bus (stock dmesg "Bus speed =
++ *    200000000Hz"), i.e. 200 MHz * (ciu-div 3 + 1), the TM2 rate too.
++ *    Mainline cannot raise it itself (the request stops at the FSYS
++ *    user mux), so CMU_TOP is set directly.
++ *  - HS200 (kept from milestone 2), sample phase found by tuning, drive
++ *    phase 3 as the stock samsung,dw-mshc-hs200-timing <3 0 3 0>
++ *    (div, fine drive, drive, sample; live_fdt.dts:4081).
++ *
++ * The driver side (drivers/mmc/host/dw_mmc-exynos.c, exynos5433_drv_data)
++ * keeps the hardware data timeout at its maximum, as the stock kernel
++ * does: this eMMC answers reads later than its TAAC allows.
++ */
++&mshc_0 {
++	status = "okay";
++	cap-mmc-highspeed;
++	mmc-hs200-1_8v;
++	non-removable;
++	card-detect-delay = <200>;
++	samsung,dw-mshc-ciu-div = <3>;
++	samsung,dw-mshc-sdr-timing = <0 3>;
++	samsung,dw-mshc-ddr-timing = <2 3>;
++	fifo-depth = <0x80>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sd0_clk &sd0_cmd &sd0_rdqs &sd0_bus1 &sd0_bus4
++		     &sd0_bus8>;
++	bus-width = <8>;
++	assigned-clocks = <&cmu_top CLK_SCLK_MMC0_FSYS>;
++	assigned-clock-rates = <800000000>;
++};
++
++/*
++ * eMMC command/data pads as the stock tree configures them: drive
++ * strength 2 (FAST_SR3) and no pull (live_fdt.dts:3407-3413 sd0-cmd,
++ * 3546-3561 sd0-bus-width8/1, 3874-3880 sd0-bus-width4), instead of the
++ * SoC dtsi defaults (FAST_SR4, data lines pulled up).  The clock pad
++ * already matches (FAST_SR4 = stock clk_val 3).
++ */
++&sd0_cmd {
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd0_bus1 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd0_bus4 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd0_bus8 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++/* ==================================================================== */
++/* 8. USB device port (DWC3, PHY clocks, SM5703 MUIC)                   */
++/* ==================================================================== */
++
++/*
++ * USB 3.0 DRD (usb@15400000) in peripheral mode.
++ * live_fdt.dts: status okay, dwc3 dr_mode "otg", maximum-speed
++ * "high-speed".  We force peripheral mode: the SM5703 MUIC below only
++ * routes the data lines to the AP PHY and is not wired to the DWC3 as
++ * a role source; the real OTG role would be driven by it.
++ *
++ * No vdd33/vdd10 supplies: the live tree does not say which PMIC rails
++ * feed the USB block (they are left as the bootloader set them, like
++ * the stock kernel does), so the driver gets dummy regulators instead
++ * of rails borrowed from another board.
++ */
++&usbdrd30 {
++	status = "okay";
++};
++
++&usbdrd_dwc3 {
++	dr_mode = "peripheral";
++	maximum-speed = "high-speed";
++};
++
++&usbdrd30_phy {
++	status = "okay";
++};
++
++/*
++ * USB 3.0 DRD PHY clocks: switch the FSYS user muxes from OSCCLK to the
++ * PHY outputs, as the stock kernel's clock init and the TM2 board
++ * (exynos5433-tm2-common.dtsi:260-281) do.
++ */
++&cmu_fsys {
++	assigned-clocks = <&cmu_fsys CLK_MOUT_PHYCLK_USBDRD30_UDRD30_PHYCLOCK_USER>,
++			  <&cmu_fsys CLK_MOUT_PHYCLK_USBDRD30_UDRD30_PIPE_PCLK_USER>;
++	assigned-clock-parents = <&cmu_fsys CLK_PHYCLK_USBDRD30_UDRD30_PHYCLOCK_PHY>,
++				 <&cmu_fsys CLK_PHYCLK_USBDRD30_UDRD30_PIPE_PCLK_PHY>;
++};
++
++/ {
++	/*
++	 * SM5703 MUIC: routes the connector's D+/D- to the AP USB PHY, the
++	 * modem or the UART.  The stock kernel switches them to the AP on
++	 * every USB attach and opens them on shutdown, so after a reboot
++	 * from Android nothing reaches the PHY until a driver does it.
++	 * Bit-banged I2C on gpd1-5 (SDA) / gpd1-4 (SCL), 2 us delay,
++	 * address 0x25, interrupt gpa3-6 (live_fdt.dts:3061-3078; falling
++	 * edge per the stock muic_task.c).  Mainline extcon-sm5502 handles
++	 * this chip ("siliconmitus,sm5703-muic", as on the msm8916 Samsung
++	 * J5 boards).
++	 */
++	i2c_muic: i2c-muic {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpd1 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpd1 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		muic: extcon@25 {
++			compatible = "siliconmitus,sm5703-muic";
++			reg = <0x25>;
++			interrupt-parent = <&gpa3>;
++			interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
++		};
++	};
++};
++
++/* ==================================================================== */
++/* 9. Power-off and thermal protection                                  */
++/* ==================================================================== */
++
++/*
++ * Power-off: drive PS_HOLD low, as the stock kernel does (clear bit 8,
++ * "PS_HOLD Out/High", of PS_HOLD_CONTROL at PMU + 0x330C;
++ * kernel_universal5433 drivers/staging/samsung/sec_reboot.c:89-95,
++ * mach/regs-pmu-exynos5433.h:163).  Without it, poweroff and the
++ * critical thermal trip end in a halt with the PMIC still on.
++ */
++&pmu_system_controller {
++	poweroff: syscon-poweroff {
++		compatible = "syscon-poweroff";
++		regmap = <&pmu_system_controller>;
++		offset = <0x330c>;
++		mask = <0x100>;
++		value = <0x0>;
++	};
++};
++
++/* TMUs and trips (docs/THERMAL.md); no cpufreq cooling yet. */
++#include "exynos5433-gts28ltexx-thermal.dtsi"
++
++/* ==================================================================== */
++/* 10. Native display                                                   */
++/* ==================================================================== */
++
++/*
++ * DECON + MIC + MIPI-DSI + S6E3HA2 "TabS2" panel with the stock dynamic-AID
++ * gamma (docs/DISPLAY_M3.md); validated on the tablet on 2026-10-28.
++ */
++#include "exynos5433-gts28ltexx-m3.dtsi"
++
++/*
++ * The bootloader framebuffer is no longer needed once exynos-drm drives the
++ * panel, and simpledrm on it shows up as a second DRM device: phoc then
++ * picks it as the primary GPU and fails (first Phosh test, 2026-10-28).
++ */
++&framebuffer {
++	status = "disabled";
++};
++
++/* ==================================================================== */
++/* 11. Input: touchscreen and keys                                      */
++/* ==================================================================== */
++
++/*
++ * Synaptics s5806 (RMI4 over HSI2C) and gpio-keys (volume up/down, home,
++ * power): docs/INPUT_M4.md, validated on the tablet on 2026-10-28.
++ */
++#include "exynos5433-gts28ltexx-m4.dtsi"
++
++/* ==================================================================== */
++/* 12. GPU (Mali-T760 MP6, panfrost)                                    */
++/* ==================================================================== */
++
++/*
++ * No OPP table: Linux never changes the GPU voltage or clock (docs/GPU.md).
++ * Validated on the tablet on 2026-10-28: Mali-T760 id 0x750 r0p1, 6 shader
++ * cores, boot clock 266 MHz with vdd_g3d (BUCK6) at 937 500 uV, Mesa
++ * "Mali-T760 MC6 (Panfrost)" GLES 3.1 renderer in phoc, no GPU faults.
++ */
++#include "exynos5433-gts28ltexx-gpu.dtsi"
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+new file mode 100644
+index 000000000..35408e73e
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -0,0 +1,173 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433)
++#
++# 32-bit (ARMv7/LPAE) configuration: the bootloader can only boot a
++# 32-bit kernel.  Pairs with exynos5433-gts28ltexx.dts.  This is the
++# configuration validated on the tablet (boot3 test image, 2026-10-28:
++# Arch Linux, 8 cores, PMIC, eMMC, USB ECM, watchdog, sec_log console,
++# ramoops) plus CGROUP_PIDS and CRYPTO_USER.  Milestone fragments still
++# under test (gts28ltexx_m*.config) are merged on top of it by
++# scripts/kbuild-mainline.sh --fragment.  Generated with
++# "make savedefconfig".
++#
++# Why the non-obvious values:
++# - CMDLINE + CMDLINE_EXTEND: sboot replaces /chosen/bootargs with its
++#   own ~850-byte line and the kernel keeps at most COMMAND_LINE_SIZE
++#   (1024) bytes, so the boot.img header command line stays empty and
++#   our options are appended to the bootloader's (drivers/of/fdt.c
++#   early_init_dt_scan_chosen).  The whole line was 986 bytes on the
++#   first boot.  SMP is on (no "nosmp"); the initramfs finds the root.
++# - s3c2410_wdt.tmr_atboot=1: s3c2410_wdt only starts the watchdog at
++#   probe with it (no Kconfig symbol); the watchdog core then pings it
++#   until userspace opens /dev/watchdog (WATCHDOG_HANDLE_BOOT_ENABLED,
++#   WATCHDOG_OPEN_TIMEOUT=0, both defaults).  See docs/WATCHDOG.md.
++# - POWER_RESET_SYSCON (selected by ARCH_EXYNOS): syscon-reboot on PMU
++#   SWRESET (same register and value as the stock kernel,
++#   kernel_universal5433 arch/arm/mach-exynos/common.c:980), so a panic
++#   before the watchdog probes still restarts the board.
++# - PMIC, eMMC and USB gadget chain built in (=y) so a rootfs can be
++#   mounted from eMMC and the gadget used before userspace can load
++#   modules (docs/DT_M2.md).  USB_DWC3_HAPS/OF_SIMPLE stay =m, as in the
++#   validated build.
++# - INET, PACKET, UNIX, BLK_DEV_LOOP, OVERLAY_FS, POSIX_MQUEUE,
++#   INPUT_EVDEV: the initramfs to Arch (USB telnet/DHCP, read-only loop
++#   image under a tmpfs overlay) and systemd.
++# - I2C_GPIO, I2C_CHARDEV, EXTCON_SM5502: SM5703 MUIC on bit-banged I2C
++#   (USB port, exynos5433-gts28ltexx.dts section 8).
++# - MAGIC_SYSRQ: unattended test boots restart the board through
++#   /proc/sysrq-trigger (software reset keeps INFORM3, unlike a watchdog
++#   reset).
++# - CGROUP_PIDS, CRYPTO_USER: systemd (pids.max warnings on the first
++#   Arch boot; systemd-modules-load asks for crypto_user).
++#
++# Note: CONFIG_WIRELESS/WLAN are implied by CFG80211; FRAMEBUFFER_CONSOLE
++# by DRM_FBDEV_EMULATION; namespaced options by NAMESPACES.
++
++CONFIG_KERNEL_XZ=y
++CONFIG_SYSVIPC=y
++CONFIG_POSIX_MQUEUE=y
++CONFIG_BPF_SYSCALL=y
++CONFIG_CGROUPS=y
++CONFIG_MEMCG=y
++CONFIG_CGROUP_PIDS=y
++CONFIG_CGROUP_BPF=y
++CONFIG_USER_NS=y
++CONFIG_BLK_DEV_INITRD=y
++CONFIG_ARCH_EXYNOS=y
++CONFIG_SOC_EXYNOS5433=y
++CONFIG_ARM_LPAE=y
++CONFIG_SMP=y
++CONFIG_VMSPLIT_2G=y
++CONFIG_NR_CPUS=8
++CONFIG_HIGHMEM=y
++CONFIG_CMDLINE="console=tty0 loglevel=8 clk_ignore_unused pd_ignore_unused panic=5 oops=panic s3c2410_wdt.tmr_atboot=1"
++CONFIG_CMDLINE_EXTEND=y
++CONFIG_VFP=y
++CONFIG_NEON=y
++CONFIG_MODULES=y
++CONFIG_NET=y
++CONFIG_PACKET=y
++CONFIG_UNIX=y
++CONFIG_INET=y
++CONFIG_CFG80211=m
++CONFIG_PCI=y
++CONFIG_PCI_MSI=y
++CONFIG_PCI_EXYNOS=m
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_NETDEVICES=y
++CONFIG_BRCMFMAC=m
++CONFIG_BRCMFMAC_PCIE=y
++CONFIG_INPUT_EVDEV=y
++CONFIG_I2C_CHARDEV=y
++CONFIG_I2C_GPIO=y
++CONFIG_WATCHDOG=y
++CONFIG_S3C2410_WATCHDOG=y
++CONFIG_MFD_SEC_CORE=y
++CONFIG_REGULATOR=y
++CONFIG_REGULATOR_S2MPS11=y
++CONFIG_DRM=y
++CONFIG_DRM_FBDEV_EMULATION=y
++CONFIG_DRM_EXYNOS=m
++CONFIG_DRM_EXYNOS5433_DECON=y
++CONFIG_DRM_EXYNOS_DSI=y
++CONFIG_DRM_EXYNOS_MIC=y
++CONFIG_DRM_SIMPLEDRM=y
++CONFIG_DRM_PANFROST=m
++CONFIG_USB=y
++CONFIG_USB_DWC3=y
++CONFIG_USB_DWC3_GADGET=y
++CONFIG_USB_DWC3_HAPS=m
++CONFIG_USB_DWC3_OF_SIMPLE=m
++CONFIG_USB_GADGET=y
++CONFIG_USB_CONFIGFS=y
++CONFIG_USB_CONFIGFS_ECM=y
++CONFIG_USB_CONFIGFS_RNDIS=y
++CONFIG_MMC=y
++CONFIG_MMC_DW=y
++CONFIG_MMC_DW_EXYNOS=y
++CONFIG_COMMON_CLK_S2MPS11=y
++CONFIG_SAMSUNG_SEC_LOG_CONSOLE=y
++CONFIG_EXTCON=y
++CONFIG_EXTCON_SM5502=y
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_POSIX_ACL=y
++CONFIG_AUTOFS_FS=y
++CONFIG_OVERLAY_FS=y
++CONFIG_TMPFS=y
++CONFIG_TMPFS_POSIX_ACL=y
++CONFIG_PSTORE=y
++CONFIG_PSTORE_CONSOLE=y
++CONFIG_PSTORE_PMSG=y
++CONFIG_PSTORE_RAM=y
++CONFIG_CRYPTO_USER=y
++CONFIG_FONTS=y
++CONFIG_PRINTK_TIME=y
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_PANIC_TIMEOUT=5
++
++# Thermal validation (docs/THERMAL.md): emul_temp for testing the trips;
++# drop once the trips are validated on the device.
++CONFIG_THERMAL_EMULATION=y
++
++# The initramfs reads /sys/class/watchdog/watchdog0/bootstatus to tell a
++# watchdog reset (which would loop back into RECOVERY) from a normal boot.
++CONFIG_WATCHDOG_SYSFS=y
++
++# Native display (docs/DISPLAY_M3.md, validated on the tablet 2026-10-28).
++# DRM_EXYNOS is m in the base config; the DECON/DSI/MIC bools need it =y.
++CONFIG_DRM_EXYNOS=y
++CONFIG_DRM_EXYNOS5433_DECON=y
++CONFIG_DRM_EXYNOS_DSI=y
++CONFIG_DRM_EXYNOS_MIC=y
++CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2_TABS2=y
++CONFIG_BACKLIGHT_CLASS_DEVICE=y
++CONFIG_PHY_EXYNOS_MIPI_VIDEO=y
++# Scan-out buffers come from CMA (no IOMMU in use): one 1536x2048 XRGB8888
++# buffer is 12 MiB and the default 16 MiB pool made every allocation fail.
++CONFIG_CMA=y
++CONFIG_DMA_CMA=y
++CONFIG_CMA_SIZE_MBYTES=256
++
++# Real-time clock of the S2MPS13 PMIC (kept by Android): without it the
++# system starts in 1970 and PAM reports passwords "changed in future".
++CONFIG_RTC_CLASS=y
++CONFIG_RTC_DRV_S5M=y
++
++# Touchscreen (Synaptics s5806, RMI4 over I2C) and keys (gpio-keys):
++# docs/INPUT_M4.md, validated on the tablet on 2026-10-28.
++CONFIG_INPUT=y
++CONFIG_INPUT_KEYBOARD=y
++CONFIG_KEYBOARD_GPIO=y
++CONFIG_RMI4_CORE=y
++CONFIG_RMI4_I2C=y
++CONFIG_RMI4_F11=y
++CONFIG_RMI4_F12=y
++
++# Mali-T760 GPU (docs/GPU.md, validated on the tablet 2026-10-28) stays a
++# MODULE: built in, its probe runs before the initramfs watchdog guard,
++# and the first built-in boot looped (watchdog reset -> sboot boots
++# RECOVERY again).  Loaded by hand / by the initramfs after the guard.
++CONFIG_DRM_PANFROST=m
+diff --git a/arch/arm/configs/gts28ltexx_m5.config b/arch/arm/configs/gts28ltexx_m5.config
+new file mode 100644
+index 000000000..b1c118738
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_m5.config
+@@ -0,0 +1,61 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433) - milestone 5
++#
++# Fragment merged on top of gts28ltexx_defconfig by
++#   make gts28ltexx_defconfig gts28ltexx_m5.config
++# (run by scripts/kbuild-mainline.sh --fragment gts28ltexx_m5.config).
++#
++# The defconfig already carries the milestone-2 base (PMIC, eMMC, USB
++# gadget).  This fragment adds the Wi-Fi/Bluetooth milestone-5 symbols:
++#
++#  - Exynos5433 PCIe host + PHY for the BCM4358 (14e4:43ec), built-in:
++#    the Wi-Fi chip is behind it and modules are not usable at the
++#    milestone's rootfs stage (no module loading set up).
++#  - brcmfmac (BRCMFMAC + BRCMFMAC_PCIE) built-in.  BRCMFMAC=y also
++#    avoids a firmware/module request for brcmfmac-wcc (fwvid vendor
++#    ops for the 0x43ec/WCC match are registered in the same vmlinux
++#    when built-in).  Firmware loading at boot is not a problem: the
++#    kernel request goes through the usual firmware loader and is
++#    satisfied from the rootfs once mounted; until then the driver
++#    probes fine and only the firmware request waits/fails.
++#  - Bluetooth HCI UART (BT_HCIUART_BCM, which selects BT_BCM and
++#    BT_HCIUART_H4) built-in.
++#  - Serial device bus for the hci_bcm serial client (SERIAL_DEV_BUS=y
++#    because SERIAL_DEV_CTRL_TTYPORT depends on SERIAL_DEV_BUS != m).
++#  - RFKILL for radio kill-switch wiring.
++#
++# Symbols flipped from =m by this fragment: CFG80211 (defconfig =m).
++# Newly enabled (not set in gts28ltexx_defconfig): SERIAL_SAMSUNG
++# (no Kconfig default; needed for ttySAC3), RFKILL, BT.
++
++# PCIe host + PHY for the BCM4358 (mainline 6.12: PCI_EXYNOS is =m in
++# gts28ltexx_defconfig, PHY_EXYNOS_PCIE is a bool that depends on
++# PCI_EXYNOS).
++CONFIG_PCI=y
++CONFIG_PCI_MSI=y
++CONFIG_PCI_EXYNOS=y
++CONFIG_PHY_EXYNOS_PCIE=y
++
++# Wi-Fi: brcmfmac with PCIe bus support.
++CONFIG_CFG80211=y
++CONFIG_BRCMFMAC=y
++CONFIG_BRCMFMAC_PCIE=y
++
++# Bluetooth: hci_uart with the Broadcom protocol (selects BT_BCM and
++# BT_HCIUART_H4).
++CONFIG_BT=y
++CONFIG_BT_HCIUART=y
++CONFIG_BT_HCIUART_BCM=y
++
++# Serial device bus (hci_bcm attaches through serdev); TTYPORT needs
++# SERIAL_DEV_BUS != m, hence =y.
++CONFIG_SERIAL_DEV_BUS=y
++CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
++
++# Samsung serial driver for ttySAC3 (not in defconfig, no Kconfig
++# default; Bluetooth lives on that UART).
++CONFIG_SERIAL_SAMSUNG=y
++
++# Radio kill switch.
++CONFIG_RFKILL=y
+diff --git a/arch/arm/configs/gts28ltexx_m6.config b/arch/arm/configs/gts28ltexx_m6.config
+new file mode 100644
+index 000000000..4a749e422
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_m6.config
+@@ -0,0 +1,58 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Milestone 6a (audio hardware) config fragment for the gts28ltexx
++# board.  Merged on top of gts28ltexx_defconfig (see
++# scripts/kbuild-mainline.sh --fragment), which already carries the
++# milestone-2 base (PMIC, eMMC, USB gadget).  Adds the audio chain:
++# Samsung I2S, the Arizona MFD/codec stack for the WM1814 (driven as
++# WM8998) and its internal regulators.  There is no machine driver
++# yet, so no sound card is instantiated; these options only make the
++# codec MFD and its ASoC component probe.  See docs/AUDIO_M6.md for the
++# rationale.
++#
++# All symbols set here hold (=y): SND_SOC_SAMSUNG and SND_SAMSUNG_I2S
++# have no user-visible blocker, and MFD_ARIZONA_I2C/MFD_WM8998 are
++# tristates with prompts.  The one deliberate omission is the codec's
++# ASoC component itself: CONFIG_SND_SOC_WM8998 is a promptless
++# tristate (sound/soc/codecs/Kconfig:2414-2416) whose only in-tree
++# activators are imply from SND_SOC_ALL_CODECS (needs COMPILE_TEST,
++# unacceptable on a device config) and select from a machine driver -
++# and mainline has no WM8998 machine driver.  A fragment line is
++# silently dropped for such symbols (olddefconfig ignores user values
++# without a prompt; verified by hand-appending the line to .config).
++# Mainline's own pattern is SND_SOC_SAMSUNG_TM2_WM5110
++# (sound/soc/samsung/Kconfig:118-125) selecting SND_SOC_WM5110; the
++# machine-driver milestone must do the same with SND_SOC_WM8998, which
++# also flips the promptless SND_SOC_ARIZONA helper (codec glue +
++# arizona-jack) to y via its defaults (sound/soc/codecs/Kconfig:366-377).
++
++# --- milestone 6a: audio ---
++# Sound core; SND selects SND_JACK/REGMAP_I2C as needed.
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_SOC=y
++CONFIG_SND_SOC_SAMSUNG=y
++# Exynos5433 I2S0 controller (sound/soc/samsung/i2s.c).
++CONFIG_SND_SAMSUNG_I2S=y
++# Arizona MFD over I2C (drivers/mfd/arizona-i2c.c matches
++# "wlf,wm1814") and the WM8998 cell set (WM1814 shares it).  The
++# wm8998-codec ASoC cell itself stays unbuilt (see header): its
++# SND_SOC_WM8998 symbol is promptless and needs the machine driver's
++# select.
++CONFIG_MFD_ARIZONA_I2C=y
++CONFIG_MFD_WM8998=y
++# Internal LDO1 (DCVDD) and MICSUPP (MICVDD) regulator cells of the
++# Arizona MFD (drivers/mfd/arizona-core.c: early_devs/wm8998_devs).
++CONFIG_REGULATOR_ARIZONA_LDO1=y
++CONFIG_REGULATOR_ARIZONA_MICSUPP=y
++# Arizona GPIO block (wm8998_devs "arizona-gpio" cell); also needed
++# because the codec node is a gpio-controller.
++CONFIG_GPIO_ARIZONA=y
++# Extcon: arizona-jack.c (linked into snd-soc-arizona) registers an
++# extcon device for jack detection.
++CONFIG_EXTCON=y
++# LPASS MFD (audio-subsystem@11400000) parents I2S0 and its ADMA.
++CONFIG_MFD_EXYNOS_LPASS=y
++# ADMA (arm,pl330) provides the I2S0 DMA channels.
++CONFIG_DMADEVICES=y
++CONFIG_PL330_DMA=y
+diff --git a/arch/arm/configs/gts28ltexx_m7.config b/arch/arm/configs/gts28ltexx_m7.config
+new file mode 100644
+index 000000000..8a87eaaf1
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_m7.config
+@@ -0,0 +1,29 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Samsung Galaxy Tab S2 8.0 LTE (SM-T715, Exynos5433) - milestone 7
++#
++# Fragment merged on top of gts28ltexx_defconfig by
++#   make gts28ltexx_defconfig gts28ltexx_m7.config
++# (run by scripts/kbuild-mainline.sh --fragment gts28ltexx_m7.config).
++#
++# The defconfig already carries the milestone-2 base (PMIC +
++# regulators, eMMC, USB gadget).  This fragment adds the milestone-7
++# sensor drivers: the IIO core, the st_lsm6dsx IMU driver (covers the
++# LSM6DS3), the yamaha-yas530 magnetometer driver (covers the YAS537)
++# and the gpio-keys Hall switch, all built-in (=y) so
++# iio-sensor-proxy can read orientation and cover state from an
++# initramfs.
++#
++# I2C_EXYNOS5 (=y in the defconfig) is the hsi2c_10 controller driver
++# the two sensors sit on.
++
++# --- milestone 7 ---
++CONFIG_IIO=y
++CONFIG_IIO_BUFFER=y
++CONFIG_IIO_TRIGGERED_BUFFER=y
++CONFIG_IIO_ST_LSM6DSX=y
++CONFIG_IIO_ST_LSM6DSX_I2C=y
++CONFIG_YAMAHA_YAS530=y
++
++CONFIG_INPUT_EVDEV=y
++CONFIG_KEYBOARD_GPIO=y

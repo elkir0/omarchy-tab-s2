@@ -1,0 +1,383 @@
+From 38a88e1730282425521209fc36fa8eb968dae611 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 11/24] ARM: dts: gts28ltexx: Bluetooth on UART3; M5 Wi-Fi with
+ PERST# held high
+
+- New exynos5433-gts28ltexx-bt.dtsi, included by the board file
+  (section 13): BCM4358 Bluetooth on UART3 (hci_bcm, serdev), BT_EN
+  gpd4-0, BT_WAKE gpr3-7, HOST_WAKE gpa2-2, PMIC 32 kHz clock. 460800
+  baud: UART3 runs at 24 MHz here and 921600 gives UBRDIV = 0, after
+  which the patched controller no longer answers.
+- exynos5433-gts28ltexx-m5.dtsi keeps only Wi-Fi/PCIe (not in the
+  default board until the firmware-start stall is solved). PERST#
+  (gpr3-5) is held high as a GPIO output like the vendor driver does,
+  CLKREQ# and gpr3-6 keep the PCIe function.
+- Board header: section index completed (9-13).
+
+Checked on the SM-T715: Bluetooth up from a cold boot with the
+default DTB.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx-bt.dtsi | 124 ++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx-m5.dts  |   4 +-
+ .../dts/samsung/exynos5433-gts28ltexx-m5.dtsi | 121 ++++-------------
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |  18 +++
+ 4 files changed, 167 insertions(+), 100 deletions(-)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
+new file mode 100644
+index 000000000..81e5f5b60
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
+@@ -0,0 +1,124 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - Bluetooth
++ *
++ * Broadcom BCM4358 Bluetooth on UART3 (hci_bcm over serdev), validated on
++ * the tablet on 2026-10-28 (patched firmware 0144, scan OK).  UART3 lives
++ * inside the LPASS block; its device appears once the exynos-lpass MFD
++ * driver is bound, and that driver keeps LPASS runtime-active while the
++ * UART is enabled (a suspended LPASS masks the UART interrupt).
++ *
++ * BT_EN (gpd4-0) has a single writer: hci_bcm's shutdown-gpios.  No
++ * vbat/vddio supplies are given to hci_bcm: the binding makes them
++ * optional and the live tree does not name those rails.
++ *
++ * Pins, GPIOs, IRQ and UART come from the device's live device tree
++ * (01_dumps/live_fdt.dts); see docs/WIFI_BT_M5.md (sections 2.2 and 7.4).
++ */
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/clock/samsung,s2mps11.h>
++
++/ {
++	aliases {
++		serial3 = &serial_3;
++	};
++};
++
++/*
++ * Stock groups cfg-hostwake (live_fdt.dts:438-444), cfg-btwake
++ * (3496-3501) and cfg-en (6196-6201), without the power-down cells.
++ */
++&pinctrl_alive {
++	bt_host_wake_pins: bt-host-wake-pins {
++		samsung,pins = "gpa2-2";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_fsys {
++	bt_wake_pins: bt-wake-pins {
++		samsung,pins = "gpr3-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_peric {
++	bt_en_pins: bt-en-pins {
++		samsung,pins = "gpd4-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
++	};
++};
++
++/*
++ * Bluetooth: stock serial@11460000 (live_fdt.dts:3988-4001) = mainline
++ * serial_3 = ttySAC3 (getprop.txt:240 ro.bluetooth.tty=ttySAC3), with
++ * the stock "broadcom,bcm4358" child (live_fdt.dts:4198-4203).  TM2
++ * wires the same three control pins on the same UART
++ * (exynos5433-tm2-common.dtsi &serial_3 bluetooth node).
++ */
++&serial_3 {
++	status = "okay";
++
++	bluetooth {
++		/*
++		 * No bcm4358 entry in hci_bcm's of_match table
++		 * (hci_bcm.c:1597-1612); brcm,bcm43540-bt carries
++		 * bcm4354_device_data with .no_early_set_baudrate = true,
++		 * matching the stock fixed-baud attach flow: the vendor
++		 * stack opens ttySAC3 at 921600 and loads the .hcd at
++		 * that speed.
++		 *
++		 * No brcm,requires-autobaud-mode: the stock flow never
++		 * autobauds.
++		 */
++		compatible = "brcm,bcm43540-bt";
++
++		/* BT_EN: stock gpio 0 / cfg-en, gpd4-0 (live_fdt.dts:4198
++		 * -4203, 6196-6201). */
++		shutdown-gpios = <&gpd4 0 GPIO_ACTIVE_HIGH>;
++		/* BT_WAKE: stock gpio 1 / cfg-btwake, gpr3-7. */
++		device-wakeup-gpios = <&gpr3 7 GPIO_ACTIVE_HIGH>;
++		/*
++		 * HOST_WAKE: stock gpio 2 / cfg-hostwake, gpa2-2.
++		 * interrupt-names "host-wakeup" is what hci_bcm looks up
++		 * (hci_bcm.c:1245, of_irq_get_byname(node,
++		 * "host-wakeup")); rising edge matches the downstream
++		 * IRQF_TRIGGER_RISING request (bcm4358.c).  interrupts
++		 * rather than the deprecated host-wakeup-gpios.
++		 */
++		interrupt-parent = <&gpa2>;
++		interrupts = <2 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "host-wakeup";
++
++		/*
++		 * 32.768 kHz BT clock from the PMIC: s2mps13_osc output 2
++		 * ("s2mps13_bt", exynos5433-gts28ltexx.dts, PMIC section;
++		 * S2MPS11_CLK_BT = 2 in samsung,s2mps11.h).  "extclk" is
++		 * the deprecated spelling of "txco" but resolves through
++		 * bcm_get_txco's fallback (hci_bcm.c:1067-1082) and is
++		 * what TM2 uses; the stock BT node carries no clocks
++		 * property, the source follows the TM2 wiring for the
++		 * same chip family.
++		 */
++		clocks = <&s2mps13_osc S2MPS11_CLK_BT>;
++		clock-names = "extclk";
++
++		/*
++		 * Stock runs 921600 (libbt_vndcfg.txt UART_TARGET_BAUD_RATE),
++		 * but UART3 is clocked at 24 MHz here (sclk_aud_uart from
++		 * oscclk), which gives UBRDIV = 0 at 921600: after the baud
++		 * switch the controller no longer answers (seen on the
++		 * device, 2026-10-28).  460800 gives UBRDIV = 2 (0.16 %
++		 * error) and works.
++		 */
++		max-speed = <460800>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&bt_host_wake_pins &bt_wake_pins &bt_en_pins>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+index 7647996c5..c3760be16 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dts
+@@ -3,8 +3,8 @@
+  * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
+  *
+  * Board file (validated base: PMIC, eMMC, USB, SMP, watchdog) plus
+- * Wi-Fi (BCM4358 on PCIe, brcmfmac) and Bluetooth (BCM4358 on UART3,
+- * hci_bcm) from exynos5433-gts28ltexx-m5.dtsi.  See docs/WIFI_BT_M5.md.
++ * Wi-Fi (BCM4358 on PCIe, brcmfmac) from exynos5433-gts28ltexx-m5.dtsi;
++ * Bluetooth is part of the board file.  See docs/WIFI_BT_M5.md.
+  */
+ 
+ /dts-v1/;
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+index 755a84365..f0d24ed6f 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-m5.dtsi
+@@ -2,8 +2,10 @@
+ /*
+  * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - milestone 5
+  *
+- * Wi-Fi: Broadcom BCM4358 on PCIe (brcmfmac), Bluetooth: BCM4358 on
+- * UART3 (hci_bcm).
++ * Wi-Fi: Broadcom BCM4358 on PCIe (brcmfmac).  Bluetooth moved to
++ * exynos5433-gts28ltexx-bt.dtsi (included by the board file) once it
++ * worked on the tablet; Wi-Fi stays here until the firmware start stall
++ * is solved (docs/WIFI_BT_M5.md section 7.2).
+  *
+  * The stock kernel toggled the radio-enable GPIOs from vendor glue
+  * (bcmdhd dhd_custom_exynos.c, bcm4358.c) that has no mainline
+@@ -26,12 +28,6 @@
+  *    leave-on state (same policy as the usbdrd30 comment in
+  *    exynos5433-gts28ltexx.dts, PMIC section).
+  *
+- *  - BT_EN (gpd4-0) has a single writer: hci_bcm's shutdown-gpios.
+- *    No vbat/vddio supplies are given to hci_bcm: the binding makes
+- *    them optional and the live tree does not name those rails, so the
+- *    driver runs them as NULL instead of borrowing rails from another
+- *    board.
+- *
+  * All GPIOs, pins, clocks, IRQs and the baud rate are transcribed from
+  * the device's live device tree (01_dumps/live_fdt.dts) and the vendor
+  * configuration preserved in this repo (04_arch_rootfs overlay); see
+@@ -44,10 +40,6 @@
+ #include <dt-bindings/clock/samsung,s2mps11.h>
+ 
+ / {
+-	aliases {
+-		serial3 = &serial_3;
+-	};
+-
+ 	/*
+ 	 * WLAN_EN (gpj2-0): gpio 0 of the stock wlan node
+ 	 * (live_fdt.dts:4733-4738).  Downstream bcmdhd drives it high and
+@@ -106,15 +98,19 @@ &pcie {
+ 
+ 	pinctrl-names = "default";
+ 	/*
+-	 * pcie_bus: SoC-level group gpr3-4/5/6 func 3 pull-up
+-	 * (exynos5433-pinctrl.dtsi:340; same pins as the stock pcie_bus
+-	 * group, live_fdt.dts:3849-3855).
++	 * gpr3-4 (CLKREQ_EN) and gpr3-6 keep the PCIe function of the
++	 * SoC pcie_bus group (exynos5433-pinctrl.dtsi:340); gpr3-5 is
++	 * PERST#, which the stock driver requests as a GPIO output driven
++	 * high (kernel_universal5433 drivers/pci/host/pci-exynos.c:837-841,
++	 * labels in arch/arm/boot/dts/exynos5433-gts2_common.dtsi:1441-1443)
++	 * instead of leaving it to function 3.  Mainline pci-exynos has no
++	 * PERST# handling, so the pin is held high by pinctrl.
+ 	 * wlan_en_pins / pcie_wake_pins / wlan_host_wake_pins: board groups
+ 	 * defined below, transcribed from the stock cfg-wlanen, pcie_wake
+ 	 * and wlan_host_wake groups.
+ 	 */
+-	pinctrl-0 = <&pcie_bus &wlan_en_pins &pcie_wake_pins
+-		     &wlan_host_wake_pins>;
++	pinctrl-0 = <&pcie_clkreq_pins &pcie_perst_pins &wlan_en_pins
++		     &pcie_wake_pins &wlan_host_wake_pins>;
+ 
+ 	vdd10-supply = <&pcie_vdd10>;
+ 	vdd18-supply = <&wlan_reg_on>;
+@@ -173,8 +169,7 @@ &pcie_phy {
+  * Board pin groups, transcribed from the stock groups, placed inside
+  * their pinctrl controller nodes (only controller children become
+  * pin groups): cfg-wlanen (live_fdt.dts:5626-5632) and pcie_wake
+- * (402-407) / wlan_host_wake (666-672) / cfg-hostwake (438-444) /
+- * cfg-btwake (3496-3501) / cfg-en (6196-6201).  The stock power-down
++ * (402-407) / wlan_host_wake (666-672).  The stock power-down
+  * cells (samsung,pin-con-pdn / pin-pud-pdn) are kept out, like the
+  * rest of mainline exynos5433 boards.
+  */
+@@ -199,90 +194,20 @@ wlan_host_wake_pins: wlan-host-wake-pins {
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+ 		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+ 	};
+-
+-	bt_host_wake_pins: bt-host-wake-pins {
+-		samsung,pins = "gpa2-2";
+-		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+-		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+-	};
+ };
+ 
+ &pinctrl_fsys {
+-	bt_wake_pins: bt-wake-pins {
+-		samsung,pins = "gpr3-7";
+-		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+-		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	pcie_clkreq_pins: pcie-clkreq-pins {
++		samsung,pins = "gpr3-4", "gpr3-6";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_3>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+ 	};
+-};
+ 
+-&pinctrl_peric {
+-	bt_en_pins: bt-en-pins {
+-		samsung,pins = "gpd4-0";
++	/* Stock state: GPIO output high, pull-up kept from pcie_bus. */
++	pcie_perst_pins: pcie-perst-pins {
++		samsung,pins = "gpr3-5";
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+-		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+-	};
+-};
+-
+-/*
+- * Bluetooth: stock serial@11460000 (live_fdt.dts:3988-4001) = mainline
+- * serial_3 = ttySAC3 (getprop.txt:240 ro.bluetooth.tty=ttySAC3), with
+- * the stock "broadcom,bcm4358" child (live_fdt.dts:4198-4203).  TM2
+- * wires the same three control pins on the same UART
+- * (exynos5433-tm2-common.dtsi &serial_3 bluetooth node).
+- */
+-&serial_3 {
+-	status = "okay";
+-
+-	bluetooth {
+-		/*
+-		 * No bcm4358 entry in hci_bcm's of_match table
+-		 * (hci_bcm.c:1597-1612); brcm,bcm43540-bt carries
+-		 * bcm4354_device_data with .no_early_set_baudrate = true,
+-		 * matching the stock fixed-baud attach flow: the vendor
+-		 * stack opens ttySAC3 at 921600 and loads the .hcd at
+-		 * that speed.
+-		 *
+-		 * No brcm,requires-autobaud-mode: the stock flow never
+-		 * autobauds.
+-		 */
+-		compatible = "brcm,bcm43540-bt";
+-
+-		/* BT_EN: stock gpio 0 / cfg-en, gpd4-0 (live_fdt.dts:4198
+-		 * -4203, 6196-6201). */
+-		shutdown-gpios = <&gpd4 0 GPIO_ACTIVE_HIGH>;
+-		/* BT_WAKE: stock gpio 1 / cfg-btwake, gpr3-7. */
+-		device-wakeup-gpios = <&gpr3 7 GPIO_ACTIVE_HIGH>;
+-		/*
+-		 * HOST_WAKE: stock gpio 2 / cfg-hostwake, gpa2-2.
+-		 * interrupt-names "host-wakeup" is what hci_bcm looks up
+-		 * (hci_bcm.c:1245, of_irq_get_byname(node,
+-		 * "host-wakeup")); rising edge matches the downstream
+-		 * IRQF_TRIGGER_RISING request (bcm4358.c).  interrupts
+-		 * rather than the deprecated host-wakeup-gpios.
+-		 */
+-		interrupt-parent = <&gpa2>;
+-		interrupts = <2 IRQ_TYPE_EDGE_RISING>;
+-		interrupt-names = "host-wakeup";
+-
+-		/*
+-		 * 32.768 kHz BT clock from the PMIC: s2mps13_osc output 2
+-		 * ("s2mps13_bt", exynos5433-gts28ltexx.dts, PMIC section;
+-		 * S2MPS11_CLK_BT = 2 in samsung,s2mps11.h).  "extclk" is
+-		 * the deprecated spelling of "txco" but resolves through
+-		 * bcm_get_txco's fallback (hci_bcm.c:1067-1082) and is
+-		 * what TM2 uses; the stock BT node carries no clocks
+-		 * property, the source follows the TM2 wiring for the
+-		 * same chip family.
+-		 */
+-		clocks = <&s2mps13_osc S2MPS11_CLK_BT>;
+-		clock-names = "extclk";
+-
+-		/* Stock attach baud (04_arch_rootfs overlay
+-		 * etc/default/brcm-bluetooth BT_BAUD=921600; vendor
+-		 * getprop ro.bluetooth.tty + libbt_vndcfg.txt). */
+-		max-speed = <921600>;
+-
+-		pinctrl-names = "default";
+-		pinctrl-0 = <&bt_host_wake_pins &bt_wake_pins &bt_en_pins>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-val = <1>;
+ 	};
+ };
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index e759bc48d..7147c9a7f 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -23,6 +23,11 @@
+  *   6. PMIC (S2MPS13)
+  *   7. eMMC
+  *   8. USB device port (DWC3, PHY clocks, SM5703 MUIC)
++ *   9. Power-off and thermal protection
++ *  10. Native display
++ *  11. Input: touchscreen and keys
++ *  12. GPU (Mali-T760 MP6, panfrost)
++ *  13. Bluetooth (BCM4358 on UART3, hci_bcm)
+  */
+ 
+ /dts-v1/;
+@@ -807,3 +812,16 @@ &framebuffer {
+  * "Mali-T760 MC6 (Panfrost)" GLES 3.1 renderer in phoc, no GPU faults.
+  */
+ #include "exynos5433-gts28ltexx-gpu.dtsi"
++
++/* ==================================================================== */
++/* 13. Bluetooth (BCM4358 on UART3, hci_bcm)                            */
++/* ==================================================================== */
++
++/*
++ * UART3 sits in the LPASS block (exynos-lpass keeps it runtime-active),
++ * 460800 baud with UART3 at 24 MHz, patched firmware loaded by btbcm:
++ * docs/WIFI_BT_M5.md section 7.4, validated on the tablet on 2026-10-28.
++ * The drivers are modules (bluetooth, hci_uart, samsung_tty, exynos-lpass)
++ * that the initramfs installs into the root filesystem.
++ */
++#include "exynos5433-gts28ltexx-bt.dtsi"

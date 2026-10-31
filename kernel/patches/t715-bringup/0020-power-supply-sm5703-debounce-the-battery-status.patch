@@ -1,0 +1,150 @@
+From 8e16c2ef410c7eee3349795d72c56ed9f974cdd8 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 20/24] power: supply: sm5703: debounce the battery status
+
+The status is derived from the instantaneous battery current with a
+50 mA dead band.  On a USB port at 99 % that current swings between
+about -110 and +115 mA from one second to the next, so the status
+flipped between Charging, Not charging and Discharging.  With no line
+power supply on the board, UPower derives OnBattery from the battery
+state, and gsd-power played its plug and unplug sounds at every flip.
+
+Report a new status only once three readings in a row, 10 s apart,
+agree on it.  The status property returns that debounced value; the
+first reading at probe is reported as is.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/power/supply/sm5703_fuel_gauge.c | 67 +++++++++++++++++++-----
+ 1 file changed, 55 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/power/supply/sm5703_fuel_gauge.c b/drivers/power/supply/sm5703_fuel_gauge.c
+index c6be25c2e..719b82e5a 100644
+--- a/drivers/power/supply/sm5703_fuel_gauge.c
++++ b/drivers/power/supply/sm5703_fuel_gauge.c
+@@ -77,12 +77,26 @@
+ 
+ #define SM5703_FG_POLL_INTERVAL		msecs_to_jiffies(30000)
+ 
++/*
++ * On a USB port at 99 % the battery current swings between about -110 and
++ * +115 mA from one second to the next (measured 2026-10-29), so a status
++ * taken from one reading flips between charging and discharging, and
++ * userspace takes each flip for a cable plug or unplug (UPower OnBattery,
++ * the gsd-power plug sounds).  A new status is reported only once
++ * SM5703_FG_STATUS_SAMPLES readings in a row, SM5703_FG_CHECK_INTERVAL
++ * apart, agree on it.
++ */
++#define SM5703_FG_STATUS_SAMPLES	3
++#define SM5703_FG_CHECK_INTERVAL	msecs_to_jiffies(10000)
++
+ struct sm5703_fg {
+ 	struct regmap *regmap;
+ 	struct power_supply *psy;
+ 	struct delayed_work poll_work;
+ 	int last_capacity;
+-	int last_status;
++	int status;		/* reported, debounced */
++	int pending_status;	/* differing reading being confirmed */
++	int pending_count;
+ };
+ 
+ /* Volts in 1/256 V steps (3.90625 mV), to microvolts */
+@@ -220,11 +234,11 @@ static int sm5703_fg_get_property(struct power_supply *psy,
+ 				  union power_supply_propval *val)
+ {
+ 	struct sm5703_fg *fg = power_supply_get_drvdata(psy);
+-	int capacity;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_STATUS:
+-		return sm5703_fg_get_status(fg, &capacity, &val->intval);
++		val->intval = READ_ONCE(fg->status);
++		return 0;
+ 	case POWER_SUPPLY_PROP_PRESENT:
+ 		/* Built-in battery, the gauge has no presence detection */
+ 		val->intval = 1;
+@@ -268,22 +282,47 @@ static const struct power_supply_desc sm5703_fg_desc = {
+ 	.num_properties	= ARRAY_SIZE(sm5703_fg_props),
+ };
+ 
+-/* No interrupt: notify userspace when the capacity or the status changes */
++/*
++ * No interrupt: notify userspace when the capacity or the debounced status
++ * changes.  A reading that differs from the reported status is checked
++ * again every SM5703_FG_CHECK_INTERVAL until it is confirmed or dropped.
++ */
+ static void sm5703_fg_poll_work(struct work_struct *work)
+ {
+ 	struct sm5703_fg *fg = container_of(work, struct sm5703_fg,
+ 					    poll_work.work);
++	unsigned long delay = SM5703_FG_POLL_INTERVAL;
++	bool changed = false;
+ 	int capacity, status;
+ 
+-	if (!sm5703_fg_get_status(fg, &capacity, &status) &&
+-	    (capacity != fg->last_capacity || status != fg->last_status)) {
+-		fg->last_capacity = capacity;
+-		fg->last_status = status;
+-		power_supply_changed(fg->psy);
++	if (!sm5703_fg_get_status(fg, &capacity, &status)) {
++		if (status == fg->status) {
++			fg->pending_count = 0;
++		} else {
++			if (status != fg->pending_status) {
++				fg->pending_status = status;
++				fg->pending_count = 0;
++			}
++			if (++fg->pending_count >= SM5703_FG_STATUS_SAMPLES) {
++				WRITE_ONCE(fg->status, status);
++				fg->pending_count = 0;
++				changed = true;
++			} else {
++				delay = SM5703_FG_CHECK_INTERVAL;
++			}
++		}
++
++		if (capacity != fg->last_capacity) {
++			fg->last_capacity = capacity;
++			changed = true;
++		}
+ 	}
+ 
++	if (changed)
++		power_supply_changed(fg->psy);
++
+ 	queue_delayed_work(system_freezable_power_efficient_wq,
+-			   &fg->poll_work, SM5703_FG_POLL_INTERVAL);
++			   &fg->poll_work, delay);
+ }
+ 
+ static bool sm5703_fg_readable_reg(struct device *dev, unsigned int reg)
+@@ -329,14 +368,13 @@ static int sm5703_fg_probe(struct i2c_client *client)
+ 	struct power_supply_config psy_cfg = {};
+ 	unsigned int id, cntl, op_status;
+ 	struct sm5703_fg *fg;
+-	int ret;
++	int capacity, ret;
+ 
+ 	fg = devm_kzalloc(dev, sizeof(*fg), GFP_KERNEL);
+ 	if (!fg)
+ 		return -ENOMEM;
+ 
+ 	fg->last_capacity = -1;
+-	fg->last_status = -1;
+ 
+ 	fg->regmap = devm_regmap_init_i2c(client, &sm5703_fg_regmap_config);
+ 	if (IS_ERR(fg->regmap))
+@@ -364,6 +402,11 @@ static int sm5703_fg_probe(struct i2c_client *client)
+ 		dev_warn(dev,
+ 			 "battery model not loaded, readings are unreliable until the stock driver initialises the gauge\n");
+ 
++	/* The first reading is reported as is, the poll work debounces later ones */
++	if (sm5703_fg_get_status(fg, &capacity, &fg->status))
++		fg->status = POWER_SUPPLY_STATUS_UNKNOWN;
++	fg->pending_status = fg->status;
++
+ 	psy_cfg.fwnode = dev_fwnode(dev);
+ 	psy_cfg.drv_data = fg;
+ 

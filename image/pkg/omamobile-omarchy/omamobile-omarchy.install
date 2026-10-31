@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+# omamobile-omarchy, SM-T715 tablet build (pkg/omamobile-omarchy): upstream's
+# scriptlet without the omamobile-update notes (not shipped here). The patches
+# go on from the pacman hook (95-omamobile-omarchy-patches) after the
+# transaction. Omarchy's lock needs /etc/pam.d/omarchy-lock-password, which
+# only Omarchy's installer writes: lock-pam writes it when it is missing.
+post_install() {
+  /usr/lib/omamobile-omarchy/lock-pam || true
+  echo "omamobile-omarchy: patch log /var/log/omamobile/omarchy-patches.log; omamobile-omarchy-patches status|verify"
+}
+post_upgrade() {
+  /usr/lib/omamobile-omarchy/lock-pam || true
+}
+pre_remove() {
+  # Omarchy's own files back, so removing the package leaves no patched copies
+  /usr/bin/omamobile-omarchy-patches restore >/dev/null 2>&1 || true
+}

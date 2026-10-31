@@ -1,0 +1,50 @@
+# Omarchy base packages left out of the SM-T715 image on purpose.
+#
+# The image installs Omarchy's own list, install/omarchy-base.packages of the
+# installed omarchy package (as Omarchy's ISO and omarchy-mobile do), minus
+# the names below. One name per line, "name  # reason"; the reason is copied
+# into the MANIFEST. Names of Omarchy's list that are not available (or whose
+# dependencies are not) on armv7h are left out automatically and listed in
+# the MANIFEST as unavailable, so they need no line here.
+
+# --- Heavy desktop applications: not needed by the session or the shell ---
+libreoffice-fresh       # office suite, the biggest package of the list
+kdenlive                # video editor
+obs-studio              # screen recording and streaming
+xournalpp               # handwritten notes
+moonlight-qt            # game streaming client
+gpu-screen-recorder     # needs VAAPI/NVENC/Vulkan encoders; none on Mali-T760
+
+# --- Containers: no container runtime in this test image ---
+docker                  # Omarchy's setup would enable docker.socket
+docker-buildx           # Docker plugin
+docker-compose          # Docker plugin
+lazydocker              # Docker TUI, useless without docker
+ufw-docker              # ufw rules for Docker; depends on docker
+
+# --- Toolchains, interpreters and database client libraries ---
+clang                   # C/C++ toolchain
+llvm                    # LLVM toolchain (mesa only needs llvm-libs, which stays)
+ruby                    # Ruby interpreter
+tobi-try                # Omarchy's "try" helper, written in Ruby: would pull ruby back in
+luarocks                # Lua package manager
+lua51                   # Lua 5.1 for luarocks/Neovim plugins, not used by the session
+mariadb-libs            # MariaDB client library
+postgresql-libs         # PostgreSQL client library
+
+# --- OCR ---
+tesseract               # OCR engine (Omarchy's screenshot-to-text)
+tesseract-data-eng      # OCR language data
+
+# --- Printing: no printer on a tablet test image ---
+cups                    # print server
+cups-filters            # print filters
+cups-pk-helper          # polkit helper for CUPS
+system-config-printer   # printer settings GUI
+
+# --- Fonts ---
+noto-fonts-cjk          # CJK glyphs, several hundred MiB
+
+# --- Build-machine helpers ---
+kernel-modules-hook     # keeps the running kernel's modules across upgrades; this rootfs has no kernel and no modules
+qemu-user-static-binfmt # runs other architectures' binaries: a build machine's job, not a tablet's

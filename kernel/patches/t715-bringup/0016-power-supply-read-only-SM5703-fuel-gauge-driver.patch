@@ -1,0 +1,540 @@
+From 51f08bea2c16c4b2025b8fa4b6ac55f699a47786 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 16/24] power: supply: read-only SM5703 fuel gauge driver
+
+The SM-T715's battery gauge (SM5703 fuel gauge block, I2C 0x71) exposed
+as a power_supply: capacity, voltage, OCV, current, temperature and a
+status derived from the current sign.  The driver never writes the chip:
+the battery model, calibration and alarms stay as Android's driver set
+them, and regmap only allows reading the registers decoded here (the
+interrupt status register is cleared on read, so it is excluded).  It
+polls every 30 s and reports changes.
+
+Checked on the SM-T715: 99 %, 4.35 V, -94 mA on battery, 38.9 C,
+"Discharging", FG_OP_STATUS low byte 0x07 (model loaded), and UPower
+lists the battery.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../siliconmitus,sm5703-fuel-gauge.yaml       |  53 +++
+ drivers/power/supply/Kconfig                  |  15 +
+ drivers/power/supply/Makefile                 |   1 +
+ drivers/power/supply/sm5703_fuel_gauge.c      | 410 ++++++++++++++++++
+ 4 files changed, 479 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+ create mode 100644 drivers/power/supply/sm5703_fuel_gauge.c
+
+diff --git a/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml b/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+new file mode 100644
+index 000000000..0b3c789a7
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+@@ -0,0 +1,53 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/siliconmitus,sm5703-fuel-gauge.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Silicon Mitus SM5703 Fuel Gauge
++
++maintainers:
++  - elkir0 <elkir0@users.noreply.github.com>
++
++description:
++  The SM5703 fuel gauge is a standalone I2C device, separate from the
++  SM5703 charger and regulator MFD. It measures the battery voltage,
++  current and temperature, and computes the state of charge from a
++  battery model loaded into it by the host.
++
++allOf:
++  - $ref: power-supply.yaml#
++
++properties:
++  compatible:
++    const: siliconmitus,sm5703-fuel-gauge
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++    description:
++      Low state of charge, low voltage and temperature alarm output.
++
++required:
++  - compatible
++  - reg
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        fuel-gauge@71 {
++            compatible = "siliconmitus,sm5703-fuel-gauge";
++            reg = <0x71>;
++            interrupt-parent = <&gpa1>;
++            interrupts = <4 IRQ_TYPE_EDGE_BOTH>;
++        };
++    };
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index bcfa63fb9..403631ada 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -819,6 +819,21 @@ config CHARGER_RT5033
+ 	  The device supports pre-charge mode, fast charge mode and
+ 	  constant voltage mode.
+ 
++config BATTERY_SM5703
++	tristate "Silicon Mitus SM5703 fuel gauge support"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Say Y here to enable read-only support for the Silicon Mitus
++	  SM5703 fuel gauge, as found on the Samsung Galaxy Tab S2 8.0 LTE.
++	  The driver reports the state of charge, voltage, current and
++	  temperature measured by the gauge.  It never writes to the chip,
++	  which must have been initialised with a battery model beforehand
++	  (by the stock firmware).
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called sm5703_fuel_gauge.
++
+ config CHARGER_RT9455
+ 	tristate "Richtek RT9455 battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 8dcb41545..0feea92c0 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -57,6 +57,7 @@ obj-$(CONFIG_BATTERY_MAX1720X)	+= max1720x_battery.o
+ obj-$(CONFIG_BATTERY_MAX1721X)	+= max1721x_battery.o
+ obj-$(CONFIG_BATTERY_RT5033)	+= rt5033_battery.o
+ obj-$(CONFIG_CHARGER_RT5033)	+= rt5033_charger.o
++obj-$(CONFIG_BATTERY_SM5703)	+= sm5703_fuel_gauge.o
+ obj-$(CONFIG_CHARGER_RT9455)	+= rt9455_charger.o
+ obj-$(CONFIG_CHARGER_RT9467)	+= rt9467-charger.o
+ obj-$(CONFIG_CHARGER_RT9471)	+= rt9471.o
+diff --git a/drivers/power/supply/sm5703_fuel_gauge.c b/drivers/power/supply/sm5703_fuel_gauge.c
+new file mode 100644
+index 000000000..c6be25c2e
+--- /dev/null
++++ b/drivers/power/supply/sm5703_fuel_gauge.c
+@@ -0,0 +1,410 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Read-only driver for the Silicon Mitus SM5703 fuel gauge, as found on
++ * the Samsung Galaxy Tab S2 8.0 LTE (SM-T715, board "gts28ltexx").
++ *
++ * The fuel gauge is its own I2C device (address 0x71), separate from the
++ * SM5703 charger/regulator MFD.  It keeps running from the battery across
++ * reboots, and the stock Android driver loads the battery model, the
++ * calibration and the alarm thresholds into it at every Android boot.
++ * This driver therefore never writes to the chip: the regmap below has no
++ * writeable register.  It only decodes the measurement registers, using
++ * the fixed-point formats of the downstream driver:
++ *   02_sources/kernel_universal5433/drivers/battery/sm5703_fuelgauge.c
++ *   02_sources/kernel_universal5433/include/linux/battery/fuelgauge/
++ *     sm5703_fuelgauge_impl.h          (register map)
++ *
++ * Registers are 16 bits wide, read LSB first (the downstream driver reads
++ * them with a 2-byte I2C block read into a u16 on a little-endian CPU).
++ *
++ * Not done here, because each needs writes or state the stock driver
++ * keeps in RAM: battery model loading, the temperature compensation the
++ * stock driver writes to CURR_CAL before every SOC read, OCV tracking,
++ * low-SOC/low-voltage alarms (no IRQ is used, the driver polls) and the
++ * "dynamic" capacity_max learnt at each full charge.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/devm-helpers.h>
++#include <linux/i2c.h>
++#include <linux/minmax.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define SM5703_FG_REG_DEVICE_ID		0x00
++#define SM5703_FG_REG_CNTL		0x01
++#define SM5703_FG_REG_SOC		0x05
++#define SM5703_FG_REG_OCV		0x06
++#define SM5703_FG_REG_VOLTAGE		0x07
++#define SM5703_FG_REG_CURRENT		0x08
++#define SM5703_FG_REG_TEMPERATURE	0x09
++#define SM5703_FG_REG_OP_STATUS		0x10
++
++/* CNTL: the stock driver sets ENABLE_TEMP_MEASURE when it loads the model */
++#define SM5703_FG_CNTL_TEMP_MEASURE	BIT(14)
++
++/* FG_OP_STATUS[7:0] reads DISABLE_RE_INIT (7) once the model is loaded */
++#define SM5703_FG_OP_STATUS_INIT	GENMASK(7, 0)
++#define SM5703_FG_OP_STATUS_INIT_DONE	0x07
++
++/* Common to all measurement registers: bits 7:0 are 1/256 fractions */
++#define SM5703_FG_FRAC			GENMASK(7, 0)
++/* SOC: bits 15:8 integer percent */
++#define SM5703_FG_SOC_INT		GENMASK(15, 8)
++/* OCV, VOLTAGE: bits 10:8 integer volts, unsigned */
++#define SM5703_FG_VOLT			GENMASK(10, 0)
++/* CURRENT: bit 15 sign, bits 10:8 integer amps (sign-magnitude) */
++#define SM5703_FG_SIGN			BIT(15)
++#define SM5703_FG_CURR			GENMASK(10, 0)
++/* TEMPERATURE: bit 15 sign, bits 14:8 integer degrees C (sign-magnitude) */
++#define SM5703_FG_TEMP_INT		GENMASK(14, 8)
++
++/*
++ * Capacity scaling, in 0.1 % units, from the stock device tree node
++ * (fuelgauge,capacity_max = <990>, fuelgauge,capacity_min = <0>).  This is
++ * the value the stock driver starts from at every boot; it later moves it
++ * within 990 +/- 60 at each full charge, which is not reproduced here.
++ */
++#define SM5703_FG_CAPACITY_MAX		990
++#define SM5703_FG_CAPACITY_MIN		0
++
++/* Below this battery current (either sign), the battery is considered idle */
++#define SM5703_FG_IDLE_CURRENT_UA	50000
++
++#define SM5703_FG_POLL_INTERVAL		msecs_to_jiffies(30000)
++
++struct sm5703_fg {
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct delayed_work poll_work;
++	int last_capacity;
++	int last_status;
++};
++
++/* Volts in 1/256 V steps (3.90625 mV), to microvolts */
++static int sm5703_fg_raw_to_uv(unsigned int raw)
++{
++	return FIELD_GET(SM5703_FG_VOLT, raw) * 15625 / 4;
++}
++
++static int sm5703_fg_get_voltage(struct sm5703_fg *fg, unsigned int reg,
++				 int *uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, reg, &raw);
++	if (ret)
++		return ret;
++
++	*uv = sm5703_fg_raw_to_uv(raw);
++
++	return 0;
++}
++
++/*
++ * The stock driver reports the magnitude negated when bit 15 is set and
++ * treats a positive current as charging (ta_exist in sm5703_get_soc()),
++ * which is also the power_supply ABI convention, so the sign is kept.
++ */
++static int sm5703_fg_get_current(struct sm5703_fg *fg, int *ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_CURRENT, &raw);
++	if (ret)
++		return ret;
++
++	*ua = FIELD_GET(SM5703_FG_CURR, raw) * 15625 / 4;
++	if (raw & SM5703_FG_SIGN)
++		*ua = -*ua;
++
++	return 0;
++}
++
++/* Same arithmetic and truncation as sm5703_get_soc() and get_property() */
++static int sm5703_fg_get_capacity(struct sm5703_fg *fg, int *capacity)
++{
++	unsigned int raw;
++	int soc, ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_SOC, &raw);
++	if (ret)
++		return ret;
++
++	/* 0.1 % units */
++	soc = FIELD_GET(SM5703_FG_SOC_INT, raw) * 10 +
++	      FIELD_GET(SM5703_FG_FRAC, raw) * 10 / 256;
++
++	if (soc < SM5703_FG_CAPACITY_MIN)
++		soc = 0;
++	else
++		soc = (soc - SM5703_FG_CAPACITY_MIN) * 1000 /
++		      (SM5703_FG_CAPACITY_MAX - SM5703_FG_CAPACITY_MIN);
++
++	*capacity = clamp(soc, 0, 1000) / 10;
++
++	return 0;
++}
++
++/*
++ * The stock fuel gauge driver reports no status (the charger driver does).
++ * Without the charger, derive it from the battery current and capacity.
++ */
++static int sm5703_fg_status(int capacity, int curr_ua)
++{
++	if (curr_ua > SM5703_FG_IDLE_CURRENT_UA)
++		return POWER_SUPPLY_STATUS_CHARGING;
++	if (curr_ua < -SM5703_FG_IDLE_CURRENT_UA)
++		return POWER_SUPPLY_STATUS_DISCHARGING;
++	if (capacity >= 100)
++		return POWER_SUPPLY_STATUS_FULL;
++
++	return POWER_SUPPLY_STATUS_NOT_CHARGING;
++}
++
++static int sm5703_fg_get_status(struct sm5703_fg *fg, int *capacity,
++				int *status)
++{
++	int curr_ua, ret;
++
++	ret = sm5703_fg_get_capacity(fg, capacity);
++	if (ret)
++		return ret;
++
++	ret = sm5703_fg_get_current(fg, &curr_ua);
++	if (ret)
++		return ret;
++
++	*status = sm5703_fg_status(*capacity, curr_ua);
++
++	return 0;
++}
++
++/*
++ * Temperature of the gauge's own sensor, in 0.1 degree C, as in
++ * sm5703_get_temperature().  It is only measured once the stock driver
++ * has set ENABLE_TEMP_MEASURE, so report nothing otherwise.
++ */
++static int sm5703_fg_get_temp(struct sm5703_fg *fg, int *temp)
++{
++	unsigned int cntl, raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_CNTL, &cntl);
++	if (ret)
++		return ret;
++
++	if (!(cntl & SM5703_FG_CNTL_TEMP_MEASURE))
++		return -ENODATA;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_TEMPERATURE, &raw);
++	if (ret)
++		return ret;
++
++	*temp = FIELD_GET(SM5703_FG_TEMP_INT, raw) * 10 +
++		FIELD_GET(SM5703_FG_FRAC, raw) * 10 / 256;
++	if (raw & SM5703_FG_SIGN)
++		*temp = -*temp;
++
++	return 0;
++}
++
++static int sm5703_fg_get_property(struct power_supply *psy,
++				  enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct sm5703_fg *fg = power_supply_get_drvdata(psy);
++	int capacity;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		return sm5703_fg_get_status(fg, &capacity, &val->intval);
++	case POWER_SUPPLY_PROP_PRESENT:
++		/* Built-in battery, the gauge has no presence detection */
++		val->intval = 1;
++		return 0;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		return 0;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		return sm5703_fg_get_capacity(fg, &val->intval);
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		return sm5703_fg_get_voltage(fg, SM5703_FG_REG_VOLTAGE,
++					     &val->intval);
++	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
++		return sm5703_fg_get_voltage(fg, SM5703_FG_REG_OCV,
++					     &val->intval);
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		return sm5703_fg_get_current(fg, &val->intval);
++	case POWER_SUPPLY_PROP_TEMP:
++		return sm5703_fg_get_temp(fg, &val->intval);
++	default:
++		return -EINVAL;
++	}
++}
++
++static enum power_supply_property sm5703_fg_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++};
++
++static const struct power_supply_desc sm5703_fg_desc = {
++	.name		= "sm5703-fuelgauge",
++	.type		= POWER_SUPPLY_TYPE_BATTERY,
++	.get_property	= sm5703_fg_get_property,
++	.properties	= sm5703_fg_props,
++	.num_properties	= ARRAY_SIZE(sm5703_fg_props),
++};
++
++/* No interrupt: notify userspace when the capacity or the status changes */
++static void sm5703_fg_poll_work(struct work_struct *work)
++{
++	struct sm5703_fg *fg = container_of(work, struct sm5703_fg,
++					    poll_work.work);
++	int capacity, status;
++
++	if (!sm5703_fg_get_status(fg, &capacity, &status) &&
++	    (capacity != fg->last_capacity || status != fg->last_status)) {
++		fg->last_capacity = capacity;
++		fg->last_status = status;
++		power_supply_changed(fg->psy);
++	}
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &fg->poll_work, SM5703_FG_POLL_INTERVAL);
++}
++
++static bool sm5703_fg_readable_reg(struct device *dev, unsigned int reg)
++{
++	/*
++	 * Only what the driver uses.  INTFG (0x02) in particular is left out:
++	 * the stock IRQ handler reads it to clear the interrupt, and a
++	 * regmap debugfs dump must not do that behind the stock driver.
++	 */
++	switch (reg) {
++	case SM5703_FG_REG_DEVICE_ID:
++	case SM5703_FG_REG_CNTL:
++	case SM5703_FG_REG_SOC:
++	case SM5703_FG_REG_OCV:
++	case SM5703_FG_REG_VOLTAGE:
++	case SM5703_FG_REG_CURRENT:
++	case SM5703_FG_REG_TEMPERATURE:
++	case SM5703_FG_REG_OP_STATUS:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static bool sm5703_fg_writeable_reg(struct device *dev, unsigned int reg)
++{
++	return false;
++}
++
++static const struct regmap_config sm5703_fg_regmap_config = {
++	.reg_bits		= 8,
++	.val_bits		= 16,
++	.val_format_endian	= REGMAP_ENDIAN_LITTLE,
++	.max_register		= SM5703_FG_REG_OP_STATUS,
++	.readable_reg		= sm5703_fg_readable_reg,
++	.writeable_reg		= sm5703_fg_writeable_reg,
++	.cache_type		= REGCACHE_NONE,
++};
++
++static int sm5703_fg_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = {};
++	unsigned int id, cntl, op_status;
++	struct sm5703_fg *fg;
++	int ret;
++
++	fg = devm_kzalloc(dev, sizeof(*fg), GFP_KERNEL);
++	if (!fg)
++		return -ENOMEM;
++
++	fg->last_capacity = -1;
++	fg->last_status = -1;
++
++	fg->regmap = devm_regmap_init_i2c(client, &sm5703_fg_regmap_config);
++	if (IS_ERR(fg->regmap))
++		return dev_err_probe(dev, PTR_ERR(fg->regmap),
++				     "failed to initialise regmap\n");
++
++	/* The stock driver checks no ID value, it only logs it */
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_DEVICE_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read device ID\n");
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_CNTL, &cntl);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read CNTL\n");
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_OP_STATUS, &op_status);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read FG_OP_STATUS\n");
++
++	dev_info(dev, "device ID 0x%04x, CNTL 0x%04x, FG_OP_STATUS 0x%04x\n",
++		 id, cntl, op_status);
++
++	if (FIELD_GET(SM5703_FG_OP_STATUS_INIT, op_status) !=
++	    SM5703_FG_OP_STATUS_INIT_DONE)
++		dev_warn(dev,
++			 "battery model not loaded, readings are unreliable until the stock driver initialises the gauge\n");
++
++	psy_cfg.fwnode = dev_fwnode(dev);
++	psy_cfg.drv_data = fg;
++
++	fg->psy = devm_power_supply_register(dev, &sm5703_fg_desc, &psy_cfg);
++	if (IS_ERR(fg->psy))
++		return dev_err_probe(dev, PTR_ERR(fg->psy),
++				     "failed to register power supply\n");
++
++	ret = devm_delayed_work_autocancel(dev, &fg->poll_work,
++					   sm5703_fg_poll_work);
++	if (ret)
++		return ret;
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &fg->poll_work, SM5703_FG_POLL_INTERVAL);
++
++	return 0;
++}
++
++static const struct i2c_device_id sm5703_fg_id[] = {
++	{ "sm5703-fuel-gauge" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, sm5703_fg_id);
++
++static const struct of_device_id sm5703_fg_of_match[] = {
++	{ .compatible = "siliconmitus,sm5703-fuel-gauge" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sm5703_fg_of_match);
++
++static struct i2c_driver sm5703_fg_driver = {
++	.driver = {
++		.name = "sm5703-fuel-gauge",
++		.of_match_table = sm5703_fg_of_match,
++	},
++	.probe = sm5703_fg_probe,
++	.id_table = sm5703_fg_id,
++};
++module_i2c_driver(sm5703_fg_driver);
++
++MODULE_AUTHOR("Samsung Electronics / Silicon Mitus (downstream sm5703_fuelgauge.c)");
++MODULE_DESCRIPTION("Silicon Mitus SM5703 fuel gauge driver (read-only)");
++MODULE_LICENSE("GPL");

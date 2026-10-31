@@ -1,0 +1,12 @@
+#!/bin/sh
+# prepare-root [ROOT]: what Chromium's Debian root needs before and after apt.
+set -eu
+R=${1:-/var/lib/t715-chromium/root}
+[ -x "$R/usr/lib/chromium/chromium" ] || { echo "prepare-root: no Chromium in $R" >&2; exit 1; }
+# bwrap binds the host's over these, which it refuses on a symlink
+for f in resolv.conf passwd group localtime; do
+    [ ! -L "$R/etc/$f" ] || rm -f "$R/etc/$f"
+    [ -e "$R/etc/$f" ] || : > "$R/etc/$f"
+done
+# Nothing in this root runs as root in use, and nothing needs to become root
+find "$R" -xdev -type f -perm /6000 -exec chmod ug-s {} +

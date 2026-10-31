@@ -1,0 +1,286 @@
+From 491d298b3644ad19f2a13d559d490bdc1295f28a Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 2/4] misc: camera test: rear path, stepwise stop (test branch
+ only)
+
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 52 ++++++++++++
+ drivers/clk/samsung/clk-exynos5433.c          |  2 +-
+ drivers/misc/t715-cam-capture.c               | 79 +++++++++++++------
+ 3 files changed, 109 insertions(+), 24 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+index e4d4d345d..f003382bc 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -109,6 +109,11 @@ t715_cam2_mclk_off: t715-cam2-mclk-off-pins {
+ &soc {
+ 	cam-capture@12130000 {
+ 		compatible = "samsung,t715-cam-capture";
++		label = "front";
++		t715,lanes = <1>;
++		t715,settle = <16>;
++		t715,width = <1936>;
++		t715,height = <1090>;
+ 		reg = <0x12130000 0x1000>, <0x12110000 0x1000>, <0x12160000 0x1000>;
+ 		phys = <&mipi_phy 2>;
+ 		phy-names = "csis";
+@@ -148,4 +153,51 @@ cam-capture@12130000 {
+ 		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
+ 				       <400000000>, <400000000>, <200000000>;
+ 	};
++
++	/* Rear: CSIS0 to FIMC-LITE A, 4 lanes, on the 400 MHz branch. */
++	cam-capture@12120000 {
++		compatible = "samsung,t715-cam-capture";
++		label = "rear";
++		t715,lanes = <4>;
++		t715,settle = <15>;
++		t715,width = <1640>;
++		t715,height = <1228>;
++		reg = <0x12120000 0x1000>, <0x12100000 0x1000>, <0x12150000 0x1000>;
++		phys = <&mipi_phy 0>;
++		phy-names = "csis";
++		power-domains = <&pd_cam0>;
++
++		clocks = <&cmu_cam0 CLK_ACLK_CSIS0>, <&cmu_cam0 CLK_PCLK_CSIS0>,
++			 <&cmu_cam0 CLK_ACLK_LITE_A>, <&cmu_cam0 CLK_PCLK_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_AXIUS_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_ASYNCAPBM_LITE_A>, <&cmu_cam0 CLK_ACLK_ASYNCAPBS_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_ASYNCAXIM_LITE_A>, <&cmu_cam0 CLK_ACLK_ASYNCAXIS_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_SMMU_LITE_A>, <&cmu_cam0 CLK_PCLK_SMMU_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_BTS_LITE_A>, <&cmu_cam0 CLK_PCLK_BTS_LITE_A>,
++			 <&cmu_cam0 CLK_PCLK_ASYNCAXI_LITE_A>,
++			 <&cmu_cam0 CLK_ACLK_XIU_IS0X>, <&cmu_cam0 CLK_ACLK_XIU_ISP0EX>,
++			 <&cmu_cam0 CLK_ACLK_CAM0ND_400>, <&cmu_cam0 CLK_ACLK_CAM0NP_276>,
++			 <&cmu_cam0 CLK_ACLK_AHBSYNCDN>, <&cmu_cam0 CLK_PCLK_SYSREG_CAM0>,
++			 <&cmu_cam0 CLK_PCLK_PMU_CAM0>,
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
++
++		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S4_USER>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_B>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_A>,
++				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_B>,
++				  <&cmu_cam0 CLK_DIV_ACLK_CSIS0>,
++				  <&cmu_cam0 CLK_DIV_ACLK_LITE_A>,
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_A>;
++		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
++					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S4_PHY>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
++					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_A>,
++					 <0>, <0>, <0>;
++		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
++				       <400000000>, <400000000>, <200000000>;
++	};
+ };
+diff --git a/drivers/clk/samsung/clk-exynos5433.c b/drivers/clk/samsung/clk-exynos5433.c
+index 77de57919..f895c436e 100644
+--- a/drivers/clk/samsung/clk-exynos5433.c
++++ b/drivers/clk/samsung/clk-exynos5433.c
+@@ -4776,7 +4776,7 @@ PNAME(mout_aclk_csis1_a_p)		= { "mout_aclk_cam0_552_user",
+ PNAME(mout_aclk_csis0_b_p)		= { "mout_aclk_csis0_a",
+ 					    "mout_aclk_cam0_333_user", };
+ PNAME(mout_aclk_csis0_a_p)		= { "mout_aclk_cam0_552_user",
+-					    "mout_aclk-cam0_400_user", };
++					    "mout_aclk_cam0_400_user", };
+ PNAME(mout_aclk_3aa1_b_p)		= { "mout_aclk_3aa1_a",
+ 					    "mout_aclk_cam0_333_user", };
+ PNAME(mout_aclk_3aa1_a_p)		= { "mout_aclk_cam0_552_user",
+diff --git a/drivers/misc/t715-cam-capture.c b/drivers/misc/t715-cam-capture.c
+index 727636f6d..b9ca3597e 100644
+--- a/drivers/misc/t715-cam-capture.c
++++ b/drivers/misc/t715-cam-capture.c
+@@ -1,18 +1,21 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * SM-T715 camera bring-up, stages (b) and (c): frames from the front sensor
+- * through MIPI CSIS1 and FIMC-LITE B into memory, with no ISP.  Test code, never
+- * in a daily kernel.  docs/hardware/CAMERA.md.
++ * SM-T715 camera bring-up, stages (b) and (c): frames from a sensor through
++ * MIPI CSIS and FIMC-LITE into memory, with no ISP.  Test code, never in a daily
++ * kernel.  docs/hardware/CAMERA.md.
+  *
+  * The sensor is powered by t715-cam-probe and driven from user space over
+- * /dev/i2c-22.  Here, in order of use: write "arm" to debugfs t715-capture/ctl,
+- * start the sensor, read t715-capture/status, write "stop", read
+- * t715-capture/frame.  No hardware access until allow_hw=1.
++ * /dev/i2c.  Here, one debugfs directory per camera, in order of use: write "arm"
++ * to t715-capture-NAME/ctl, start the sensor, read status, read frame.  "halt"
++ * stops the capture alone; "stop" also takes the clocks down, gate by gate, with
++ * a line in the log for each, which is how the hang in CAMERA.md section 11 is
++ * looked for.  No hardware access until allow_hw=1.
+  *
+  * The register sequences follow stock's fimc-is-hw-csi.c (the s5pcsis variant)
+  * and fimc-is-device-flite.c.  Polled: no interrupt is requested.
+  */
+ #include <linux/clk.h>
++#include <linux/clk-provider.h>
+ #include <linux/debugfs.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+@@ -32,11 +35,6 @@ static bool allow_hw;
+ module_param(allow_hw, bool, 0644);
+ MODULE_PARM_DESC(allow_hw, "must be 1 before any register is touched");
+ 
+-static unsigned int width = 1936, height = 1090, settle = 16;
+-module_param(width, uint, 0644);
+-module_param(height, uint, 0644);
+-module_param(settle, uint, 0644);
+-
+ #define CSIS_CTRL		0x00
+ #define  CSIS_CTRL_ALIGN_32BIT		BIT(20)
+ #define  CSIS_CTRL_UPDATE_SHADOW0	BIT(16)
+@@ -46,7 +44,7 @@ module_param(settle, uint, 0644);
+ #define  CSIS_CTRL_ENABLE		BIT(0)
+ #define CSIS_DPHYCTRL		0x04
+ #define  CSIS_DPHY_HSS_MASK		(0xff << 24)
+-#define  CSIS_DPHY_ON_1LANE		0x03
++#define  CSIS_DPHY_ON(lanes)		(~(0x1f << ((lanes) + 1)) & 0x1f)
+ #define CSIS_CONFIG		0x08
+ #define  CSIS_CFG_FMT_MASK		(0x3f << 2)
+ #define  CSIS_CFG_FMT_RAW10		(0x2b << 2)
+@@ -83,7 +81,7 @@ module_param(settle, uint, 0644);
+ #define LITE_CIFCNTSEQ		0x100
+ #define LITE_CIOSAN(n)		(0x200 + 4 * (n))
+ 
+-#define T715_CAP_BUF_SIZE	(8 * SZ_1M)
++#define T715_CAP_BUF_SIZE	(20 * SZ_1M)
+ 
+ struct t715_cap {
+ 	struct device *dev;
+@@ -97,6 +95,7 @@ struct t715_cap {
+ 	struct dentry *dir;
+ 	struct mutex lock;
+ 	bool armed;
++	u32 width, height, settle, lanes;
+ };
+ 
+ static void t715_mask(void __iomem *reg, u32 clear, u32 set)
+@@ -110,15 +109,15 @@ static void t715_csis_on(struct t715_cap *c)
+ 
+ 	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_RESET);
+ 	udelay(10);
+-	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_HSS_MASK, settle << 24);
++	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_HSS_MASK, c->settle << 24);
+ 	t715_mask(b + CSIS_CONFIG, CSIS_CFG_FMT_MASK,
+ 		  CSIS_CFG_FMT_RAW10 | CSIS_CFG_END_INTERVAL(1));
+-	writel(width << 16 | height, b + CSIS_RESOL);
++	writel(c->width << 16 | c->height, b + CSIS_RESOL);
+ 	t715_mask(b + CSIS_CTRL, CSIS_CTRL_ALIGN_32BIT | CSIS_CTRL_LANES_MASK |
+-		  CSIS_CTRL_WCLK_EXTCLK, 0);
++		  CSIS_CTRL_WCLK_EXTCLK, (c->lanes - 1) << 2);
+ 	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_UPDATE_SHADOW0);
+ 	t715_mask(b + CSIS_CTRL, 0, CSIS_CTRL_ENABLE | CSIS_CTRL_WCLK_EXTCLK);
+-	t715_mask(b + CSIS_DPHYCTRL, 0, CSIS_DPHY_ON_1LANE);
++	t715_mask(b + CSIS_DPHYCTRL, 0, CSIS_DPHY_ON(c->lanes));
+ 	t715_mask(b + CSIS_INTMSK, 0, CSIS_INTMSK_ALL);
+ }
+ 
+@@ -128,7 +127,7 @@ static void t715_csis_off(struct t715_cap *c)
+ 
+ 	t715_mask(b + CSIS_INTMSK, CSIS_INTMSK_ALL, 0);
+ 	t715_mask(b + CSIS_CTRL, CSIS_CTRL_ENABLE, 0);
+-	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_ON_1LANE, 0);
++	t715_mask(b + CSIS_DPHYCTRL, CSIS_DPHY_ON(c->lanes), 0);
+ }
+ 
+ static void t715_lite_on(struct t715_cap *c)
+@@ -155,8 +154,8 @@ static void t715_lite_on(struct t715_cap *c)
+ 	writel(0, b + LITE_CIODMAFMT);
+ 
+ 	writel(0, b + LITE_CIGENERAL);
+-	writel(width << 16 | height, b + LITE_CISRCSIZE);
+-	writel(height << 16 | width, b + LITE_CIOCAN);
++	writel(c->width << 16 | c->height, b + LITE_CISRCSIZE);
++	writel(c->height << 16 | c->width, b + LITE_CIOCAN);
+ 	t715_mask(b + LITE_CIGCTRL, LITE_FMT_MASK | LITE_POLARITY_MASK | LITE_IRQ_DISABLE_MASK,
+ 		  LITE_FMT_RAW10 | LITE_SELCAM_MIPI);
+ 	writel(LITE_WINOFSEN, b + LITE_CIWDOFST);
+@@ -197,16 +196,36 @@ static int t715_arm(struct t715_cap *c)
+ 	return ret;
+ }
+ 
++static void t715_halt(struct t715_cap *c)
++{
++	t715_mask(c->lite + LITE_CIIMGCPT, LITE_IMGCPTEN, 0);
++}
++
++/* One step at a time, each in the log, so that a hang names itself in pstore. */
+ static void t715_stop(struct t715_cap *c)
+ {
++	int i;
++
+ 	if (!c->armed)
+ 		return;
+-	t715_mask(c->lite + LITE_CIIMGCPT, LITE_IMGCPTEN, 0);
++	t715_halt(c);
+ 	msleep(60);
++	dev_info(c->dev, "stop: capture off, status %08x\n", readl(c->lite + LITE_CISTATUS));
+ 	t715_csis_off(c);
++	dev_info(c->dev, "stop: csis off\n");
++	msleep(20);
+ 	phy_power_off(c->phy);
+-	clk_bulk_disable_unprepare(c->nclks, c->clks);
++	dev_info(c->dev, "stop: phy off\n");
++	msleep(20);
++	for (i = c->nclks - 1; i >= 0; i--) {
++		dev_info(c->dev, "stop: gate %d %s\n", i, __clk_get_name(c->clks[i].clk));
++		msleep(50);
++		clk_disable_unprepare(c->clks[i].clk);
++	}
++	dev_info(c->dev, "stop: gates off\n");
++	msleep(20);
+ 	pm_runtime_put_sync(c->dev);
++	dev_info(c->dev, "stop: done\n");
+ 	c->armed = false;
+ }
+ 
+@@ -226,6 +245,8 @@ static ssize_t ctl_write(struct file *f, const char __user *ubuf, size_t len, lo
+ 	mutex_lock(&c->lock);
+ 	if (sysfs_streq(buf, "arm"))
+ 		ret = t715_arm(c);
++	else if (sysfs_streq(buf, "halt"))
++		t715_halt(c);
+ 	else if (sysfs_streq(buf, "stop"))
+ 		t715_stop(c);
+ 	else
+@@ -270,6 +291,8 @@ static int t715_cap_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct t715_cap *c;
++	const char *label;
++	char name[32];
+ 	int ret;
+ 
+ 	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
+@@ -303,6 +326,13 @@ static int t715_cap_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 	dev_info(dev, "buffer at %pad, %d clocks\n", &c->dma, c->nclks);
+ 
++	if (of_property_read_string(dev->of_node, "label", &label))
++		return -EINVAL;
++	of_property_read_u32(dev->of_node, "t715,lanes", &c->lanes);
++	of_property_read_u32(dev->of_node, "t715,settle", &c->settle);
++	of_property_read_u32(dev->of_node, "t715,width", &c->width);
++	of_property_read_u32(dev->of_node, "t715,height", &c->height);
++
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)
+ 		return ret;
+@@ -310,7 +340,10 @@ static int t715_cap_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, c);
+ 	c->blob.data = c->buf;
+ 	c->blob.size = T715_CAP_BUF_SIZE;
+-	c->dir = debugfs_create_dir("t715-capture", NULL);
++	snprintf(name, sizeof(name), "t715-capture-%s", label);
++	c->dir = debugfs_create_dir(name, NULL);
++	debugfs_create_u32("width", 0600, c->dir, &c->width);
++	debugfs_create_u32("height", 0600, c->dir, &c->height);
+ 	debugfs_create_file("ctl", 0200, c->dir, c, &ctl_fops);
+ 	debugfs_create_file("status", 0400, c->dir, c, &status_fops);
+ 	debugfs_create_blob("frame", 0400, c->dir, &c->blob);

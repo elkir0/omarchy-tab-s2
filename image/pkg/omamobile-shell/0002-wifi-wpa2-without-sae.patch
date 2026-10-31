@@ -1,0 +1,142 @@
+SM-T715 tablet: Wi-Fi passwords in WPA2-PSK when the radio has no SAE.
+
+The tablet's BCM4358 firmware (brcmfmac, linux-firmware 7.112.300.14) has no
+SAE, so a WPA3-Personal profile never associates ("association took too
+long"), and the panel shows it as "Network out of range". Quickshell's
+connectWithPsk writes key-mgmt=sae whenever the network it reports is SAE,
+which happens for routers serving one SSID as WPA3 and as WPA2. The panel now asks `iw phy` once whether the radio names SAE;
+without it, a password for an SAE network goes through nmcli with a WPA2-PSK
+profile (key-mgmt pinned, password on stdin through `--ask`, as the upstream
+fallback does; the SSID as a positional parameter; the profile deleted if it
+fails to come up). With SAE, or without iw, nothing changes. Against
+omarchy-mobile 5f7ba48, packages/omamobile-shell (applied with patch -p1 in
+that directory, after 0001).
+
+diff --git a/plugins/omamobile.quicksettings/WifiModel.js b/plugins/omamobile.quicksettings/WifiModel.js
+index ed8d2b3..1ae9cd8 100644
+--- a/plugins/omamobile.quicksettings/WifiModel.js
++++ b/plugins/omamobile.quicksettings/WifiModel.js
+@@ -188,6 +188,29 @@ function nmcliConnectArgv(ssid, ifname) {
+   return argv
+ }
+ 
++// Whether `iw phy` says the radio can do SAE (WPA3-Personal): softMAC
++// drivers print "SAE with AUTHENTICATE", full-MAC ones list SAE_OFFLOAD.
++// The SM-T715's BCM4358 firmware has neither.
++function phyHasSae(iwPhy) {
++  return /\bSAE/.test(String(iwPhy || ""))
++}
++
++// Without SAE, a network Quickshell reports as SAE (in practice one SSID
++// served as WPA3 and WPA2) gets a WPA2-PSK profile through nmcli: Quickshell's
++// connectWithPsk would write key-mgmt=sae, which never associates. As in
++// nmcliConnectArgv the password is never an argument (`--ask` reads it from
++// stdin); the SSID and interface reach sh as positional parameters, never as
++// code. A profile that fails to come up is deleted, so a retry after a wrong
++// password doesn't leave a duplicate behind.
++function nmcliWpa2ConnectArgv(ssid, ifname) {
++  var script = 'u=$(cat /proc/sys/kernel/random/uuid) || exit; ' +
++    'nmcli connection add type wifi con-name "$1" ssid "$1" connection.uuid "$u" ' +
++    '${2:+ifname "$2"} wifi-sec.key-mgmt wpa-psk >/dev/null || exit; ' +
++    'nmcli --wait 45 --ask connection up uuid "$u" && exit; ' +
++    'rc=$?; nmcli connection delete uuid "$u" >/dev/null 2>&1; exit $rc'
++  return ["sh", "-c", script, "sh", String(ssid), String(ifname || "")]
++}
++
+ function nmcliFailureMessage(stderr) {
+   var text = String(stderr || "")
+   if (/secrets were required|802-1x|psk|password|authentication/i.test(text)) return "Wrong password"
+@@ -250,6 +273,8 @@ if (typeof module !== "undefined") {
+     failureMessage: failureMessage,
+     shouldReprompt: shouldReprompt,
+     nmcliConnectArgv: nmcliConnectArgv,
++    phyHasSae: phyHasSae,
++    nmcliWpa2ConnectArgv: nmcliWpa2ConnectArgv,
+     nmcliFailureMessage: nmcliFailureMessage,
+     listEntries: listEntries,
+     sameRows: sameRows
+diff --git a/plugins/omamobile.quicksettings/WifiPanel.qml b/plugins/omamobile.quicksettings/WifiPanel.qml
+index e90b05b..7ae565e 100644
+--- a/plugins/omamobile.quicksettings/WifiPanel.qml
++++ b/plugins/omamobile.quicksettings/WifiPanel.qml
+@@ -54,6 +54,7 @@ Item {
+     syncRows(true)
+     refreshSaved()
+     rescan()
++    if (!phyChecked && !saeProbe.running) saeProbe.running = true
+   }
+ 
+   function close() {
+@@ -96,6 +97,10 @@ Item {
+   property string actionKind: ""   // "connect" | "disconnect" | "forget"
+   property string actionSsid: ""
+   property bool actionSecured: false
++  // Whether the radio can do SAE (WPA3-Personal), from `iw phy` the first
++  // time the panel opens; until then (or without iw) Quickshell connects.
++  property bool phyHasSae: true
++  property bool phyChecked: false
+   property string failureSsid: ""
+   property string failureText: ""
+ 
+@@ -210,6 +215,18 @@ Item {
+     }
+   }
+ 
++  Process {
++    id: saeProbe
++    command: ["iw", "phy"]
++    stdout: StdioCollector {
++      waitForEnd: true
++      onStreamFinished: {
++        root.phyHasSae = WifiModel.phyHasSae(text)
++        root.phyChecked = true
++      }
++    }
++  }
++
+   // ---------------------------------------------------------------- actions
+ 
+   function runAction(kind, ssid, secured, callback) {
+@@ -313,7 +330,12 @@ Item {
+     passwordField.text = ""
+     cancelSheet()
+     runAction("connect", ssid, true, function(network) {
+-      if (typeof network.connectWithPsk === "function") {
++      if (!root.phyHasSae && network.security === WifiSecurityType.Sae) {
++        pskConnect.secret = psk
++        pskConnect.ssid = ssid
++        pskConnect.command = WifiModel.nmcliWpa2ConnectArgv(ssid, root.device ? root.device.name : "")
++        pskConnect.running = true
++      } else if (typeof network.connectWithPsk === "function") {
+         network.connectWithPsk(psk)
+       } else {
+         pskConnect.secret = psk
+diff --git a/test/wifi-model.js b/test/wifi-model.js
+index 2d39022..71a4322 100644
+--- a/test/wifi-model.js
++++ b/test/wifi-model.js
+@@ -143,6 +143,24 @@ test("the nmcli fallback never carries the password in argv", () => {
+   assert.strictEqual(M.nmcliFailureMessage("boom"), "Couldn't connect")
+ })
+ 
++test("SAE support comes from iw phy", () => {
++  assert.strictEqual(M.phyHasSae("\tSupported extended features:\n\t\t* [ SAE_OFFLOAD ]: SAE offload support"), true)
++  assert.strictEqual(M.phyHasSae("\tDevice supports SAE with AUTHENTICATE command"), true)
++  assert.strictEqual(M.phyHasSae("Wiphy phy0\n\t* [ 4WAY_HANDSHAKE_STA_PSK ]: 4-way handshake with PSK in station mode"), false)
++  assert.strictEqual(M.phyHasSae(""), false)
++})
++
++test("the WPA2 fallback pins wpa-psk and keeps the password and SSID out of the script", () => {
++  const argv = M.nmcliWpa2ConnectArgv("Home $(reboot)", "wlp1s0")
++  assert.strictEqual(M.nmcliWpa2ConnectArgv.length, 2, "takes no secret")
++  assert.deepStrictEqual(argv.slice(0, 2), ["sh", "-c"])
++  assert.deepStrictEqual(argv.slice(3), ["sh", "Home $(reboot)", "wlp1s0"])
++  assert.ok(/wifi-sec\.key-mgmt wpa-psk/.test(argv[2]))
++  assert.ok(/--ask connection up/.test(argv[2]))
++  assert.ok(!/Home/.test(argv[2]), "the SSID is a parameter, not code")
++  assert.deepStrictEqual(M.nmcliWpa2ConnectArgv("Home", "").slice(3), ["sh", "Home", ""])
++})
++
+ test("list entries: sections in order, uniform fields", () => {
+   const rows = M.buildRows([net("Home", 0.6, { connected: true, known: true }), net("Cafe", 0.4)], OPEN, OWE)
+   const entries = M.listEntries(rows, [{ name: "Attic", uuid: "u3" }], true)

@@ -1,0 +1,9 @@
+post_install() {
+  systemctl enable t715-chromium-update.timer >/dev/null 2>&1 || true
+}
+post_upgrade() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+pre_remove() {
+  systemctl disable t715-chromium-update.timer >/dev/null 2>&1 || true
+}

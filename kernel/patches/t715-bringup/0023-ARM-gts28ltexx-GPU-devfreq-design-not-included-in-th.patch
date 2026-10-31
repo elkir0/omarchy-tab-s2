@@ -1,0 +1,343 @@
+From dc1fc95fbbc7c27fee0917df5df2e32f795bd471 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 23/24] ARM: gts28ltexx: GPU devfreq design (not included in
+ the board)
+
+An OPP table for the Mali-T760 (160-700 MHz, stock worst-case voltages
+plus a cold margin), panfrost as a devfreq cooling device, and passive
+trips on the g3d and apollo thermal zones, with a config fragment for
+the devfreq governor and devfreq cooling.  docs/GPU.md section 10 has
+the derivation.
+
+Not included by exynos5433-gts28ltexx.dts.  First run on the tablet
+(docs/GPU.md section 10.10): clock and BUCK6 voltage follow every OPP,
+the governor scales up to 600 MHz under load, the cooling device
+registers.  Stability per level is still untested: the GL load used for
+the test faults on every job already at the boot clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-gpufreq.dtsi        | 273 ++++++++++++++++++
+ arch/arm/configs/gts28ltexx_gpufreq.config    |  32 ++
+ 2 files changed, 305 insertions(+)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
+ create mode 100644 arch/arm/configs/gts28ltexx_gpufreq.config
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
+new file mode 100644
+index 000000000..d2c1a6cfb
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi
+@@ -0,0 +1,273 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715), Exynos5433 - GPU frequency
++ * scaling (panfrost devfreq) and GPU thermal throttling
++ *
++ * NOT included by the board yet.  Include it AFTER
++ * exynos5433-gts28ltexx-gpu.dtsi (that file deletes the GPU's
++ * operating-points-v2 property, this one sets it again), together with
++ * arch/arm/configs/gts28ltexx_gpufreq.config.  docs/GPU.md section 10
++ * has the value-by-value source table and the device test plan.
++ *
++ * Path abbreviations in the comments:
++ *   stock/   = 02_sources/kernel_universal5433/
++ *   mali/    = stock/drivers/gpu/arm/t7xx/r22p0/platform/exynos/
++ *   asv.h    = stock/arch/arm/mach-exynos/include/mach/asv-exynos5433.h
++ *   tmu.h    = stock/arch/arm/mach-exynos/include/mach/tmu.h
++ *   stock-thermal = stock/drivers/thermal/exynos_thermal.c
++ *   clk      = drivers/clk/samsung/clk-exynos5433.c (this tree)
++ */
++
++/*
++ * OPP table.
++ *
++ * Frequencies: the eight stock Mali DVFS levels (mali/gpu_exynos5433.c:46-55,
++ * 700 600 550 500 420 350 266 160 MHz).  Each one is an exact entry of the
++ * mainline PLL35xx rate table that the G3D PLL uses (clk:737-786, G3D PLL
++ * at clk:3301-3302), and panfrost's clk_set_rate() on aclk_g3d reaches that
++ * PLL: aclk_g3d (clk:3339, CLK_SET_RATE_PARENT) -> div_aclk_g3d
++ * (clk:3319, CLK_SET_RATE_PARENT) -> mout_aclk_g3d_400 (clk:3307,
++ * CLK_SET_RATE_PARENT) -> mout_g3d_pll (clk:3309, CLK_SET_RATE_PARENT) ->
++ * fout_g3d_pll, 24 MHz input (board &xxti).  Mainline P/M/S, divider 1:
++ *   700 MHz  P3 M175 S1 (clk:763)   stock P6 M350 S1 (stock clk-exynos5433.c:3218)
++ *   600 MHz  P5 M500 S2 (clk:766)   same as stock (:3219)
++ *   550 MHz  P6 M550 S2 (clk:768)   same as stock (:3220)
++ *   500 MHz  P6 M500 S2 (clk:771)   same as stock (:3221)
++ *   420 MHz  P5 M350 S2 (clk:773)   same as stock (:3222)
++ *   350 MHz  P6 M350 S2 (clk:775)   same as stock (:3223); or 700 MHz / 2
++ *                                   when the PLL already runs at 700 MHz
++ *                                   (clk-divider.c:320-328)
++ *   266 MHz  P6 M532 S3 (clk:779)   same as stock (:3224)
++ *   160 MHz  P6 M320 S3 (clk:783)   same as stock (:3225)
++ * Exact Hz values (266000000, not the SoC dtsi's 267000000).
++ *
++ * Voltages: the chip's ASV group and table version are treated as unknown,
++ * so each OPP takes the highest stock G3D voltage at that frequency over
++ * the 16 ASV groups and the four tables (always the ASV0 column; asv.h
++ * v0 433-442, v1 538-546, v2 642-651, v3 748-757) plus the stock cold
++ * margin, 37500 uV (GPU_VOLTAGE_OFFSET_MARGIN, mali/gpu_exynos5433.c:90),
++ * which stock adds to the table voltage while the GPU state is GPU_COLD,
++ * i.e. the G3D sensor reads <= 19 C or the system is suspending
++ * (mali/gpu_notifier.c:113-116, mali/gpu_dvfs_api.c:161, stock-thermal
++ * 433-434 and 499-502, tmu.h:22).  Mainline cannot tell when the GPU is
++ * cold, so the margin is always applied.
++ *
++ *   MHz  envelope (table, line)   + 37500   = OPP uV
++ *   700  1162500 (v1, asv.h:539)            1200000
++ *   600  1100000 (v0, asv.h:436)            1137500
++ *   550  1075000 (v0, asv.h:437)            1112500
++ *   500  1050000 (v0, asv.h:438)            1087500
++ *   420  1025000 (v0, asv.h:439)            1062500
++ *   350  1000000 (v0, asv.h:440)            1037500
++ *   266  1000000 (v0, asv.h:441)            1037500
++ *   160  1000000 (v0, asv.h:442)            1037500
++ *
++ * Ceiling: the most stock ever writes to vdd_g3d is G3D_MAX_VOLT
++ * 1162500 uV (stock/arch/arm/mach-exynos/asv-exynos5433.c:39, the 700 MHz
++ * value of table v1) plus the cold margin = 1200000 uV, at 700 MHz on a
++ * table-version 2-4 chip while cold (target_vol = table + margin,
++ * mali/gpu_dvfs_api.c:161; regulator_set_voltage(vol, vol),
++ * mali/gpu_exynos5433.c:581; the stock BUCK6 window is 600000-1500000 uV,
++ * 01_dumps/live_fdt.dts:2400,2405).  No OPP goes above it; 700 MHz sits
++ * exactly on it.  All values are on the BUCK6 6250 uV grid
++ * (drivers/regulator/s2mps11.c:611) and inside the board's BUCK6 window
++ * (600000-1500000 uV, exynos5433-gts28ltexx.dts:430-437), which therefore
++ * needs no change.
++ *
++ * Cooling states (devfreq cooling counts from the fastest OPP,
++ * drivers/thermal/devfreq_cooling.c:348-375, 110): 0 = 700, 1 = 600,
++ * 2 = 550, 3 = 500, 4 = 420, 5 = 350, 6 = 266, 7 = 160 MHz.  The
++ * cooling-maps below use these numbers: renumber them if an OPP is added,
++ * removed or disabled.
++ */
++/ {
++	gpu_opp_table_gts28: opp-table-gpu {
++		compatible = "operating-points-v2";
++
++		opp-160000000 {
++			opp-hz = /bits/ 64 <160000000>;
++			opp-microvolt = <1037500>;
++		};
++
++		opp-266000000 {
++			opp-hz = /bits/ 64 <266000000>;
++			opp-microvolt = <1037500>;
++		};
++
++		opp-350000000 {
++			opp-hz = /bits/ 64 <350000000>;
++			opp-microvolt = <1037500>;
++		};
++
++		opp-420000000 {
++			opp-hz = /bits/ 64 <420000000>;
++			opp-microvolt = <1062500>;
++		};
++
++		opp-500000000 {
++			opp-hz = /bits/ 64 <500000000>;
++			opp-microvolt = <1087500>;
++		};
++
++		opp-550000000 {
++			opp-hz = /bits/ 64 <550000000>;
++			opp-microvolt = <1112500>;
++		};
++
++		opp-600000000 {
++			opp-hz = /bits/ 64 <600000000>;
++			opp-microvolt = <1137500>;
++		};
++
++		/*
++		 * Stock uses 700 MHz only as a boost: its governors stop at
++		 * GPU_MAX_CLOCK_LIMIT 600 MHz unless the hardware-counter
++		 * boost is on (mali/gpu_exynos5433.c:68,
++		 * mali/gpu_dvfs_governor.c:135-139), and table versions 0-1
++		 * stop at 550 MHz (mali/gpu_exynos5433.c:64,141-151).  The
++		 * mainline PLL setting differs from stock's (P3 M175 S1 vs
++		 * P6 M350 S1, same 1400 MHz VCO).  docs/GPU.md section 10.
++		 */
++		opp-700000000 {
++			opp-hz = /bits/ 64 <700000000>;
++			opp-microvolt = <1200000>;
++		};
++	};
++};
++
++&gpu {
++	/*
++	 * The SoC dtsi's own table (exynos5433.dtsi:1199-1234) stays deleted
++	 * (exynos5433-gts28ltexx-gpu.dtsi): it is the stock default table,
++	 * below the envelope at 700 MHz.
++	 */
++	operating-points-v2 = <&gpu_opp_table_gts28>;
++
++	/*
++	 * panfrost registers a devfreq cooling device on this node
++	 * (drivers/gpu/drm/panfrost/panfrost_devfreq.c:215, needs
++	 * CONFIG_DEVFREQ_THERMAL); the cells are <min-state max-state>
++	 * (drivers/thermal/thermal_of.c:271-290).
++	 */
++	#cooling-cells = <2>;
++};
++
++/*
++ * Thermal throttling, as stock does it.
++ *
++ * Stock caps the GPU clock from the G3D sensor (sensor 2) only
++ * (stock-thermal:977-980, 1029): >= 95 C 420 MHz, >= 100 C 350 MHz,
++ * >= 105 C 266 MHz, >= 110 C 160 MHz, >= 115 C 160 MHz
++ * (GPU_TH_TEMP1-5, tmu.h:40-45; states stock-thermal:489-502; caps
++ * GPU_TEMP_THROTTLING1-4/TRIPPING, mali/gpu_exynos5433.c:92-96, applied
++ * as a max lock, mali/gpu_notifier.c:61-87).  The >= 115 C step needs no
++ * passive trip: 160 MHz is already the >= 110 C cap, and the zone's
++ * critical trip at 115 C stays (exynos5433-gts28ltexx-thermal.dtsi).
++ *
++ * Each trip maps to one fixed cooling state (min = max), so step_wise
++ * sets exactly that cap when the trip is crossed and drops it when the
++ * temperature falls back (drivers/thermal/gov_step_wise.c:31-75); the
++ * device takes the deepest cap of all its trips
++ * (drivers/thermal/thermal_helpers.c:178-188), as stock takes the highest
++ * state.  Hysteresis 2 C: stock recomputes the GPU state at every reading
++ * with none; 2 C is the stock TMU threshold_falling (live_fdt.dts:4246)
++ * and only delays the release.
++ *
++ * tmu_g3d is disabled (exynos5433-gts28ltexx-thermal.dtsi), so the
++ * g3d-thermal zone is not registered and these four trips do nothing
++ * until that sensor is re-enabled.
++ */
++&g3d_thermal {
++	trips {
++		g3d_gpu_throttle1: g3d-gpu-throttle1 {
++			temperature = <95000>;	/* GPU_TH_TEMP1, tmu.h:41 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++
++		g3d_gpu_throttle2: g3d-gpu-throttle2 {
++			temperature = <100000>;	/* GPU_TH_TEMP2, tmu.h:42 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++
++		g3d_gpu_throttle3: g3d-gpu-throttle3 {
++			temperature = <105000>;	/* GPU_TH_TEMP3, tmu.h:43 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++
++		g3d_gpu_throttle4: g3d-gpu-throttle4 {
++			temperature = <110000>;	/* GPU_TH_TEMP4, tmu.h:44 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++	};
++
++	cooling-maps {
++		map-gpu-throttle1 {
++			/* 420 MHz, mali/gpu_exynos5433.c:92 */
++			trip = <&g3d_gpu_throttle1>;
++			cooling-device = <&gpu 4 4>;
++		};
++
++		map-gpu-throttle2 {
++			/* 350 MHz, mali/gpu_exynos5433.c:93 */
++			trip = <&g3d_gpu_throttle2>;
++			cooling-device = <&gpu 5 5>;
++		};
++
++		map-gpu-throttle3 {
++			/* 266 MHz, mali/gpu_exynos5433.c:94 */
++			trip = <&g3d_gpu_throttle3>;
++			cooling-device = <&gpu 6 6>;
++		};
++
++		map-gpu-throttle4 {
++			/* 160 MHz, mali/gpu_exynos5433.c:95-96 */
++			trip = <&g3d_gpu_throttle4>;
++			cooling-device = <&gpu 7 7>;
++		};
++	};
++};
++
++/*
++ * Stock also throttles the GPU from the A53 sensor (sensor 3, "KFC",
++ * mainline apollo): it replaces the GPU temperature by 98 C when KFC
++ * reads 81-85 C (and the CPU/ISP maximum is below 101 C, and G3D below
++ * 96 C), i.e. at least GPU_THROTTLING1 = 420 MHz, and by 112 C when KFC
++ * reads above 85 C, i.e. GPU_THROTTLING4 = 160 MHz (stock-thermal:992-1000,
++ * then 1029).  Readings are whole degrees: "> 80" is ">= 81", "> 85" is
++ * ">= 86".  Mirrored here on the apollo zone, which works on this board.
++ * The mirror ignores the "maximum below 101 C" condition, so it throttles
++ * in a few cases where stock would not, never the reverse.
++ */
++&apollo_thermal {
++	trips {
++		apollo_gpu_throttle1: apollo-gpu-throttle1 {
++			temperature = <81000>;	/* stock-thermal:992 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++
++		apollo_gpu_throttle4: apollo-gpu-throttle4 {
++			temperature = <86000>;	/* stock-thermal:997 */
++			hysteresis = <2000>;
++			type = "passive";
++		};
++	};
++
++	cooling-maps {
++		map-gpu-throttle1 {
++			/* 420 MHz, mali/gpu_exynos5433.c:92 */
++			trip = <&apollo_gpu_throttle1>;
++			cooling-device = <&gpu 4 4>;
++		};
++
++		map-gpu-throttle4 {
++			/* 160 MHz, mali/gpu_exynos5433.c:95 */
++			trip = <&apollo_gpu_throttle4>;
++			cooling-device = <&gpu 7 7>;
++		};
++	};
++};
+diff --git a/arch/arm/configs/gts28ltexx_gpufreq.config b/arch/arm/configs/gts28ltexx_gpufreq.config
+new file mode 100644
+index 000000000..b8071feb8
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_gpufreq.config
+@@ -0,0 +1,32 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# GPU frequency scaling (panfrost devfreq) and GPU thermal throttling for
++# the gts28ltexx board.  Merged on top of gts28ltexx_defconfig (see
++# scripts/kbuild-mainline.sh --fragment), together with
++# arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpufreq.dtsi.
++# docs/GPU.md section 10 has the rationale and the device test plan.
++
++# panfrost stays a module, as in gts28ltexx_defconfig: built in, its probe
++# runs before the initramfs watchdog guard, and the first built-in boot
++# looped (docs/GPU.md).  Repeated here so this fragment can never turn it
++# into =y by accident.
++CONFIG_DRM_PANFROST=m
++
++# devfreq core (core framework).  Already =y in a defconfig build, where
++# DRM_PANFROST selects it (drivers/gpu/drm/panfrost/Kconfig); stated so the
++# fragment carries its own requirements.  Selects PM_OPP.
++CONFIG_PM_DEVFREQ=y
++
++# The governor panfrost hard-codes (DEVFREQ_GOV_SIMPLE_ONDEMAND,
++# drivers/gpu/drm/panfrost/panfrost_devfreq.c:206-208).  A modular panfrost
++# only selects it =m; built in, devfreq_add_device() finds it without
++# request_module("governor_simpleondemand") (drivers/devfreq/devfreq.c:310),
++# i.e. without depending on module autoloading at panfrost load time.
++CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
++
++# devfreq cooling device (bool, core thermal code): panfrost registers one
++# with devfreq_cooling_em_register() (panfrost_devfreq.c:215); without this
++# option that call is a stub returning -EINVAL
++# (include/linux/devfreq_cooling.h:76-81), there is no cooling device and
++# the thermal zones' GPU cooling-maps never bind.
++CONFIG_DEVFREQ_THERMAL=y

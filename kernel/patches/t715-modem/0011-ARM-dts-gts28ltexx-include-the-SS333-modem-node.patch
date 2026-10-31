@@ -1,0 +1,24 @@
+From d6b6673b999ff1e1484f170405aeb167725d11a0 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 11/16] ARM: dts: gts28ltexx: include the SS333 modem node
+
+The modem node and the SPI4 boot link (exynos5433-gts28ltexx-modem-ss333.dtsi)
+follow the MIPI-LLI include; both drivers are modules that are never
+autoloaded and do nothing until their allow_hw parameter is set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 9e33aad42..45b25e8e7 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -928,3 +928,5 @@ &framebuffer {
+  * on the tablet yet.
+  */
+ #include "exynos5433-gts28ltexx-modem.dtsi"
++/* SS333 modem node (sec_modem_v1.ko) and SPI4 boot link: same rules. */
++#include "exynos5433-gts28ltexx-modem-ss333.dtsi"

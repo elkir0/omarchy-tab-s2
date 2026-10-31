@@ -1,0 +1,76 @@
+From a2297f87a4edbfa5839cf336a59cff538aa27c3e Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 09/24] mfd: exynos-lpass: keep LPASS active while its UART is
+ enabled
+
+The UART sub-block has no runtime PM of its own. Once LPASS runtime-
+suspends right after probe, exynos_lpass_disable() clears
+SFR_LPASS_INTR_CPU_MASK, which masks the UART interrupt: a serial device
+behind it never completes a transmission (hci_bcm: "command 0x0c03 tx
+timeout"). The vendor kernel keeps the block on for its UART ("audio
+uart always on").
+
+Take a runtime PM reference in probe when an enabled
+samsung,exynos5433-uart child exists, and drop it in the remove action.
+
+Checked on the SM-T715 (Bluetooth on UART3): CTS rises as soon as BT_EN
+is set, the controller answers HCI_Reset and loads its patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/mfd/exynos-lpass.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/mfd/exynos-lpass.c b/drivers/mfd/exynos-lpass.c
+index 8b5fed476..1005c6845 100644
+--- a/drivers/mfd/exynos-lpass.c
++++ b/drivers/mfd/exynos-lpass.c
+@@ -52,6 +52,8 @@ struct exynos_lpass {
+ 	/* pointer to the LPASS TOP regmap */
+ 	struct regmap *top;
+ 	struct clk *sfr0_clk;
++	/* runtime PM reference held for the UART sub-block */
++	bool uart_ref;
+ };
+ 
+ static void exynos_lpass_core_sw_reset(struct exynos_lpass *lpass, int mask)
+@@ -109,6 +111,8 @@ static void exynos_lpass_disable_lpass(void *data)
+ 	struct platform_device *pdev = data;
+ 	struct exynos_lpass *lpass = platform_get_drvdata(pdev);
+ 
++	if (lpass->uart_ref)
++		pm_runtime_put_noidle(&pdev->dev);
+ 	pm_runtime_disable(&pdev->dev);
+ 	if (!pm_runtime_status_suspended(&pdev->dev))
+ 		exynos_lpass_disable(lpass);
+@@ -118,6 +122,7 @@ static int exynos_lpass_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct exynos_lpass *lpass;
++	struct device_node *uart;
+ 	void __iomem *base_top;
+ 	int ret;
+ 
+@@ -142,6 +147,21 @@ static int exynos_lpass_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, lpass);
+ 	pm_runtime_set_active(dev);
++
++	/*
++	 * The UART sub-block has no runtime PM of its own, and suspending
++	 * LPASS clears SFR_LPASS_INTR_CPU_MASK, which masks the UART
++	 * interrupt: a serial device behind it (e.g. Bluetooth) then sees
++	 * every transmission time out.  Keep the block active while an
++	 * enabled UART child exists, as the vendor kernel does.
++	 */
++	uart = of_get_compatible_child(dev->of_node, "samsung,exynos5433-uart");
++	if (uart && of_device_is_available(uart)) {
++		pm_runtime_get_noresume(dev);
++		lpass->uart_ref = true;
++	}
++	of_node_put(uart);
++
+ 	pm_runtime_enable(dev);
+ 	exynos_lpass_enable(lpass);
+ 

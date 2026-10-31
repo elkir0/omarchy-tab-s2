@@ -1,0 +1,36 @@
+From 100c6feb351853cf769da78058eb35960c0ddc85 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 13/16] spi: s3c64xx: allow for the auto chip-select gap in the
+ DMA timeout
+
+With S3C64XX_SPI_QUIRK_CS_AUTO the controller idles NSC_CNT clocks
+around every frame, so a long byte-wide transfer runs well below
+cur_speed. The SS333 BOOT image (10748 bytes at 100 kHz on SPI4 of
+Exynos5433) moved at about 67 kbit/s and timed out after 8056 bytes
+against a 0.93 s budget. The vendor 3.10 kernel multiplied the
+computed time by 10; do the same for auto chip-select ports.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/spi/spi-s3c64xx.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/spi/spi-s3c64xx.c b/drivers/spi/spi-s3c64xx.c
+index bd75c9c96..9ec34db9e 100644
+--- a/drivers/spi/spi-s3c64xx.c
++++ b/drivers/spi/spi-s3c64xx.c
+@@ -577,6 +577,13 @@ static int s3c64xx_wait_for_dma(struct s3c64xx_spi_driver_data *sdd,
+ 
+ 	/* millisecs to xfer 'len' bytes @ 'cur_speed' */
+ 	ms = xfer->len * 8 * 1000 / sdd->cur_speed;
++	/*
++	 * Auto chip select idles NSC_CNT clocks around every frame, so a long
++	 * byte-wide transfer runs well below cur_speed (about 2/3 of it at
++	 * 100 kHz on Exynos5433); keep the vendor kernel's tolerance.
++	 */
++	if (sdd->port_conf->quirks & S3C64XX_SPI_QUIRK_CS_AUTO)
++		ms *= 10;
+ 	ms += 30;               /* some tolerance */
+ 	ms = max(ms, 100);      /* minimum timeout */
+ 

@@ -1,0 +1,52 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# shannon-nv-provision.service: make the verified NV copy that shannon-loader
+# sends to the CP (NV mode A, SYNTHESIS D4), once per device.
+#
+#   shannon-nv-provision
+#
+# Same method as the bring-up (2026-10-29): the EFS partition is only read,
+# into a RAM file; that file is loop-mounted read-only without journal
+# replay (ro,noload), never the partition itself; nv_data.bin is copied only
+# if it is 1 MiB and its .md5 matches MD5(nv || "Samsung_Android_RIL"). The
+# copy goes to /var/lib/shannon/nv (0700, files 0400) with a sha256 manifest.
+# Nothing is ever written to EFS, and an existing copy is never replaced.
+set -eu
+dst=${SHANNON_NV_DIR:-/var/lib/shannon/nv}
+efs=/dev/disk/by-partlabel/EFS
+[ -e "$dst/manifest.sha256" ] && { echo "NV copy already present"; exit 0; }
+[ -b "$efs" ] || { echo "no EFS partition"; exit 1; }
+blockdev --setro "$efs"
+
+work=$(mktemp -d /run/shannon-nv.XXXXXX)
+cleanup() {
+	mountpoint -q "$work/mnt" && umount "$work/mnt"
+	[ -n "${loop:-}" ] && losetup -d "$loop" 2>/dev/null
+	# the tmpfs holds a whole EFS image: it must not outlive this script
+	mountpoint -q "$work" && umount "$work"
+	rmdir "$work"
+}
+trap cleanup EXIT
+mount -t tmpfs -o size=64m,mode=0700 tmpfs "$work"
+dd if="$efs" of="$work/efs.img" bs=1M status=none
+loop=$(losetup --find --show --read-only "$work/efs.img")
+mkdir "$work/mnt"
+mount -o ro,noload "$loop" "$work/mnt"
+
+nv="$work/mnt/nv_data.bin"
+[ -f "$nv" ] && [ -f "$nv.md5" ] || { echo "nv_data.bin or its .md5 missing on EFS"; exit 1; }
+size=$(stat -c %s "$nv")
+[ "$size" = 1048576 ] || { echo "nv_data.bin is $size bytes, not 1 MiB: refused"; exit 1; }
+want=$(tr -d ' \n\r' < "$nv.md5" | cut -c1-32)
+have=$( { cat "$nv"; printf 'Samsung_Android_RIL'; } | md5sum | cut -c1-32)
+[ "$want" = "$have" ] || { echo "nv_data.bin.md5 does not match the RIL formula: refused"; exit 1; }
+
+install -d -m 0700 "$(dirname "$dst")" "$dst"
+tmp=$(mktemp -d "$dst.new.XXXXXX")
+install -m 0400 "$nv" "$tmp/nv_data.bin"
+install -m 0400 "$nv.md5" "$tmp/nv_data.bin.md5"
+( cd "$tmp" && sha256sum nv_data.bin nv_data.bin.md5 > manifest.sha256 && chmod 0400 manifest.sha256 )
+( cd "$tmp" && sha256sum -c --quiet manifest.sha256 )
+rmdir "$dst" 2>/dev/null || true
+mv "$tmp" "$dst"
+echo "NV copy provisioned in $dst (manifest checked)"

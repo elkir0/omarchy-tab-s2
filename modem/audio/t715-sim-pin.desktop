@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Code PIN SIM
+Comment=Déverrouiller la carte SIM
+Exec=t715-sim-pin
+Icon=dialog-password
+Terminal=false
+Categories=Settings;Telephony;
