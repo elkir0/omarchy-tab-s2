@@ -1,0 +1,36 @@
+The Location tile, over t715-gps
+
+Upstream's tile and its omamobile-gnss command come back: t715-gps answers to that name,
+and the receiver only runs while GeoClue has a client.
+
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,8 +12,9 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
+-// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no torch, location or
+-// NFC (GNSS, flash LED and NFC are not driven), and no fingerprint sensor.
++// SM-T715 tablet (sm-t715-omarchy, pkg/omamobile-shell): no torch or NFC (flash
++// LED and NFC are not driven), and no fingerprint sensor. Location is t715-gps,
++// under upstream's omamobile-gnss command (docs/hardware/GPS.md).
+ // Mobile data goes through NetworkManager. Rotation is t715-rotate
+ // (docs/image/ROTATION.md). Hotspot needs the modem as its uplink: the tile
+ // takes the Wi-Fi radio off the client network while it is on.
+@@ -25,6 +26,7 @@
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
++  { id: "location", label: "Location" },
+   { id: "dnd", label: "Do not disturb" },
+   { id: "battery-saver", label: "Battery saver" },
+   { id: "dark-theme", label: "Dark theme" },
+@@ -50,7 +52,7 @@
+   "wifi", "bluetooth", "mobile-data", "dnd",
+   "airplane", "rotation-lock", "rotate", "battery-saver",
+   "dark-theme", "night-light", "keyboard", "clipboard",
+-  "screenshot"
++  "screenshot", "location"
+ ]
+ 
+ var QUICK_COUNT = 4

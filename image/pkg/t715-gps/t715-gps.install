@@ -1,0 +1,10 @@
+post_install() {
+  systemd-sysusers t715-gps.conf >/dev/null 2>&1 || true
+}
+post_upgrade() {
+  systemd-sysusers t715-gps.conf >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+pre_remove() {
+  systemctl disable --now t715-gps-nmea.socket >/dev/null 2>&1 || true
+}

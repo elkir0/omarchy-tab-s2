@@ -1,0 +1,7 @@
+# One trip outside: systemctl start --no-block t715-gps-capture, take the cable out, come back.
+[Unit]
+Description=GPS capture, cold, for one trip outside
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=t715-gps --why=capture /usr/bin/t715-gps-capture

@@ -1,0 +1,166 @@
+#!/usr/bin/python3
+# One trip outside, with no cable, no session and no screen: waits for the cable to go, erases
+# gpsd's memory, then GeoClue's own demo client asks for the position, the way an app does. For
+# the time of the capture a drop-in lets the NMEA go through tee on its way to GeoClue. Stops by
+# itself, and says when the receiver went off.  Everything stays in
+# /var/lib/t715-gps/captures, readable by root; only summary.txt is free of coordinates.
+#   t715-gps-capture [--no-wait] [--warm] [--minutes N] [--hold SECONDS]
+import calendar, glob, os, shutil, signal, subprocess, sys, time
+
+CLIENT = '/usr/lib/geoclue-2.0/demos/where-am-i'
+USER = 'alarm'
+FIFO = '/var/lib/t715-gps/root/data/nmea.out'
+TRACE = '/var/lib/t715-gps/root/data/capture.nmea'
+DROPIN = '/run/systemd/system/t715-gps-nmea@.service.d'
+# gpsd predates the last wrap of the GPS week number: its date is exactly this far behind, and
+# GeoClue only takes the time of day from it.
+WEEKS_1024 = 1024 * 7 * 86400
+args = sys.argv[1:]
+
+
+def opt(name, default):
+    return type(default)(args[args.index(name) + 1]) if name in args else default
+
+
+MINUTES = opt('--minutes', 30.0)
+HOLD = opt('--hold', 300.0)
+WAIT = '--no-wait' not in args
+OUT = time.strftime('/var/lib/t715-gps/captures/%Y%m%d-%H%M%S')
+os.makedirs(OUT, mode=0o700)
+events = open(OUT + '/events.txt', 'a', buffering=1)
+
+
+def note(msg):
+    events.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+
+
+def udc():
+    for path in glob.glob('/sys/class/udc/*/state'):
+        with open(path) as f:
+            return f.read().strip()
+    return 'none'
+
+
+def run(*cmd):
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout.strip()
+
+
+def receiver_active():
+    return run('systemctl', 'is-active', 't715-gpsd.service') == 'active'
+
+
+def power():
+    return run('/usr/lib/t715-gps/t715-gps-power', 'status')
+
+
+def rmc_utc(f):
+    d, t = f[9], f[1]
+    return calendar.timegm((2000 + int(d[4:6]), int(d[2:4]), int(d[:2]), int(t[:2]), int(t[2:4]), int(t[4:6])))
+
+
+def stop_client(client):
+    if client.poll() is None:
+        client.send_signal(signal.SIGTERM)
+        try:
+            client.wait(5)
+        except subprocess.TimeoutExpired:
+            client.kill()
+
+
+note('armed, cable ' + udc())
+if WAIT:
+    while udc() == 'configured':
+        time.sleep(2)
+    note('cable gone')
+    time.sleep(20)
+was_on = run('systemctl', 'is-enabled', 't715-gps-nmea.socket') == 'enabled'
+if '--warm' not in args:
+    subprocess.check_call(['/usr/bin/omamobile-gnss', 'forget'])
+    note('gpsd memory erased')
+os.makedirs(DROPIN, exist_ok=True)
+with open(DROPIN + '/capture.conf', 'w') as f:
+    f.write('[Service]\nReadWritePaths=%s\nExecStart=\nExecStart=/bin/sh -c \'exec tee --output-error=exit %s < %s\'\n'
+            % (os.path.dirname(TRACE), TRACE, FIFO))
+run('systemctl', 'daemon-reload')
+subprocess.check_call(['/usr/bin/omamobile-gnss', 'on'])
+run('systemctl', 'restart', 'geoclue.service')
+time.sleep(2)
+
+t0 = time.time()
+said = open(OUT + '/where-am-i.txt', 'wb')
+client = subprocess.Popen(['/usr/bin/runuser', '-u', USER, '--', CLIENT, '-t', str(int(MINUTES * 60))],
+                          stdout=said, stderr=subprocess.STDOUT)
+first_fix = None
+first_client = None
+sats = {}
+used = 0
+valid = 0
+offsets = []
+hdop = []
+off = 0
+tail = ''
+while time.time() - t0 < MINUTES * 60 and client.poll() is None:
+    time.sleep(1)
+    if WAIT and udc() == 'configured':
+        note('cable back')
+        break
+    if not os.path.exists(TRACE):
+        continue
+    with open(TRACE, errors='replace') as fh:
+        fh.seek(off)
+        chunk = fh.read()
+        off = fh.tell()
+    now = time.time()
+    lines = (tail + chunk).split('\n')
+    tail = lines.pop()
+    for line in lines:
+        f = line.strip().split('*')[0].split(',')
+        if f[0].endswith('RMC') and len(f) > 9 and f[2] == 'A':
+            valid += 1
+            if f[1] and f[9]:
+                offsets.append((now - rmc_utc(f)) % WEEKS_1024)
+        elif f[0].endswith('GGA') and len(f) > 8 and f[6] not in ('', '0'):
+            if first_fix is None:
+                first_fix = now - t0
+                note('first fix at %.0f s, quality %s, %s sats, HDOP %s' % (first_fix, f[6], f[7], f[8]))
+            used = max(used, int(f[7] or 0))
+            if f[8]:
+                hdop.append(float(f[8]))
+        elif f[0].endswith('GSV'):
+            for i in range(4, len(f) - 3, 4):
+                if f[i] and f[i + 3]:
+                    sats.setdefault(f[i], []).append(int(f[i + 3]))
+    if first_client is None:
+        with open(OUT + '/where-am-i.txt', errors='replace') as fh:
+            if 'New location' in fh.read():
+                first_client = now - t0
+                note('GeoClue gave the client a position at %.0f s' % first_client)
+    if first_fix is not None and first_client is not None and now - t0 - first_client > HOLD:
+        note('position held')
+        break
+
+stop_client(client)
+note('client gone')
+left = time.time()
+while receiver_active() and time.time() - left < 15:
+    time.sleep(0.2)
+off_after = time.time() - left
+if not was_on:
+    subprocess.call(['/usr/bin/omamobile-gnss', 'off'])
+shutil.rmtree(DROPIN, ignore_errors=True)
+run('systemctl', 'daemon-reload')
+if os.path.exists(TRACE):
+    shutil.move(TRACE, OUT + '/nmea')
+with open(OUT + '/where-am-i.txt', errors='replace') as fh:
+    updates = fh.read().count('New location')
+with open(OUT + '/summary.txt', 'w') as s:
+    s.write('duration %.0f s\nfirst fix %s s\nfirst position at the client %s s\n' % (time.time() - t0, first_fix, first_client))
+    s.write('client updates %d\nvalid RMC %d\nmax sats used %d\n' % (updates, valid, used))
+    if hdop:
+        s.write('HDOP min %.1f max %.1f\n' % (min(hdop), max(hdop)))
+    s.write('sats with C/N0 (samples, min, max): %s\n' % {k: (len(v), min(v), max(v)) for k, v in sorted(sats.items())})
+    if offsets:
+        s.write('system clock minus RMC time, modulo 1024 weeks: min %.1f s, max %.1f s\n' % (min(offsets), max(offsets)))
+    s.write('receiver off %.1f s after the client left, still active: %s\n' % (off_after, receiver_active()))
+    s.write('power after stop: %s\n' % power())
+note('stopped')

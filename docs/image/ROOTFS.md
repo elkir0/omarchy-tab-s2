@@ -761,6 +761,14 @@ the sensor tables in `/usr/lib/firmware/t715/`, which an image cannot carry (Sam
 python3 research/parity/camera/t715-cam-seq.py FIRMWARE SEQ6B2 OUTDIR
 ```
 
+## GPS
+
+The Location tile, off in the image. On, it lets GeoClue reach the receiver, and the receiver runs
+only while an app asks: `docs/hardware/GPS.md`. `gpsd` and its libraries are not in the image, the
+first use copies them from SYSTEM into `/var/lib/t715-gps/root` (18 MiB). Position in the drawer
+shows what GeoClue gives. GeoClue has no network and no source but the satellites, so indoors there
+is no position at all. A first fix takes one to three minutes under a clear sky.
+
 ## Updates
 
 `t715-update-check.timer` looks 10 minutes after login, then daily, with `checkupdates`,

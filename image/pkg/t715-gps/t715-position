@@ -1,0 +1,20 @@
+#!/bin/sh
+# The drawer's Position: says what it waits for, then GeoClue's own client.  From cold the first
+# fix takes one to three minutes under a clear sky, and where-am-i says nothing until then.
+case ${LANG:-} in
+fr*)
+    off="Location est sur Off : allume la tuile, puis rouvre Position."
+    wait="Recherche des satellites : une à trois minutes dehors, ciel dégagé. Laisse cette fenêtre ouverte."
+    ;;
+*)
+    off="Location is off: turn the tile on, then open Position again."
+    wait="Looking for satellites: one to three minutes outside, under a clear sky. Keep this window open."
+    ;;
+esac
+if ! omamobile-gnss status --json | grep -q '"location":"on"'; then
+    echo "$off"
+    sleep 30
+    exit 1
+fi
+echo "$wait"
+exec /usr/lib/geoclue-2.0/demos/where-am-i -t 600

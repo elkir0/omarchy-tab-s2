@@ -64,7 +64,7 @@ false. It only shows a warning, so it matters only with a lock.
 
 | Item | What happened | Effort |
 |---|---|---|
-| **Maps, Calculator, Clocks, GeoClue** | `omamobile-apps` was dropped because it needs `neard`, and they went with it. **Checked**: absent from the tablet, in ALARM's armv7h repositories. With no GPS the position comes from Wi-Fi, untried. The Location tile needs GeoClue | small |
+| **Maps, Calculator, Clocks, GeoClue** | `omamobile-apps` was dropped because it needs `neard`, and they went with it. **Checked**: absent from the tablet, in ALARM's armv7h repositories. GeoClue now has the GPS for its only source (`docs/hardware/GPS.md`). The Location tile needs GeoClue | small |
 | **`wf-recorder`** | The Screen record tile reads "No recorder". **Checked**: absent, in the repositories | small |
 | **`pipewire-alsa`** | **Checked**: absent. ALSA-only clients bypass PipeWire | small |
 | **Vibration** | The motor exists, the image's feedbackd rule already matches `pwm-vibrator`, and the kernel has no `CONFIG_PWM` nor a board node. `packages.extra` says "ring and vibration". Read, unproven on this chip | small to medium, kernel |
@@ -76,7 +76,7 @@ false. It only shows a warning, so it matters only with a lock.
 | **Dead menu rows** | Update > Firmware would install fwupd for nothing, and Update > Config > Plymouth rebuilds for a kernel no package owns: the step that hides them is pre-marked as done | small |
 | **`--wayland-text-input-version=3`** | Upstream's second flag for the keyboard in Chromium. Test first: the keyboard did rise in the address bar | small |
 | **Packages of this image** | `t715-modem` and the `omamobile-*` packages have no repository: `pacman -U` or a new image | medium |
-| **GPS** | A separate BCM4752 on a serial port, not the modem as we assumed. Needs a chroot with Samsung's `gpsd`. No plan exists | large |
+| **GPS** | Done: a BCM4752 on a serial port, Samsung's `gpsd` offline, GeoClue, the Location tile (`docs/hardware/GPS.md`) | done |
 | **Charging** | Linux cannot limit or stop charging: there is no charger driver, so no guard and no limit | large |
 | **Waydroid** | Android apps. ARM images exist, binder and much else is missing from the kernel, GPU at 266 MHz. Nothing was run | large, uncertain |
 
@@ -168,5 +168,5 @@ waiting for the owner.
 | Cameras | `docs/hardware/CAMERA.md`: a photo from the front, frames from the rear | seen; a rear photo in the light waits for the owner |
 | Fingerprint | `docs/hardware/FINGERPRINT.md`: feasible under a condition not met, the bus test not run | written |
 
-Left as they were: Wayvnc mirror, suspend, Packages of this image, GPS, charging, Waydroid, and
+Left as they were: Wayvnc mirror, suspend, Packages of this image, charging, Waydroid, and
 section 7.

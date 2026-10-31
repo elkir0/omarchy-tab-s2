@@ -1,0 +1,45 @@
+From 846440af3e992b67f7ad5096f18bdd19efea1bd8 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:00:00 +0000
+Subject: [PATCH 2/2] ARM: configs: gts28ltexx: GPIO sysfs for the GPS's power
+ line
+
+Samsung's gpsd writes 0 or 1 to a file. The option's prompt sits behind EXPERT, which on
+this config also brings DEBUG_KERNEL, SCHED_DEBUG and RCU_TRACE into a daily kernel, so the
+prompt loses its condition instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_modem.config | 5 +++++
+ drivers/gpio/Kconfig                     | 2 +-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/configs/gts28ltexx_modem.config b/arch/arm/configs/gts28ltexx_modem.config
+index 399d6b56d..da82f6abf 100644
+--- a/arch/arm/configs/gts28ltexx_modem.config
++++ b/arch/arm/configs/gts28ltexx_modem.config
+@@ -34,3 +34,8 @@ CONFIG_MIPI_LLI=m
+ # sec_modem_v1.ko).  Provided by the modem_v1 patch of the same series;
+ # ignored by olddefconfig until that patch is applied.
+ CONFIG_SEC_MODEM_V1=m
++
++# GPS_PWR_EN (gpg2-0): Samsung's gpsd writes 0 or 1 to a file (GpioNStdbyPath), which is
++# /sys/class/sec/gps/GPS_PWR_EN/value on Android.  The value file of an exported line is
++# the same thing.
++CONFIG_GPIO_SYSFS=y
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+index d93cd4f72..f53e6e0ff 100644
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -59,7 +59,7 @@ config DEBUG_GPIO
+ 	  that are most common when setting up new platforms or boards.
+ 
+ config GPIO_SYSFS
+-	bool "/sys/class/gpio/... (sysfs interface)" if EXPERT
++	bool "/sys/class/gpio/... (sysfs interface)"
+ 	depends on SYSFS
+ 	select GPIO_CDEV # We need to encourage the new ABI
+ 	help
+-- 
+2.52.0
+

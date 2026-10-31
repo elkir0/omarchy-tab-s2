@@ -191,7 +191,7 @@ first cell pair.
 | `/pcie@15700000` | `samsung,exynos5433-pcie`, `snps,dw-pcie` | drivers/pci/host/pci-exynos.c | `pci-exynos.c:380` (same 5433 compatible) | `pci/samsung,exynos-pcie.yaml` | `pcie@15700000:1965` | dt-only | num-lanes 1 l.7077; assumed Wi-Fi host (see uncertainties) |
 | `/bluetooth` | `broadcom,bcm4358` | drivers/bluetooth/bcm4358.c (vendor) | `hci_bcm.c:1605` `brcm,bcm43438-bt` | `net/bluetooth/brcm,bluetooth.yaml` | — | dt-only | On `serial@11460000` (l.3989); gpios l.4202 |
 | `/wlan` | `samsung,brcm-wlan` | drivers/net/wireless/bcmdhd4358/dhd_custom_exynos.c | none — use brcmfmac (`brcmfmac/pcie.c:59` ships `brcmfmac4358-pcie` firmware name) | — | — | dt+small-driver-change | No DT node needed upstream beyond pcie; firmware `brcm/brcmfmac4358-pcie.bin`; interface uncertain |
-| `/gps` | `samsung,exynos54xx-bcm4752` | drivers/gps/sec_gps_bcm4752.c | none (mainline GNSS has `bcm4751` binding `gnss/bcm4751.yaml`, different chip wiring) | `gnss/bcm4751.yaml` (reference) | — | new-driver | Uncertain: UART wiring needed; reg l.1245 |
+| `/gps` | `samsung,exynos54xx-bcm4752` | drivers/gps/sec_gps_bcm4752.c | none (mainline has the `brcm,bcm4751` binding, no driver) | `gnss/brcm,bcm4751.yaml` (reference) | — | userspace | UART0, GPS_PWR_EN on gpg2-0, Samsung's `gpsd`: `docs/hardware/GPS.md` |
 
 ## 12. Sensors & input (13 nodes — 3 same / 4 diff / 6 none)
 
@@ -449,5 +449,5 @@ wm1814@1a l.1975-2022 (`reset` gpc0-7 l.2004, `ldoena` gpf0-0 l.1975).
 * **vmmc-en-gpio phandle** — `<0x27 0x07 0x01>` (l.1284) resolves only inside
   the decompiled tree (phandle 0x27 bank not re-derived here); cross-check the
   bank name against the pinctrl dump before writing the board DT.
-* **GPS** — stock BCM4752 driver is a vendor char device; the mainline
-  `gnss/bcm4751.yaml` binding is for a different wiring; treat as new-driver.
+* **GPS** — no kernel driver: UART0 and a GPIO, and the position comes from
+  Samsung's `gpsd`, offline (`docs/hardware/GPS.md`).

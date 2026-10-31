@@ -1,0 +1,53 @@
+#!/bin/bash
+# The Location switch, under the name the shell's tile calls.
+#   omamobile-gnss on      apps may ask GeoClue; the receiver runs only while one does
+#   omamobile-gnss off     stops the receiver, and nothing can start it
+#   omamobile-gnss status [--json]
+#   omamobile-gnss forget  erases gpsd's stored position and time: next start is cold
+set -u
+SOCKET=t715-gps-nmea.socket
+STACK=t715-gpsd.service
+ROOT=/var/lib/t715-gps/root
+
+as_root() {
+  if [[ $EUID -eq 0 ]]; then return; fi
+  systemctl start "omamobile-gnss-location@$1.service"
+  exit
+}
+
+installed() {
+  [[ -f $ROOT/system/etc/gps.xml || -e /dev/disk/by-partlabel/SYSTEM ]] && echo true || echo false
+}
+
+status() {
+  local location=off running=no
+  [[ $(systemctl is-enabled "$SOCKET" 2>/dev/null) == enabled ]] && location=on
+  systemctl -q is-active "$STACK" && running=yes
+  if [[ ${1:-} == --json ]]; then
+    printf '{"installed":%s,"location":"%s","running":"%s"}\n' "$(installed)" "$location" "$running"
+  else
+    echo "Location: $location"
+    echo "Receiver: $running"
+    echo "Power: $(/usr/lib/t715-gps/t715-gps-power status)"
+  fi
+}
+
+case ${1:-status} in
+  on)
+    as_root on
+    /usr/lib/t715-gps/t715-gps-prepare || exit 1
+    systemctl enable --now "$SOCKET"
+    ;;
+  off)
+    as_root off
+    systemctl disable --now "$SOCKET"
+    systemctl stop 't715-gps-nmea@*.service' "$STACK" 2>/dev/null || true
+    ;;
+  forget)
+    [[ $EUID -eq 0 ]] || { echo "omamobile-gnss forget: needs root" >&2; exit 1; }
+    systemctl stop 't715-gps-nmea@*.service' "$STACK" 2>/dev/null || true
+    find "$ROOT/data/system/gps" -mindepth 1 -delete
+    ;;
+  status) status "${2:-}" ;;
+  *) echo "usage: omamobile-gnss on|off|status [--json]|forget" >&2; exit 2 ;;
+esac

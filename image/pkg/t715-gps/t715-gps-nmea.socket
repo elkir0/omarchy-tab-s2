@@ -1,0 +1,17 @@
+# GeoClue connects here while an app wants a position.  Enabled by "omamobile-gnss on"; with
+# Location off the socket does not exist and nothing can start the receiver.
+[Unit]
+Description=Position from the GPS, for GeoClue
+
+[Socket]
+ListenStream=/run/t715-gps/nmea.sock
+Accept=yes
+MaxConnections=1
+SocketUser=root
+SocketGroup=geoclue
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

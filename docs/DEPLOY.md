@@ -943,6 +943,13 @@ through `image/rootfs/packages.mobile`. The first boot on a kernel with the
 modem makes the NV copy from EFS, read only (`shannon-nv-provision.service`);
 the NV never goes into the image, it holds the device's identity.
 
+### 11.9 With the GPS
+
+The GPS needs the kernel of `kernel/patches/t715-gps` in BOOT (UART0, `CONFIG_GPIO_SYSFS`) and
+`t715-gps` with `omamobile-shell` 1.15 or later, which a persistent root takes with `pacman -U`.
+Nothing else: the first `omamobile-gnss on`, from the Location tile, copies `gpsd` from SYSTEM. Check
+with `image/tests/ondevice/t715-gps.sh`, as root on the tablet, Wi-Fi or LTE connected.
+
 ## 12. Known limitations
 
 From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` reports.
@@ -1084,6 +1091,12 @@ From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` repor
   imports kill or leak GPU clients (`docs/journal/ONDEVICE-2026-10-28.md`,
   `docs/journal/ONDEVICE-2026-10-29.md`). Check that `omarchy-probe.sh image`
   reports the shim mapped.
+- **The tablet stops answering on USB after the cable went in and out.** The Mac keeps listing
+  `SM-T715 RNDIS` on a port with nothing on it (`ioreg -p IOUSB`), and more than one
+  `AppleUserECM` driver runs for one tablet. Seen on both of the Mac's ports. Changing port helped
+  once; restarting the Mac cleared it. Download mode still works, so it is not the connector.
+- **Behind a display's USB hub there is no IP link.** The tablet enumerates at high speed and
+  receives, but `usb0` sends nothing: TX 0, dropped 15. Why is not established. Use a port of the Mac.
 
 ## 14. Gaps: what no doc or script covers yet
 

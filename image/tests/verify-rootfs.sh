@@ -607,6 +607,28 @@ check "browsers: Chromium's daily update enabled" \
 get /home/alarm/.config/mimeapps.list; cp "$W/f" "$W/mimeapps"
 check "browsers: Chromium is alarm's default for http, https and text/html" \
     sh -c 'grep -q "^x-scheme-handler/http=chromium.desktop" "$1" && grep -q "^x-scheme-handler/https=chromium.desktop" "$1" && grep -q "^text/html=chromium.desktop" "$1"' _ "$W/mimeapps"
+gps_missing=""
+for f in /usr/bin/omamobile-gnss /usr/bin/t715-gps-capture /usr/lib/t715-gps/t715-gps-prepare /usr/lib/t715-gps/t715-gps-power \
+         /usr/lib/systemd/system/t715-gpsd.service /usr/lib/systemd/system/t715-gps-nmea.socket /usr/lib/systemd/system/t715-gps-nmea@.service \
+         /usr/lib/systemd/system/t715-gps-power.service /usr/share/polkit-1/rules.d/50-omamobile-gnss.rules; do
+    exists "$f" || gps_missing="$gps_missing $f"
+done
+check "GPS: the package's commands, units and polkit rule${gps_missing:+; missing:$gps_missing}" test -z "$gps_missing"
+check "GPS: no gpsd in the image, it comes from the tablet's own SYSTEM" absent /var/lib/t715-gps/root
+check "GPS: Location is off in the image (the socket is not enabled)" absent /etc/systemd/system/sockets.target.wants/t715-gps-nmea.socket
+get /usr/lib/systemd/system/t715-gpsd.service; cp "$W/f" "$W/gpsd.service"
+check "GPS: gpsd has no network, no capability and no root" \
+    sh -c 'grep -qx "PrivateNetwork=yes" "$1" && grep -qx "CapabilityBoundingSet=" "$1" && grep -qx "User=t715-gps" "$1"' _ "$W/gpsd.service"
+get /usr/lib/systemd/system/t715-gps-power.service; cp "$W/f" "$W/gps-power.service"
+check "GPS: the power line drops when gpsd goes" \
+    sh -c 'grep -qx "BindsTo=t715-gps-power.service" "$1" && grep -qx "StopWhenUnneeded=yes" "$2" &&
+           grep -qx "ExecStop=/usr/lib/t715-gps/t715-gps-power down" "$2"' _ "$W/gpsd.service" "$W/gps-power.service"
+get /etc/geoclue/conf.d/90-t715-gps.conf; cp "$W/f" "$W/geoclue-gps"
+get /usr/lib/systemd/system/geoclue.service.d/t715-gps.conf; cp "$W/f" "$W/geoclue-dropin"
+check "GPS: GeoClue itself has no network (its GeoIP lookup survives [wifi] enable=false)" grep -qx 'PrivateNetwork=yes' "$W/geoclue-dropin"
+check "GPS: GeoClue's only source is the receiver" \
+    sh -c 'grep -q "^nmea-socket=/run/t715-gps/nmea.sock" "$1" &&
+           [ "$(grep -c "^enable=false" "$1")" = 6 ] && [ "$(grep -c "^enable=true" "$1")" = 1 ]' _ "$W/geoclue-gps"
 check "telephony: no NV copy and no APN in the image" \
     sh -c '! debugfs -R "stat /var/lib/shannon/nv" /img/rootfs.img 2>/dev/null | grep -q "^Inode:" && ! debugfs -R "stat /etc/shannond.env" /img/rootfs.img 2>/dev/null | grep -q "^Inode:"'
 units=""

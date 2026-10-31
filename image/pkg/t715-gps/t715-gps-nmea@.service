@@ -1,0 +1,22 @@
+# One connection: gpsd's NMEA down the socket.  cat dies on the first write after the client
+# leaves, that is within a second, and gpsd stops with it (StopWhenUnneeded).
+[Unit]
+Description=NMEA to a GPS client
+BindsTo=t715-gpsd.service
+After=t715-gpsd.service
+CollectMode=inactive-or-failed
+
+[Service]
+User=t715-gps
+Group=t715-gps
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 100); do [ -p /var/lib/t715-gps/root/data/nmea.out ] && exit 0; sleep 0.1; done; exit 1'
+ExecStart=/usr/bin/cat /var/lib/t715-gps/root/data/nmea.out
+SuccessExitStatus=1
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

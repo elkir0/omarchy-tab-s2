@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.2, pre-release
+
+The GPS.
+
+- The BCM4752 works. The chip only measures: the position comes from Samsung's `gpsd`, which the
+  tablet copies from its own SYSTEM partition the first time Location goes on. No file of Samsung's
+  is in this repository or in the image.
+- `gpsd` runs with no network, no capability and its own user. GeoClue has no network either: its
+  GeoIP lookup survives `[wifi] enable=false`, so that alone would still ask a server.
+- A Location tile, off by default. The receiver runs only while an app asks, and goes off within a
+  second or two of the app leaving, a crash included.
+- Position in the drawer shows what GeoClue gives.
+- Kernel: UART0 and `CONFIG_GPIO_SYSFS` (`kernel/patches/t715-gps`).
+
+Tested on one tablet: a cold 3D fix in 39 to 76 s under a clear sky. No assistance server: every
+start is cold, and there is no position indoors. Behind a display's USB hub the SSH link does not
+work, use a port of the computer. The first boot of this ROM was tested from RECOVERY; the Android
+steps and the Heimdall flash were never run.
+
 ## 0.9.1, pre-release
 
 A ROM to flash.

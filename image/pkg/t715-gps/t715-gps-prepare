@@ -1,0 +1,91 @@
+#!/usr/bin/python3
+# The tree t715-gpsd.service runs in: gpsd, its linker and libraries, copied once from this
+# tablet's SYSTEM partition (read-only, journal not replayed), and a gps.xml made from Samsung's
+# with the network off.  Nothing from here is ever in the package or the image.
+import os, re, shutil, subprocess, sys, tempfile
+
+BASE = '/var/lib/t715-gps'
+ROOT = BASE + '/root'
+SYSTEM = '/dev/disk/by-partlabel/SYSTEM'
+FILES = '''bin/gpsd bin/linker lib/hw/gps.default.so lib/libEGL.so lib/libGLESv2.so
+lib/libSecurityManagerNative.so lib/libbacktrace.so lib/libbase.so lib/libbinder.so lib/libc++.so
+lib/libc.so lib/libcrypto.so lib/libcutils.so lib/libdl.so lib/libexpat.so lib/libfloatingfeature.so
+lib/libgui.so lib/libhardware.so lib/libhardware_legacy.so lib/libicui18n.so lib/libicuuc.so
+lib/libknox_remotedesktopclient.so lib/liblog.so lib/liblzma.so lib/libm.so lib/libnetutils.so
+lib/libpackagelistparser.so lib/libpcre.so lib/libpersona.so lib/libprotobuf-cpp-full.so
+lib/libremotedesktop_client.so lib/libril.so lib/librilutils.so lib/libsdp_crypto.so lib/libsec-ril.so
+lib/libsec_ode_pbkdf.so lib/libsecnativefeature.so lib/libsecril-client.so lib/libselinux.so
+lib/libsqlite.so lib/libssl.so lib/libstdc++.so lib/libsts_values.so lib/libsync.so lib/libui.so
+lib/libunwind.so lib/libutils.so lib/libwpa_client.so lib/libwrappergps.so lib/libxml2.so
+lib/libz.so'''.split()
+
+# Set on <hal>.  gpsd's own downloads, its SUPL client and its log service stay off.
+HAL = {'PortName': '/dev/ttySAC0', 'GpioNStdbyPath': '/run/gps_pwr', 'NmeaOutName': '/data/nmea.out',
+       'CtrlPipe': '/data/glgpsctrl', 'LogDirectory': '/data/log', 'LogEnabled': 'false',
+       'RILEnabled': 'false', 'SensorsEnable': 'false', 'SuplEnable': 'false', 'LbsEnable': 'false',
+       'LbsCellEnable': 'false', 'HttpSyncLto': 'false', 'HulaEnable': 'false'}
+
+
+def gps_xml(text):
+    hal = re.search(r'<hal\b.*?>', text, re.S)
+    body = re.sub(r'\s+LbsServer="[^"]*"', '', hal.group(0))
+    for key, value in HAL.items():
+        body = re.sub(r'\s+%s="[^"]*"' % key, '', body)
+    attrs = ''.join('\n       %s="%s"' % kv for kv in HAL.items())
+    body = body.replace('<hal', '<hal' + attrs, 1)
+    text = text[:hal.start()] + body + text[hal.end():]
+    job = '  <job id="Periodic">\n    <task>\n      <req_pos />\n    </task>\n  </job>\n\n'
+    return text.replace('</glgps>', job + '</glgps>')
+
+
+def main():
+    if os.path.exists(ROOT + '/system/etc/gps.xml'):
+        return 0
+    if not os.path.exists(SYSTEM):
+        print('t715-gps-prepare: no SYSTEM partition', file=sys.stderr)
+        return 1
+    os.makedirs(BASE, exist_ok=True)
+    fresh = tempfile.mkdtemp(prefix='root.', dir=BASE)
+    mnt = tempfile.mkdtemp(prefix='t715-gps-system.')
+    subprocess.check_call(['mount', '-t', 'ext4', '-o', 'ro,noload,nosuid,nodev,noexec', SYSTEM, mnt])
+    try:
+        for name in FILES:
+            dst = '%s/system/%s' % (fresh, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            # A few of the libraries sit under vendor/ on SYSTEM.
+            found = mnt + '/' + name
+            if not os.path.exists(found):
+                found = mnt + '/vendor/' + name
+            shutil.copy(found, dst)
+            os.chmod(dst, 0o755)
+        with open(mnt + '/etc/gps.xml') as f:
+            xml = gps_xml(f.read())
+    except OSError:
+        shutil.rmtree(fresh)
+        raise
+    finally:
+        subprocess.call(['umount', mnt])
+        os.rmdir(mnt)
+    os.makedirs(fresh + '/system/etc')
+    with open(fresh + '/system/etc/gps.xml', 'w') as f:
+        f.write(xml)
+    # gpsd only takes wake locks; here they are two empty files.
+    os.makedirs(fresh + '/wakelock')
+    for name in 'wake_lock', 'wake_unlock':
+        open('%s/wakelock/%s' % (fresh, name), 'w').close()
+        shutil.chown('%s/wakelock/%s' % (fresh, name), 't715-gps')
+    for name in 'dev', 'proc', 'run', 'sys':
+        os.makedirs(fresh + '/' + name)
+    # The position store is personal data: gps's alone.
+    os.makedirs(fresh + '/data/system/gps')
+    os.makedirs(fresh + '/data/log')
+    for path in '/data', '/data/system', '/data/system/gps', '/data/log':
+        shutil.chown(fresh + path, 't715-gps', 't715-gps')
+    os.chmod(fresh + '/data', 0o700)
+    os.chmod(fresh, 0o755)
+    os.rename(fresh, ROOT)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

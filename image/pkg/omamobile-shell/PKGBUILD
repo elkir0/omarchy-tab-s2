@@ -26,7 +26,7 @@
 #     the image build;
 #   - 0001-tablet-quick-settings-tiles.patch: no hotspot, torch, location,
 #     NFC, fingerprint or rotation-lock tiles (0005 puts mobile data back, 0006
-#     the rotation lock);
+#     the rotation lock, 0013 location);
 #   - 0002-wifi-wpa2-without-sae.patch: the BCM4358 firmware has no SAE
 #     (WPA3), so the Wi-Fi panel joins a WPA3/WPA2 SSID with a WPA2-PSK
 #     profile through nmcli instead of Quickshell's key-mgmt=sae one (needs
@@ -78,7 +78,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.32
-pkgrel=1.14
+pkgrel=1.15
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -107,6 +107,7 @@ source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit
         0010-upstream-app-names-in-recents.patch
         0011-tablet-set-pin.patch
         0012-tablet-back-gesture.patch
+        0013-tablet-location-tile.patch
         tablet-shell.json
         tablet-home.json)
 sha256sums=('3009362b931b4097b3222a9c048b80ba2832cf570cfbe99edf7a9a4282c2029d'
@@ -122,6 +123,7 @@ sha256sums=('3009362b931b4097b3222a9c048b80ba2832cf570cfbe99edf7a9a4282c2029d'
             '28acc7cc56e4aede4a748844deeb1350837790db0af39cb07ba7ec8dd08c103a'
             'fc5e6b8d2156aac2307433c8530dbac5700c59197b7e9592351ab05ab5431775'
             'dfa8c77c1331c85eec161a89c858a69f238d8b85d487c5df0e0ba29b3d52156b'
+            'dac6c2abe0f4eca32d494846265a40800954e9df4f64454bb6dc7aba980dca2b'
             '1bb18754cd60203f28f5ad947c7dd9eddf52d66d3ddd6ee2e206b795a8126166'
             '7643f6faa8ed82e31f01ecc3a0767684c68df009318c02d1ae1158f497ce1450')
 noextract=("$_tarball")
@@ -148,6 +150,7 @@ prepare() {
   patch -Np1 -i "$srcdir/0010-upstream-app-names-in-recents.patch"
   patch -Np1 -i "$srcdir/0011-tablet-set-pin.patch"
   patch -Np1 -i "$srcdir/0012-tablet-back-gesture.patch"
+  patch -Np1 -i "$srcdir/0013-tablet-location-tile.patch"
   cp "$srcdir/tablet-shell.json" profile/shell.json
   cp "$srcdir/tablet-home.json" profile/home.json
 }
@@ -214,7 +217,7 @@ PY
   grep -q 'running: root.callWatchEnabled' plugins/omamobile.bar/Bar.qml
   # The patched tile catalogue: none of the phone's tiles but mobile data (0005),
   # which goes through NetworkManager, not omamobile-sit, and Hotspot (0008).
-  if grep -nE '"(torch|location|nfc|fingerprint)"' \
+  if grep -nE '"(torch|nfc|fingerprint)"' \
       plugins/omamobile.quicksettings/TilesModel.js; then
     echo "TilesModel.js still lists a phone tile" >&2
     return 1
@@ -222,6 +225,8 @@ PY
   grep -q '"mobile-data"' plugins/omamobile.quicksettings/TilesModel.js
   grep -q '"rotation-lock"' plugins/omamobile.quicksettings/TilesModel.js
   grep -q '"hotspot"' plugins/omamobile.quicksettings/TilesModel.js
+  # The Location tile over t715-gps (0013).
+  grep -q '"location"' plugins/omamobile.quicksettings/TilesModel.js
   # The edge swipe goes through t715-keys (0012).
   grep -q 'signal=SIGHUP' plugins/omamobile.back/BackModel.js
   # Airplane mode reaches the modem (0008).

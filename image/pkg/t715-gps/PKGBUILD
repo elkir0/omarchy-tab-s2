@@ -1,0 +1,32 @@
+# SM-T715 (armv7h): position from the BCM4752 through GeoClue (docs/hardware/GPS.md). The chip
+# only measures: Samsung's gpsd computes the position, so this package runs it, and carries none
+# of it. t715-gps-prepare copies gpsd and its libraries from the tablet's own SYSTEM partition
+# the first time Location is used, and writes a gps.xml with every network feature off.
+# gpsd runs in that tree with no network; GeoClue connecting to the socket starts it, and
+# nothing but that socket does.
+pkgname=t715-gps
+pkgver=0.1.0
+pkgrel=5
+pkgdesc="GPS for the SM-T715: Samsung's gpsd, offline and on demand, as a GeoClue source"
+arch=(armv7h)
+license=('GPL-2.0-or-later')
+depends=(bash geoclue polkit python systemd util-linux)
+install=t715-gps.install
+source=(t715-gps-prepare t715-gps-power t715-gps-capture t715-position omamobile-gnss
+        t715-gpsd.service t715-gps-power.service t715-gps-nmea.socket
+        t715-gps-nmea@.service t715-gps-capture.service omamobile-gnss-location@.service
+        90-t715-gps.conf geoclue-t715-gps.conf 50-omamobile-gnss.rules
+        t715-position.desktop t715-gps.sysusers)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 -t "$pkgdir/usr/lib/t715-gps" t715-gps-prepare t715-gps-power
+  install -Dm755 -t "$pkgdir/usr/bin" t715-gps-capture t715-position omamobile-gnss
+  install -Dm644 -t "$pkgdir/usr/lib/systemd/system" t715-gpsd.service t715-gps-power.service \
+    t715-gps-nmea.socket t715-gps-nmea@.service t715-gps-capture.service omamobile-gnss-location@.service
+  install -Dm644 -t "$pkgdir/etc/geoclue/conf.d" 90-t715-gps.conf
+  install -Dm644 geoclue-t715-gps.conf "$pkgdir/usr/lib/systemd/system/geoclue.service.d/t715-gps.conf"
+  install -Dm644 -t "$pkgdir/usr/share/polkit-1/rules.d" 50-omamobile-gnss.rules
+  install -Dm644 t715-position.desktop "$pkgdir/usr/share/applications/t715-position.desktop"
+  install -Dm644 t715-gps.sysusers "$pkgdir/usr/lib/sysusers.d/t715-gps.conf"
+}

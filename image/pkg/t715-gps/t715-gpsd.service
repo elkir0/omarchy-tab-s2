@@ -1,0 +1,36 @@
+# Samsung's gpsd, in the tree t715-gps-prepare made, with no network and no way to reach one:
+# PrivateNetwork leaves it nothing but its own loopback (image/tests/ondevice/t715-gps.sh).
+# Started only by t715-gps-nmea@.service, and stopped when that goes.  The power line is its own
+# unit: systemd sets up BindPaths even for a "+" command, so the value file has to exist first.
+[Unit]
+Description=gpsd for the BCM4752, offline
+BindsTo=t715-gps-power.service
+After=t715-gps-power.service
+StopWhenUnneeded=yes
+
+[Service]
+User=t715-gps
+Group=t715-gps
+SupplementaryGroups=uucp
+ExecStart=/system/bin/gpsd -c /system/etc/gps.xml Periodic
+TimeoutStopSec=5
+Environment=LD_LIBRARY_PATH=/system/lib ANDROID_ROOT=/system ANDROID_DATA=/data PATH=/system/bin
+RootDirectory=/var/lib/t715-gps/root
+MountAPIVFS=yes
+ProcSubset=pid
+ProtectProc=invisible
+TemporaryFileSystem=/sys:ro
+BindPaths=/var/lib/t715-gps/root/wakelock:/sys/power
+PrivateDevices=yes
+BindPaths=/dev/ttySAC0
+DeviceAllow=/dev/ttySAC0 rw
+BindPaths=/run/t715-gps/gps_pwr:/run/gps_pwr
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectHostname=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes

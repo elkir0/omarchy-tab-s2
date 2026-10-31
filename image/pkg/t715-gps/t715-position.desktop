@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Position
+Name[fr]=Position
+Comment=Ask GeoClue for the position, from the satellites
+Comment[fr]=Demander la position à GeoClue, depuis les satellites
+Exec=t715-position
+Icon=find-location
+Categories=Utility;
+Terminal=true

@@ -1,0 +1,8 @@
+# The Location switch for the shell: runs "omamobile-gnss on|off" as root. Allowed for the active
+# local user by 50-omamobile-gnss.rules.
+[Unit]
+Description=Location %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omamobile-gnss %i

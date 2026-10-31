@@ -220,7 +220,8 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
   image); the polkit rule that asks a wheel member for their own password.
 - **Changed for the tablet**: `0001-tablet-quick-settings-tiles.patch`
   (`TilesModel.js`: no mobile data, hotspot, torch, location, NFC,
-  fingerprint or rotation-lock tile; the tablet's default layout),
+  fingerprint or rotation-lock tile; the tablet's default layout;
+  `0013-tablet-location-tile.patch` puts location back),
   `0002-wifi-wpa2-without-sae.patch` (1.2: WPA2-PSK profiles for SAE
   networks, the radio has no SAE), `0003-tablet-drawer-opens-light.patch`
   (1.3: no icon rescan or keyboard when the drawer opens),
@@ -309,3 +310,14 @@ the drawer entries Photo and Selfie: `docs/hardware/CAMERA.md`. It needs `t715-c
 the daily kernel and the sensor tables in `/usr/lib/firmware/t715/`, which are not packaged:
 they are Samsung's, and `research/parity/camera/t715-cam-seq.py` makes them from the owner's own
 firmware. In `image/rootfs/packages.mobile`.
+
+## t715-gps
+
+Location, through GeoClue: `docs/hardware/GPS.md`. The package holds no Samsung file:
+`t715-gps-prepare` copies `gpsd` and its libraries from the tablet's SYSTEM partition the first
+time Location goes on, into `/var/lib/t715-gps/root`. Units: `t715-gps-nmea.socket`, started by
+GeoClue connecting, `t715-gpsd.service`, with no network, no capability and its own user, and
+`t715-gps-power.service` for the power line. A drop-in gives `geoclue.service` no network either.
+`omamobile-gnss on|off|status|forget` is the switch, under the name the shell's tile calls;
+`t715-position` is the drawer's Position; `t715-gps-capture` records one trip outside. Needs
+`CONFIG_GPIO_SYSFS` (`kernel/patches/t715-gps`). In `image/rootfs/packages.mobile`.

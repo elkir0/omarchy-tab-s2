@@ -11,3 +11,4 @@ omamessages             # Messages app: SMS conversations (pkg/omamessages)
 t715-modem              # the SS333 stack: loader, shannond, ModemManager facade, NV provisioning, units (pkg/t715-modem)
 t715-chromium           # the default browser: launcher and update tool for Debian's Chromium, in its own root (Dockerfile, step 3b)
 t715-camera             # Photo and Selfie: one picture at a time from the two cameras, raw Bayer developed in software
+t715-gps                # Location: gpsd from SYSTEM, offline and on demand, as GeoClue's only source (pkg/t715-gps)

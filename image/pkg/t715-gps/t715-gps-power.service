@@ -1,0 +1,11 @@
+# GPS_PWR_EN as a file for gpsd.  Nothing else needs this unit, so it stops, and drops the line, as
+# soon as gpsd is gone, however it went.
+[Unit]
+Description=Power line of the BCM4752
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/t715-gps/t715-gps-power up
+ExecStop=/usr/lib/t715-gps/t715-gps-power down

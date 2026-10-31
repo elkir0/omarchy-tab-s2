@@ -1,0 +1,33 @@
+#!/bin/sh
+# GPS_PWR_EN (gpg2-0) as the value file gpsd expects: up exports it low and gives it to gps's
+# user, down drops it low and unexports it.  t715-gps-power.service runs down as soon as gpsd is
+# gone, a crash included, so the receiver never stays powered without it.
+set -e
+for chip in /sys/class/gpio/gpiochip*; do
+    [ "$(cat "$chip/label")" = gpg2 ] && base=$(cat "$chip/base")
+done
+[ -n "$base" ] || { echo "t715-gps-power: no gpg2" >&2; exit 1; }
+line=/sys/class/gpio/gpio$base
+case $1 in
+up)
+    [ -d "$line" ] || echo "$base" > /sys/class/gpio/export
+    echo low > "$line/direction"
+    chown t715-gps "$line/value"
+    mkdir -p /run/t715-gps
+    ln -sf "$line/value" /run/t715-gps/gps_pwr
+    ;;
+down)
+    if [ -d "$line" ]; then
+        echo 0 > "$line/value"
+        echo "$base" > /sys/class/gpio/unexport
+    fi
+    rm -f /run/t715-gps/gps_pwr
+    ;;
+status)
+    [ -d "$line" ] && cat "$line/value" || echo 0
+    ;;
+*)
+    echo "usage: t715-gps-power up|down|status" >&2
+    exit 2
+    ;;
+esac
