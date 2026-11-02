@@ -32,6 +32,9 @@
 #   KBUILD_SKIP_ARM64=1  skip the ARM64 non-regression phase
 # KBUILD_VOLUME and KBUILD_OUT_DIR also win over the --fragment defaults, so
 # two trees can build the same fragment at the same time.
+#   KBUILD_BUILD_TIMESTAMP, KBUILD_BUILD_VERSION, KBUILD_BUILD_USER and
+#   KBUILD_BUILD_HOST reach make when set: a kernel to publish carries a
+#   fixed build date, not the time it was built.
 #
 # Boot partition budget (from the stock device): 14 MiB total shared by
 # kernel + initramfs + DTB container.  The script fails if zImage
@@ -112,13 +115,17 @@ fi
 # --- arm32 build ------------------------------------------------------------
 # shellcheck disable=SC2016
 run_make() {
+    local v kv=()
+    for v in KBUILD_BUILD_TIMESTAMP KBUILD_BUILD_VERSION KBUILD_BUILD_USER KBUILD_BUILD_HOST; do
+        [[ -n "${!v:-}" ]] && kv+=("$v=${!v}")
+    done
     docker run --rm \
         --platform linux/arm64 \
         -v "$SOURCE_DIR:/src" \
         -v "$VOLUME:/build" \
         -w /src \
         "$IMAGE_TAG" \
-        make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- O=/build "$@"
+        make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- O=/build ${kv[@]+"${kv[@]}"} "$@"
 }
 
 arm32_build() {

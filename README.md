@@ -5,7 +5,7 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 0.9.2, pre-release.** It runs daily on one tablet. Nobody else has installed it yet.
+**Version 0.9.3, pre-release.** It runs daily on one tablet. Nobody else has installed it yet.
 
 An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
@@ -34,6 +34,7 @@ An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 | Sound | speaker and microphone through PipeWire; vibration motor |
 | Cameras | both, through V4L2 with no ISP: photos developed in software, no preview, no autofocus |
 | GPS | position from the satellites through GeoClue, offline, the receiver on only while an app asks; a cold fix in about a minute under a clear sky, none indoors; a Location tile, off by default |
+| Charging | stock Android's currents: about 1 A into the battery on a fast charger, 450 mA from a computer's port; stock's thermal rules on the battery thermistor |
 | Security | ufw on, only SSH and DHCP on the USB cable come in; a screen lock you turn on by choosing a password |
 | Browsers | Chromium on the GPU by default, Firefox beside it |
 
@@ -344,14 +345,14 @@ Everything we learned about this hardware is public, register addresses included
 
 ### Drivers
 
-All of them are in [kernel/patches/](kernel/patches/), 48 patches on `v6.12.114`:
+All of them are in [kernel/patches/](kernel/patches/), 53 patches on `v6.12.114`:
 
 | Part | Driver |
 |---|---|
 | Exynos 5433 in 32-bit mode | SoC support, clocks, watchdog |
 | Panel | `panel-samsung-s6e3ha2-tabs2` |
 | Audio | `gts28-wm1814` machine driver, WM8998 and baseband link changes |
-| Battery | `sm5703` fuel gauge, read-only |
+| Battery | `sm5703` fuel gauge, read-only, with the battery thermistor, and `sm5703` charger |
 | Modem | `exynos5433-mipi-lli`, and `modem_v1`, Samsung's 3.10 driver ported to 6.12 |
 | Touch keys, vibration | `tc300k`, `pwm-vibra` |
 | Cameras | `t715-camera`, raw capture with no ISP |

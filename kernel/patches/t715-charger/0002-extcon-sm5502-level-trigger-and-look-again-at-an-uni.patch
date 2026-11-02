@@ -1,0 +1,181 @@
+From 5810519899867d0db230612523a36daefb1c38a0 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/5] extcon: sm5502: level trigger, and look again at an
+ unidentified attach
+
+INTB stays low until the INT registers are read.  Edge triggered, an
+event latched while the handler runs makes no new falling edge, and every
+later event is lost with it: seen after a plug on the Galaxy Tab S2, INT1
+still holding ATTACH and the attach interrupt never fired.
+
+An attach whose cable the MUIC has not identified yet, DEV_TYPE1 still 0
+or the ADC at ground with no OTG type, was dropped without a word.  Read
+it again every 200 ms for 2 s, and log the outcome.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/extcon/extcon-sm5502.c | 76 +++++++++++++++++++++++++++++-----
+ 1 file changed, 66 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/extcon/extcon-sm5502.c b/drivers/extcon/extcon-sm5502.c
+index c8c4b9ef7..21a780ea1 100644
+--- a/drivers/extcon/extcon-sm5502.c
++++ b/drivers/extcon/extcon-sm5502.c
+@@ -6,6 +6,7 @@
+  * Author: Chanwoo Choi <cw00.choi@samsung.com>
+  */
+ 
++#include <linux/devm-helpers.h>
+ #include <linux/err.h>
+ #include <linux/i2c.h>
+ #include <linux/interrupt.h>
+@@ -20,6 +21,8 @@
+ #include "extcon-sm5502.h"
+ 
+ #define	DELAY_MS_DEFAULT		17000	/* unit: millisecond */
++#define	DELAY_MS_RETRY			200
++#define	RETRY_COUNT			10
+ 
+ struct muic_irq {
+ 	unsigned int irq;
+@@ -56,6 +59,10 @@ struct sm5502_muic_info {
+ 	 * driver should notify cable state to upper layer.
+ 	 */
+ 	struct delayed_work wq_detcable;
++
++	/* An attach the MUIC had not identified yet, looked at again */
++	struct delayed_work wq_retry;
++	unsigned int retries;
+ };
+ 
+ struct sm5502_type {
+@@ -389,7 +396,7 @@ static unsigned int sm5502_muic_get_cable_type(struct sm5502_muic_info *info)
+ 			dev_dbg(info->dev,
+ 				"cannot identify the cable type: adc(0x%x), dev_type1(0x%x)\n",
+ 				adc, dev_type1);
+-			return -EINVAL;
++			return -EAGAIN;
+ 		}
+ 		break;
+ 	case SM5502_MUIC_ADC_SEND_END_BUTTON:
+@@ -454,7 +461,7 @@ static unsigned int sm5502_muic_get_cable_type(struct sm5502_muic_info *info)
+ 			dev_dbg(info->dev,
+ 				"cannot identify the cable type: adc(0x%x)\n",
+ 				adc);
+-			return -EINVAL;
++			return -EAGAIN;
+ 		}
+ 		break;
+ 	default:
+@@ -474,13 +481,21 @@ static int sm5502_muic_cable_handler(struct sm5502_muic_info *info,
+ 	unsigned int con_sw = DM_DP_SWITCH_OPEN;
+ 	unsigned int vbus_sw = VBUSIN_SWITCH_OPEN;
+ 	unsigned int id;
+-	int ret;
++	int type, ret;
+ 
+-	/* Get the type of attached or detached cable */
+-	if (attached)
+-		cable_type = sm5502_muic_get_cable_type(info);
+-	else
++	/*
++	 * Get the type of attached or detached cable.  A plug can raise
++	 * ATTACH before the MUIC has identified the cable: the caller looks
++	 * again later, and prev_cable_type stays as it was.
++	 */
++	if (attached) {
++		type = sm5502_muic_get_cable_type(info);
++		if (type == -EAGAIN)
++			return -EAGAIN;
++		cable_type = type;
++	} else {
+ 		cable_type = prev_cable_type;
++	}
+ 	prev_cable_type = cable_type;
+ 
+ 	switch (cable_type) {
+@@ -535,8 +550,16 @@ static void sm5502_muic_irq_work(struct work_struct *work)
+ 	if (info->irq_attach) {
+ 		ret = sm5502_muic_cable_handler(info, true);
+ 		info->irq_attach = false;
++		if (ret == -EAGAIN) {
++			info->retries = 0;
++			mod_delayed_work(system_power_efficient_wq,
++					 &info->wq_retry,
++					 msecs_to_jiffies(DELAY_MS_RETRY));
++			ret = 0;
++		}
+ 	}
+ 	if (info->irq_detach) {
++		cancel_delayed_work(&info->wq_retry);
+ 		ret = sm5502_muic_cable_handler(info, false);
+ 		info->irq_detach = false;
+ 	}
+@@ -634,11 +657,35 @@ static void sm5502_muic_detect_cable_wq(struct work_struct *work)
+ 	int ret;
+ 
+ 	/* Notify the state of connector cable or not  */
++	mutex_lock(&info->mutex);
+ 	ret = sm5502_muic_cable_handler(info, true);
+-	if (ret < 0)
++	mutex_unlock(&info->mutex);
++	if (ret < 0 && ret != -EAGAIN)
+ 		dev_warn(info->dev, "failed to detect cable state\n");
+ }
+ 
++static void sm5502_muic_retry_wq(struct work_struct *work)
++{
++	struct sm5502_muic_info *info = container_of(to_delayed_work(work),
++				struct sm5502_muic_info, wq_retry);
++	unsigned int ms;
++	int ret;
++
++	mutex_lock(&info->mutex);
++	ret = sm5502_muic_cable_handler(info, true);
++	ms = ++info->retries * DELAY_MS_RETRY;
++	if (ret != -EAGAIN)
++		dev_info(info->dev, "cable identified %u ms after its attach\n",
++			 ms);
++	else if (info->retries < RETRY_COUNT)
++		queue_delayed_work(system_power_efficient_wq, &info->wq_retry,
++				   msecs_to_jiffies(DELAY_MS_RETRY));
++	else
++		dev_info(info->dev, "cable still unidentified %u ms after its attach\n",
++			 ms);
++	mutex_unlock(&info->mutex);
++}
++
+ static void sm5502_init_dev_type(struct sm5502_muic_info *info)
+ {
+ 	unsigned int reg_data, vendor_id, version_id;
+@@ -700,6 +747,10 @@ static int sm5022_muic_i2c_probe(struct i2c_client *i2c)
+ 	mutex_init(&info->mutex);
+ 
+ 	INIT_WORK(&info->irq_work, sm5502_muic_irq_work);
++	ret = devm_delayed_work_autocancel(info->dev, &info->wq_retry,
++					   sm5502_muic_retry_wq);
++	if (ret)
++		return ret;
+ 
+ 	info->regmap = devm_regmap_init_i2c(i2c, &sm5502_muic_regmap_config);
+ 	if (IS_ERR(info->regmap)) {
+@@ -709,8 +760,13 @@ static int sm5022_muic_i2c_probe(struct i2c_client *i2c)
+ 		return ret;
+ 	}
+ 
+-	/* Support irq domain for SM5502 MUIC device */
+-	irq_flags = IRQF_TRIGGER_FALLING | IRQF_ONESHOT | IRQF_SHARED;
++	/*
++	 * Support irq domain for SM5502 MUIC device.  INTB stays low until the
++	 * INT registers are read: an event latched while the handler runs
++	 * makes no new falling edge and, edge triggered, every later event
++	 * would be lost with it.
++	 */
++	irq_flags = IRQF_TRIGGER_LOW | IRQF_ONESHOT | IRQF_SHARED;
+ 	ret = devm_regmap_add_irq_chip(info->dev, info->regmap, info->irq,
+ 				       irq_flags, 0, info->type->irq_chip,
+ 				       &info->irq_data);
+-- 
+2.52.0
+

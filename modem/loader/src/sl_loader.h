@@ -82,10 +82,10 @@ struct sl_config {
 #define SL_BAT_MIN_PERCENT	5	/* before any CP power-on */
 #define SL_BAT_MAX_DECI_C	400	/* default: temperature must be < 40.0 degC */
 /*
- * Highest --max-temp. The gauge temperature is the SM5703's own sensor (the
- * inside of the tablet, not the battery thermistor); on the desktop root it
- * reads 44-48 degC with a cool case. Stock Android powers the CP on at any
- * temperature; the owner raised the gate to 55.0 on 2026-10-30, a guard
+ * Highest --max-temp. The gauge's temp is the battery thermistor since the
+ * t715-charger kernel (40-45 degC in use); the SM5703's own sensor, which read
+ * 66 degC under charge, moved to temp_ambient. Stock Android powers the CP on
+ * at any temperature; the owner raised the gate to 55.0 on 2026-10-30, a guard
  * against real overheating only.
  */
 #define SL_BAT_MAX_DECI_C_CAP	550

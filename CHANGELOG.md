@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.3, pre-release
+
+Charging.
+
+- The tablet charges at stock Android's rates. Before, the charger kept the input limit near
+  500 mA that the bootloader leaves, so a fast charger gave the battery about +300 mA, not enough
+  for the screen on. Now a fast charger gets 1750 mA in and 2100 mA of charge, about +1 A into
+  the battery with the screen off; a computer's port gets 450 mA.
+- Stock's thermal rules, on the battery's own thermistor: no charge above 55 °C or below -5 °C,
+  a gentler charge above 45 °C or below 10 °C. One change from stock: the warm step ends at
+  43 °C, not 40 °C. The battery idles at 41-42 °C under this kernel, and with stock's exit the
+  charge stayed at about 83 % for good.
+- The battery's temperature in UPower and in the modem's start gate is the thermistor's now, not
+  the gauge chip's, which runs 15-20 °C hotter on a charger.
+- USB, for a tablet that the computer stopped seeing: the cable detector's interrupt could freeze
+  after boot or lose an event for good, and after a boot with no cable USB stayed off until the
+  next boot.
+- Charging starts a fifth of a second after the plug, not up to 10 s later.
+- `device/mac-usb-reenum.c`: after an unplug of more than a minute, macOS can keep a dead USB
+  session and ignore the tablet plugged back in. This makes the Mac enumerate it again.
+- Kernel: `kernel/patches/t715-charger`, five patches. The kernel carries a fixed build date.
+
+Tested on one tablet: on a fast charger, 70 to 85 % in 49 min with the screen on, past the 83 %
+where it used to stop, the warm step entered at 45 °C and left at 43 °C; three replugs on a Mac,
+a boot with no cable, a fast charger plugged after boot. The fix for a boot with no cable is
+proven only by a fault injected on the device: the real boot with no cable did not hit the fault.
+The system image is the one of 0.9.2, only `boot.img` and `recovery.img` change. `boot.img` runs
+on the reference tablet, where a boot on the fast charger charged from 10 s in; `recovery.img`
+was not booted.
+
 ## 0.9.2, pre-release
 
 The GPS.

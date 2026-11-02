@@ -1,0 +1,1646 @@
+From d24304ac14c930e57fd08f101a4b1427016c7381 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 5/5] power: supply: add the SM5703 charger
+
+sboot leaves VBUSCNTL reading 1800 mA, but the real input limit stays
+near 500 mA until a host writes the register: the Galaxy Tab S2 charged
+at +270-380 mA on a fast charger.  The driver applies stock's limits, a
+TA 1750/2100 mA and a USB port 450/450 mA, a float of 4390 mV, and
+stock's thermal rules on the battery thermistor, with one difference:
+WARM ends at 43.0 C rather than 40.0, for with no cpuidle the battery
+idles at 41-42 C and stock's exit would cap the charge at 83 % for good.
+
+No interrupt: a 10 s poll, pulled forward by the MUIC's extcon events.
+The MUIC reports a cable 30-50 ms before VBUS reaches the charger, so
+while it reports one without VBUS the work looks every 200 ms.
+
+The decisions are pure C in sm5703_charger_policy.h, tested on the host
+by sm5703_charger_policy_test.c.  The gauge and the charger are built
+in: the thermal rules must not wait for the root filesystem.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-battery.dtsi        |  14 +
+ arch/arm/configs/gts28ltexx_defconfig         |   8 +-
+ drivers/power/supply/Kconfig                  |  16 +
+ drivers/power/supply/Makefile                 |   1 +
+ drivers/power/supply/sm5703_charger.c         | 806 ++++++++++++++++++
+ drivers/power/supply/sm5703_charger_policy.h  | 251 ++++++
+ .../power/supply/sm5703_charger_policy_test.c | 449 ++++++++++
+ 7 files changed, 1542 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/power/supply/sm5703_charger.c
+ create mode 100644 drivers/power/supply/sm5703_charger_policy.h
+ create mode 100644 drivers/power/supply/sm5703_charger_policy_test.c
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
+index eff8b1b00..0853410f2 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-battery.dtsi
+@@ -28,6 +28,20 @@ fuel-gauge@71 {
+ 	};
+ };
+ 
++/*
++ * The SM5703's charger block answers at 0x49 on hsi2c_8, live_fdt.dts:4371.
++ * Pins gpb0-1/gpb0-0 function 4, as stock.
++ */
++&hsi2c_8 {
++	status = "okay";
++
++	charger@49 {
++		compatible = "siliconmitus,sm5703-charger";
++		reg = <0x49>;
++		extcon = <&muic>;
++	};
++};
++
+ /* Channel 2 is the battery thermistor: stock "adc-temp", live_fdt.dts:5012. */
+ &adc {
+ 	status = "okay";
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 0ef16ae24..15155793a 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -246,10 +246,12 @@ CONFIG_IIO=y
+ CONFIG_EXYNOS_ADC=y
+ CONFIG_IIO_ST_LSM6DSX=m
+ CONFIG_YAMAHA_YAS530=m
+-# Battery fuel gauge (SM5703 on HSI2C7, read-only, docs/BATTERY.md):
+-# the power_supply class that UPower reads, and the driver as a module.
++# Battery (SM5703 on HSI2C7, read-only gauge, docs/BATTERY.md) and its
++# charger: the power_supply class that UPower reads.  Both are built in,
++# for the charger's thermal rules must not depend on the root filesystem.
+ CONFIG_POWER_SUPPLY=y
+-CONFIG_BATTERY_SM5703=m
++CONFIG_BATTERY_SM5703=y
++CONFIG_CHARGER_SM5703=y
+ 
+ # Milestone 5, Wi-Fi and Bluetooth (BCM4358, docs/WIFI_BT_M5.md).  Every
+ # driver that talks to the radios stays a MODULE, like panfrost: a
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index ab52e3123..05fe9c9dd 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -836,6 +836,22 @@ config BATTERY_SM5703
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called sm5703_fuel_gauge.
+ 
++config CHARGER_SM5703
++	tristate "Silicon Mitus SM5703 charger support"
++	depends on I2C
++	depends on EXTCON
++	select REGMAP_I2C
++	help
++	  Say Y here to enable support for the charger block of the
++	  Silicon Mitus SM5703, as found on the Samsung Galaxy Tab S2 8.0
++	  LTE.  The driver applies the stock Android charging currents and
++	  float voltages, and stops charging outside the battery's thermal
++	  limits, with the hysteresis of the stock driver.  The cable type
++	  comes from the MUIC's extcon device.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called sm5703_charger.
++
+ config CHARGER_RT9455
+ 	tristate "Richtek RT9455 battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 0feea92c0..177462df9 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_BATTERY_MAX1721X)	+= max1721x_battery.o
+ obj-$(CONFIG_BATTERY_RT5033)	+= rt5033_battery.o
+ obj-$(CONFIG_CHARGER_RT5033)	+= rt5033_charger.o
+ obj-$(CONFIG_BATTERY_SM5703)	+= sm5703_fuel_gauge.o
++obj-$(CONFIG_CHARGER_SM5703)	+= sm5703_charger.o
+ obj-$(CONFIG_CHARGER_RT9455)	+= rt9455_charger.o
+ obj-$(CONFIG_CHARGER_RT9467)	+= rt9467-charger.o
+ obj-$(CONFIG_CHARGER_RT9471)	+= rt9471.o
+diff --git a/drivers/power/supply/sm5703_charger.c b/drivers/power/supply/sm5703_charger.c
+new file mode 100644
+index 000000000..6de472dc2
+--- /dev/null
++++ b/drivers/power/supply/sm5703_charger.c
+@@ -0,0 +1,806 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Driver for the charger block of the Silicon Mitus SM5703, as found on
++ * the Samsung Galaxy Tab S2 8.0 LTE (SM-T715, board "gts28ltexx").
++ *
++ * Written from the stock Android driver:
++ *   02_sources/kernel_universal5433/drivers/battery/sm5703_charger.c
++ * which drives the same registers from the board's big battery driver.
++ * Only the charging decisions of the stock values are kept, in
++ * sm5703_charger_policy.h; the flash LED, the LDOs, the reset line, OTG
++ * and the Q3 limit belong to other functions of the chip and are left
++ * untouched.
++ *
++ * The charger is its own I2C device (address 0x49), separate from the
++ * fuel gauge (0x71).  INT1-4 (0x00-0x03) are read-to-clear and INTMSK1-4
++ * (0x04-0x07) must never be written: neither is readable nor writeable
++ * in the regmap below, and no IRQ is used, the driver polls.  The cable
++ * type comes from the MUIC's extcon, which makes up its mind about 17 s
++ * after its own probe.
++ *
++ * Measured on the device: after VBUS appears, VBUSCNTL reads a large
++ * value but the real input limit stays near 500 mA until a host writes
++ * VBUSCNTL, and writing it releases the limit.  Whether writing the
++ * value it already holds is enough is unknown, so on each VBUS arrival
++ * and each cable type change the input limit is forced with
++ * regmap_write_bits (which, unlike regmap_update_bits, does not skip a
++ * write that changes nothing): first the 450 mA code, then the target.
++ *
++ * The stock register values while charging are 0x10=0x1b, 0x11=0xa0,
++ * 0x12=0xd8, 0x13=0x08.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/extcon.h>
++#include <linux/i2c.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#include "sm5703_charger_policy.h"
++
++#define SM5703_CHG_REG_STATUS1		0x08
++#define SM5703_CHG_REG_STATUS2		0x09
++#define SM5703_CHG_REG_STATUS3		0x0A
++#define SM5703_CHG_REG_CNTL		0x0C
++#define SM5703_CHG_REG_VBUSCNTL		0x0D
++#define SM5703_CHG_REG_CHGCNTL1		0x0E	/* do not touch */
++#define SM5703_CHG_REG_CHGCNTL2		0x0F
++#define SM5703_CHG_REG_CHGCNTL3		0x10
++#define SM5703_CHG_REG_CHGCNTL4		0x11
++#define SM5703_CHG_REG_CHGCNTL5		0x12
++#define SM5703_CHG_REG_CHGCNTL6		0x13
++#define SM5703_CHG_REG_DEVICE_ID	0x1E
++#define SM5703_CHG_REG_STATUS5		0x6B
++
++/* STATUS2: THEMREG (0), THEMSHDN (1), VSYSOK (3), NOBAT (4) */
++#define SM5703_CHG_STATUS2_THEMREG	BIT(0)
++#define SM5703_CHG_STATUS2_THEMSHDN	BIT(1)
++#define SM5703_CHG_STATUS2_VSYSOK	BIT(3)
++#define SM5703_CHG_STATUS2_NOBAT	BIT(4)
++
++/* STATUS3: CHGON (0), Q4FULLON (1), TOPOFF (2), DONE (3) */
++#define SM5703_CHG_STATUS3_CHGON	BIT(0)
++#define SM5703_CHG_STATUS3_Q4FULLON	BIT(1)
++#define SM5703_CHG_STATUS3_TOPOFF	BIT(2)
++#define SM5703_CHG_STATUS3_DONE	BIT(3)
++
++/* STATUS5: VBUSOK (5), VBUSUVLO (6), VBUSOVP (7) */
++#define SM5703_CHG_STATUS5_VBUSOK	BIT(5)
++#define SM5703_CHG_STATUS5_VBUSUVLO	BIT(6)
++#define SM5703_CHG_STATUS5_VBUSOVP	BIT(7)
++
++/* CNTL: mode 4 charging off, 5 charging on, 6 flash boost, 7 USB OTG */
++#define SM5703_CHG_CNTL_MODE		GENMASK(2, 0)
++#define SM5703_CHG_CNTL_MODE_CHARGING_OFF	4
++#define SM5703_CHG_CNTL_MODE_CHARGING_ON	5
++#define SM5703_CHG_CNTL_MODE_FLASH_BOOST	6
++#define SM5703_CHG_CNTL_MODE_USB_OTG		7
++#define SM5703_CHG_CNTL_AUTOSET		BIT(4)
++
++/* VBUSCNTL: input current limit, mA = 100 + n * 50 */
++#define SM5703_CHG_VBUSCNTL_ILIMIT	GENMASK(5, 0)
++
++/* CHGCNTL2: fast charge current, mA = 100 + n * 50 */
++#define SM5703_CHG_CHGCNTL2_IFAST	GENMASK(5, 0)
++
++/* CHGCNTL3: float voltage, mV = 4120 + n * 10 */
++#define SM5703_CHG_CHGCNTL3_VFLOAT	GENMASK(4, 0)
++
++/* CHGCNTL4: AUTOSTOP (7), topoff current (6:3), mA = 100 + n * 25 */
++#define SM5703_CHG_CHGCNTL4_AUTOSTOP	BIT(7)
++#define SM5703_CHG_CHGCNTL4_TOPOFF	GENMASK(6, 3)
++
++/* CHGCNTL5: AICLEN (7), topoff timer (6:5), AICL threshold (2:0) */
++#define SM5703_CHG_CHGCNTL5_AICLEN	BIT(7)
++#define SM5703_CHG_CHGCNTL5_TOPOFF_TIME	GENMASK(6, 5)
++#define SM5703_CHG_CHGCNTL5_AICL_TH	GENMASK(2, 0)	/* mV = 4300 + n * 100 */
++
++/* CHGCNTL6: FREQSEL (3:2), 0 3 MHz, 1 2.4 MHz, 2 1.5 MHz, 3 1.8 MHz */
++#define SM5703_CHG_CHGCNTL6_FREQSEL	GENMASK(3, 2)
++
++#define SM5703_CHG_DEVICE_ID		0x01
++
++/*
++ * The stock values written once at probe: float 4200 mV (0x10 bits 4:0,
++ * the rest of the register is written later by the work), topoff 200 mA
++ * with AUTOSTOP (0x11 = 0xa0), AICL enabled with the longest topoff
++ * timer (0x12 = 0xc0; the stock 0xd8 also sets bits 4:3, which the
++ * register description does not name and this driver leaves alone) and
++ * the 1.5 MHz switching frequency (0x13 = 0x08).
++ */
++#define SM5703_CHG_TOPOFF_STEP		4	/* 100 + 4 * 25 mA */
++#define SM5703_CHG_TOPOFF_TIME_STEP	2
++#define SM5703_CHG_FREQSEL_STEP		2	/* 1.5 MHz */
++
++/* What shutdown and remove leave behind, safe for any later stage */
++#define SM5703_CHG_FLOAT_SAFE_MV	4200
++#define SM5703_CHG_CURRENT_SAFE_MA	450
++
++#define SM5703_CHG_POLL_INTERVAL	msecs_to_jiffies(10000)
++
++/*
++ * Measured: the MUIC reports a cable about 50 ms before it routes VBUS to
++ * the charger.  While it reports one and VBUS is not there yet, the work
++ * looks again this often, this many times, rather than in 10 s.
++ */
++#define SM5703_CHG_SETTLE_INTERVAL	msecs_to_jiffies(200)
++#define SM5703_CHG_SETTLE_TRIES		10
++
++/* The fuel gauge's power supply name, the source of the temperature */
++#define SM5703_CHG_FG_PSY_NAME		"sm5703-fuelgauge"
++
++struct sm5703_chg {
++	struct device *dev;
++	struct regmap *regmap;
++	struct extcon_dev *edev;
++	struct power_supply *psy;
++	struct delayed_work work;
++	struct mutex lock;		/* protects everything below */
++	struct notifier_block sdp_nb;
++	struct notifier_block dcp_nb;
++
++	enum sm5703_chg_cable cable;
++	enum sm5703_chg_zone zone;
++	bool have_zone;
++	bool had_vbus;
++	bool recharge_logged;
++	unsigned int settle_tries;
++
++	/* Cached by the work, read by get_property() with no I2C */
++	int online;
++	int status;
++	int health;
++	struct sm5703_chg_limits lim;
++};
++
++static const char *sm5703_chg_cable_name(enum sm5703_chg_cable cable)
++{
++	switch (cable) {
++	case SM5703_CABLE_NONE:
++		return "none";
++	case SM5703_CABLE_USB:
++		return "USB";
++	case SM5703_CABLE_TA:
++		return "TA";
++	}
++
++	return "unknown";
++}
++
++static const char *sm5703_chg_zone_name(enum sm5703_chg_zone zone)
++{
++	switch (zone) {
++	case SM5703_ZONE_COLD_STOP:
++		return "cold-stop";
++	case SM5703_ZONE_COOL:
++		return "cool";
++	case SM5703_ZONE_NORMAL:
++		return "normal";
++	case SM5703_ZONE_WARM:
++		return "warm";
++	case SM5703_ZONE_HOT_STOP:
++		return "hot-stop";
++	}
++
++	return "unknown";
++}
++
++/*
++ * The register writes, in one place.  They all log and ignore a failure:
++ * the work runs again in 10 s and rewrites everything it depends on.
++ */
++static void sm5703_chg_write_float(struct sm5703_chg *chg, int mv)
++{
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL3,
++				 SM5703_CHG_CHGCNTL3_VFLOAT,
++				 sm5703_reg_float(mv));
++	if (ret)
++		dev_warn_ratelimited(chg->dev,
++				     "failed to write the float voltage: %d\n",
++				     ret);
++}
++
++static void sm5703_chg_write_charge(struct sm5703_chg *chg, int ma)
++{
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL2,
++				 SM5703_CHG_CHGCNTL2_IFAST,
++				 sm5703_reg_fast(ma));
++	if (ret)
++		dev_warn_ratelimited(chg->dev,
++				     "failed to write the charge current: %d\n",
++				     ret);
++}
++
++static void sm5703_chg_write_input(struct sm5703_chg *chg, int ma)
++{
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_VBUSCNTL,
++				 SM5703_CHG_VBUSCNTL_ILIMIT,
++				 sm5703_reg_input(ma));
++	if (ret)
++		dev_warn_ratelimited(chg->dev,
++				     "failed to write the input limit: %d\n",
++				     ret);
++}
++
++/*
++ * Release the input limit: two writes, the 450 mA code then the target,
++ * because after VBUS appears only a write to VBUSCNTL lifts the ~500 mA
++ * limit the chip holds, whatever the register reads.
++ */
++static void sm5703_chg_force_input(struct sm5703_chg *chg, int ma)
++{
++	int ret;
++
++	ret = regmap_write_bits(chg->regmap, SM5703_CHG_REG_VBUSCNTL,
++				SM5703_CHG_VBUSCNTL_ILIMIT,
++				sm5703_reg_input(SM5703_CHG_CURRENT_SAFE_MA));
++	if (!ret)
++		ret = regmap_write_bits(chg->regmap, SM5703_CHG_REG_VBUSCNTL,
++					SM5703_CHG_VBUSCNTL_ILIMIT,
++					sm5703_reg_input(ma));
++	if (ret)
++		dev_warn_ratelimited(chg->dev,
++				     "failed to write the input limit: %d\n",
++				     ret);
++}
++
++static void sm5703_chg_write_mode(struct sm5703_chg *chg, unsigned int mode)
++{
++	int ret;
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CNTL,
++				 SM5703_CHG_CNTL_MODE, mode);
++	if (ret)
++		dev_warn_ratelimited(chg->dev,
++				     "failed to write the charger mode: %d\n",
++				     ret);
++}
++
++/*
++ * The battery temperature and voltage from the fuel gauge, which reports
++ * the battery thermistor as its temperature.  The temperature is invalid
++ * when the gauge is missing or reports no TEMP; the voltage is taken on
++ * its own.
++ */
++static void sm5703_chg_read_fg(bool *temp_valid, int *temp,
++			       bool *volt_valid, int *uv)
++{
++	struct power_supply *psy;
++	union power_supply_propval val;
++
++	*temp_valid = false;
++	*volt_valid = false;
++
++	psy = power_supply_get_by_name(SM5703_CHG_FG_PSY_NAME);
++	if (!psy)
++		return;
++
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_TEMP, &val)) {
++		*temp = val.intval;
++		*temp_valid = true;
++	}
++
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW,
++				       &val)) {
++		*uv = val.intval;
++		*volt_valid = true;
++	}
++
++	power_supply_put(psy);
++}
++
++/*
++ * The delayed work, every 10 s and on every extcon event: read the chip,
++ * work out the cable and the thermal zone, apply the limits and report.
++ */
++static void sm5703_chg_work(struct work_struct *work)
++{
++	struct sm5703_chg *chg = container_of(work, struct sm5703_chg,
++					      work.work);
++	struct sm5703_chg_limits lim;
++	enum sm5703_chg_cable cable;
++	enum sm5703_chg_zone zone;
++	bool vbus, temp_valid, volt_valid;
++	bool cable_changed, zone_changed;
++	bool online_changed, status_changed, health_changed;
++	bool mode_is_5 = false;
++	bool recharge, reported;
++	bool notify = false;
++	unsigned long delay = SM5703_CHG_POLL_INTERVAL;
++	int temp = 0, uv = 0;
++	int online, status, health;
++	unsigned int status2, status3, status5;
++	int ret;
++
++	mutex_lock(&chg->lock);
++
++	/* 1. The status registers, or nothing can be decided */
++	ret = regmap_read(chg->regmap, SM5703_CHG_REG_STATUS2, &status2);
++	if (!ret)
++		ret = regmap_read(chg->regmap, SM5703_CHG_REG_STATUS3, &status3);
++	if (!ret)
++		ret = regmap_read(chg->regmap, SM5703_CHG_REG_STATUS5, &status5);
++	if (ret) {
++		dev_warn_ratelimited(chg->dev,
++				     "failed to read the status registers: %d\n",
++				     ret);
++		chg->health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		goto out;
++	}
++
++	/*
++	 * 2. The cable.  A type the driver does not know is USB on
++	 * purpose: only a TA may draw the full input limit
++	 */
++	vbus = status5 & SM5703_CHG_STATUS5_VBUSOK;
++	if (!vbus)
++		cable = SM5703_CABLE_NONE;
++	else if (extcon_get_state(chg->edev, EXTCON_CHG_USB_DCP) > 0)
++		cable = SM5703_CABLE_TA;
++	else
++		cable = SM5703_CABLE_USB;
++
++	reported = extcon_get_state(chg->edev, EXTCON_CHG_USB_SDP) > 0 ||
++		   extcon_get_state(chg->edev, EXTCON_CHG_USB_DCP) > 0;
++	if (vbus || !reported) {
++		chg->settle_tries = 0;
++	} else if (chg->settle_tries < SM5703_CHG_SETTLE_TRIES) {
++		chg->settle_tries++;
++		delay = SM5703_CHG_SETTLE_INTERVAL;
++	}
++
++	/* 3. The temperature and the zone, kept when it cannot be read */
++	zone = chg->zone;
++	sm5703_chg_read_fg(&temp_valid, &temp, &volt_valid, &uv);
++	if (temp_valid) {
++		if (chg->have_zone)
++			zone = sm5703_chg_next_zone(zone, temp);
++		else
++			zone = sm5703_chg_first_zone(temp);
++		chg->have_zone = true;
++	}
++
++	/* 4. The limits; without a temperature, never charge */
++	sm5703_chg_get_limits(cable, zone, &lim);
++	if (!temp_valid) {
++		lim.enable = false;
++		dev_warn_ratelimited(chg->dev,
++				     "no battery temperature, charging off\n");
++	}
++
++	/*
++	 * 5. The float voltage, then the charge current, then the input
++	 * limit.  On VBUS arrival or a cable change the input limit is
++	 * forced with two writes, to release the chip's own limit
++	 */
++	sm5703_chg_write_float(chg, lim.float_mv);
++	sm5703_chg_write_charge(chg, lim.charge_ma);
++	if (vbus && (!chg->had_vbus || cable != chg->cable))
++		sm5703_chg_force_input(chg, lim.input_ma);
++	else
++		sm5703_chg_write_input(chg, lim.input_ma);
++
++	/*
++	 * 6. Charging on or off, but only between the two charging modes:
++	 * modes 6 (flash boost) and 7 (USB OTG) belong to someone else
++	 */
++	if (vbus) {
++		unsigned int cntl, mode, want;
++
++		ret = regmap_read(chg->regmap, SM5703_CHG_REG_CNTL, &cntl);
++		if (!ret) {
++			mode = cntl & SM5703_CHG_CNTL_MODE;
++			if (mode == SM5703_CHG_CNTL_MODE_CHARGING_OFF ||
++			    mode == SM5703_CHG_CNTL_MODE_CHARGING_ON) {
++				want = lim.enable ?
++					SM5703_CHG_CNTL_MODE_CHARGING_ON :
++					SM5703_CHG_CNTL_MODE_CHARGING_OFF;
++				if (mode != want)
++					sm5703_chg_write_mode(chg, want);
++				mode_is_5 = want == SM5703_CHG_CNTL_MODE_CHARGING_ON;
++			}
++		}
++	}
++
++	/*
++	 * 7. Recharge: the charger reports DONE, charging is on and the
++	 * battery has fallen below the recharge threshold.  Toggling the
++	 * mode restarts charging
++	 */
++	recharge = vbus && lim.enable && (status3 & SM5703_CHG_STATUS3_DONE) &&
++		   mode_is_5 && volt_valid &&
++		   uv < lim.recharge_mv * 1000;
++	if (recharge) {
++		sm5703_chg_write_mode(chg, SM5703_CHG_CNTL_MODE_CHARGING_OFF);
++		msleep(100);
++		sm5703_chg_write_mode(chg, SM5703_CHG_CNTL_MODE_CHARGING_ON);
++		if (!chg->recharge_logged) {
++			dev_info(chg->dev,
++				 "battery fell to %d mV after a full charge, restarting charging\n",
++				 uv / 1000);
++			chg->recharge_logged = true;
++		}
++	} else {
++		chg->recharge_logged = false;
++	}
++
++	/* 8. What get_property() reports until the next run */
++	online = vbus;
++	if (!vbus)
++		status = POWER_SUPPLY_STATUS_DISCHARGING;
++	else if (!lim.enable)
++		status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++	else if (status3 & SM5703_CHG_STATUS3_DONE)
++		status = POWER_SUPPLY_STATUS_FULL;
++	else if (status3 & SM5703_CHG_STATUS3_CHGON)
++		status = POWER_SUPPLY_STATUS_CHARGING;
++	else
++		status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++
++	if (zone == SM5703_ZONE_HOT_STOP)
++		health = POWER_SUPPLY_HEALTH_OVERHEAT;
++	else if (zone == SM5703_ZONE_COLD_STOP)
++		health = POWER_SUPPLY_HEALTH_COLD;
++	else if (status5 & SM5703_CHG_STATUS5_VBUSOVP)
++		health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++	else if (!temp_valid)
++		health = POWER_SUPPLY_HEALTH_UNKNOWN;
++	else if (status2 & (SM5703_CHG_STATUS2_THEMSHDN |
++			    SM5703_CHG_STATUS2_THEMREG))
++		health = POWER_SUPPLY_HEALTH_OVERHEAT;
++	else
++		health = POWER_SUPPLY_HEALTH_GOOD;
++
++	/* 9. Cache, log a change of cable or zone, and notify */
++	cable_changed = cable != chg->cable;
++	zone_changed = zone != chg->zone;
++	online_changed = online != chg->online;
++	status_changed = status != chg->status;
++	health_changed = health != chg->health;
++
++	chg->cable = cable;
++	chg->zone = zone;
++	chg->had_vbus = vbus;
++	chg->online = online;
++	chg->status = status;
++	chg->health = health;
++	chg->lim = lim;
++
++	if (cable_changed || zone_changed)
++		dev_info(chg->dev,
++			 "cable %s, zone %s: input %d mA, charge %d mA, float %d mV, recharge %d mV, charging %s\n",
++			 sm5703_chg_cable_name(cable),
++			 sm5703_chg_zone_name(zone), lim.input_ma,
++			 lim.charge_ma, lim.float_mv, lim.recharge_mv,
++			 lim.enable ? "on" : "off");
++
++	notify = online_changed || status_changed || health_changed;
++
++out:
++	mutex_unlock(&chg->lock);
++
++	if (notify)
++		power_supply_changed(chg->psy);
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &chg->work, delay);
++}
++
++/*
++ * Reads only what the work has cached: no I2C here, so userspace polling
++ * cannot delay on the bus.
++ */
++static int sm5703_chg_get_property(struct power_supply *psy,
++				   enum power_supply_property psp,
++				   union power_supply_propval *val)
++{
++	struct sm5703_chg *chg = power_supply_get_drvdata(psy);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = READ_ONCE(chg->online);
++		return 0;
++	case POWER_SUPPLY_PROP_STATUS:
++		val->intval = READ_ONCE(chg->status);
++		return 0;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = READ_ONCE(chg->health);
++		return 0;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		val->intval = READ_ONCE(chg->lim.input_ma) * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		val->intval = READ_ONCE(chg->lim.charge_ma) * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		val->intval = READ_ONCE(chg->lim.float_mv) * 1000;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static enum power_supply_property sm5703_chg_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++};
++
++static const struct power_supply_desc sm5703_chg_desc = {
++	.name		= "sm5703-charger",
++	.type		= POWER_SUPPLY_TYPE_MAINS,
++	.get_property	= sm5703_chg_get_property,
++	.properties	= sm5703_chg_props,
++	.num_properties	= ARRAY_SIZE(sm5703_chg_props),
++};
++
++/* A cable event only pulls the work forward, at most once per event */
++static int sm5703_chg_sdp_notifier(struct notifier_block *nb,
++				   unsigned long action, void *data)
++{
++	struct sm5703_chg *chg = container_of(nb, struct sm5703_chg, sdp_nb);
++
++	mod_delayed_work(system_freezable_power_efficient_wq, &chg->work, 0);
++
++	return NOTIFY_DONE;
++}
++
++static int sm5703_chg_dcp_notifier(struct notifier_block *nb,
++				   unsigned long action, void *data)
++{
++	struct sm5703_chg *chg = container_of(nb, struct sm5703_chg, dcp_nb);
++
++	mod_delayed_work(system_freezable_power_efficient_wq, &chg->work, 0);
++
++	return NOTIFY_DONE;
++}
++
++static bool sm5703_chg_readable_reg(struct device *dev, unsigned int reg)
++{
++	/*
++	 * Only what the driver uses.  INT1-4 (0x00-0x03) in particular are
++	 * left out: they are read-to-clear, and a regmap debugfs dump must
++	 * not swallow an interrupt behind the chip's other drivers.
++	 */
++	return (reg >= SM5703_CHG_REG_STATUS1 && reg <= SM5703_CHG_REG_STATUS3) ||
++	       (reg >= SM5703_CHG_REG_CNTL && reg <= SM5703_CHG_REG_CHGCNTL6) ||
++	       reg == SM5703_CHG_REG_DEVICE_ID ||
++	       reg == SM5703_CHG_REG_STATUS5;
++}
++
++static bool sm5703_chg_writeable_reg(struct device *dev, unsigned int reg)
++{
++	switch (reg) {
++	case SM5703_CHG_REG_CNTL:
++	case SM5703_CHG_REG_VBUSCNTL:
++	case SM5703_CHG_REG_CHGCNTL2:
++	case SM5703_CHG_REG_CHGCNTL3:
++	case SM5703_CHG_REG_CHGCNTL4:
++	case SM5703_CHG_REG_CHGCNTL5:
++	case SM5703_CHG_REG_CHGCNTL6:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static const struct regmap_config sm5703_chg_regmap_config = {
++	.reg_bits		= 8,
++	.val_bits		= 8,
++	.max_register		= SM5703_CHG_REG_STATUS5,
++	.readable_reg		= sm5703_chg_readable_reg,
++	.writeable_reg		= sm5703_chg_writeable_reg,
++	.cache_type		= REGCACHE_NONE,
++};
++
++/*
++ * What shutdown and remove leave in the chip: float 4200 mV, 450 mA
++ * charge and input, charging on.  A later stage without this driver must
++ * never inherit 4390 mV or a stopped charger.
++ */
++static void sm5703_chg_set_safe_state(struct sm5703_chg *chg)
++{
++	unsigned int cntl;
++
++	sm5703_chg_write_float(chg, SM5703_CHG_FLOAT_SAFE_MV);
++	sm5703_chg_write_charge(chg, SM5703_CHG_CURRENT_SAFE_MA);
++	sm5703_chg_write_input(chg, SM5703_CHG_CURRENT_SAFE_MA);
++
++	if (!regmap_read(chg->regmap, SM5703_CHG_REG_CNTL, &cntl) &&
++	    (cntl & SM5703_CHG_CNTL_MODE) == SM5703_CHG_CNTL_MODE_CHARGING_OFF)
++		sm5703_chg_write_mode(chg, SM5703_CHG_CNTL_MODE_CHARGING_ON);
++}
++
++static int sm5703_chg_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = {};
++	unsigned int init_regs[] = { SM5703_CHG_REG_CNTL,
++				     SM5703_CHG_REG_VBUSCNTL,
++				     SM5703_CHG_REG_CHGCNTL2,
++				     SM5703_CHG_REG_CHGCNTL3,
++				     SM5703_CHG_REG_CHGCNTL4,
++				     SM5703_CHG_REG_CHGCNTL5,
++				     SM5703_CHG_REG_CHGCNTL6 };
++	unsigned int init_vals[ARRAY_SIZE(init_regs)];
++	unsigned int id;
++	struct sm5703_chg *chg;
++	size_t i;
++	int ret;
++
++	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++
++	chg->dev = dev;
++	mutex_init(&chg->lock);
++
++	i2c_set_clientdata(client, chg);
++
++	chg->regmap = devm_regmap_init_i2c(client, &sm5703_chg_regmap_config);
++	if (IS_ERR(chg->regmap))
++		return dev_err_probe(dev, PTR_ERR(chg->regmap),
++				     "failed to initialise regmap\n");
++
++	ret = regmap_read(chg->regmap, SM5703_CHG_REG_DEVICE_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read device ID\n");
++	if (id != SM5703_CHG_DEVICE_ID)
++		return dev_err_probe(dev, -ENODEV,
++				     "unexpected device ID 0x%02x\n", id);
++
++	chg->edev = extcon_get_edev_by_phandle(dev, 0);
++	if (IS_ERR(chg->edev))
++		return dev_err_probe(dev, PTR_ERR(chg->edev),
++				     "failed to get the extcon device\n");
++
++	/* What the bootloader or the previous kernel left */
++	for (i = 0; i < ARRAY_SIZE(init_regs); i++) {
++		ret = regmap_read(chg->regmap, init_regs[i], &init_vals[i]);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to read 0x%02x\n",
++					     init_regs[i]);
++	}
++
++	dev_info(dev, "found CNTL 0x%02x, VBUSCNTL 0x%02x, CHGCNTL2-6 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
++		 init_vals[0], init_vals[1], init_vals[2], init_vals[3],
++		 init_vals[4], init_vals[5], init_vals[6]);
++
++	/* The stock values, before anything else can change the limits */
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL3,
++				 SM5703_CHG_CHGCNTL3_VFLOAT,
++				 sm5703_reg_float(SM5703_CHG_FLOAT_SAFE_MV));
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to write CHGCNTL3\n");
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL4,
++				 SM5703_CHG_CHGCNTL4_AUTOSTOP |
++				 SM5703_CHG_CHGCNTL4_TOPOFF,
++				 SM5703_CHG_CHGCNTL4_AUTOSTOP |
++				 FIELD_PREP(SM5703_CHG_CHGCNTL4_TOPOFF,
++					    SM5703_CHG_TOPOFF_STEP));
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to write CHGCNTL4\n");
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL5,
++				 SM5703_CHG_CHGCNTL5_AICLEN |
++				 SM5703_CHG_CHGCNTL5_TOPOFF_TIME |
++				 SM5703_CHG_CHGCNTL5_AICL_TH,
++				 SM5703_CHG_CHGCNTL5_AICLEN |
++				 FIELD_PREP(SM5703_CHG_CHGCNTL5_TOPOFF_TIME,
++					    SM5703_CHG_TOPOFF_TIME_STEP));
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to write CHGCNTL5\n");
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CHGCNTL6,
++				 SM5703_CHG_CHGCNTL6_FREQSEL,
++				 FIELD_PREP(SM5703_CHG_CHGCNTL6_FREQSEL,
++					    SM5703_CHG_FREQSEL_STEP));
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to write CHGCNTL6\n");
++
++	ret = regmap_update_bits(chg->regmap, SM5703_CHG_REG_CNTL,
++				 SM5703_CHG_CNTL_AUTOSET,
++				 SM5703_CHG_CNTL_AUTOSET);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to write CNTL\n");
++
++	/* What get_property() reports until the first run of the work */
++	chg->cable = SM5703_CABLE_NONE;
++	chg->zone = SM5703_ZONE_NORMAL;
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_NORMAL, &chg->lim);
++	chg->status = POWER_SUPPLY_STATUS_DISCHARGING;
++	chg->health = POWER_SUPPLY_HEALTH_GOOD;
++
++	psy_cfg.fwnode = dev_fwnode(dev);
++	psy_cfg.drv_data = chg;
++
++	chg->psy = devm_power_supply_register(dev, &sm5703_chg_desc, &psy_cfg);
++	if (IS_ERR(chg->psy))
++		return dev_err_probe(dev, PTR_ERR(chg->psy),
++				     "failed to register power supply\n");
++
++	ret = devm_delayed_work_autocancel(dev, &chg->work, sm5703_chg_work);
++	if (ret)
++		return ret;
++
++	chg->sdp_nb.notifier_call = sm5703_chg_sdp_notifier;
++	ret = devm_extcon_register_notifier(dev, chg->edev,
++					    EXTCON_CHG_USB_SDP, &chg->sdp_nb);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to register the SDP notifier\n");
++
++	chg->dcp_nb.notifier_call = sm5703_chg_dcp_notifier;
++	ret = devm_extcon_register_notifier(dev, chg->edev,
++					    EXTCON_CHG_USB_DCP, &chg->dcp_nb);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to register the DCP notifier\n");
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &chg->work, 0);
++
++	return 0;
++}
++
++static void sm5703_chg_remove(struct i2c_client *client)
++{
++	struct sm5703_chg *chg = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&chg->work);
++	sm5703_chg_set_safe_state(chg);
++}
++
++static void sm5703_chg_shutdown(struct i2c_client *client)
++{
++	struct sm5703_chg *chg = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&chg->work);
++	sm5703_chg_set_safe_state(chg);
++}
++
++static const struct i2c_device_id sm5703_chg_id[] = {
++	{ "sm5703-charger" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, sm5703_chg_id);
++
++static const struct of_device_id sm5703_chg_of_match[] = {
++	{ .compatible = "siliconmitus,sm5703-charger" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sm5703_chg_of_match);
++
++static struct i2c_driver sm5703_charger_driver = {
++	.driver = {
++		.name = "sm5703-charger",
++		.of_match_table = sm5703_chg_of_match,
++	},
++	.probe = sm5703_chg_probe,
++	.remove = sm5703_chg_remove,
++	.shutdown = sm5703_chg_shutdown,
++	.id_table = sm5703_chg_id,
++};
++module_i2c_driver(sm5703_charger_driver);
++
++MODULE_AUTHOR("Samsung Electronics / Silicon Mitus (downstream sm5703_charger.c)");
++MODULE_DESCRIPTION("Silicon Mitus SM5703 charger driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/power/supply/sm5703_charger_policy.h b/drivers/power/supply/sm5703_charger_policy.h
+new file mode 100644
+index 000000000..7ffdd5586
+--- /dev/null
++++ b/drivers/power/supply/sm5703_charger_policy.h
+@@ -0,0 +1,251 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Pure charging decisions for the Silicon Mitus SM5703 charger, as found
++ * on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715, board "gts28ltexx").
++ *
++ * The thresholds and the limits come from the stock Android driver and its
++ * device tree:
++ *   02_sources/kernel_universal5433/drivers/battery/sm5703_charger.c
++ *
++ * No kernel include and no kernel helper is allowed here: this header is
++ * compiled by the host test sm5703_charger_policy_test.c as well.
++ */
++
++#ifndef _SM5703_CHARGER_POLICY_H
++#define _SM5703_CHARGER_POLICY_H
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#else
++#include <stdbool.h>
++#endif
++
++/*
++ * What the MUIC reports.  A cable the driver does not know is taken for a
++ * USB port on purpose: only a TA may draw the full input limit.
++ */
++enum sm5703_chg_cable {
++	SM5703_CABLE_NONE,
++	SM5703_CABLE_USB,
++	SM5703_CABLE_TA,
++};
++
++/* Thermal zones; COLD_STOP and HOT_STOP stop charging entirely */
++enum sm5703_chg_zone {
++	SM5703_ZONE_COLD_STOP,
++	SM5703_ZONE_COOL,
++	SM5703_ZONE_NORMAL,
++	SM5703_ZONE_WARM,
++	SM5703_ZONE_HOT_STOP,
++};
++
++/* Charging limits for one cable and zone, as written to the chip */
++struct sm5703_chg_limits {
++	int input_ma;
++	int charge_ma;
++	int float_mv;
++	int recharge_mv;
++	bool enable;
++};
++
++/*
++ * Battery thermistor, stock device tree: 66 points, 12-bit ADC value
++ * ascending against the temperature in 0.1 degree C descending.
++ */
++static const int sm5703_chg_thermistor_adc[] = {
++	  58,   60,   62,   63,   64,   66,   68,   70,   73,   75,   77,   79,
++	  82,   85,   87,   89,   92,  106,  110,  113,  117,  121,  124,  128,
++	 133,  138,  141,  145,  152,  159,  162,  166,  170,  177,  183,  189,
++	 195,  200,  204,  208,  213,  219,  228,  276,  326,  386,  456,  541,
++	 645,  765,  779,  810,  865,  866,  907,  928,  961,  998, 1034, 1068,
++	1103, 1134, 1158, 1210, 1259, 1472,
++};
++
++static const int sm5703_chg_thermistor_deci_c[] = {
++	 850,  840,  830,  820,  810,  800,  790,  780,  770,  760,  750,  740,
++	 730,  720,  710,  700,  690,  640,  630,  620,  610,  600,  590,  580,
++	 570,  560,  550,  540,  530,  520,  510,  500,  490,  480,  470,  460,
++	 450,  440,  430,  420,  410,  400,  390,  340,  290,  240,  190,  150,
++	 100,   50,   40,   30,   20,   10,    0,  -10,  -20,  -30,  -40,  -50,
++	 -60,  -70,  -80,  -90, -100, -150,
++};
++
++/*
++ * Convert a 12-bit ADC reading from the battery thermistor to 0.1 degree C,
++ * interpolating linearly between the two surrounding points with C integer
++ * division.  Returns false outside the table.
++ */
++static inline bool sm5703_thermistor_deci_c(int raw, int *deci_c)
++{
++	unsigned int n = sizeof(sm5703_chg_thermistor_adc) /
++			 sizeof(sm5703_chg_thermistor_adc[0]);
++	unsigned int i;
++
++	if (raw < sm5703_chg_thermistor_adc[0] ||
++	    raw > sm5703_chg_thermistor_adc[n - 1])
++		return false;
++
++	for (i = 0; i < n - 1; i++) {
++		int adc0 = sm5703_chg_thermistor_adc[i];
++		int adc1 = sm5703_chg_thermistor_adc[i + 1];
++		int t0 = sm5703_chg_thermistor_deci_c[i];
++		int t1 = sm5703_chg_thermistor_deci_c[i + 1];
++
++		if (raw <= adc1) {
++			*deci_c = t0 + (t1 - t0) * (raw - adc0) / (adc1 - adc0);
++			return true;
++		}
++	}
++
++	return false;
++}
++
++/*
++ * Zone from the temperature alone, in 0.1 degree C.  The stop zones are
++ * checked first so that a temperature which qualifies for both a stop and
++ * a charging zone (T <= -50 is also T <= 100) stops charging.
++ */
++static inline enum sm5703_chg_zone sm5703_chg_first_zone(int deci_c)
++{
++	if (deci_c >= 550)
++		return SM5703_ZONE_HOT_STOP;
++	if (deci_c <= -50)
++		return SM5703_ZONE_COLD_STOP;
++	if (deci_c >= 450)
++		return SM5703_ZONE_WARM;
++	if (deci_c <= 100)
++		return SM5703_ZONE_COOL;
++	return SM5703_ZONE_NORMAL;
++}
++
++/*
++ * Hysteresis: the zone from the current one and the temperature, so that a
++ * temperature sitting on a threshold does not make the zone oscillate and
++ * charging stop and restart at every poll.  The stop zones are absolute:
++ * they are entered from any zone.
++ *
++ * Stock leaves WARM at 40.0 C.  This port has no cpuidle or cpufreq yet and
++ * the battery idles at 41-42 C, so 40.0 C is never reached and charging would
++ * stay capped at the WARM float voltage, about 83 %.  Leave it at 43.0 C; the
++ * thresholds that enter WARM and the stop zones are stock.
++ */
++static inline enum sm5703_chg_zone sm5703_chg_next_zone(
++					enum sm5703_chg_zone cur, int deci_c)
++{
++	if (deci_c >= 550)
++		return SM5703_ZONE_HOT_STOP;
++	if (deci_c <= -50)
++		return SM5703_ZONE_COLD_STOP;
++
++	switch (cur) {
++	case SM5703_ZONE_HOT_STOP:
++		if (deci_c <= 430)
++			return SM5703_ZONE_NORMAL;
++		if (deci_c <= 500)
++			return SM5703_ZONE_WARM;
++		return SM5703_ZONE_HOT_STOP;
++	case SM5703_ZONE_COLD_STOP:
++		if (deci_c >= 150)
++			return SM5703_ZONE_NORMAL;
++		if (deci_c >= 0)
++			return SM5703_ZONE_COOL;
++		return SM5703_ZONE_COLD_STOP;
++	case SM5703_ZONE_WARM:
++		if (deci_c <= 430)
++			return SM5703_ZONE_NORMAL;
++		return SM5703_ZONE_WARM;
++	case SM5703_ZONE_COOL:
++		if (deci_c >= 150)
++			return SM5703_ZONE_NORMAL;
++		return SM5703_ZONE_COOL;
++	case SM5703_ZONE_NORMAL:
++		if (deci_c >= 450)
++			return SM5703_ZONE_WARM;
++		if (deci_c <= 100)
++			return SM5703_ZONE_COOL;
++		return SM5703_ZONE_NORMAL;
++	}
++
++	return cur;
++}
++
++/*
++ * The charging limits for one cable and zone.  Base by cable: a TA draws
++ * 1750 mA at the input and 2100 mA into the battery, a USB port 450 mA both.
++ * The WARM and COOL zones cap the charge current at 2000 mA and lower the
++ * float voltage; the stop zones and a missing cable only keep the input
++ * limits so the system keeps running from VBUS.
++ */
++static inline void sm5703_chg_get_limits(enum sm5703_chg_cable cable,
++					 enum sm5703_chg_zone zone,
++					 struct sm5703_chg_limits *lim)
++{
++	lim->input_ma = cable == SM5703_CABLE_TA ? 1750 : 450;
++	lim->charge_ma = cable == SM5703_CABLE_TA ? 2100 : 450;
++	lim->float_mv = 4390;
++	lim->recharge_mv = 4340;
++	lim->enable = true;
++
++	switch (zone) {
++	case SM5703_ZONE_NORMAL:
++		break;
++	case SM5703_ZONE_WARM:
++		lim->float_mv = 4200;
++		lim->recharge_mv = 4150;
++		if (lim->charge_ma > 2000)
++			lim->charge_ma = 2000;
++		break;
++	case SM5703_ZONE_COOL:
++		lim->float_mv = 4200;
++		lim->recharge_mv = 4050;
++		if (lim->charge_ma > 2000)
++			lim->charge_ma = 2000;
++		break;
++	case SM5703_ZONE_HOT_STOP:
++	case SM5703_ZONE_COLD_STOP:
++		lim->float_mv = 4200;
++		lim->recharge_mv = 4050;
++		lim->enable = false;
++		break;
++	}
++
++	if (cable == SM5703_CABLE_NONE) {
++		lim->input_ma = 450;
++		lim->charge_ma = 450;
++		lim->float_mv = 4200;
++		lim->recharge_mv = 4050;
++		lim->enable = false;
++	}
++}
++
++/* Input limit in mA to the VBUSCNTL code: mA = 100 + n * 50 */
++static inline unsigned int sm5703_reg_input(int ma)
++{
++	if (ma < 450)
++		ma = 450;
++	if (ma > 1750)
++		ma = 1750;
++	return (ma - 100) / 50;
++}
++
++/* Charge current in mA to the CHGCNTL2 code: mA = 100 + n * 50 */
++static inline unsigned int sm5703_reg_fast(int ma)
++{
++	if (ma < 100)
++		ma = 100;
++	if (ma > 2100)
++		ma = 2100;
++	return (ma - 100) / 50;
++}
++
++/* Float voltage in mV to the CHGCNTL3 code: mV = 4120 + n * 10 */
++static inline unsigned int sm5703_reg_float(int mv)
++{
++	if (mv < 4200)
++		mv = 4200;
++	if (mv > 4390)
++		mv = 4390;
++	return (mv - 4120) / 10;
++}
++
++#endif /* _SM5703_CHARGER_POLICY_H */
+diff --git a/drivers/power/supply/sm5703_charger_policy_test.c b/drivers/power/supply/sm5703_charger_policy_test.c
+new file mode 100644
+index 000000000..13f1bc84d
+--- /dev/null
++++ b/drivers/power/supply/sm5703_charger_policy_test.c
+@@ -0,0 +1,449 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Host test for sm5703_charger_policy.h.  Not part of the kernel build:
++ *
++ *   cc -std=gnu11 -Wall -Wextra -Werror -o /tmp/sm5703_policy_test \
++ *      drivers/power/supply/sm5703_charger_policy_test.c
++ *   /tmp/sm5703_policy_test
++ */
++
++#include "sm5703_charger_policy.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++/*
++ * Prints what failed and exits non-zero on the first failure.
++ */
++#define CHECK(cond)							\
++	do {								\
++		if (!(cond)) {						\
++			printf("FAIL %s:%d: %s\n", __func__, __LINE__,	\
++			       #cond);					\
++			exit(1);					\
++		}							\
++	} while (0)
++
++static void test_reg_input(void)
++{
++	CHECK(sm5703_reg_input(450) == 0x07);
++	CHECK(sm5703_reg_input(1750) == 0x21);
++	CHECK(sm5703_reg_input(100) == 0x07);	/* clamped up to 450 */
++	CHECK(sm5703_reg_input(0) == 0x07);
++	CHECK(sm5703_reg_input(-5000) == 0x07);
++	CHECK(sm5703_reg_input(2000) == 0x21);	/* clamped down to 1750 */
++	CHECK(sm5703_reg_input(500) == 0x08);
++	CHECK(sm5703_reg_input(1000) == 0x12);
++}
++
++static void test_reg_fast(void)
++{
++	CHECK(sm5703_reg_fast(2100) == 0x28);
++	CHECK(sm5703_reg_fast(2000) == 0x26);
++	CHECK(sm5703_reg_fast(100) == 0x00);
++	CHECK(sm5703_reg_fast(450) == 0x07);
++	CHECK(sm5703_reg_fast(0) == 0x00);	/* clamped up to 100 */
++	CHECK(sm5703_reg_fast(-1) == 0x00);
++	CHECK(sm5703_reg_fast(2500) == 0x28);	/* clamped down to 2100 */
++}
++
++static void test_reg_float(void)
++{
++	CHECK(sm5703_reg_float(4200) == 0x08);
++	CHECK(sm5703_reg_float(4390) == 0x1b);
++	CHECK(sm5703_reg_float(4120) == 0x08);	/* clamped up to 4200 */
++	CHECK(sm5703_reg_float(0) == 0x08);
++	CHECK(sm5703_reg_float(4500) == 0x1b);	/* clamped down to 4390 */
++	CHECK(sm5703_reg_float(4340) == 0x16);
++}
++
++static void test_thermistor_ends(void)
++{
++	int t;
++
++	CHECK(!sm5703_thermistor_deci_c(57, &t));
++	CHECK(!sm5703_thermistor_deci_c(1473, &t));
++	CHECK(!sm5703_thermistor_deci_c(-1, &t));
++	CHECK(sm5703_thermistor_deci_c(58, &t));
++	CHECK(t == 850);
++	CHECK(sm5703_thermistor_deci_c(1472, &t));
++	CHECK(t == -150);
++}
++
++static void test_thermistor_points(void)
++{
++	struct {
++		int raw;
++		int deci_c;
++	} pts[] = {
++		{ 141, 550 }, { 166, 500 }, { 195, 450 }, { 219, 400 },
++		{ 541, 150 }, { 645, 100 }, { 907, 0 }, { 1068, -50 },
++		{ 60, 840 }, { 63, 820 }, { 92, 690 }, { 106, 640 },
++		{ 228, 390 }, { 276, 340 }, { 456, 190 }, { 765, 50 },
++		{ 779, 40 }, { 810, 30 }, { 865, 20 }, { 866, 10 },
++		{ 928, -10 }, { 998, -30 }, { 1034, -40 }, { 1103, -60 },
++		{ 1134, -70 }, { 1158, -80 }, { 1210, -90 }, { 1259, -100 },
++	};
++	unsigned int i;
++	int t;
++
++	for (i = 0; i < sizeof(pts) / sizeof(pts[0]); i++) {
++		CHECK(sm5703_thermistor_deci_c(pts[i].raw, &t));
++		CHECK(t == pts[i].deci_c);
++	}
++}
++
++static void test_thermistor_interpolation(void)
++{
++	int t;
++
++	/* Midway between 98 (805 at raw 98) and 100 at raw 100: raw 99 */
++	CHECK(sm5703_thermistor_deci_c(99, &t));
++	CHECK(t == 665);
++
++	/* Halfway between 440 (raw 200) and 430 (raw 204): raw 202 gives 435 */
++	CHECK(sm5703_thermistor_deci_c(202, &t));
++	CHECK(t == 435);
++
++	/* Raw 100 is not a table point: 690 at 92, 640 at 106, C division */
++	CHECK(sm5703_thermistor_deci_c(100, &t));
++	CHECK(t == 662);
++}
++
++static void test_thermistor_monotonic(void)
++{
++	int raw, prev = 1000;	/* above the warmest point */
++
++	for (raw = 58; raw <= 1472; raw++) {
++		int t;
++
++		if (!sm5703_thermistor_deci_c(raw, &t))
++			continue;
++		CHECK(t <= prev);
++		prev = t;
++	}
++}
++
++static void test_first_zone(void)
++{
++	CHECK(sm5703_chg_first_zone(550) == SM5703_ZONE_HOT_STOP);
++	CHECK(sm5703_chg_first_zone(551) == SM5703_ZONE_HOT_STOP);
++	CHECK(sm5703_chg_first_zone(1000) == SM5703_ZONE_HOT_STOP);
++	CHECK(sm5703_chg_first_zone(549) == SM5703_ZONE_WARM);
++	CHECK(sm5703_chg_first_zone(450) == SM5703_ZONE_WARM);
++	CHECK(sm5703_chg_first_zone(449) == SM5703_ZONE_NORMAL);
++	CHECK(sm5703_chg_first_zone(250) == SM5703_ZONE_NORMAL);
++	CHECK(sm5703_chg_first_zone(101) == SM5703_ZONE_NORMAL);
++	CHECK(sm5703_chg_first_zone(100) == SM5703_ZONE_COOL);
++	CHECK(sm5703_chg_first_zone(99) == SM5703_ZONE_COOL);
++	CHECK(sm5703_chg_first_zone(0) == SM5703_ZONE_COOL);
++	CHECK(sm5703_chg_first_zone(-49) == SM5703_ZONE_COOL);
++	CHECK(sm5703_chg_first_zone(-50) == SM5703_ZONE_COLD_STOP);
++	CHECK(sm5703_chg_first_zone(-51) == SM5703_ZONE_COLD_STOP);
++	CHECK(sm5703_chg_first_zone(-1000) == SM5703_ZONE_COLD_STOP);
++}
++
++/*
++ * An independent restatement of the zone rules, so that the transition
++ * checks do not merely repeat the implementation.
++ */
++static enum sm5703_chg_zone sm5703_chg_next_zone_ref(
++					enum sm5703_chg_zone cur, int deci_c)
++{
++	if (deci_c >= 550)
++		return SM5703_ZONE_HOT_STOP;
++	if (deci_c <= -50)
++		return SM5703_ZONE_COLD_STOP;
++
++	switch (cur) {
++	case SM5703_ZONE_HOT_STOP:
++		if (deci_c <= 430)
++			return SM5703_ZONE_NORMAL;
++		if (deci_c <= 500)
++			return SM5703_ZONE_WARM;
++		return SM5703_ZONE_HOT_STOP;
++	case SM5703_ZONE_COLD_STOP:
++		if (deci_c >= 150)
++			return SM5703_ZONE_NORMAL;
++		if (deci_c >= 0)
++			return SM5703_ZONE_COOL;
++		return SM5703_ZONE_COLD_STOP;
++	case SM5703_ZONE_WARM:
++		if (deci_c <= 430)
++			return SM5703_ZONE_NORMAL;
++		return SM5703_ZONE_WARM;
++	case SM5703_ZONE_COOL:
++		if (deci_c >= 150)
++			return SM5703_ZONE_NORMAL;
++		return SM5703_ZONE_COOL;
++	case SM5703_ZONE_NORMAL:
++		if (deci_c >= 450)
++			return SM5703_ZONE_WARM;
++		if (deci_c <= 100)
++			return SM5703_ZONE_COOL;
++		return SM5703_ZONE_NORMAL;
++	}
++
++	return cur;
++}
++
++/*
++ * Each transition on both sides of its threshold, from every zone.
++ */
++static void test_next_zone(void)
++{
++	static const struct {
++		enum sm5703_chg_zone cur;
++		int deci_c;
++		enum sm5703_chg_zone want;
++	} t[] = {
++		/* HOT_STOP: T <= 430 NORMAL, T <= 500 WARM, else stays */
++		{ SM5703_ZONE_HOT_STOP, 429, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_HOT_STOP, 430, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_HOT_STOP, 431, SM5703_ZONE_WARM },
++		{ SM5703_ZONE_HOT_STOP, 500, SM5703_ZONE_WARM },
++		{ SM5703_ZONE_HOT_STOP, 501, SM5703_ZONE_HOT_STOP },
++		{ SM5703_ZONE_HOT_STOP, 549, SM5703_ZONE_HOT_STOP },
++		/* COLD_STOP: T >= 150 NORMAL, T >= 0 COOL, else stays */
++		{ SM5703_ZONE_COLD_STOP, 151, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_COLD_STOP, 150, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_COLD_STOP, 149, SM5703_ZONE_COOL },
++		{ SM5703_ZONE_COLD_STOP, 0, SM5703_ZONE_COOL },
++		{ SM5703_ZONE_COLD_STOP, -1, SM5703_ZONE_COLD_STOP },
++		{ SM5703_ZONE_COLD_STOP, -49, SM5703_ZONE_COLD_STOP },
++		/* WARM: T <= 430 NORMAL, else stays */
++		{ SM5703_ZONE_WARM, 429, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_WARM, 430, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_WARM, 431, SM5703_ZONE_WARM },
++		{ SM5703_ZONE_WARM, 449, SM5703_ZONE_WARM },
++		/* COOL: T >= 150 NORMAL, else stays */
++		{ SM5703_ZONE_COOL, 151, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_COOL, 150, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_COOL, 149, SM5703_ZONE_COOL },
++		{ SM5703_ZONE_COOL, 101, SM5703_ZONE_COOL },
++		/* NORMAL: T >= 450 WARM, T <= 100 COOL, else stays */
++		{ SM5703_ZONE_NORMAL, 449, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_NORMAL, 450, SM5703_ZONE_WARM },
++		{ SM5703_ZONE_NORMAL, 451, SM5703_ZONE_WARM },
++		{ SM5703_ZONE_NORMAL, 101, SM5703_ZONE_NORMAL },
++		{ SM5703_ZONE_NORMAL, 100, SM5703_ZONE_COOL },
++		{ SM5703_ZONE_NORMAL, 99, SM5703_ZONE_COOL },
++	};
++	static const enum sm5703_chg_zone zones[] = {
++		SM5703_ZONE_COLD_STOP, SM5703_ZONE_COOL, SM5703_ZONE_NORMAL,
++		SM5703_ZONE_WARM, SM5703_ZONE_HOT_STOP,
++	};
++	unsigned int i;
++	int deci_c;
++
++	/* The absolute thresholds apply from every zone */
++	for (i = 0; i < sizeof(zones) / sizeof(zones[0]); i++) {
++		for (deci_c = -70; deci_c <= 560; deci_c++) {
++			enum sm5703_chg_zone want;
++
++			if (deci_c >= 550)
++				want = SM5703_ZONE_HOT_STOP;
++			else if (deci_c <= -50)
++				want = SM5703_ZONE_COLD_STOP;
++			else
++				continue;
++			CHECK(sm5703_chg_next_zone(zones[i], deci_c) == want);
++		}
++	}
++
++	for (i = 0; i < sizeof(t) / sizeof(t[0]); i++)
++		CHECK(sm5703_chg_next_zone(t[i].cur, t[i].deci_c) ==
++		      t[i].want);
++
++	/* Every threshold, on both sides, from every zone */
++	{
++		static const int thresholds[] = {
++			-50, -49, -1, 0, 1, 99, 100, 101, 149, 150, 151,
++			429, 430, 431, 449, 450, 451, 499, 500, 501,
++			549, 550, 551,
++		};
++		unsigned int j, k;
++
++		for (j = 0; j < sizeof(zones) / sizeof(zones[0]); j++) {
++			for (k = 0; k < sizeof(thresholds) / sizeof(thresholds[0]); k++) {
++				int c = thresholds[k];
++				enum sm5703_chg_zone want =
++					sm5703_chg_next_zone_ref(zones[j], c);
++
++				CHECK(sm5703_chg_next_zone(zones[j], c) == want);
++			}
++		}
++	}
++
++	/* Between its thresholds, every zone holds where it is.  The HOT_STOP
++	 * and COLD_STOP mid-bands overlap the absolute stop thresholds, which
++	 * are covered above. */
++	for (deci_c = 101; deci_c <= 449; deci_c++) {
++		CHECK(sm5703_chg_next_zone(SM5703_ZONE_NORMAL, deci_c) ==
++		      SM5703_ZONE_NORMAL);
++	}
++	for (deci_c = 431; deci_c <= 449; deci_c++)
++		CHECK(sm5703_chg_next_zone(SM5703_ZONE_WARM, deci_c) ==
++		      SM5703_ZONE_WARM);
++	for (deci_c = 101; deci_c <= 149; deci_c++)
++		CHECK(sm5703_chg_next_zone(SM5703_ZONE_COOL, deci_c) ==
++		      SM5703_ZONE_COOL);
++}
++
++static void test_limits(void)
++{
++	struct sm5703_chg_limits lim;
++
++	/* TA, NORMAL */
++	sm5703_chg_get_limits(SM5703_CABLE_TA, SM5703_ZONE_NORMAL, &lim);
++	CHECK(lim.input_ma == 1750);
++	CHECK(lim.charge_ma == 2100);
++	CHECK(lim.float_mv == 4390);
++	CHECK(lim.recharge_mv == 4340);
++	CHECK(lim.enable);
++
++	/* USB, NORMAL */
++	sm5703_chg_get_limits(SM5703_CABLE_USB, SM5703_ZONE_NORMAL, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4390);
++	CHECK(lim.recharge_mv == 4340);
++	CHECK(lim.enable);
++
++	/* WARM caps the charge current and lowers the float voltage */
++	sm5703_chg_get_limits(SM5703_CABLE_TA, SM5703_ZONE_WARM, &lim);
++	CHECK(lim.input_ma == 1750);
++	CHECK(lim.charge_ma == 2000);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4150);
++	CHECK(lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_USB, SM5703_ZONE_WARM, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);	/* base is already below the cap */
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4150);
++	CHECK(lim.enable);
++
++	/* COOL caps the charge current and lowers the float voltage */
++	sm5703_chg_get_limits(SM5703_CABLE_TA, SM5703_ZONE_COOL, &lim);
++	CHECK(lim.input_ma == 1750);
++	CHECK(lim.charge_ma ==  2000);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_USB, SM5703_ZONE_COOL, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(lim.enable);
++
++	/* The stop zones keep the base input and charge, but stop charging */
++	sm5703_chg_get_limits(SM5703_CABLE_TA, SM5703_ZONE_HOT_STOP, &lim);
++	CHECK(lim.input_ma == 1750);
++	CHECK(lim.charge_ma == 2100);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_TA, SM5703_ZONE_COLD_STOP, &lim);
++	CHECK(lim.input_ma == 1750);
++	CHECK(lim.charge_ma == 2100);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_USB, SM5703_ZONE_HOT_STOP, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_USB, SM5703_ZONE_COLD_STOP, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	/* No cable, whatever the zone: minimum limits, never charging */
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_NORMAL, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_WARM, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_COOL, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_HOT_STOP, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++
++	sm5703_chg_get_limits(SM5703_CABLE_NONE, SM5703_ZONE_COLD_STOP, &lim);
++	CHECK(lim.input_ma == 450);
++	CHECK(lim.charge_ma == 450);
++	CHECK(lim.float_mv == 4200);
++	CHECK(lim.recharge_mv == 4050);
++	CHECK(!lim.enable);
++}
++
++/* No combination may exceed the chip's maximum float, input or charge */
++static void test_limits_max(void)
++{
++	static const enum sm5703_chg_cable cables[] = {
++		SM5703_CABLE_NONE, SM5703_CABLE_USB, SM5703_CABLE_TA,
++	};
++	static const enum sm5703_chg_zone zones[] = {
++		SM5703_ZONE_COLD_STOP, SM5703_ZONE_COOL, SM5703_ZONE_NORMAL,
++		SM5703_ZONE_WARM, SM5703_ZONE_HOT_STOP,
++	};
++	unsigned int i, j;
++
++	for (i = 0; i < sizeof(cables) / sizeof(cables[0]); i++) {
++		for (j = 0; j < sizeof(zones) / sizeof(zones[0]); j++) {
++			struct sm5703_chg_limits lim;
++
++			sm5703_chg_get_limits(cables[i], zones[j], &lim);
++			CHECK(lim.float_mv <= 4390);
++			CHECK(lim.input_ma <= 1750);
++			CHECK(lim.charge_ma <= 2100);
++		}
++	}
++}
++
++int main(void)
++{
++	test_reg_input();
++	test_reg_fast();
++	test_reg_float();
++	test_thermistor_ends();
++	test_thermistor_points();
++	test_thermistor_interpolation();
++	test_thermistor_monotonic();
++	test_first_zone();
++	test_next_zone();
++	test_limits();
++	test_limits_max();
++
++	printf("all tests passed\n");
++	return 0;
++}
+-- 
+2.52.0
+

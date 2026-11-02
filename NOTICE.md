@@ -28,7 +28,7 @@ from the tablet's own SYSTEM partition at boot (`image/tools/build-rootfs --publ
 
 The released images hold free software from Arch Linux ARM, Omarchy, omarchy-mobile, Debian (Chromium)
 and this repository. Their sources are at those projects. The kernel is `v6.12.114` plus the patches
-in `kernel/patches/` (`t715-bringup`, `t715-modem`, `t715-parity`, `t715-gps`), built with
+in `kernel/patches/` (`t715-bringup`, `t715-modem`, `t715-parity`, `t715-gps`, `t715-charger`), built with
 `gts28ltexx_modem.config`.
 
 The notes in `research/` and `docs/hardware/` describe what we observed, for interoperability, by

@@ -1,0 +1,64 @@
+From f9d7d382956a67f8427bf5a579d2f8c62a90376d Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/5] ARM: dts: gts28ltexx: the MUIC's interrupt with no pull,
+ level low
+
+The pad gpa3-6 resets with a pull-down that stock does not set.  INTB is
+open drain, pulled up on the board, so the line stayed low, no falling
+edge came after boot, and the cable type and the D+/D- switch froze at
+their boot state.  Set no pull, as stock, and a level trigger, as the
+driver now asks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 22 +++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 8be9e0769..5356eb905 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -768,7 +768,8 @@ / {
+ 	 * from Android nothing reaches the PHY until a driver does it.
+ 	 * Bit-banged I2C on gpd1-5 (SDA) / gpd1-4 (SCL), 2 us delay,
+ 	 * address 0x25, interrupt gpa3-6 (live_fdt.dts:3061-3078; falling
+-	 * edge per the stock muic_task.c).  Mainline extcon-sm5502 handles
++	 * edge in the stock muic_task.c, level here so that no event is
++	 * lost, see extcon-sm5502.c).  Mainline extcon-sm5502 handles
+ 	 * this chip ("siliconmitus,sm5703-muic", as on the msm8916 Samsung
+ 	 * J5 boards).
+ 	 */
+@@ -784,11 +785,28 @@ muic: extcon@25 {
+ 			compatible = "siliconmitus,sm5703-muic";
+ 			reg = <0x25>;
+ 			interrupt-parent = <&gpa3>;
+-			interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
++			interrupts = <6 IRQ_TYPE_LEVEL_LOW>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&muic_irq>;
+ 		};
+ 	};
+ };
+ 
++/*
++ * INTB is open drain, pulled up on the board.  With the pad's reset pull-down
++ * the line stays low and no falling edge reaches the kernel after boot, so the
++ * cable type and the D+/D- switch freeze at their boot state.  Stock sets no
++ * pull (live_fdt.dts:419).
++ */
++&pinctrl_alive {
++	muic_irq: muic-irq-pins {
++		samsung,pins = "gpa3-6";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR1>;
++	};
++};
++
+ /* ==================================================================== */
+ /* 9. Power-off and thermal protection                                  */
+ /* ==================================================================== */
+-- 
+2.52.0
+

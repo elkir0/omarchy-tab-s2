@@ -172,14 +172,13 @@ here stays off until `systemctl restart shannon-loader` or the next boot.
 
 **Temperature gate.** The CP is never powered on at 55.0 °C or more
 (`shannon-loader --max-temp=55.0` in the unit; the loader's default and the
-original SYNTHESIS rule 1 say 40.0). The value is the SM5703 gauge's own
-sensor, the inside of the tablet, not the battery thermistor (that one sits
-behind the Exynos ADC, not enabled in the mainline kernel): on the desktop
-root it read 44-48 °C at idle with a case that does not feel warm, and stock
-Android powers the CP on at any temperature, so the owner raised the gate to
-55.0 on 2026-10-30, a guard against real overheating only. The prepare
-service waits for less than 54.0 °C; `journalctl -u shannon-modem-prepare`
-shows any wait.
+original SYNTHESIS rule 1 say 40.0). Since the `t715-charger` kernel the
+value is the battery thermistor (ADC channel 2, `docs/hardware/BATTERY.md`
+§8), 40-45 °C in use. Before, it was the SM5703 gauge's own sensor, which
+reads 48-66 °C on a charger and would have held the modem back. Stock Android
+powers the CP on at any temperature, so the owner raised the gate to 55.0 on
+2026-10-30, a guard against real overheating only. The prepare service waits
+for less than 54.0 °C; `journalctl -u shannon-modem-prepare` shows any wait.
 
 From the desktop (the user in `radio`):
 

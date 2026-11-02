@@ -23,9 +23,9 @@ StartLimitBurst=3
 [Service]
 Type=notify
 NotifyAccess=main
-# --max-temp=55.0: the gauge temperature is the inside of the tablet, not the battery
-# thermistor, and stock Android powers the CP on at any temperature; the owner raised
-# the CP power-on gate from 40.0 to 55.0 on 2026-10-30 (guard against overheating only).
+# --max-temp=55.0: the gauge's temp is the battery thermistor since the t715-charger
+# kernel, and stock Android powers the CP on at any temperature; the owner raised the
+# CP power-on gate from 40.0 to 55.0 on 2026-10-30 (guard against overheating only).
 ExecStart=/usr/bin/shannon-loader --kmsg --max-temp=55.0
 Restart=on-failure
 RestartSec=30

@@ -1,4 +1,6 @@
-# Battery — SM5703 fuel gauge (read-only power_supply driver)
+# Battery — SM5703 fuel gauge (read-only) and charger
+
+The charger, the battery thermistor and what they changed for USB are in §8.
 
 SM-T715 (gts28ltexx), mainline 6.12 arm32. Goal: show the battery level
 in userspace (UPower, Phosh, Hyprland bars read
@@ -35,8 +37,8 @@ and the device's stock tree `dumps/live_fdt.dts`.
 - `live_fdt.dts:1636-1641`: `capacity_calculation_type = 0x0c`,
   `capacity_max = 990`, `capacity_max_margin = 60`, `capacity_min = 0`.
   `0x0c` = `DYNAMIC_SCALE (4) | ATOMIC (8)` (`sec_charging_common.h:326-341`).
-- The gauge is a separate I2C device; the SM5703 charger/MFD at 0x49 is
-  out of scope.
+- The gauge is a separate I2C device; the SM5703 charger at 0x49 has its
+  own driver (§8).
 
 ## 2. Read-only policy
 
@@ -95,12 +97,13 @@ positive value means charging (`ta_exist = is_charging && batt_current >= 0`,
 unplugging at `dmesg.txt:1669`. The power_supply ABI also uses
 positive = charging, so the sign is passed through unchanged.
 
-**Temperature.** It is the gauge's own sensor, decoded from its register
-with no thermistor table, so it is exposed as `TEMP` (the stock driver
-reports the same value for `TEMP` and `TEMP_AMBIENT`, `fg.c:1153-1157`).
-It is *not* Android's `Tbat`, which comes from a battery thermistor read by
-`sec_battery` through the AP ADC. If `CNTL` bit 14 is clear the gauge does
-not measure temperature, and `TEMP` returns `-ENODATA`.
+**Temperature.** `TEMP` is the battery thermistor since `t715-charger`
+(§8), Android's `Tbat`. The gauge's own sensor, decoded from its register
+with no thermistor table, is `TEMP_AMBIENT` and the fallback when the ADC
+fails (the stock driver reports it for both, `fg.c:1153-1157`): it reads
+48-66 °C on a charger with the battery at 40-45 °C. If `CNTL` bit 14 is
+clear the gauge does not measure temperature and `TEMP_AMBIENT` returns
+`-ENODATA`.
 
 ## 4. CAPACITY and capacity_max
 
@@ -166,10 +169,8 @@ from it is re-checked every 10 s, and only three readings in a row that
 agree replace it. A real plug or unplug therefore shows after 20 to
 50 s.
 
-Still open: without the charger or VBUS detection, a battery idling
-below 50 mA on its own reads Not charging, and UPower then reports it
-on mains. The lasting fix is a line-power supply (charger or MUIC
-driver).
+The line-power supply this needed exists since `t715-charger`:
+`sm5703-charger`, type Mains, which UPower reads for `OnBattery` (§8).
 
 ## 6. Left out, and why
 
@@ -184,7 +185,6 @@ driver).
 | `CHARGE_FULL`, `ENERGY_NOW`, `CAPACITY_LEVEL` | stock returns `-ENODATA` or has no decoding |
 | Dynamic `capacity_max`, atomic smoothing (§4) | state held by the stock driver / Android |
 | STATUS register 0x04 | the stock driver only masks alarm bits from it |
-| Battery thermistor (`Tbat`) | read by `sec_battery` via the AP ADC, not by the gauge |
 
 ## 7. First test on the device
 
@@ -212,7 +212,7 @@ Expected:
 | `POWER_SUPPLY_VOLTAGE_NOW` | 3 400 000-4 400 000 (µV); ~4.39 V when charging at full |
 | `POWER_SUPPLY_VOLTAGE_OCV` | 3 400 000-4 350 000, close to `VOLTAGE_NOW` at low current |
 | `POWER_SUPPLY_CURRENT_NOW` | negative on battery (−100 000 to −2 000 000 µA), positive on the charger (up to ~2 100 000) |
-| `POWER_SUPPLY_TEMP` | ~150-450 (0.1 °C), room/device temperature |
+| `POWER_SUPPLY_TEMP` | ~150-450 (0.1 °C), the battery thermistor (§8) |
 | `POWER_SUPPLY_STATUS` | `Discharging` unplugged, `Charging` plugged |
 | `POWER_SUPPLY_PRESENT` / `TECHNOLOGY` | `1` / `Li-ion` |
 
@@ -230,3 +230,105 @@ Checks:
    event when it does.
 4. Raw sanity: in the regmap dump, SOC/256 (in %), VOLTAGE & 0x7ff / 256
    (in V) must match the decoded sysfs values.
+
+## 8. Charger, thermistor and USB detection (`t715-charger`)
+
+`drivers/power/supply/sm5703_charger.c` for the chip,
+`sm5703_charger_policy.h` for the decisions, pure C tested on the host by
+`sm5703_charger_policy_test.c`. Hardware: `hsi2c_8` (`i2c-27` here), address
+0x49, device ID 0x01. Measurements of 2026-11-01 and 02.
+
+**Why a driver.** `VBUSCNTL` reads 1800 mA after sboot, but the real input
+limit stays near 500 mA until a host *writes* that register. On a Mac port,
+screen off: +39 mA as booted, +699 mA after writing 0x21, -20 mA at 0x07. So
+the tablet charged at +270-380 mA on a fast charger and could not hold up
+with the screen on. What stock writes against what sboot leaves:
+
+| Register | After sboot | Stock |
+|---|---|---|
+| `VBUSCNTL` 0x0D | 0x22, reads 1800 mA, acts as about 500 | 0x21, 1750 mA |
+| `CHGCNTL2` 0x0F | 0x22, 1800 mA | 0x28, 2100 mA |
+| `CHGCNTL3` 0x10 | 0x08, float 4200 mV | 0x1b, float 4390 mV |
+| `CHGCNTL4` 0x11 | 0x80 | 0xa0 |
+| `CHGCNTL5` 0x12 | 0xfa, AICL 4.5 V | 0xd8, AICL 4.3 V |
+| `CHGCNTL6` 0x13 | 0x00, 3 MHz | 0x08, 1.5 MHz |
+
+**What it does.** No IRQ: a 10 s poll and extcon notifiers. It never touches
+INT1-4 (read-clear), INTMSK or `CHGCNTL1`. The mode bits of `CNTL` move only
+between 4 (off) and 5 (on). A TA gets 1750/2100 mA, a USB port or an unknown
+cable 450/450 mA. On VBUS arrival or a cable change the input limit is written
+twice, 450 then the target, because equal writes would be skipped and the
+write is what releases the limit. With no valid temperature, charging stops.
+`.shutdown` leaves 4200 mV and 450 mA, verified at the next boot. Types as
+Mains, so UPower reports `on-battery: no`.
+
+**Thermal rules.** Stock, on the thermistor (ADC channel 2, 12 bits, stock's
+66-point table): 55.0 °C stops, until 50.0; 45.0 °C lowers the float to 4200 mV
+and the charge to 2000 mA; 10.0 °C does the same until 15.0; -5.0 °C stops,
+until 0.0. One difference: **WARM ends at 43.0 °C, not 40.0.** With no cpuidle
+or cpufreq the battery idles at 41-42 °C, so at 40.0 the first warm spell caps
+the tablet at the WARM float for good: kernel 3 sat 2 h 30 at 83 %, +25 mA.
+
+**Rate.** Fast charger, screen off: 57 to 71 % in 36 min, about +1 A. Input
+sweep at float 4390: 900 mA +437, 1100 +613, 1300 +795, 1500 +972, 1750 +980.
+`VBUSLIMIT` is set at 1500, not at 1750, so the real input stops near 1.5 A:
+the supply or the cable, not proven which.
+
+**Boot on a charger.** On one boot the charge started only 85 s in: `Not
+charging`, -500 to -1100 mA, `VSYSOK` low at 25 s, then +675 mA by itself. Cause
+unknown; a charger plugged after boot starts at once (+656 mA). On 11-02 a boot
+on the fast charger charged from 10 s in.
+
+**USB and cable detection.** Five faults of ours, one of the Mac's:
+
+1. *Frozen at boot.* The pad gpa3-6 resets with a pull-down, stock sets none.
+   INTB stayed low, no falling edge came, and the cable type and the D+/D-
+   switch stayed as boot left them. Fixed in the board's pinctrl.
+2. *An event lost for good.* INTB stays low until the INT registers are read.
+   After a plug on the Mac, `muic-attach` had not fired, INTB was low, and INT1
+   still held 0x01, so the route was open and no later event could arrive.
+   Fixed by a level trigger in the DT and in `extcon-sm5502.c`.
+3. *No cable at boot, no USB until the next boot.* The initramfs stops its
+   gadget at about 5 s. With no cable the stop takes 5.5 s against 1.5 s: three
+   of the nine boots measured, one of them the day the Mac lost the tablet.
+   dwc3 times out on the halt, silently, and the UDC core kept
+   `gadget->connected` on that error, so the next bind did nothing: `DCTL` 0,
+   pull-up off. `usb_gadget_disconnect_locked()` now clears it either way.
+   Timeout injected on the device: with the fix `DCTL` 0x8c000a00, link On;
+   without it `RUN/STOP` stays clear, link Disconnected. A real boot with no
+   cable on 11-02 stopped in 1.47 s, so it did not hit the fault: only the
+   injection proves the fix. What makes the stop slow is not known.
+4. *Charging late after a plug.* The MUIC reports the cable 30-50 ms before
+   VBUS reaches the charger (`STATUS5` UVLO, then VBUSOK), so the work the
+   notifier pulled forward saw no VBUS and charging waited for the 10 s poll.
+   While a cable is reported without VBUS, the work now looks every 200 ms,
+   ten times: a TA plug charged 210 ms after its attach.
+5. *A cable type missing.* Once, after a real replug, extcon reported no cable
+   for more than 10 s while the Mac had enumerated, until the next plug. The
+   driver drops an attach whose type it cannot read, silently: `DEV_TYPE1`
+   still 0, or `ADC` at ground. Not seen again in two plugs traced every
+   20 ms, where `DEV_TYPE1` was set at the attach. Such an attach is now read
+   again every 200 ms for 2 s, and logged: `cable identified N ms after its
+   attach` or `still unidentified`. Unproven cause, defensive fix: on a TA, a
+   missing type would charge at the USB 450 mA.
+6. *macOS.* Twice, after an unplug of more than a minute, the Mac kept the
+   session, device in ioreg, `en14` active, and ignored the tablet plugged
+   back into that port: 6 min on 11-01, and on 11-02 after the boot with no
+   cable, while the tablet had `RUN/STOP` set and was ready. Short unplugs of
+   a few seconds, three of them, went through. The tablet is on a root port
+   of the Mac, with no hub. `device/mac-usb-reenum.c` clears it: enumerated
+   at once. Not reproduced by the soft unplug below.
+
+**Soft unplug.** `CONTROL` 0x1a (manual) and `MANSW1` 0x00 at 20-0025 cut VBUS
+(`STATUS5` UVLO) and D+/D- with the cable in place; 0x1e and 0x27 put them
+back. The Mac drops the session and enumerates again in seconds, the charger
+goes to no cable and back. It raises no MUIC detach and did not reproduce the
+stop timeout of point 3 (0.0 s).
+
+**Real tests with the installed kernel, 11-02.** Replugs on the Mac: three,
+the Mac back each time in about 3 s with no help. Boot with no cable, then the
+Mac: the tablet ready, the Mac stale (point 6). Fast charger plugged after
+boot: `DCP`, 1750/2100 mA, charging 210 ms after the attach, then 70 to 85 %
+in 49 min with the screen on: WARM at 45.0 °C, NORMAL again 9 min later at
+43.0 °C, and on past the 83 % where kernel 3 stayed. Not verified: a charge to
+100 %.

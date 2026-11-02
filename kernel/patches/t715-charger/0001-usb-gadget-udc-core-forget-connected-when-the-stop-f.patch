@@ -1,0 +1,43 @@
+From 355300a2d06c18d494978de14791b416430c2396 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/5] usb: gadget: udc: core: forget "connected" when the stop
+ fails
+
+usb_gadget_disconnect_locked() kept gadget->connected set when
+->pullup(gadget, 0) failed.  With no host ever attached, dwc3 times out
+waiting for the controller to halt, RUN/STOP already cleared, so the flag
+stayed set, the next connect was a no-op and the pull-up stayed off until
+the next boot.  Clear the flag either way.
+
+Seen on the Galaxy Tab S2 after a boot with no cable: the initramfs's
+gadget stop took 5.5 s instead of 1.5 s, and the next bind left DCTL at 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/gadget/udc/core.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/usb/gadget/udc/core.c b/drivers/usb/gadget/udc/core.c
+index fa49746d5..2eb48cf24 100644
+--- a/drivers/usb/gadget/udc/core.c
++++ b/drivers/usb/gadget/udc/core.c
+@@ -782,9 +782,13 @@ static int usb_gadget_disconnect_locked(struct usb_gadget *gadget)
+ 		goto out;
+ 	}
+ 
++	/*
++	 * With no host attached dwc3 times out waiting for the controller to
++	 * halt, RUN/STOP already cleared.  Staying "connected" would make the
++	 * next connect a no-op and leave the pull-up off until the next boot.
++	 */
+ 	ret = gadget->ops->pullup(gadget, 0);
+-	if (!ret)
+-		gadget->connected = 0;
++	gadget->connected = 0;
+ 
+ 	mutex_lock(&udc_lock);
+ 	if (gadget->udc->driver)
+-- 
+2.52.0
+

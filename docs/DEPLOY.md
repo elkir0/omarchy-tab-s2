@@ -968,7 +968,9 @@ From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` repor
 - **Modem**: calls, SMS and mobile data need the modem BOOT (11.8); the
   BOOT of 11.7 does not carry the modem series. `docs/hardware/MODEM.md`
   lists the gaps.
-- **Battery**: read-only fuel gauge, no charger or VBUS detection.
+- **Battery**: read-only fuel gauge; the charger driver sets stock's limits
+  and thermal rules (`docs/hardware/BATTERY.md` §8), with a real input near
+  1.5 A. A tablet that stays warm charges by steps above 80 %.
 - **Wi-Fi**: WPA2 only; regulatory country 99 without `clm_blob`, so
   channels 149-165 are off. A saved network connects about 3.5 s after
   wpa_supplicant starts (eleven boots out of twelve on 2026-10-29, first
