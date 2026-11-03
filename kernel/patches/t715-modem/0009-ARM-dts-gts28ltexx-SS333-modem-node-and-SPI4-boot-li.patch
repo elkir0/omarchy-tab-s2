@@ -1,4 +1,4 @@
-From 54c806b11df43793d443878b407d5c866a6d3e61 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 09/16] ARM: dts: gts28ltexx: SS333 modem node and SPI4 boot

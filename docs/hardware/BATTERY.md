@@ -332,3 +332,39 @@ boot: `DCP`, 1750/2100 mA, charging 210 ms after the attach, then 70 to 85 %
 in 49 min with the screen on: WARM at 45.0 °C, NORMAL again 9 min later at
 43.0 °C, and on past the 83 % where kernel 3 stayed. Not verified: a charge to
 100 %.
+
+## 9. Idle power with the screen off (2026-11-02)
+
+Measured on battery, screen off, 5 min a window. Every window had the CPU
+99.4 % idle and the display power domain off, so none of this is the panel or
+a busy task:
+
+| Window | Power |
+|---|---|
+| As shipped | 2.26 W |
+| Accelerometer released | 2.19 W (−67 mW) |
+| Wi-Fi power save on, accelerometer streaming again | 1.67 W (about −0.5 W, −0.4 to −0.6 W depending on the reference window) |
+| Both fixes installed, 15 min | 1.48 W (378 mA, 346 interrupts a second) |
+
+The last window is not a clean sum of the two before it: the chip cooled from
+44 to 38 °C during it, which accounts for part of the gap with 1.67 W.
+
+**The accelerometer.** On the lock screen the panel blanks 5 s after a wake,
+and the lock did it itself, with `omarchy-brightness-display off`: `t715-keys`
+never heard of it, never wrote its `touch-off` flag, so `t715-rotate` kept the
+accelerometer streaming — the sensors' I2C bus at about 510 interrupts a
+second, 0 once released — and the touchscreen stayed enabled under the dark
+panel. `t715-lock-blank-through-keys.patch` (omamobile-omarchy 0.1.27-1.2,
+`image/pkg/omamobile-omarchy/`) gives the lock's blank the path of every other
+screen-off: the same SIGUSR1 as hypridle's idle timeout, touch off, the flag,
+then DPMS, with Omarchy's own blank as the fallback.
+
+**Wi-Fi power save.** `22-t715-wifi-powersave.conf`
+(`image/rootfs/overlay/etc/NetworkManager/conf.d/`) sets `wifi.powersave = 3`
+on the brcmfmac interface, overriding Omarchy's off (`docs/image/ROOTFS.md`,
+"Firewall"): the largest single idle saving measured so far, at the price of
+some latency on incoming traffic while the radio dozes.
+
+**What remains**, about 1.5 W, is the CPU rails at their 1.2 GHz voltages with
+no cpuidle, the memory at its top level and the modem link; CPU frequency
+scaling (`docs/hardware/CPUFREQ.md`, stage 1) is the next lever.

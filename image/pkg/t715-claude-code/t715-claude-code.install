@@ -1,0 +1,22 @@
+## arg 1:  the new package version
+post_install() {
+  cat <<'EOF'
+t715-claude-code: the installer is in, not Claude Code itself (Anthropic's
+licence). To install it, as root:
+
+    sudo t715-claude-install
+
+then sign in as your user:
+
+    claude setup-token
+    claude-token-save     # paste the token at its prompt, not as an argument
+
+See docs/DEPLOY.md 11.10.
+EOF
+}
+
+## arg 1:  the new package version
+## arg 2:  the old package version
+post_upgrade() {
+  post_install "$1"
+}

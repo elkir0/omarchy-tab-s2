@@ -1,4 +1,4 @@
-From 51f08bea2c16c4b2025b8fa4b6ac55f699a47786 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 16/24] power: supply: read-only SM5703 fuel gauge driver

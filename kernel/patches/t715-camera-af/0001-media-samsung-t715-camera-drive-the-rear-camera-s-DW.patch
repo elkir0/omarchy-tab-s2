@@ -1,0 +1,330 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/2] media: samsung: t715-camera: drive the rear camera's
+ DW9807 focus motor
+
+The rear S5K4H5 module has a DW9807 voice coil on ISP I2C channel 1, at
+0x0c.  Its rail came on with the camera, but nothing ever moved the lens:
+it stayed at rest, sharp at no distance, and every rear photograph was
+blurred.
+
+The driver now wakes the motor at stream on and ramps the lens to
+V4L2_CID_FOCUS_ABSOLUTE in steps of 16, then ramps it back to 0 and powers
+the coil down before the rails go off, as dw9807-vcm.c does in suspend and
+resume.  A failing motor leaves the stream running.  The control's default
+comes from the device tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/samsung/t715-camera.c | 207 +++++++++++++++++--
+ 1 file changed, 186 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/media/platform/samsung/t715-camera.c b/drivers/media/platform/samsung/t715-camera.c
+index 6b95e1ab4..ceabe846c 100644
+--- a/drivers/media/platform/samsung/t715-camera.c
++++ b/drivers/media/platform/samsung/t715-camera.c
+@@ -12,6 +12,9 @@
+  *
+  * The gates this driver touches are the functional ones only.  The rest of CMU_CAM0
+  * is the block's bus (CLK_IGNORE_UNUSED), and turning it off hangs the SoC.
++ *
++ * The rear camera's DW9807 focus motor lives on its own bit-banged bus and is ramped
++ * like dw9807-vcm.c, as V4L2_CID_FOCUS_ABSOLUTE on the rear video node.
+  */
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+@@ -95,6 +98,14 @@
+ #define SENSOR_GAIN		0x0204
+ #define SENSOR_FLL		0x0340
+ 
++/* DW9807 registers, dw9807-vcm.c:23-35. */
++#define VCM_CTL			0x02
++#define VCM_MSB			0x03
++#define VCM_STATUS		0x05
++#define VCM_MAX_POS		1023
++#define VCM_STEP		16
++#define VCM_MAX_RETRY		10
++
+ enum { CAM_FRONT, CAM_REAR };
+ 
+ struct t715_cam_buf {
+@@ -116,12 +127,14 @@ struct t715_cam {
+ 	struct pinctrl *pins;
+ 	struct pinctrl_state *st_off, *st_on;
+ 	struct i2c_client *sensor;
++	struct i2c_client *vcm;
++	int vcm_pos;
+ 	const char *fw_name;
+ 	u32 lanes, settle, width, height;
+ 
+ 	struct v4l2_device v4l2;
+ 	struct v4l2_ctrl_handler ctrls;
+-	struct v4l2_ctrl *exposure, *gain, *vblank;
++	struct v4l2_ctrl *exposure, *gain, *vblank, *focus;
+ 	struct video_device vdev;
+ 	struct vb2_queue queue;
+ 	struct mutex lock;
+@@ -173,6 +186,124 @@ static int t715_sensor_load(struct t715_cam *c)
+ 	return ret;
+ }
+ 
++/* --- DW9807 focus motor, rear camera only, on its own bit-banged bus. --- */
++
++static int t715_vcm_write(struct t715_cam *c, u8 reg, u8 val)
++{
++	u8 buf[2] = { reg, val };
++	int ret;
++
++	ret = i2c_master_send(c->vcm, buf, sizeof(buf));
++	return ret < 0 ? ret : 0;
++}
++
++/* dw9807-vcm.c:53-74: point the address pointer at STATUS, then read it back. */
++static int t715_vcm_status(struct t715_cam *c)
++{
++	u8 reg = VCM_STATUS, val;
++	int ret;
++
++	ret = i2c_master_send(c->vcm, &reg, sizeof(reg));
++	if (ret < 0)
++		return ret;
++	ret = i2c_master_recv(c->vcm, &val, sizeof(val));
++	if (ret < 0)
++		return ret;
++	return val;
++}
++
++static int t715_vcm_wait(struct t715_cam *c)
++{
++	int ret, i;
++
++	for (i = 0; i < VCM_MAX_RETRY; i++) {
++		ret = t715_vcm_status(c);
++		if (ret < 0)
++			return ret;
++		if (!ret)
++			return 0;
++		usleep_range(1000, 1100);
++	}
++	return -EBUSY;
++}
++
++static int t715_vcm_set(struct t715_cam *c, int pos)
++{
++	u8 buf[3] = { VCM_MSB, (pos >> 8) & 3, pos & 0xff };
++	int ret;
++
++	ret = t715_vcm_wait(c);
++	if (ret)
++		return ret;
++	ret = i2c_master_send(c->vcm, buf, sizeof(buf));
++	if (ret < 0)
++		return ret;
++	c->vcm_pos = pos;
++	return 0;
++}
++
++/*
++ * The soft movement dw9807_vcm_suspend/resume use: towards to in steps of
++ * VCM_STEP, the last step landing exactly on it.
++ */
++static int t715_vcm_ramp(struct t715_cam *c, int to)
++{
++	int ret, pos = c->vcm_pos;
++
++	while (pos != to) {
++		if (abs(to - pos) <= VCM_STEP)
++			pos = to;
++		else if (to > pos)
++			pos += VCM_STEP;
++		else
++			pos -= VCM_STEP;
++		ret = t715_vcm_set(c, pos);
++		if (ret)
++			return ret;
++		usleep_range(1000, 1100);
++	}
++	return 0;
++}
++
++/* The rail is on and the pull-ups with it: wake the motor and ramp to the control. */
++static void t715_vcm_on(struct t715_cam *c)
++{
++	int ret;
++
++	if (!c->vcm)
++		return;
++	v4l2_ctrl_lock(c->focus);
++	ret = t715_vcm_write(c, VCM_CTL, 0x00);
++	if (!ret) {
++		c->vcm_pos = 0;
++		ret = t715_vcm_ramp(c, c->focus->cur.val);
++	}
++	if (ret) {
++		/* Streaming goes on without focus rather than failing on it. */
++		c->vcm_pos = -1;
++		dev_warn_once(c->dev, "focus motor off line: %d\n", ret);
++	}
++	v4l2_ctrl_unlock(c->focus);
++}
++
++/* Back to rest, then power down.  A failure here must not stop the rest. */
++static void t715_vcm_off(struct t715_cam *c)
++{
++	int ret;
++
++	if (!c->vcm || c->vcm_pos < 0)
++		return;
++	v4l2_ctrl_lock(c->focus);
++	ret = t715_vcm_ramp(c, 0);
++	if (ret)
++		dev_warn(c->dev, "focus motor stuck at %d: %d\n", c->vcm_pos, ret);
++	ret = t715_vcm_write(c, VCM_CTL, 0x01);
++	if (ret)
++		dev_warn(c->dev, "focus motor power down failed: %d\n", ret);
++	c->vcm_pos = -1;
++	v4l2_ctrl_unlock(c->focus);
++}
++
+ /* fimc-is-device-6b2.c:609-627 */
+ static int t715_front_on(struct t715_cam *c)
+ {
+@@ -422,6 +553,7 @@ static int t715_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	ret = t715_sensor_load(c);
+ 	if (ret)
+ 		goto phy;
++	t715_vcm_on(c);
+ 	ret = v4l2_ctrl_handler_setup(&c->ctrls);
+ 	if (ret)
+ 		goto phy;
+@@ -444,6 +576,7 @@ static int t715_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	writel(readl(c->lite + LITE_CIIMGCPT) & ~LITE_IMGCPTEN, c->lite + LITE_CIIMGCPT);
+ 	t715_csis_off(c);
+ phy:
++	t715_vcm_off(c);
+ 	phy_power_off(c->phy);
+ clks:
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(c->clks), c->clks);
+@@ -474,6 +607,7 @@ static void t715_stop_streaming(struct vb2_queue *q)
+ 	t715_csis_off(c);
+ 	phy_power_off(c->phy);
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(c->clks), c->clks);
++	t715_vcm_off(c);
+ 	if (c->kind == CAM_FRONT)
+ 		t715_front_off(c);
+ 	else
+@@ -507,6 +641,11 @@ static int t715_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		return t715_sensor_write(c, SENSOR_GAIN, ctrl->val, 2);
+ 	case V4L2_CID_VBLANK:
+ 		return t715_sensor_write(c, SENSOR_FLL, c->height + ctrl->val, 2);
++	case V4L2_CID_FOCUS_ABSOLUTE:
++		/* Kept and applied by t715_vcm_on() at the next stream on. */
++		if (c->vcm_pos < 0)
++			return 0;
++		return t715_vcm_set(c, ctrl->val);
+ 	}
+ 	return -EINVAL;
+ }
+@@ -607,18 +746,46 @@ static const struct v4l2_file_operations t715_fops = {
+ 	.poll = vb2_fop_poll,
+ };
+ 
++/*
++ * A phandle to a bit-banged bus plus an address: a dummy client to talk through.
++ * No phandle means no device; an addr_default of 0 means the address is required.
++ */
++static struct i2c_client *t715_i2c_client(struct device *dev, const char *bus_prop,
++					  const char *addr_prop, u16 addr_default)
++{
++	struct device_node *bus_np;
++	struct i2c_adapter *bus;
++	struct i2c_client *client;
++	u32 addr = addr_default;
++	int ret;
++
++	bus_np = of_parse_phandle(dev->of_node, bus_prop, 0);
++	if (!bus_np)
++		return NULL;
++	bus = of_get_i2c_adapter_by_node(bus_np);
++	of_node_put(bus_np);
++	if (!bus)
++		return ERR_PTR(-EPROBE_DEFER);
++	ret = of_property_read_u32(dev->of_node, addr_prop, &addr);
++	if (ret && !addr_default) {
++		i2c_put_adapter(bus);
++		return ERR_PTR(ret);
++	}
++	client = devm_i2c_new_dummy_device(dev, bus, addr);
++	i2c_put_adapter(bus);
++	return client;
++}
++
+ static int t715_cam_probe(struct platform_device *pdev)
+ {
+ 	static const char * const front_rails[] = { "avdd", "iovdd" };
+ 	static const char * const rear_rails[] = { "avdd", "dvdd", "af", "iovdd" };
+ 	static const char * const clk_names[] = { "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy" };
+ 	struct device *dev = &pdev->dev;
+-	struct device_node *bus_np;
+-	struct i2c_adapter *bus;
+ 	struct video_device *vdev;
+ 	struct vb2_queue *q;
+ 	struct t715_cam *c;
+-	u32 addr;
++	u32 af_def = 0;
+ 	int i, ret;
+ 
+ 	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
+@@ -685,22 +852,14 @@ static int t715_cam_probe(struct platform_device *pdev)
+ 	if (IS_ERR(c->st_on))
+ 		return PTR_ERR(c->st_on);
+ 
+-	bus_np = of_parse_phandle(dev->of_node, "t715,i2c-bus", 0);
+-	if (!bus_np)
+-		return -EINVAL;
+-	bus = of_get_i2c_adapter_by_node(bus_np);
+-	of_node_put(bus_np);
+-	if (!bus)
+-		return -EPROBE_DEFER;
+-	ret = of_property_read_u32(dev->of_node, "t715,i2c-addr", &addr);
+-	if (!ret) {
+-		c->sensor = devm_i2c_new_dummy_device(dev, bus, addr);
+-		if (IS_ERR(c->sensor))
+-			ret = PTR_ERR(c->sensor);
+-	}
+-	i2c_put_adapter(bus);
+-	if (ret)
+-		return ret;
++	c->sensor = t715_i2c_client(dev, "t715,i2c-bus", "t715,i2c-addr", 0);
++	if (IS_ERR_OR_NULL(c->sensor))
++		return c->sensor ? PTR_ERR(c->sensor) : -EINVAL;
++	/* The focus motor is optional; the front camera has none. */
++	c->vcm = t715_i2c_client(dev, "t715,af-bus", "t715,af-addr", 0x0c);
++	if (IS_ERR(c->vcm))
++		return PTR_ERR(c->vcm);
++	c->vcm_pos = -1;
+ 
+ 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+ 	if (ret)
+@@ -717,13 +876,19 @@ static int t715_cam_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	v4l2_ctrl_handler_init(&c->ctrls, 3);
++	v4l2_ctrl_handler_init(&c->ctrls, 4);
+ 	c->exposure = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_EXPOSURE,
+ 					1, 0xfff0, 1, c->height);
+ 	c->gain = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+ 				    0x20, 0x200, 1, 0x80);
+ 	c->vblank = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_VBLANK,
+ 				      36, 0xfff0 - c->height, 1, 36);
++	if (c->vcm) {
++		of_property_read_u32(dev->of_node, "t715,af-default", &af_def);
++		af_def = clamp(af_def, 0, VCM_MAX_POS);
++		c->focus = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_FOCUS_ABSOLUTE,
++					     0, VCM_MAX_POS, 1, af_def);
++	}
+ 	ret = c->ctrls.error;
+ 	if (ret)
+ 		goto ctrls;

@@ -1,4 +1,4 @@
-From 094007a9b5f472f577b1878a343b92888be37420 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH] soc: samsung: program the Exynos5433 G3D body bias with

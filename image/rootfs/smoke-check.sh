@@ -213,8 +213,13 @@ if [ "$osk" = true ]; then
 else
     fail "alarm's gsetting screen-keyboard-enabled: ${osk:-unreadable}, not true"
 fi
-# Its layout: the first input source, US QWERTY.
-want="[('xkb', 'us'), ('xkb', 'fr')]"
+# Its layout: the first input source, locale.env's T715_XKB.
+T715_XKB=$(sed -n 's/^T715_XKB=//p' /usr/share/t715-omarchy/locale.env 2>/dev/null)
+if [ "$T715_XKB" = fr ]; then
+    want="[('xkb', 'fr'), ('xkb', 'us')]"
+else
+    want="[('xkb', 'us'), ('xkb', 'fr')]"
+fi
 src="$(run env HOME=/home/alarm gsettings get org.gnome.desktop.input-sources sources 2>/dev/null)"
 if [ "$src" = "$want" ]; then
     pass "alarm's gsetting org.gnome.desktop.input-sources sources: $src"

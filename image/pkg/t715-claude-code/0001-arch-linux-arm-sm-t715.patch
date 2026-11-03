@@ -1,0 +1,45 @@
+--- a/install.sh
++++ b/install.sh
+@@ -137,16 +137,10 @@
+ # image ships without it; nodejs.org's armv7l node links libatomic.so.1, which the pad
+ # images only carry as a glib dependency (a bare Debian armhf has none: node won't start).
+ # These packages are only ever missing on the first (root) install.
+-apt_install() { $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y -qq "$@"; }
+-pkgs=()
+-command -v rg >/dev/null || pkgs+=(ripgrep)
+-command -v xz >/dev/null || pkgs+=(xz-utils)
+-dpkg -s libatomic1 >/dev/null 2>&1 || pkgs+=(libatomic1)
+-if [ "${#pkgs[@]}" -gt 0 ]; then
+-  log "Installing ${pkgs[*]}…"
+-  apt_install update || true
+-  apt_install install "${pkgs[@]}" >/dev/null || fail "apt-get install ${pkgs[*]} failed"
+-fi
++apt_install() { false; }   # SM-T715 (Arch Linux ARM): no apt; earlyoom below is skipped
++# SM-T715: the dependencies come from pacman beforehand (ripgrep, xz, npm; Node 22 is
++# nodejs-lts-jod; libatomic.so.1 is gcc-libs').
++for c in rg xz npm; do command -v "$c" >/dev/null || fail "$c is missing: pacman -S ripgrep xz npm"; done
+ 
+ node_ok() {   # does the resolved `node` satisfy Claude Code's engine guard?
+   node -e 'const[a,b]=process.versions.node.split(".").map(Number);process.exit(((a===22&&b>=17)||(a>=24&&(a>24||b>=2)))?0:1)' 2>/dev/null
+@@ -202,6 +196,12 @@
+ find "$DL_CACHE" -name 'claude-*.bin' ! -name "$(basename "$binf")" -delete 2>/dev/null || true
+ fetch_resumable "$CLAUDE_REL/$VER/$DL_PLATFORM/claude" "$binf" \
+   || fail "download failed ($CLAUDE_REL/$VER/$DL_PLATFORM/claude)"
++# SM-T715: the binary against the sha256 of Anthropic's manifest for this version.
++want="$(curl -fsSL --max-time 30 "$CLAUDE_REL/$VER/manifest.json" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["platforms"][sys.argv[1]]["checksum"])' "$DL_PLATFORM")" \
++  || fail "cannot read $CLAUDE_REL/$VER/manifest.json"
++have="$(sha256sum "$binf" | cut -d' ' -f1)"
++[ "$have" = "$want" ] || { rm -f "$binf"; fail "sha256 mismatch for the official binary (have $have, manifest $want)"; }
++log "sha256 matches Anthropic's manifest ($want)"
+ 
+ # 4. Extract the JavaScript on-device. The extractor reads Bun's module table (no full
+ #    scan any more: seconds on a laptop, a few minutes at most on an H3 — the old carve
+@@ -320,7 +320,7 @@
+   for a in "\$@"; do case "\$a" in -p|--print) headless=1;; esac; done
+   [ "\$headless" = "1" ] && exec node "$LIB/claude-client.mjs" "\$@"
+ fi
+-exec taskset -c "\${CLAUDE_CPUS:-0,1,2,3}" nice -n 5 node "$LIB/claude.mjs" "\$@"
++exec taskset -c "\${CLAUDE_CPUS:-0-7}" nice -n 5 node "$LIB/claude.mjs" "\$@"
+ EOF
+ if [ -L "$BINDIR/claude" ]; then $SUDO rm -f "$BINDIR/claude" || true; fi
+ if ! put_if_changed "$BINDIR/claude" "$wrap" 755; then

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse a push that would publish a commit with a personal identity, a time of
+# day, or something personal in its message or diff (.githooks/privacy-scan.py).
+exec python3 -I "$(git rev-parse --show-toplevel)/.githooks/privacy-scan.py" --pre-push

@@ -1,6 +1,7 @@
 # Rotates the screen and touch input with the tablet (docs/image/ROTATION.md).
-# Named as omamobile.quicksettings expects: its Rotation tile starts it and
-# enables it, so it is off until the owner turns it on.
+# Named as omamobile.quicksettings expects: its Rotation tile starts and
+# enables it, or stops and disables it. The image enables it for alarm
+# (rootfs/omarchy-user-setup.sh), so the tablet rotates from the first boot.
 [Unit]
 Description=Rotate the screen with the tablet
 After=graphical-session.target

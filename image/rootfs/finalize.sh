@@ -82,7 +82,7 @@ base_tsv="$B/omarchy-base.tsv"
 {
     echo "== Image tree (rootfs/finalize.sh, $(date -u '+%Y-%m-%d %H:%M:%S UTC')) =="
     echo "base:            t715-omarchy:base-armv7h (Arch Linux ARM armv7h tarball)"
-    echo "hostname:        gts28lte-omarchy; time zone UTC; LANG=en_US.UTF-8"
+    echo "hostname:        gts28lte-omarchy; $(sed -n 's/^T715_//p' /usr/share/t715-omarchy/locale.env | tr '\n' ' ')"
     echo "user:            $(cat "$B/alarm-id.txt" 2>/dev/null || id alarm)"
     echo
     echo "== Versions =="

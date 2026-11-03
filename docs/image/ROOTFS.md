@@ -709,6 +709,16 @@ closed, the only way in.
 The Hotspot needs protected management frames off (`21-t715-wifi-no-pmf.conf`, for the
 client link too): with NetworkManager's default a phone's password read as rejected.
 
+Wi-Fi power save is on (`22-t715-wifi-powersave.conf`, `wifi.powersave = 3` on
+the brcmfmac interface), overriding Omarchy's `omarchy-wifi-powersave.conf`,
+which turns it off for laptops. Measured on battery, screen off, 5 min a window:
+2.26 W with power save off against 1.67 W with it on, 0.4 to 0.6 W depending on
+the reference window — the largest single idle saving so far. The price is some
+latency on incoming traffic while the radio dozes. The section is named
+(`[connection-t715-wifi-powersave]`, `match-device=driver:brcmfmac`) because a
+named section that matches the device comes before Omarchy's plain
+`[connection]`, whatever the order of the files.
+
 The Hotspot tile needs more while it is on: DHCP and DNS on the Wi-Fi interface and
 forwarding towards the modem, which `/etc/NetworkManager/dispatcher.d/50-t715-hotspot-firewall`
 adds when the access point named Hotspot comes up and removes when it goes down, straight

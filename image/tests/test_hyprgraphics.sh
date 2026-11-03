@@ -5,7 +5,7 @@
 # ARM container with the repository mounted read-only at /repo
 # ([t715-omarchy] before [core], SigLevel = Optional TrustAll), checks that:
 #   - pacman -Si hyprgraphics resolves to the pkg/hyprgraphics version
-#     (0.5.1-4.1) from t715-omarchy;
+#     (0.6.0-1.1) from t715-omarchy;
 #   - pacman -Sp hyprland takes that hyprgraphics from t715-omarchy;
 #   - the deadlock reproducer tests/hyprgraphics-repro/repro.cpp, built
 #     against the installed package (pkg-config, /usr/lib, no

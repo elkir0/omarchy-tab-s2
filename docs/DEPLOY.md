@@ -498,7 +498,10 @@ md5 -q image/out/rootfs-omarchy.img          # needed by the push script
   and writes `image/out/rootfs-omarchy.img` (raw ext4, label `ALARM`, content +
   20 %, 4032 MiB on 2026-10-29), its `.sha256` and
   `image/out/rootfs-omarchy.MANIFEST`. Log: `image/cache/rootfs-omarchy-build.log`.
-  Options: `--size MiB`, `--keep-image`, `--no-cache`.
+  Options: `--size MiB`, `--keep-image`, `--no-cache`; `--locale LANG`,
+  `--timezone TZ` and `--keyboard us|fr` set the image's language, time zone and
+  the on-screen keyboard's first layout (en_US.UTF-8, UTC and us by default),
+  written to `/usr/share/t715-omarchy/locale.env`.
 - `image/tools/build-rootfs --public` builds the image for a release: no SSH key
   and neither vendor file. At boot the initramfs copies the NVRAM and the patch
   RAM from the tablet's SYSTEM partition, read-only, and installs
@@ -841,9 +844,27 @@ after step 3, and step 5 cannot be undone.
    `--boot` gives the image the stock BOOT header's name
    (`SYSMAGIC000KU`) and BOOT's 14 MiB limit; it differs from the
    RECOVERY image by that one byte. `t715.quiet=1` gives the quiet boot
-   (11.1); the rescue keeps the text console. Reference tablet: `boot.img`
-   sha256 `43d05bb5…` (kernel `00024-ged71dc803f16`), rescue
+   (11.1); the rescue keeps the text console. Reference tablet, 2026-10-29:
+   `boot.img` sha256 `43d05bb5…` (kernel `00024-ged71dc803f16`), rescue
    `recovery.img` `fe94a7c3…` (kernel `00021`).
+
+   **Since 2026-11-03 the rescue runs the daily kernel** (the camera and
+   charger kernel of `out/mainline-camaf`, the one in BOOT), with the same
+   knobs, minus its two modem modules. Without `sec_modem_v1.ko`,
+   `shannon-modem-prepare.service` skips itself, so the CP never boots in
+   the rescue, as with `00021`, which had no modem series:
+
+   ```bash
+   M=out/mainline-camaf; R=media/0/linux/rootfs-omarchy.img; W=$(mktemp -d)
+   tar -xJf $M/modules.tar.xz -C $W && rm $W/lib/modules/*/kernel/drivers/misc/modem_v1/sec_modem_v1.ko $W/lib/modules/*/kernel/drivers/misc/mipi-lli/exynos5433-mipi-lli.ko
+   (cd $W && tar --no-xattrs -cJf $W.tar.xz .)
+   bash boot/build-initramfs.sh --out out/initramfs-rescue-camaf --knobs "t715.usbfn=ecm t715.failwait=300 t715.rootimg=$R t715.persist=0 t715.wdtguard=0" --modules $W.tar.xz
+   bash boot/pack-test-recovery.sh --initramfs out/initramfs-rescue-camaf/initramfs.cpio.gz --out out/recovery-rescue-camaf $M
+   ```
+
+   Rescue `recovery.img` `058d0481…`, booted once on the tablet: image root
+   read-only, no modem module or service, Wi-Fi, SSH and sddm up. The
+   `00021` rescue stays in `out/recovery-rescue/` to go back.
 2. **Keep the current BOOT** (Android's, with the ramdisk changes of 6.)
    in your private backups, from Linux:
    `device/tssh 'cat /dev/mmcblk0p9' > boot-p9-before-linux.img`.
@@ -949,6 +970,45 @@ The GPS needs the kernel of `kernel/patches/t715-gps` in BOOT (UART0, `CONFIG_GP
 `t715-gps` with `omamobile-shell` 1.15 or later, which a persistent root takes with `pacman -U`.
 Nothing else: the first `omamobile-gnss on`, from the Location tile, copies `gpsd` from SYSTEM. Check
 with `image/tests/ondevice/t715-gps.sh`, as root on the tablet, Wi-Fi or LTE connected.
+
+### 11.10 Claude Code
+
+The image ships no Claude Code binary: Anthropic's licence does not allow
+redistributing it, and there is no armv7 build anyway. What it ships is the
+installer (`t715-claude-code`: Yumi Lab's `claude-code-smartpi`, patched for
+this tablet — `docs/image/PACKAGES.md`). One root command, Wi-Fi connected,
+about 250 MB downloaded:
+
+```
+sudo t715-claude-install
+```
+
+That downloads Anthropic's official binary, checks it against Anthropic's
+manifest, extracts its JavaScript, rebuilds it under Node 22 and installs it
+to `/opt/claude-code` with `claude` in `/usr/local/bin`. Then sign in, **as
+the user** (not root), with a Claude Pro or Max account — no API key, no local
+browser: run `claude setup-token` on the tablet, open the URL it prints on
+another device, and paste the printed token at the second command's prompt
+(not as an argument: it would stay in the shell's history):
+
+```
+claude setup-token
+claude-token-save
+```
+
+`claude-token-save` stores it in `~/.claude/.oauth_token` (mode 600) and
+`~/.claude/settings.json` (`env.CLAUDE_CODE_OAUTH_TOKEN`). It is valid a year;
+nothing else ever reads it, and no token belongs in the image or a file of this
+repository.
+
+The installer caps the version at `MAX_VERSION` (2.1.270): from 2.1.271 the
+full-screen interface stays blank under Node (its renderer calls a native cell
+engine only Anthropic's internal Bun build has). `t715-claude-install` refuses
+anything above the cap unless `--force`. To move to another version, pinned:
+
+```
+sudo t715-claude-install 2.1.269
+```
 
 ## 12. Known limitations
 

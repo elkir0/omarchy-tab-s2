@@ -9,8 +9,8 @@ without it, a password for an SAE network goes through nmcli with a WPA2-PSK
 profile (key-mgmt pinned, password on stdin through `--ask`, as the upstream
 fallback does; the SSID as a positional parameter; the profile deleted if it
 fails to come up). With SAE, or without iw, nothing changes. Against
-omarchy-mobile 5f7ba48, packages/omamobile-shell (applied with patch -p1 in
-that directory, after 0001).
+omarchy-mobile 87b8395 (omamobile-shell 0.2.94), packages/omamobile-shell
+(applied with patch -p1 in that directory, after 0001).
 
 diff --git a/plugins/omamobile.quicksettings/WifiModel.js b/plugins/omamobile.quicksettings/WifiModel.js
 index ed8d2b3..1ae9cd8 100644

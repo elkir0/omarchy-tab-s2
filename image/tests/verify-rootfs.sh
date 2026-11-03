@@ -311,6 +311,7 @@ check "ufw: only SSH and DHCP come in, on the USB cable, identical to rootfs/ove
 exists /etc/NetworkManager/dispatcher.d/50-t715-hotspot-firewall
 check "ufw: the Hotspot tile opens DHCP, DNS and forwarding while it is on" test "$(fmode /etc/NetworkManager/dispatcher.d/50-t715-hotspot-firewall)" = 0755
 exists /etc/NetworkManager/conf.d/21-t715-wifi-no-pmf.conf
+exists /etc/NetworkManager/conf.d/22-t715-wifi-powersave.conf
 check "no Omarchy provisioning pending (/var/lib/omarchy/provisioning/pending)" \
     absent /var/lib/omarchy/provisioning/pending
 check "omarchy-provision-owner.service not enabled${prov_on:+ (found in$prov_on)}" test -z "$prov_on"
@@ -453,7 +454,7 @@ check "  the opt-in flag is absent for alarm (~/.config/t715-omarchy/fcitx5)" ab
 get /home/alarm/.config/dconf/user; cp "$W/f" "$W/dconf"
 check "alarm's dconf database holds the OSK gsetting (screen-keyboard-enabled; its value: the smoke check)" \
     grep -aq 'screen-keyboard-enabled' "$W/dconf"
-check "  and the keyboard's layout, French AZERTY first (input-sources; its value: the smoke check)" \
+check "  and the keyboard's layout, locale.env's first (input-sources; its value: the smoke check)" \
     sh -c 'grep -aq "input-sources" "$1" && grep -aq "xkb" "$1"' _ "$W/dconf"
 LAYOUT=/usr/share/t715-omarchy/squeekboard/keyboards/terminal
 for l in us fr; do
@@ -486,8 +487,8 @@ get $PS/state.json; cp "$W/f" "$W/pstate"
 dfs "ls -p /usr/share/omamobile/omarchy/patches" | awk -F/ '$6 ~ /\.patch$/ {print $6}' | sort > "$W/series"
 # The JSON the applier writes (indent 2, sorted keys): a list's items one per line.
 jlist() { awk -v k="\"$2\": [" 'index($0, k) { if (index($0, "]")) exit; f = 1; next } f && index($0, "]") { exit } f { gsub(/[ ",]/, ""); print }' "$1"; }
-check "the series: upstream's patches and ours, 0014 for the lock, without 0012, 0016 (phone-only)" \
-    sh -c '[ "$(wc -l < "$1")" = 19 ] && grep -qx t715-update-without-kernel-package.patch "$1" && grep -qx t715-pacman-keeps-alarm.patch "$1" && grep -Eq "^0014-" "$1" && ! grep -Eq "^(0012|0016)-" "$1"' _ "$W/series"
+check "the series: upstream's 24 patches and ours, 0014 for the lock, without 0012, 0016 (phone-only)" \
+    sh -c '[ "$(wc -l < "$1")" = 27 ] && grep -qx t715-update-without-kernel-package.patch "$1" && grep -qx t715-pacman-keeps-alarm.patch "$1" && grep -qx t715-lock-blank-through-keys.patch "$1" && grep -Eq "^0014-" "$1" && ! grep -Eq "^(0012|0016)-" "$1"' _ "$W/series"
 check "  bridge-4.0.4-menu-first-frame.patch kept (it targets 4.0.6)" grep -qx 'bridge-4.0.4-menu-first-frame.patch' "$W/series"
 check "applier status: result ok, nothing failed" \
     sh -c 'grep -q "\"result\": \"ok\"" "$1" && grep -q "\"failed\": null" "$1"' _ "$W/pstatus"
@@ -586,8 +587,10 @@ for f in /usr/local/bin/t715-rotate /etc/systemd/user/omamobile-autorotate.servi
     exists "$f" || rot_missing="$rot_missing $f"
 done
 check "rotation: t715-rotate, its unit and iio-sensor-proxy${rot_missing:+; missing:$rot_missing}" test -z "$rot_missing"
-check "rotation: off by default, the Rotation tile turns it on" \
+check "rotation: not enabled --global, so the Rotation tile can turn it off" \
     sh -c '[ -z "$1" ]' _ "$(linkto /etc/systemd/user/graphical-session.target.wants/omamobile-autorotate.service 2>/dev/null)"
+check "rotation: on for alarm from the first boot (omarchy-user-setup.sh)" \
+    test "$(linkto /home/alarm/.config/systemd/user/graphical-session.target.wants/omamobile-autorotate.service 2>/dev/null)" = /etc/systemd/user/omamobile-autorotate.service
 get /usr/bin/omarchy-update-restart; cp "$W/f" "$W/update-restart"
 check "pacman: omarchy update knows there is no kernel package" grep -qx 'kernel_updated=false' "$W/update-restart"
 get /usr/bin/omarchy-refresh-pacman; cp "$W/f" "$W/refresh-pacman"
@@ -629,6 +632,37 @@ check "GPS: GeoClue itself has no network (its GeoIP lookup survives [wifi] enab
 check "GPS: GeoClue's only source is the receiver" \
     sh -c 'grep -q "^nmea-socket=/run/t715-gps/nmea.sock" "$1" &&
            [ "$(grep -c "^enable=false" "$1")" = 6 ] && [ "$(grep -c "^enable=true" "$1")" = 1 ]' _ "$W/geoclue-gps"
+
+echo "== Claude Code: an installer, never Anthropic's code (docs/image/PACKAGES.md) =="
+check "t715-claude-code installed ($(pkg_ver t715-claude-code))" has_pkg t715-claude-code
+check "/usr/bin/t715-claude-install executable (mode 0755)" test "$(fmode /usr/bin/t715-claude-install)" = 0755
+get /usr/share/licenses/t715-claude-code/LICENSE; cp "$W/f" "$W/cc-lic"
+check "the licence is Yumi Lab's (MIT License)" \
+    sh -c 'grep -q "MIT License" "$1" && grep -q "Yumi Lab" "$1"' _ "$W/cc-lic"
+cc_missing=""
+for f in /usr/share/t715-claude-code/installer/install.sh /usr/share/t715-claude-code/installer/MAX_VERSION \
+         /usr/share/t715-claude-code/installer/lib/claude-release.sh /usr/share/t715-claude-code/installer/bin/claude-token-save; do
+    exists "$f" || cc_missing="$cc_missing $f"
+done
+check "the installer tree is in (${cc_missing:+missing:$cc_missing})" test -z "$cc_missing"
+check "nothing of Anthropic's: no /opt/claude-code" absent /opt/claude-code
+check "nothing of Anthropic's: no /usr/local/bin/claude" absent /usr/local/bin/claude
+# No token, anywhere: not even a file named like the token store. These trees
+# are dumped once for the three greps below (read-only; rdump puts each
+# directory inside its destination, which must exist).
+mkdir -p "$W/cc"
+for d in /etc /home /root /opt /usr/share/t715-claude-code; do
+    dfs "rdump $d $W/cc" >/dev/null 2>&1 || true
+done
+oauth="$(find "$W/cc" -name .oauth_token -print -quit)"
+check "no .oauth_token anywhere in /etc, /home, /root, /opt, /usr/share/t715-claude-code${oauth:+: found $oauth}" \
+    test -z "$oauth"
+tok="$(grep -rlIE 'sk-ant-[A-Za-z0-9]+-[A-Za-z0-9_-]{20,}' "$W/cc" 2>/dev/null | sed "s|^$W/cc||" | tr '\n' ' ')"
+check "no OAuth token value (sk-ant-…) in /etc, /home, /root, /opt, /usr/share/t715-claude-code${tok:+: found in $tok}" \
+    test -z "$tok"
+envtok="$(grep -rlE 'CLAUDE_CODE_OAUTH_TOKEN' "$W/cc/etc" "$W/cc/home" "$W/cc/root" 2>/dev/null | sed "s|^$W/cc||" | tr '\n' ' ')"
+check "no CLAUDE_CODE_OAUTH_TOKEN under /etc, /home, /root${envtok:+: found in $envtok}" test -z "$envtok"
+
 check "telephony: no NV copy and no APN in the image" \
     sh -c '! debugfs -R "stat /var/lib/shannon/nv" /img/rootfs.img 2>/dev/null | grep -q "^Inode:" && ! debugfs -R "stat /etc/shannond.env" /img/rootfs.img 2>/dev/null | grep -q "^Inode:"'
 units=""
@@ -839,9 +873,15 @@ check "no t715-omarchy sync database left" absent /var/lib/pacman/sync/t715-omar
 
 echo "== identity and tablet settings =="
 check "/etc/hostname = gts28lte-omarchy" test "$(cat_ /etc/hostname | tr -d '\n')" = gts28lte-omarchy
-check "time zone UTC (/etc/localtime)" \
-    sh -c 'case "$1" in */zoneinfo/UTC) exit 0 ;; *) exit 1 ;; esac' _ "$(linkto /etc/localtime || true)"
-check "/etc/locale.conf: LANG=en_US.UTF-8" grep -qx 'LANG=en_US.UTF-8' <(cat_ /etc/locale.conf)
+# The language and time zone tools/build-rootfs was given (--locale, --timezone).
+get /usr/share/t715-omarchy/locale.env; cp "$W/f" "$W/locale.env"
+L_LANG=$(sed -n 's/^T715_LANG=//p' "$W/locale.env"); L_TZ=$(sed -n 's/^T715_TZ=//p' "$W/locale.env")
+L_XKB=$(sed -n 's/^T715_XKB=//p' "$W/locale.env")
+check "locale.env: LANG=${L_LANG:-?}, TZ=${L_TZ:-?}, keyboard ${L_XKB:-?}" \
+    sh -c '[ -n "$1" ] && [ -n "$2" ] && case "$3" in us|fr) exit 0 ;; *) exit 1 ;; esac' _ "$L_LANG" "$L_TZ" "$L_XKB"
+check "time zone $L_TZ (/etc/localtime)" \
+    sh -c 'case "$1" in */zoneinfo/"$2") exit 0 ;; *) exit 1 ;; esac' _ "$(linkto /etc/localtime || true)" "$L_TZ"
+check "/etc/locale.conf: LANG=$L_LANG" grep -qx "LANG=$L_LANG" <(cat_ /etc/locale.conf)
 get /usr/lib/locale/locale-archive
 check "locales generated: fr_FR.UTF-8 and en_US.UTF-8" sh -c 'grep -aq fr_FR.utf8 "$1" && grep -aq en_US.utf8 "$1"' _ "$W/f"
 check "/etc/resolv.conf -> systemd-resolved stub" \
@@ -853,6 +893,11 @@ check "journald: no volatile drop-in left" absent /etc/systemd/journald.conf.d/1
 check "t715-reboot-to present, mode 0755 (RECOVERY or Download mode without Android)" test "$(fmode /usr/local/sbin/t715-reboot-to)" = 0755
 check "t715-reboot-to byte for byte" cmp -s <(cat_ /usr/local/sbin/t715-reboot-to) /our-overlay/usr/local/sbin/t715-reboot-to
 check "t715-shutdown-log.service enabled (shutdown steps kept in pstore)" test "$(linkto /etc/systemd/system/sysinit.target.wants/t715-shutdown-log.service)" = /etc/systemd/system/t715-shutdown-log.service
+check "t715-stuck-procs: a system-shutdown hook, mode 0755, byte for byte" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" "$3"' _ "$(fmode /usr/lib/systemd/system-shutdown/t715-stuck-procs)" \
+        <(cat_ /usr/lib/systemd/system-shutdown/t715-stuck-procs) /our-overlay/usr/lib/systemd/system-shutdown/t715-stuck-procs
+check "t715-pstore-shutdown.service enabled (stuck processes kept in /var/log/t715-shutdown)" \
+    test "$(linkto /etc/systemd/system/multi-user.target.wants/t715-pstore-shutdown.service)" = /etc/systemd/system/t715-pstore-shutdown.service
 check "plymouth: splash forced (sboot sets no 'splash'; needs kernel 00024, docs/DEPLOY.md 13.)" grep -q -- '--kernel-command-line="quiet splash"' <(cat_ /etc/systemd/system/plymouth-start.service.d/10-t715-splash.conf)
 check "plymouth: theme omarchy" grep -qx 'Theme=omarchy' <(cat_ /etc/plymouth/plymouthd.conf)
 check "systemd: ShowStatus=auto (no status lines before the splash)" grep -qx 'ShowStatus=auto' <(cat_ /etc/systemd/system.conf.d/10-t715-quiet.conf)

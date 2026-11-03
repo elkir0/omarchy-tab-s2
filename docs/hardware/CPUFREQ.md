@@ -21,6 +21,10 @@ below is no longer what makes browsing usable.
 is confirmed at 825 MHz. The A57 ABB and EMA are not as stock, which blocks
 everything above 1.2 GHz until decision D7.
 
+**Stage 1 ran for the A53s on 2026-11-03, on a test kernel: results in section
+9.** Every level from 400 MHz to 1.2 GHz passed, as did the storm and the
+throttle. Screen off, the gain is small: 60-90 mW of 1.48 W.
+
 Evidence tags, used wherever it matters:
 
 * **[M]** measured on this tablet under mainline (today's figures or a saved
@@ -835,6 +839,149 @@ else; the next reboot replaces them.
 The levels that pass become the table. **Any abort at a level removes that level
 and all above it**; none is retried with more voltage.
 
+### Results of stage 1 (A53), 2026-11-03
+
+Kernel: branch `t715-cpufreq` on the camera kernel (with `ed71dc803`),
+`exynos5433-gts28ltexx-cpufreq.dtsi`: A53 400 MHz to 1.2 GHz at this chip's
+voltages, no 700 MHz; A57 a single level, 1.2 GHz at 1 062 500 uV, BUCK2 held
+there; BUCK3 875 000 to 1 162 500 uV. Test RECOVERY `55977c30378c`, image mode,
+no modem modules, CP off, `cpufreq_dt` loaded by hand. Script
+`image/tests/ondevice/cpufreq.sh`. Innocuity identical before, between the two
+test boots and after. Rescue back in RECOVERY (`fe94a7c3f0fc`).
+
+On the Mac's USB, 450 mA in, the battery at 58-59 % throughout. **The steps ran
+3 minutes, not 5**: a slow charge had stopped at 58 %, and the owner chose
+to run at that level rather than wait; 5 minutes a level would have risked the
+50 % floor.
+
+**1a load: pass**, 20 checks, on the second test boot. The first boot's two
+failures were the script's (below); the kernel log after the load held no bad
+message, read by hand.
+
+**1b steps: pass at every level** [M]. Four workers pinned on cpu0-3 (sha256
+from memory, AES-CTR hashed with NEON and with integer code, an H.264 decode),
+3 minutes a level. The rail read the OPP's voltage at every poll.
+
+| level MHz | rail uV | sha256 MB/s | speed / clock vs 1.2 GHz | battery mA under load | hottest zone °C | runs, all right |
+|---|---|---|---|---|---|---|
+| 1200 | 1 162 500 | 343 | 1.000 / 1.000 | -220 | 60 | 166 |
+| 1100 | 1 125 000 | 320 | 0.933 / 0.917 | -174 | 59 | 160 |
+| 1000 | 1 087 500 | 295 | 0.860 / 0.833 | -145 | 58 | 144 |
+| 900 | 1 025 000 | 268 | 0.781 / 0.750 | -88 | 57 | 136 |
+| 800 | 1 000 000 | 241 | 0.703 / 0.667 | -51 | 55 | 124 |
+| 600 | 937 500 | 184 | 0.536 / 0.500 | -17 | 54 | 96 |
+| 500 | 912 500 | 154 | 0.449 / 0.417 | 0 | 52 | 80 |
+| 400 | 875 000 | 123 | 0.359 / 0.333 | +31 | 51 | 64 |
+
+Speed falls a little slower than the clock at every level: the memory clock
+does not move [I]. Under full A53 load, 400 MHz draws about 250 mA, about
+1.0 W, less than 1.2 GHz.
+
+**1c storm: pass**, on the second boot. 400 MHz and 1.2 GHz flipped every 50 ms
+for 10 minutes under the same load: 9 412 transitions (12 000 without the holds
+for reads), 361 runs right, no kernel message, zones at most 56 °C. The 105
+reads, each on a held level, all matched: 50 at 1.2 GHz and 1 162 500, 55 at
+400 MHz and 875 000.
+
+The first storm, on the first boot, aborted at its first poll: clock 400 MHz with
+the rail at 1 162 500. The script read the clock and the rail one after the
+other while the level changed every 50 ms. 400 MHz under 1.2 GHz's voltage is
+the safe half of a transition, since the OPP core raises the voltage before the
+clock and lowers the clock before the voltage. A status line of the same poll
+paired 1.2 GHz with 875 000, the same race in the other order. The four runs
+done by then were right. The abort did its job: reboot, daily kernel, CP online
+9.9 s after its boot. The Abort rule above is meant for a wrong settled state,
+not a read across a transition, so the storm ran again on a fresh boot, with
+the reads held on a level and no change to any voltage.
+
+**1d throttle: pass** [M]. `emul_temp` on each zone, one at a time, 3 s each:
+apollo 82 and 87 °C, atlas0 and atlas1 96 and 101 °C. The first trip gave
+state 1 (1.1 GHz), the second state 2 (1.0 GHz); each release went back to state 0
+and 1.2 GHz. **step_wise steps once per trip at a steady temperature**, and walks
+only while the temperature rises. Apollo raised 1 °C a second: 87 °C 1.0 GHz, 88
+0.9, 89 0.8, 90 0.6, 91 0.5, 92 0.4 GHz, held there to 94; falling, it gave a
+state back at each step (92 0.5 GHz ... 85 0.9 GHz), and the release restored
+1.2 GHz. So a real heat-up reaches 0.4 GHz only while the die keeps heating
+[I: emulated, not real heat].
+
+**1f idle, screen off: a small gain** [M]. The current is what the 450 mA
+input leaves for the battery, positive when charging, so a higher figure means
+a lower draw. A status line every 10 s.
+
+| policy0 | minutes | battery mA | mW | hottest zone °C |
+|---|---|---|---|---|
+| fixed 1.2 GHz | 3 | +170.6 | +680.7 | 53 |
+| fixed 400 MHz | 3 | +193.0 | +772.2 | 47 |
+| schedutil | 5 | +184.4 | +738.9 | 46 |
+
+400 MHz saves about 22 mA (90 mW) against 1.2 GHz, schedutil about 14 mA
+(60 mW): 4-6 % of the 1.48 W idle draw (BATTERY.md section 9). schedutil spent
+95 % of the window at 400 MHz, with 3 551 transitions in 5 minutes. The windows
+ran one after the other while the chip cooled from the storm, so 1.2 GHz's
+window was the warmest, and its leakage the highest. These gaps are an upper
+bound [I]. The 1.48 W idle is not mostly the A53s.
+
+**Script faults found on the device**, all fixed in `cpufreq.sh`:
+
+1. The A57 policy lists its one level with a trailing space. The list is now
+   normalized before the compare.
+2. The kernel ring is already full at boot, and the session's services keep
+   writing to it, one of them every 5 s. So a line count stops growing, and a
+   fixed marker line leaves the ring within minutes. Messages are now bounded by
+   kernel timestamps, read to the microsecond and advanced after each clean
+   check. An injected line is seen once, and a gap in the ring is reported.
+3. The storm's read race, above.
+4. `Oops` matched `ramoops` and `oops=panic` in the boot lines. It now needs a
+   word start and a following space, colon or dash.
+
+**Not done in stage 1**: 1e (the slope needs A57 levels, which wait for D7), and
+1f's 2-hour soak in normal use. Any daily kernel with these tables also needs the
+modem modules, so its first run with the CP online is stage 5's.
+
+### 1f and 5: the daily candidate's soak, 2026-11-03, and BOOT
+
+Candidate: the same tree with `gts28ltexx_cpufreq.config` (the modem fragment's
+lines, schedutil by default, `cpufreq-dt` a module that udev loads after the
+initramfs guard, CPU cooling, the lockup and hung-task detectors), DTB
+identical to stage 1's (`e1492b132fda`), the daily knobs (persistent root, quiet
+boot, modem modules blacklisted for autoload). In RECOVERY (`48c18e0c5b22`) for
+the soak, without `t715.returnafter`: that knob reboots through SysRq b, with
+no sync and the CP still on, which a persistent root with the modem online
+cannot take.
+
+**Soak: 2 h 06, persistent root, CP online, on the Mac's USB, pass** [M]. 229
+samples every 30 s, all read-only. The A53 rail at or above the level's
+voltage on every read, the A57s held at 1.2 GHz and 1 062 500 uV, no kernel
+fault, no modem crash or reset line, the CP booted once (9.94 s), no failed
+unit. policy0 spent 80 % of the time at 400 MHz (6 069 s of 7 562), 3 % at
+1.2 GHz, with 188 562 transitions. Screen off, the battery gained +44 mA on
+average at the end, at 450 mA in.
+
+- The tablet was used by hand for its first minutes, then left locked, so
+  `image/tests/ondevice/usage-sim.sh` ran its headless cycles only (a
+  real-time video decode, then idle; 12 cycles, none in the session). The
+  interface's feel at these levels is still untested beyond those minutes.
+- Two kernel lines matched the abort list: `Unhandled fault: alignment
+  exception`, a user-space SIGBUS of Nautilus's previewer (gjs, an LDREXD at
+  an address not 8-byte aligned). The same crash is in the 11-02 journal under
+  the daily kernel without cpufreq: not this kernel's.
+- **Heat**: the simulator's first headless cycle decoded on all eight cores at
+  once, as fast as they could. In 90 s atlas1 reached 99 C. The A53 maps
+  answered (state 4, 0.9 GHz), but the A57s have one level and nothing to
+  give, as in today's daily kernel, where nothing throttles at all; only the
+  115 C trip stands behind them. The load was stopped by hand and the zones
+  were back at 54-57 C within minutes. This is past the 85 C project rule. It
+  was counted, and the soak was not stopped, because the load was synthetic
+  and the A57s behaved exactly as under the daily kernel. **D7's lower A57
+  levels are what gives them something to throttle to.**
+
+**BOOT since 2026-11-03**: `out/boot-cpufreq-daily/boot.img`
+(`69b4e6c8bc8b`, one header byte away from the soaked image), the rescue back
+in RECOVERY (`058d0481b509`). Four clean reboots, 39 s each: persistent root,
+`cpufreq-dt` loaded, schedutil, CP online in 9.92-9.94 s, no kernel line on
+the abort list, no failed unit. Innocuity identical before and after. To go
+back: `out/boot-camaf/boot.img` (`6f47a0356be0`) with `device/write-part.sh BOOT`.
+
 ## 10. Expected gain for Firefox
 
 Basis: the limiting thread's frame time has a part `c` that follows the CPU clock
@@ -880,6 +1027,15 @@ threshold), stop there.** Stage 1 alone is still worth keeping, for throttling a
 
 Worth trying before all of this, because it costs nothing: a lower content
 resolution in Firefox (section 6.4).
+
+**The owner's answers, 2026-11-03, after stage 1:**
+
+| question | answer |
+|---|---|
+| The A53 tables in the daily kernel | **yes**: a daily candidate with the modem modules, then 1f's 2-hour soak in normal use and a run with the CP online, before BOOT |
+| A57 above 1.2 GHz | **D7 only, no level above 1.2 GHz**: stock's ABB and EMA values so that the A57s can scale *down* at idle; D3, D4, D5 and D8 are not needed while the cap stays at 1.2 GHz |
+| GPU devfreq (GPU.md section 10) | **after the CPU work**: the ABB kernel's T0-T5, then the 420 MHz cap with the panels as load, the owner present |
+| Deep CPU idle states (cpuidle) | **study it**, on paper first: the largest unexplored lever on the 1.48 W idle draw [I] |
 
 ## 12. Not established
 

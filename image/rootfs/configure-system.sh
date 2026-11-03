@@ -36,14 +36,18 @@ chmod 0440 /etc/sudoers.d/10-wheel
 visudo -c >/dev/null || die "sudoers do not parse"
 
 # --- locale, time zone ------------------------------------------------------
-log "locales en_US.UTF-8 fr_FR.UTF-8, LANG=en_US.UTF-8, UTC"
+# The values tools/build-rootfs wrote into the overlay (--locale, --timezone).
+. /usr/share/t715-omarchy/locale.env
+log "locales en_US.UTF-8 fr_FR.UTF-8 $T715_LANG, LANG=$T715_LANG, $T715_TZ"
 sed -i -e 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' \
-       -e 's/^#fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen
+       -e 's/^#fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' \
+       -e "s/^#$T715_LANG UTF-8/$T715_LANG UTF-8/" /etc/locale.gen
+grep -qx "$T715_LANG UTF-8" /etc/locale.gen || die "no locale $T715_LANG in /etc/locale.gen"
 locale-gen
-echo 'LANG=en_US.UTF-8' > /etc/locale.conf
-[ -e /usr/share/zoneinfo/UTC ] || die "no zoneinfo for UTC"
-ln -sfn /usr/share/zoneinfo/UTC /etc/localtime
-printf 'UTC\n' > /etc/timezone
+echo "LANG=$T715_LANG" > /etc/locale.conf
+[ -e "/usr/share/zoneinfo/$T715_TZ" ] || die "no zoneinfo for $T715_TZ"
+ln -sfn "/usr/share/zoneinfo/$T715_TZ" /etc/localtime
+printf '%s\n' "$T715_TZ" > /etc/timezone
 
 # --- accounts ---------------------------------------------------------------
 # alarm (uid 1000, from the ALARM tarball) is Omarchy's user and keeps ALARM's
@@ -97,7 +101,7 @@ id "$U" > "$B/alarm-id.txt"
 
 # --- units ------------------------------------------------------------------
 log "units"
-systemctl enable usb-rndis.service sshd.service sddm.service t715-shutdown-log.service
+systemctl enable usb-rndis.service sshd.service sddm.service t715-shutdown-log.service t715-pstore-shutdown.service
 systemctl set-default graphical.target
 
 # Touch layer P1 (docs/image/ROOTFS.md): the Power and Home keys and the cover,

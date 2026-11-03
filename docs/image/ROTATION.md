@@ -97,10 +97,11 @@ upstream:
   fifth place. Locking holds the current orientation.
 - **Rotate**: a new tile (patch 0005) that runs `t715-rotate turn`. It
   needs no sensor.
-- **Default: locked in portrait until step 6 passes.** The unit ships
-  disabled, so the tile reads Locked. A tap enables it until the next
-  reboot. After validation, run `systemctl --global enable`; persistence
-  follows `docs/image/PERSISTENCE.md`.
+- **Default: on, since the owner validated it (2026-11-03).** The image
+  enables the unit for alarm with a user link
+  (`rootfs/omarchy-user-setup.sh`), not `--global`, so the tile can still
+  turn it off and the choice survives a reboot. Until then the unit shipped
+  disabled and the tile read Locked.
 
 ## 6. What assumes portrait
 

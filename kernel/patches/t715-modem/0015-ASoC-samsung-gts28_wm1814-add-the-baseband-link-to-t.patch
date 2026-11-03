@@ -1,4 +1,4 @@
-From 629753b476c5b303f03c9d99a3b7631d10cc8399 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 15/16] ASoC: samsung: gts28_wm1814: add the baseband link to

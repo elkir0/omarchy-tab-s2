@@ -9,21 +9,24 @@ saved by its FileView 200 ms after every change, with an atomic rename),
 so the toggles now watch that file, as the bar watches its
 notifications-seen mark; no file means do-not-disturb was never turned on.
 Off the device, Quickshell 0.3.2's FileView followed six alternating
-atomic writes in a row, the first of which created the file.
+atomic writes in a row, the first of which created the file. Upstream
+paused the 30 s poll while the widget is hidden since 0.2.44 (its `shown`
+property); the file watch needs no timer at all, hidden or not.
 
 The status bar started omamobile-cell-watch and omamobile-call-watch
 --observe at every shell start. The tablet build ships neither (no modem,
 no omatel), so each start only logged "Process failed to start". They now
 run only while the bar's `cellWatch` / `callWatch` setting in shell.json is
 true (default off); plugins/README.md lists both. Against omarchy-mobile
-5f7ba48, packages/omamobile-shell (applied with patch -p1 in that
-directory, after 0001, 0002 and 0003).
+87b8395 (omamobile-shell 0.2.94), packages/omamobile-shell (applied with
+patch -p1 in that directory, after 0001 and 0002; renumbered from 0004,
+the drawer patch it followed is upstream now).
 
 diff --git a/plugins/README.md b/plugins/README.md
-index 0580c67..d1d8411 100644
+index 6293caa..bb39c37 100644
 --- a/plugins/README.md
 +++ b/plugins/README.md
-@@ -68,6 +68,8 @@ Settings live on the `bar` object in `shell.json`:
+@@ -69,6 +69,8 @@ Settings live on the `bar` object in `shell.json`:
  | `clockFormat` | `"HH:mm"` | Qt date format |
  | `showBatteryPercent` | `true` | |
  | `quickSettings` | `"omamobile.quicksettings"` | Plugin id the bar opens |
@@ -32,7 +35,7 @@ index 0580c67..d1d8411 100644
  
  **Unread notifications:** an accent pill with the number of files in
  Omarchy's notification history (`~/.local/state/omarchy/notifications/history/`,
-@@ -82,6 +84,8 @@ history, so it counts until the shade has been opened.
+@@ -83,6 +85,8 @@ history, so it counts until the shade has been opened.
  **Mobile network and calls:** the cellular icon and the call chip come from
  `omamobile-cell-watch` and `omamobile-call-watch --observe` (see
  omamobile.call below); without a modem or omatel's agent they don't show.
@@ -41,7 +44,7 @@ index 0580c67..d1d8411 100644
  
  IPC (`omarchy-shell omamobile.bar <method>`), for scripts and tests; no
  gesture or key binds it yet:
-@@ -480,8 +484,10 @@ pages are a `ListView` inside it. Apps cover it when open; nothing renders
+@@ -596,8 +600,10 @@ pages are a `ListView` inside it. Apps cover it when open; nothing renders
  while they do.
  
  Smoothness. Widgets are plain rectangles and text: no blur, shadow or
@@ -109,7 +112,7 @@ index 96f73fd..952fdca 100644
      interval: 1000
      repeat: true
 diff --git a/plugins/omamobile.home/TogglesWidget.qml b/plugins/omamobile.home/TogglesWidget.qml
-index d2f17a1..9f89ff6 100644
+index 4abfe86..c566194 100644
 --- a/plugins/omamobile.home/TogglesWidget.qml
 +++ b/plugins/omamobile.home/TogglesWidget.qml
 @@ -10,8 +10,8 @@ import qs.Commons as Commons
@@ -123,7 +126,7 @@ index d2f17a1..9f89ff6 100644
  Item {
    id: widget
  
-@@ -45,24 +45,26 @@ Item {
+@@ -47,25 +47,28 @@ Item {
  
    Process {
      id: toggleProc
@@ -142,7 +145,9 @@ index d2f17a1..9f89ff6 100644
 +  // Omarchy's notification service saves {"version": 3, "dnd": ...} to this
 +  // file 200 ms after every do-not-disturb change, whoever made it, with an
 +  // atomic rename that FileView follows; no file yet means it was never
-+  // turned on (the service's default, off).
++  // turned on (the service's default, off). SM-T715 tablet: no `qs ipc`
++  // client and no 30 s poll, and nothing at all while hidden (upstream's
++  // `shown`, which the file watch needs no timer for).
 +  FileView {
 +    path: Quickshell.env("HOME") + "/.local/state/omarchy/notifications.json"
 +    watchChanges: true
@@ -158,7 +163,8 @@ index d2f17a1..9f89ff6 100644
    }
  
 -  Timer { id: dndRead; interval: 400; onTriggered: if (!dndProc.running) dndProc.running = true }
--  Timer { interval: 30000; repeat: true; running: true; triggeredOnStart: true; onTriggered: dndRead.restart() }
+-  // Started again when shown, and triggeredOnStart reads it at once then.
+-  Timer { interval: 30000; repeat: true; running: widget.shown; triggeredOnStart: true; onTriggered: dndRead.restart() }
 -
    Grid {
      anchors.centerIn: parent

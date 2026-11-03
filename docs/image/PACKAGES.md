@@ -120,43 +120,48 @@ When ALARM ships a newer version of a package we rebuild, ours still wins
 (`[t715-omarchy]` comes first), so check whether the new version carries the
 fix, then rebase the PKGBUILD on it or drop ours.
 
-## hyprgraphics 0.5.1-4.1
+## hyprgraphics 0.6.0-1.1
 
 - **Why:** Hyprland 0.56.2 froze on the tablet as soon as it drew text
   (`debug:overlay`; also the error bar, `hyprctl notify`, group bars), see
-  `docs/journal/ONDEVICE-2026-10-28.md`, blocker 2. In hyprgraphics 0.5.1,
-  `CAsyncResourceGatherer::await()` installs its condition variable after
-  `enqueue()` has woken the gather thread, and that thread only flags
-  `awaitingEvent` when a condition variable already exists: if it finishes
-  the resource first, the wakeup is lost and the main thread waits forever.
-  Upstream: [hyprwm/hyprgraphics#53](https://github.com/hyprwm/hyprgraphics/issues/53)
-  (PR #52), not fixed in 0.5.1.
-- **Package:** `image/pkg/hyprgraphics/`, Arch's 0.5.1-4 PKGBUILD (which ALARM
-  builds unchanged) with `pkgrel=4.1`, `armv7h` in `arch=()`, and
-  `hyprgraphics-0.5.1-fix-await-lost-wakeup.patch`: `awaitingEvent` is set
-  and checked under `awaitingMtx`, `await()` returns at once when the
-  resource is already done, and `needsToProcess`/`exit` are set under
-  `requestMutex`. Only `src/resource/AsyncResourceGatherer.cpp` changes:
-  same SONAME (`libhyprgraphics.so.4`) and ABI, so ALARM's Hyprland uses it
-  without a rebuild.
+  `docs/journal/ONDEVICE-2026-10-28.md`, blocker 2. In hyprgraphics (0.5.1
+  through 0.6.0), `CAsyncResourceGatherer::await()` installs its condition
+  variable after `enqueue()` has woken the gather thread, and that thread only
+  flags `awaitingEvent` when a condition variable already exists: if it
+  finishes the resource first, the wakeup is lost and the main thread waits
+  forever. Upstream: [hyprwm/hyprgraphics#53](https://github.com/hyprwm/hyprgraphics/issues/53)
+  (PR #52, still open), not fixed in 0.6.0: its `AsyncResourceGatherer.cpp`
+  is unchanged from 0.5.1.
+- **Package:** `image/pkg/hyprgraphics/`, Arch's 0.6.0-1 PKGBUILD (which ALARM
+  builds unchanged) with `pkgrel=1.1`, `armv7h` in `arch=()`, and
+  `hyprgraphics-0.6.0-fix-await-lost-wakeup.patch`, the 0.5.1 patch with the
+  same hunks: `awaitingEvent` is set and checked under `awaitingMtx`,
+  `await()` returns at once when the resource is already done, and
+  `needsToProcess`/`exit` are set under `requestMutex`. Only
+  `src/resource/AsyncResourceGatherer.cpp` changes. The SONAME moved with the
+  version to `libhyprgraphics.so.5`, which ALARM's Hyprland 0.57.0-3 requires
+  (the 0.5.1 rebuild made the image's dependency gate fail from 2026-11-02).
 - **Test:** `image/tests/test_hyprgraphics.sh` checks that pacman takes
-  hyprgraphics 0.5.1-4.1 from `[t715-omarchy]`, including for
+  hyprgraphics 0.6.0-1.1 from `[t715-omarchy]`, including for
   `pacman -Sp hyprland`, installs it and runs the reproducer
   `image/tests/hyprgraphics-repro/repro.cpp` (Hyprland's `renderText` pattern:
   `enqueue()` then `await()` on the same thread, 20000 rounds, a watchdog
   reports a hang after 12 s) against the installed library, unpinned and
   pinned to one CPU. As a negative control it installs ALARM's stock
-  0.5.1-4 and expects the pinned run to hang.
+  0.6.0-1 and expects the pinned run to hang: it did on 2026-11-03.
 
-## omarchy-mobile at 5f7ba48: the touch shell (touch layer P2)
+## omarchy-mobile: the touch shell (touch layer P2)
 
 Both packages come from [omarchy-mobile](https://github.com/derekross/omarchy-mobile)
-(MIT) at commit `5f7ba487cec6ca66ee04606be9d71d1aad855ea0`, the version
-pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
+(MIT): `omamobile-shell` at commit `87b839567ad77911e948a4549f84198549191a36`
+(0.2.94, since 2026-11-03; before, `5f7ba48`, 0.2.32), for Omarchy 4.0.6 and
+Hyprland 0.57.0, and `omamobile-omarchy` at
+`3624ef3237b71abbe5c232f635208f564869f441` (2026-11-01), whose series still
+targets Omarchy 4.0.6.
 
-- **Source**: GitHub's tarball of that commit, checked by sha256
-  (`3009362b…2029d`; the same file name in both PKGBUILDs, so it is
-  downloaded once into the `t715-omarchy-pkg-src` volume); `prepare()`
+- **Source**: GitHub's tarball of each commit, checked by sha256
+  (`e9b0f052…e1a73` for 87b8395, `254ba88e…75c60` for 3624ef3; kept in the
+  `t715-omarchy-pkg-src` volume); `prepare()`
   extracts only the package's own directory (`noextract`, then `bsdtar` of
   one path). Not vendored: the package directories hold hundreds of
   upstream files that would duplicate upstream here, while the tarball keeps
@@ -165,7 +170,7 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
   The tarball's two package directories were compared with a clone at
   5f7ba48: identical.
 - **Version**: upstream's `version` file (checked in `prepare()`) and
-  upstream's pkgrel 1 plus `.N`: `0.1.12-1.4`, `0.2.32-1.13`.
+  upstream's pkgrel 1 plus `.N`: `0.1.27-1.2`; the shell is `0.2.94-1`.
 - **`arch = any`**, no compiled file (checked by `image/tools/build-pkg`).
 - **Build order**: `omamobile-omarchy` first: `omamobile-shell` depends on
   it, and `image/tools/build-pkg` checks that every runtime depend resolves.
@@ -173,10 +178,10 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
   `image/rootfs/install-mobile.sh` from `[t715-omarchy]` only (`docs/image/ROOTFS.md`,
   "Touch layer P2").
 
-### omamobile-omarchy 0.1.12-1.4
+### omamobile-omarchy 0.1.27-1.2
 
 - **What**: omarchy-mobile's patches to Omarchy's own files (lock, idle,
-  polkit, notifications, menu, image picker, screensaver) and
+  polkit, notifications, menu, image picker, screensaver, app icons) and
   `omamobile-omarchy-patches`, which applies them from Omarchy's pristine
   files (recognised by the mtree sha256s pacman keeps for the omarchy
   package, which the retagged package keeps too: `docs/image/REPACK.md`), checks
@@ -186,11 +191,29 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
 - **Dropped**: patches 0012 and 0016 (they hand `omarchy update`, the
   channel switch and the pacman refresh to `omamobile-update`, which assumes
   an `[omamobile]` repository), `omamobile-update` and its stand-ins
-  (`lib/update-bin` in omarchy-mobile). Upstream's
+  (`lib/update-bin` in omarchy-mobile); `lib/modules-cleanup` and `systemd/`
+  (0.1.21: a Pixel's next kernel arrives as a module tree that a cleanup must
+  spare; here the modules are the initramfs's, no push or package owns a tree,
+  and the image has no `kernel-modules-hook`). Upstream's
   scriptlet is replaced by `omamobile-omarchy.install` (the same `lock-pam`
   and `restore` calls, without the notes about `omamobile-update`).
-- **Ours**: `t715-update-without-kernel-package.patch` and
-  `t715-pacman-keeps-alarm.patch`, which does 0016's job here: `omarchy-refresh-pacman`
+- **New since 0.1.12, all taken**: the lock's glance view (0023), the battery
+  (0026, from the kernel's supplies: `sm5703-fuelgauge` and the Mains
+  `sm5703-charger`) and media controls (0027, Quickshell's Mpris) on the lock;
+  fingerprint only when a finger is enrolled (0022: no fprintd here, so
+  never); the display off before a suspend (0021: suspend is masked here); the
+  largest app icon (0024); no launch toast for shell surfaces (0025). The
+  glance's weather is the shell's `~/.local/state/omamobile/weather.json`,
+  which `omamobile-shell` 0.2.32 does not write, so none shows; the lock never
+  asks the network. Upstream's devices run Quickshell 0.3.2, as this image.
+- **Ours**: `t715-update-without-kernel-package.patch`,
+  `t715-pacman-keeps-alarm.patch` and, since 1.2,
+  `t715-lock-blank-through-keys.patch`: the lock's own blank, 5 s after a wake,
+  went at the panel alone, so `t715-keys` never heard of it and the touchscreen
+  and `t715-rotate`'s accelerometer stayed on under the dark panel (−67 mW
+  measured once released); the blank now signals `t715-keys`, with Omarchy's as
+  the fallback.
+  `t715-pacman-keeps-alarm.patch` does 0016's job here: `omarchy-refresh-pacman`
   and `omarchy-channel-set` refuse when `/etc/pacman.conf` has `[alarm]`. They would
   copy Omarchy's x86_64 configuration over ALARM's, losing the armv7h repositories and
   `IgnorePkg`.
@@ -207,10 +230,21 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
 - **`check()`**: syntax of the scripts, the hook's command, upstream's
   applier tests against synthetic Omarchy trees (`test/patches.py`; its
   real-package part expects 0012 and 0016 and is skipped), `test/lock-pam.sh`,
-  and the count of 17 patches. On the real package: the image build applies
-  and verifies the series (19 applied with ours, none found upstream).
+  and the count of 24 patches. On the real package: the image build applies
+  and verifies the series. On 2026-11-02 the applier ran on the tablet with
+  `--root` on a scratch copy of the omarchy 4.0.6-1.1 package: 26 applied with
+  ours, none found upstream, and the 19 patched QML and JS files parse
+  (`qmlformat`).
 
-### omamobile-shell 0.2.32-1.13
+### omamobile-shell 0.2.94-1
+
+Moved from 0.2.32-1.15 on 2026-11-03 (the owner's yes). What the tablet
+gains from upstream: the drawer swiped up from anywhere and following the
+finger, with no keyboard and no icon rescan; the home pill in a 44 px bottom
+bar that apps no longer draw under; recents named by app; a media card in the
+shade; home widgets that idle while nobody sees them; signal bars on the
+mobile data tile. Upstream's `bl_power` read every 2 s now comes with it: it
+is what lets the widgets idle while the panel is off.
 
 - **What**: Omarchy shell plugins (QML) for a touch screen: `omamobile.bar`
   (replaces `omarchy.bar`), `.quicksettings`, `.launcher` (dock, drawer, home
@@ -218,33 +252,34 @@ pinned for Omarchy 4.0.6 and Hyprland 0.56.2.
   `omamobile-setup-user`, `-launch`, `-osk-watch`, `-bt-agent`,
   `-screenrecord`, `-widget`; `omamobile-setup-user.service` (masked in the
   image); the polkit rule that asks a wheel member for their own password.
-- **Changed for the tablet**: `0001-tablet-quick-settings-tiles.patch`
+- **Changed for the tablet**, ten patches against 87b8395:
+  `0001-tablet-quick-settings-tiles.patch`
   (`TilesModel.js`: no mobile data, hotspot, torch, location, NFC,
   fingerprint or rotation-lock tile; the tablet's default layout;
-  `0013-tablet-location-tile.patch` puts location back),
-  `0002-wifi-wpa2-without-sae.patch` (1.2: WPA2-PSK profiles for SAE
-  networks, the radio has no SAE), `0003-tablet-drawer-opens-light.patch`
-  (1.3: no icon rescan or keyboard when the drawer opens),
-  `0004-tablet-quiet-pollers.patch` (1.4: the home toggles watch the
+  `0010-tablet-location-tile.patch` puts location back),
+  `0002-wifi-wpa2-without-sae.patch` (WPA2-PSK profiles for SAE
+  networks, the radio has no SAE),
+  `0003-tablet-quiet-pollers.patch` (the home toggles watch the
   notification service's settings file instead of a `qs ipc` call every
   30 s; the bar's modem and call watchers only with `cellWatch` /
-  `callWatch`), `0005` to `0007` (mobile data, rotation, Réseau mobile),
-  `0008-tablet-tiles-that-work.patch` (1.13: Airplane mode reaches the modem and holds across a reboot through
+  `callWatch`), `0004` to `0006` (mobile data on shannond's facade, rotation,
+  Réseau mobile),
+  `0007-tablet-tiles-that-work.patch` (Airplane mode reaches the modem and holds across a reboot through
   NetworkManager, the radio states are read with `LC_ALL=C`, the Hotspot tile is back under "Add
   tiles" and shows its password, no Speaker on the call card),
-  `0009-upstream-bottom-strip-keyboard-on-pill.patch` and
-  `0010-upstream-app-names-in-recents.patch` (1.10: upstream's 0.2.40 to 0.2.43,
-  the launcher, keyboard and switcher plugins only, taken from commit 1154721 rather
-  than moving to 0.2.45, whose home changes bring a `bl_power` read every 2 s),
-  `0011-tablet-set-pin.patch` (1.12: `omamobile-set-pin` ships, says tablet, and sudo
-  asks for the password once one is chosen), `0012-tablet-back-gesture.patch` (1.14: the edge swipe
-  goes through `t715-keys`, its Escape by name finds no key here), `tablet-shell.json` as `profile/shell.json` (the eight
+  `0008-tablet-set-pin.patch` (`omamobile-set-pin` ships, says tablet, and sudo
+  asks for the password once one is chosen), `0009-tablet-back-gesture.patch` (the edge swipe
+  goes through `t715-keys`, its Escape by name finds no key here). Upstream
+  now has what 0.2.32's 0003 (the light drawer), 0009 and 0010 (the bottom
+  strip, app names in recents) did, so they are gone. `tablet-shell.json` as `profile/shell.json` (the eight
   plugins, the watchers on, the drawer at 6 columns, Omarchy's idle values, and since 1.4
   Omarchy's 18 bar-widget-only plugins in `disabledPlugins`, so the shell
   stops compiling widgets no bar shows) and `tablet-home.json` as
   `profile/home.json` (a 6x8 home grid with the image's apps; a new file,
   seeded by the image build).
-- **Dropped**: the fingerprint, update and permission-sheet plugins;
+- **Dropped**: the fingerprint, update, permission-sheet and (since 0.2.94)
+  voice plugins, the voice, weather, keyboard-language, keyboard-theme and
+  screenshot-viewer helpers;
   `omamobile-fp-enroll`, `-nfc-open` and its
   unit, `-keys` (`t715-keys` handles the keys), `-sleepd` and its unit,
   `-onboarding`, `-portal-access` and `portal/`,
@@ -321,3 +356,37 @@ GeoClue connecting, `t715-gpsd.service`, with no network, no capability and its 
 `omamobile-gnss on|off|status|forget` is the switch, under the name the shell's tile calls;
 `t715-position` is the drawer's Position; `t715-gps-capture` records one trip outside. Needs
 `CONFIG_GPIO_SYSFS` (`kernel/patches/t715-gps`). In `image/rootfs/packages.mobile`.
+
+## t715-claude-code
+
+An **installer** for Claude Code, not the program: Anthropic publishes it as a Bun-compiled
+binary for x64/arm64 only, and its licence forbids redistributing it, so the image cannot
+carry it. The package holds Yumi Lab's MIT-licensed
+[`claude-code-smartpi`](https://github.com/Yumi-Lab/claude-code-smartpi) (the armv7
+installer: download the official binary, extract its JavaScript, rebundle it under Node 22),
+pinned at commit `a9cac19982b922745c1ba33a4a3fe9ea2a94719b` and patched
+(`0001-arch-linux-arm-sm-t715.patch`) for this tablet: no apt — the dependencies come from
+pacman beforehand (`rg`, `xz`, `npm`; Node 22 is `nodejs-lts-jod`); the downloaded binary is
+checked against the sha256 of Anthropic's `manifest.json` for that version; the launcher
+`taskset`s all eight cores instead of a pad's four.
+
+- **What is installed**: `/usr/share/t715-claude-code/installer/` (the patched upstream
+  tree, minus `bench/`) and `/usr/bin/t715-claude-install`, the wrapper the owner runs as
+  root (`sudo t715-claude-install [VERSION]`, `docs/DEPLOY.md` 11.10). Nothing else: the
+  package owns no file under `/opt`, `/usr/local` or `/home`, holds no ELF, and `arch = any`.
+- **The wrapper**: root-only, runs the installer with `HOME` set to the target user's home
+  (`$SUDO_USER`, `alarm` without sudo — never root), from a `mktemp -d` under `/var/tmp`
+  removed on exit, then gives that user `~/.claude` and `settings.json` (600). The version
+  defaults to the installer's `MAX_VERSION` (2.1.270: from 2.1.271 the full-screen interface
+  stays blank under Node, its renderer needing a native cell engine only Anthropic's Bun
+  has); anything above is refused without `--force`, compared as dotted numbers (no
+  `sort -V`). It never reads, prints or copies `~/.claude/.oauth_token` or a token value.
+- **Sign-in is the owner's**, on the tablet, after the install: `claude setup-token`, then
+  `claude-token-save` (one of the installer's `bin/` helpers, installed to
+  `/usr/local/bin` at first run). No token in the package, the image or this repository;
+  `image/tests/verify-rootfs.sh` checks the image for one.
+- **Depends**: `bash`, `nodejs-lts-jod` (Node 22, the engine Claude Code's guard allows),
+  `npm` (esbuild, ws, undici, js-yaml for the bundle), `ripgrep`, `xz`, `python`
+  (the JavaScript extractor and the manifest check), `curl`, `util-linux` (`taskset`),
+  `coreutils`, `gcc-libs` (`libatomic.so.1` for Node), `tar`, `diffutils`, `findutils`,
+  `grep`. In `image/rootfs/packages.mobile`.

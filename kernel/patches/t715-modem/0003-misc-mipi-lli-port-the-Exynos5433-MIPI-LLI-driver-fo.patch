@@ -1,4 +1,4 @@
-From b8bd9e731f92c8b0ec4eab87ae29cb828613f9f0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 03/16] misc: mipi-lli: port the Exynos5433 MIPI-LLI driver for

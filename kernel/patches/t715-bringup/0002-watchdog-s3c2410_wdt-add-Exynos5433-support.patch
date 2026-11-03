@@ -1,4 +1,4 @@
-From 44804523d167f8b7c4811c04affa7ac3ba4c4766 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 02/24] watchdog: s3c2410_wdt: add Exynos5433 support

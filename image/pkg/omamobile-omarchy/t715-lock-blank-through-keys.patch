@@ -1,0 +1,27 @@
+# SM-T715: the lock blanks its idle screen through t715-keys. Five seconds after
+# a wake on the lock screen, Omarchy's lock turns the panel off itself, with
+# omarchy-brightness-display off. t715-keys then never hears of it: the
+# touchscreen stays on under a dark panel, and t715-rotate, which releases the
+# accelerometer on t715-keys' touch-off flag, keeps it streaming, about 500
+# I2C interrupts a second and 67 mW on battery (2026-11-02). The same SIGUSR1 as
+# hypridle's idle timeout gives the lock's blank the path of every other
+# screen-off: touch off, the flag, then DPMS. On this panel bl_power is not the
+# user's to write, so omarchy-brightness-display off does no more than that.
+#
+# Against Omarchy 4.0.6, after the series (0003, 0009, 0022 and 0023 also
+# touch this file).
+diff --git i/shell/plugins/lock/Service.qml w/shell/plugins/lock/Service.qml
+--- i/shell/plugins/lock/Service.qml
++++ w/shell/plugins/lock/Service.qml
+@@ -480,7 +480,10 @@
+ 
+   Process {
+     id: blankProcess
+-    command: ["bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
++    // SM-T715: through t715-keys, as its idle timeout does, so that the
++    // touchscreen and the rotation daemon's accelerometer go off with the panel.
++    // Omarchy's own blank when t715-keys is not running.
++    command: ["bash", "-c", "systemctl --user kill --kill-whom=main --signal=SIGUSR1 t715-keys.service 2>/dev/null || { omarchy-brightness-keyboard off; omarchy-brightness-display off; }"]
+   }
+ 
+   Timer {

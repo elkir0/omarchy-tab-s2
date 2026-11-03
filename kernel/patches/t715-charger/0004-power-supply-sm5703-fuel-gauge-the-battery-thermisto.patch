@@ -1,4 +1,4 @@
-From 44b512e27f27349154ace7e4ee24645be602f524 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 12:00:00 +0000
 Subject: [PATCH 4/5] power: supply: sm5703-fuel-gauge: the battery thermistor

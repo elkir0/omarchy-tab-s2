@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/3] ARM: configs: gts28ltexx_cpufreq_test: the stage 1 test
+ kernel
+
+cpufreq-dt as a module, so a test kernel boots without it and it is
+loaded by hand; the userspace, performance and schedutil governors, CPU
+cooling, the soft lockup and hung task detectors.  No modem drivers: a
+CP must never boot under a CPU that is being tested.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../configs/gts28ltexx_cpufreq_test.config    | 44 +++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+ create mode 100644 arch/arm/configs/gts28ltexx_cpufreq_test.config
+
+diff --git a/arch/arm/configs/gts28ltexx_cpufreq_test.config b/arch/arm/configs/gts28ltexx_cpufreq_test.config
+new file mode 100644
+index 000000000..18f82348d
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_cpufreq_test.config
+@@ -0,0 +1,44 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# CPU frequency scaling, TEST kernels only (docs/hardware/CPUFREQ.md sections
++# 2.1 and 8.3 in the omarchy-tab-s2 repository).  Merged on top of
++# gts28ltexx_defconfig (kernel/kbuild-mainline.sh --fragment
++# gts28ltexx_cpufreq_test.config), for the board's
++# exynos5433-gts28ltexx-cpufreq.dtsi.  Takes the place of
++# gts28ltexx_modem.config: one fragment per build.
++
++# gts28ltexx_modem.config's lines without the modem drivers.  A test kernel
++# carries no modem module, so shannon-modem-prepare.service skips itself and
++# the CP never boots under a CPU being qualified: its boot programs eFuses
++# (CPUFREQ.md section 8.4).  SPI_S3C64XX only serves the modem's boot link.
++CONFIG_SPI=y
++CONFIG_GPIO_SYSFS=y
++
++# cpufreq core, with the transition table as the record of what ran.
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++
++# userspace by default: loading the driver changes no clock and no rail.
++# The tests pin levels with scaling_setspeed; schedutil is for the soak.
++CONFIG_CPU_FREQ_DEFAULT_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
++CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
++
++# A module, blacklisted at boot by t715.modblacklist=cpufreq_dt and loaded by
++# hand after the initramfs guard has run: built in, a bad table would hang
++# before it (the panfrost boot loop, CPUFREQ.md section 8.3).  Selects
++# CPUFREQ_DT_PLATDEV, built in, which creates the device it binds to.
++CONFIG_CPUFREQ_DT=m
++
++# CPU cooling: the cpufreq core registers each policy as a cooling device for
++# the board's maps.
++CONFIG_CPU_THERMAL=y
++CONFIG_CPU_FREQ_THERMAL=y
++
++# A hang must end in a panic, and the panic in a reset back to the daily
++# kernel (CPUFREQ.md section 8.3; the freeze of 2026-10-29).  The test script
++# sets the *_panic sysctls at load.
++CONFIG_DEBUG_KERNEL=y
++CONFIG_SOFTLOCKUP_DETECTOR=y
++CONFIG_DETECT_HUNG_TASK=y
+-- 
+2.52.0
+

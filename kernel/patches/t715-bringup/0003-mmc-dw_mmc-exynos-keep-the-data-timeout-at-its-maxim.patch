@@ -1,4 +1,4 @@
-From 52c9420659101ac050ab98910ec80785fd1c0d4c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 03/24] mmc: dw_mmc-exynos: keep the data timeout at its

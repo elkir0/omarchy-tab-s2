@@ -1,4 +1,4 @@
-// Reproducer for the hyprgraphics 0.5.1 CAsyncResourceGatherer::await() lost wakeup.
+// Reproducer for the hyprgraphics CAsyncResourceGatherer::await() lost wakeup.
 // It does what Hyprland 0.56.2 IHyprRenderer::renderText(STextResourceData&&) does
 // (src/render/Renderer.cpp:1628): enqueue(res) then await(res) on the same thread,
 // with the debug overlay's warning text (src/debug/Overlay.cpp:368).

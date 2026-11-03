@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/2] ARM: dts: gts28ltexx: the rear camera's focus motor
+
+The DW9807 on a bit-banged bus, gpc2-2 SDA and gpc2-3 SCL, under alias
+i2c19: below the highest alias, so the dynamically numbered buses keep
+their numbers and the charger stays 27-0049.  Position 500 by default,
+measured sharp from about 1 m to infinity (488 far away, 544 at 30 cm,
+624 at 10 cm).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+index 1ca93b25b..bb86a1749 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -4,11 +4,14 @@
+  * and FIMC-LITE A, 4 lanes, both on the 400 MHz branch, with no ISP.  t715-camera.ko
+  * drives them; docs/hardware/CAMERA.md has the path and the proofs.  The bit-banged buses
+  * are stock's i2c@35 for the front and the same thing on ch0 for the rear, proved on the
+- * tablet: 0x35 answers model 0x6b20, 0x37 answers 0x485b.
++ * tablet: 0x35 answers model 0x6b20, 0x37 answers 0x485b.  The rear camera's DW9807
++ * focus motor sits on ch1 of the ISP I2C, at 0x0c.
+  */
+ 
+ / {
+ 	aliases {
++		/* 19, below the top alias (22): the dynamically numbered buses keep theirs */
++		i2c19 = &i2c_cam_af;
+ 		i2c21 = &i2c_cam_rear;
+ 		i2c22 = &i2c_cam_front;
+ 	};
+@@ -30,6 +33,16 @@ i2c_cam_front: i2c-cam-front {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+ 	};
++
++	/* The rear camera's DW9807 focus motor, on ISP I2C channel 1. */
++	i2c_cam_af: i2c-cam-af {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc2 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc2 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
+ };
+ 
+ &pinctrl_peric {
+@@ -125,6 +138,10 @@ camera@12120000 {
+ 		t715,height = <2458>;
+ 		t715,i2c-bus = <&i2c_cam_rear>;
+ 		t715,i2c-addr = <0x37>;
++		t715,af-bus = <&i2c_cam_af>;
++		t715,af-addr = <0x0c>;
++		/* 500 is sharp from about 1 m to infinity */
++		t715,af-default = <500>;
+ 		reg = <0x12120000 0x1000>, <0x12100000 0x1000>;
+ 		interrupts = <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>;
+ 		phys = <&mipi_phy 0>;

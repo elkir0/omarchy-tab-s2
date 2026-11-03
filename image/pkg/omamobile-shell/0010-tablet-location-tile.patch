@@ -1,8 +1,12 @@
 The Location tile, over t715-gps
 
 Upstream's tile and its omamobile-gnss command come back: t715-gps answers to that name,
-and the receiver only runs while GeoClue has a client.
+and the receiver only runs while GeoClue has a client. Against omarchy-mobile
+87b8395 (omamobile-shell 0.2.94) and the patches before it, packages/omamobile-shell
+(renumbered from 0013).
 
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index 892b3d8..7168b7d 100644
 --- a/plugins/omamobile.quicksettings/TilesModel.js
 +++ b/plugins/omamobile.quicksettings/TilesModel.js
 @@ -12,8 +12,9 @@
@@ -17,7 +21,7 @@ and the receiver only runs while GeoClue has a client.
  // Mobile data goes through NetworkManager. Rotation is t715-rotate
  // (docs/image/ROTATION.md). Hotspot needs the modem as its uplink: the tile
  // takes the Wi-Fi radio off the client network while it is on.
-@@ -25,6 +26,7 @@
+@@ -25,6 +26,7 @@ var CATALOG = [
    { id: "hotspot", label: "Hotspot" },
    { id: "rotation-lock", label: "Rotation" },
    { id: "rotate", label: "Rotate" },
@@ -25,7 +29,7 @@ and the receiver only runs while GeoClue has a client.
    { id: "dnd", label: "Do not disturb" },
    { id: "battery-saver", label: "Battery saver" },
    { id: "dark-theme", label: "Dark theme" },
-@@ -50,7 +52,7 @@
+@@ -50,7 +52,7 @@ var DEFAULT_LAYOUT = [
    "wifi", "bluetooth", "mobile-data", "dnd",
    "airplane", "rotation-lock", "rotate", "battery-saver",
    "dark-theme", "night-light", "keyboard", "clipboard",

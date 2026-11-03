@@ -1,0 +1,89 @@
+# SM-T715 (armv7h): Claude Code, an installer instead of the program.
+#
+# Why: Anthropic ships Claude Code as a Bun-compiled binary for x64/arm64 only;
+# there is no armv7 build, and its licence does not let the image redistribute
+# it. So the image carries Yumi Lab's MIT-licensed installer
+# (https://github.com/Yumi-Lab/claude-code-smartpi), pinned at commit
+# a9cac19982b922745c1ba33a4a3fe9ea2a94719b plus 0001-arch-linux-arm-sm-t715.patch
+# (no apt: pacman; the downloaded binary checked against Anthropic's
+# manifest.json sha256; all eight cores). On the tablet the owner runs
+# `sudo t715-claude-install` (docs/DEPLOY.md 11.10): that downloads Anthropic's
+# official binary, verifies it, extracts its JavaScript, rebundles it under
+# Node 22 and installs it to /opt/claude-code with /usr/local/bin/claude.
+# Nothing of Anthropic's is in this package or in the image.
+#
+# Sign-in is the owner's, on the tablet: `claude setup-token` then
+# `claude-token-save` (~/.claude/.oauth_token, settings.json
+# env.CLAUDE_CODE_OAUTH_TOKEN). No token here, ever.
+#
+# Build: tools/build-pkg t715-claude-code. Notes: docs/image/PACKAGES.md.
+
+pkgname=t715-claude-code
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Claude Code on the SM-T715: Yumi Lab's installer (MIT), patched for Arch Linux ARM"
+arch=(any)
+url="https://github.com/Yumi-Lab/claude-code-smartpi"
+license=('MIT')
+# Every command install.sh (at a9cac19, with the patch), lib/, bin/ and the
+# wrapper call on the tablet:
+#   bash curl python3 xz rg npm node  the installer itself (its shebang is bash,
+#     and the patch adds `curl … manifest.json | python3 -I -`, `sha256sum`)
+#   node  >= 22.17 (Claude Code's engine guard): nodejs-lts-jod, Node 22
+#   npm   the bundle step installs esbuild, ws, undici, js-yaml with npm
+#   taskset nice  the launcher the installer writes (util-linux, coreutils)
+#   tar cpio install cmp sha256sum head stat mkdir rm find  coreutils, tar,
+#     diffutils, findutils (pacman's base, but listed where not obvious)
+#   gcc-libs  libatomic.so.1, which nodejs-lts-jod's binary links
+install=t715-claude-code.install
+depends=(bash
+         nodejs-lts-jod   # Node 22 (>= 22.17): what Claude Code's engine guard allows
+         npm              # installs esbuild + ws undici js-yaml for the Node bundle
+         ripgrep          # rg: the app shells out to it; USE_BUILTIN_RIPGREP=0
+         xz               # unpacks nodejs.org's armv7l tarball when Node must be installed
+         python           # python3: the JS extractor (shim/extract-bun-js.py) and the
+                          # manifest check our patch adds
+         curl             # Anthropic's binary and manifest.json, nodejs.org
+         util-linux       # taskset in the launcher the installer writes
+         coreutils        # sha256sum, install, stat, head, nice, ...
+         gcc-libs         # libatomic.so.1 for Node
+         tar              # unpacks the Node tarball into /usr/local
+         diffutils        # cmp: put_if_changed skips rewrite of an unchanged file
+         findutils        # find: the download cache's cleanup
+         grep)            # claude-check-update greps claude --version's output
+makedepends=(git)
+source=("git+https://github.com/Yumi-Lab/claude-code-smartpi.git#commit=a9cac19982b922745c1ba33a4a3fe9ea2a94719b"
+        0001-arch-linux-arm-sm-t715.patch
+        t715-claude-install)
+sha256sums=('SKIP'
+            '17dda0d18343ff6c57d8bb9f418e93a010af247978ea1b07968be4795c826bbf'
+            'SKIP')
+
+prepare() {
+  cd claude-code-smartpi
+  patch -Np1 -i ../0001-arch-linux-arm-sm-t715.patch
+}
+
+package() {
+  cd claude-code-smartpi
+  # The installer tree: everything upstream ships except bench/ (its own test
+  # corpus), .git* and the macOS junk, for the tablet's
+  # /usr/share/t715-claude-code/installer/.
+  local dst="$pkgdir/usr/share/$pkgname/installer"
+  install -dm755 "$dst"
+  find . -mindepth 1 -maxdepth 1 \
+    ! -name bench ! -name '.git*' ! -name '._*' -exec cp -a {} "$dst/" \;
+  # Everything 644, then what the installer runs back to 755: install.sh, the
+  # bin/ helpers it installs, lib/ (sourced) and the executable files of shim/
+  # (only extract-bun-js.py, run as `python3 "$ex"`; the .mjs files are handed
+  # to node, their mode does not matter).
+  find "$dst" -type d -exec chmod 755 {} +
+  find "$dst" -type f -exec chmod 644 {} +
+  chmod 755 "$dst/install.sh"
+  find "$dst/bin" -type f -exec chmod 755 {} +
+  find "$dst/lib" -type f -exec chmod 755 {} +
+  chmod 755 "$dst/shim/extract-bun-js.py"
+  # The licence where Arch looks for it, and the wrapper the owner runs.
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm755 "$srcdir/t715-claude-install" "$pkgdir/usr/bin/t715-claude-install"
+}

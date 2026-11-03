@@ -1,4 +1,4 @@
-From ea84d0061f5256ff58629bcf01dea03c6a1770b2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 01/16] dt-bindings: clock: exynos5433: add CMU_CPIF MIPI-LLI

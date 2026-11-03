@@ -1,8 +1,8 @@
 # SM-T715 (armv7h) package of omarchy-mobile's omamobile-omarchy at commit
-# 5f7ba48, trimmed for an 8" tablet without an [omamobile] repository.
+# 3624ef3, trimmed for an 8" tablet without an [omamobile] repository.
 #
 # What it is: omarchy-mobile's touch patches to Omarchy 4.0.6 (lock, idle,
-# polkit, notifications, menu, image picker, screensaver) and the tool that
+# polkit, notifications, menu, image picker, screensaver, app icons) and the tool that
 # keeps them applied, omamobile-omarchy-patches: every run starts from
 # Omarchy's own files (checked against the omarchy package's mtree sha256s
 # in pacman's local database), applies the series in a scratch tree with
@@ -15,13 +15,31 @@
 #     (channel switch and pacman refresh refused on a phone): both need
 #     omamobile-update, which assumes an [omamobile] repository and a phone's
 #     update flow; t715-pacman-keeps-alarm.patch does 0016's job here;
-#   - bin/omamobile-update and lib/update-bin/: not shipped (see above).
+#   - bin/omamobile-update and lib/update-bin/: not shipped (see above);
+#   - lib/modules-cleanup and systemd/ (0.1.21): a Pixel's kernels come in
+#     module trees that a push leaves for the next boot; here the modules are
+#     the initramfs's, no package or push owns a tree, and the image has no
+#     kernel-modules-hook to hold off.
+# New since 0.1.12, all taken: the lock's glance view (0023; its weather is
+# the shell's ~/.local/state/omamobile/weather.json, which omamobile-shell
+# 0.2.32 does not write, so none shows, and the lock never asks the network),
+# the battery (0026, read from the kernel's supplies: sm5703-fuelgauge and the
+# Mains sm5703-charger) and media controls (0027, Quickshell's Mpris) on the
+# lock, fingerprint only when a finger is enrolled (0022: no fprintd here, so
+# never), the display off before a suspend (0021: suspend is masked here), the
+# largest app icon (0024) and no launch toast for shell surfaces (0025).
 # Kept on purpose: bridge-4.0.4-menu-first-frame.patch. Despite its name it
 # targets 4.0.6 (its header: "4.0.6's menu is still a plain PanelWindow";
 # upstream's test/patches.py applies it to the real 4.0.6 package after
 # 0018): the menu card no longer flashes at the top edge for a frame.
+# t715-lock-blank-through-keys.patch (1.2): the lock's own blank, 5 s after a
+# wake, went at the panel alone (omarchy-brightness-display off), so t715-keys
+# never heard of it: the touchscreen stayed on under the dark panel and
+# t715-rotate kept the accelerometer streaming (about 500 I2C interrupts a
+# second, 67 mW measured). The blank now signals t715-keys, whose touch-off
+# flag releases the accelerometer, with Omarchy's own blank as the fallback.
 #
-# Source: the GitHub tarball of derekross/omarchy-mobile at 5f7ba48 (MIT),
+# Source: the GitHub tarball of derekross/omarchy-mobile at 3624ef3 (MIT),
 # checked by sha256; only packages/omamobile-omarchy is extracted.
 # Build: tools/build-pkg omamobile-omarchy. Image: rootfs/install-mobile.sh
 # (packages.mobile), checked by tests/verify-rootfs.sh.
@@ -29,8 +47,8 @@
 # Maintainer (upstream): Derek Ross <derekross@gmail.com>
 
 pkgname=omamobile-omarchy
-pkgver=0.1.12
-pkgrel=1.4
+pkgver=0.1.27
+pkgrel=1.2
 pkgdesc="Omarchy Mobile's touch patches to Omarchy, re-applied after every Omarchy upgrade (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -40,15 +58,17 @@ license=(MIT)
 depends=('omarchy>=4.0.6' bash python patch libarchive util-linux)
 checkdepends=(python patch diffutils)
 install=omamobile-omarchy.install
-_commit=5f7ba487cec6ca66ee04606be9d71d1aad855ea0
+_commit=3624ef3237b71abbe5c232f635208f564869f441
 _tarball=omarchy-mobile-${_commit:0:7}.tar.gz
 _dir=omarchy-mobile-$_commit/packages/omamobile-omarchy
 source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit.tar.gz"
         t715-update-without-kernel-package.patch
-        t715-pacman-keeps-alarm.patch)
-sha256sums=('3009362b931b4097b3222a9c048b80ba2832cf570cfbe99edf7a9a4282c2029d'
+        t715-pacman-keeps-alarm.patch
+        t715-lock-blank-through-keys.patch)
+sha256sums=('254ba88ec74d278681b63651a7c01f63af2cbb97f6bce4c968e5ac174ab75c60'
             '17b2558e4114e9ee9d81d9c5842dd69f1dea77dd4317b69025050338c45c0738'
-            'e4800d17937dbddb1c80b4866ba681b56904548cce03a6d3f531cd14389985bd')
+            'e4800d17937dbddb1c80b4866ba681b56904548cce03a6d3f531cd14389985bd'
+            '7e294b9e8c9db2a1e58f263fa435bbb6a744fc3f75a1285f2345ccd498d0f6ea')
 noextract=("$_tarball")
 
 # Upstream files left out of this package, relative to packages/omamobile-omarchy.
@@ -57,6 +77,8 @@ _drop=(
   patches/0016-pacman-a-phone-refuses-the-channel-switch-and-pacman-refresh.patch
   bin/omamobile-update
   lib/update-bin
+  lib/modules-cleanup
+  systemd
 )
 
 prepare() {
@@ -83,7 +105,7 @@ check() {
   # omarchy 4.0.6 package (rootfs/install-mobile.sh).
   env -u OMARCHY_PKG HOME="$srcdir/home" python3 -B test/patches.py
   bash test/lock-pam.sh
-  [[ $(ls patches/*.patch | wc -l) == 17 ]] || { echo "expected 17 patches" >&2; return 1; }
+  [[ $(ls patches/*.patch | wc -l) == 24 ]] || { echo "expected 24 patches" >&2; return 1; }
 }
 
 package() {
@@ -96,7 +118,8 @@ package() {
   done
   # Ours, not upstream's: added here, after check(), whose synthetic Omarchy trees do not have these files
   install -Dm644 -t "$pkgdir/usr/share/omamobile/omarchy/patches" \
-    "$srcdir/t715-update-without-kernel-package.patch" "$srcdir/t715-pacman-keeps-alarm.patch"
+    "$srcdir/t715-update-without-kernel-package.patch" "$srcdir/t715-pacman-keeps-alarm.patch" \
+    "$srcdir/t715-lock-blank-through-keys.patch"
   install -Dm644 libalpm/95-omamobile-omarchy-patches.hook \
     "$pkgdir/usr/share/libalpm/hooks/95-omamobile-omarchy-patches.hook"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

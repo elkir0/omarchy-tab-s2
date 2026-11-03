@@ -1,4 +1,4 @@
-From 12380c45170565f58cf393931b5e765de7cc424d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 17/24] ARM: gts28ltexx: scheduler and timer tuning; audio,

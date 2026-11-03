@@ -1,4 +1,4 @@
-From eb1ea00e2b66bdeb5ccaae1ba9b92b0ef17f103d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 16/16] ARM: configs: gts28ltexx: enable Landlock

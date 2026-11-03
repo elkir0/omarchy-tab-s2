@@ -1,4 +1,4 @@
-From 9510f7e46ce7d4a83bf22a5168e9cc9d58bbabc6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH] ARM: gts28ltexx: GPU devfreq in the daily board, capped at

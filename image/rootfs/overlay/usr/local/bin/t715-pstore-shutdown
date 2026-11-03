@@ -1,0 +1,15 @@
+#!/bin/sh
+# SM-T715: at boot, keep what the previous shutdown left in pstore's console:
+# the processes t715-stuck-procs found alive after the last SIGKILL, and the
+# stop jobs that timed out. pstore holds one boot only, the journal a few
+# days; /var/log/t715-shutdown/ keeps every case, one file each.
+f=/sys/fs/pstore/console-ramoops-0
+[ -r "$f" ] || exit 0
+pat='t715-stuck:|still around after SIGKILL|stop-sigterm. timed out|stop-final-sigterm. timed out'
+grep -qE "$pat" "$f" || exit 0
+d=/var/log/t715-shutdown
+mkdir -p "$d"
+out="$d/$(date +%Y%m%d-%H%M%S).log"
+# from the first stuck process to the end: SysRq w's task stacks follow it
+awk -v pat="$pat" 'f || $0 ~ pat { f = 1 } f' "$f" > "$out"
+logger -t t715-pstore-shutdown "the previous shutdown left processes or timed out: $out"

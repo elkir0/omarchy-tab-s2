@@ -1,4 +1,4 @@
-From d4709df4435a904dd503e885c95eac2c42f65b41 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 08/16] misc: modem_v1: port the SS333 modem interface to Linux

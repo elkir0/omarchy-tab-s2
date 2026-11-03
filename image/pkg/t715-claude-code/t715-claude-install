@@ -1,0 +1,135 @@
+#!/bin/bash
+# t715-claude-install — run Claude Code's installer for the tablet's owner.
+#
+# The image ships no Claude Code binary (Anthropic's licence); this wrapper is
+# the one root command docs/DEPLOY.md 11.10 tells the owner to run. It runs
+# Yumi Lab's installer (/usr/share/t715-claude-code/installer/install.sh) as
+# root but with HOME set to the target user's home, so what the installer
+# writes there (~/.claude/settings.json) lands on the owner's account, not
+# root's; the wrapper then gives that user everything under ~/.claude.
+#
+# Nothing here reads, prints or copies a token: signing in is the owner's,
+# afterwards, with the two commands this script ends with.
+set -eu
+
+INSTALLER=/usr/share/t715-claude-code/installer
+MAX_VERSION_FILE=$INSTALLER/MAX_VERSION
+
+usage() {
+  cat <<'EOF'
+t715-claude-install [VERSION] [--force] [-h|--help]
+
+  Root command that installs Claude Code on the tablet, for the user it is
+  run for ($SUDO_USER, "alarm" without sudo): downloads Anthropic's official
+  binary, checks it against Anthropic's manifest, rebuilds it under Node 22
+  and installs it to /opt/claude-code with /usr/local/bin/claude.
+
+  VERSION  an explicit Claude Code version (default: the installer's
+           MAX_VERSION). A version above MAX_VERSION is refused unless
+           --force: from 2.1.271 the full-screen interface stays blank
+           under Node.
+  --force  allow a version above MAX_VERSION
+
+  Afterwards, as the user:  claude setup-token   then   claude-token-save
+  (that stores the token in ~/.claude, nowhere else).
+EOF
+}
+
+die() { printf 't715-claude-install: %s\n' "$*" >&2; exit 1; }
+
+FORCE=0
+VERSION=""
+for a in "$@"; do
+  case "$a" in
+    -h|--help) usage; exit 0 ;;
+    --force)   FORCE=1 ;;
+    -*)        die "unknown option: $a (see --help)" ;;
+    *)         [ -z "$VERSION" ] || die "only one VERSION at a time (see --help)"
+               VERSION="$a" ;;
+  esac
+done
+
+[ "$(id -u)" -eq 0 ] || die "run me as root: sudo t715-claude-install"
+[ -f "$INSTALLER/install.sh" ] || die "no $INSTALLER/install.sh (the t715-claude-code package)"
+[ -r "$MAX_VERSION_FILE" ] || die "cannot read $MAX_VERSION_FILE"
+
+# The account Claude Code is installed for: whoever ran sudo, alarm when this
+# is a root shell. root itself never is: the installer would pin root's
+# ~/.claude/settings.json instead of the owner's.
+user="${SUDO_USER:-alarm}"
+[ -n "$user" ] || user=alarm
+[ "$user" != root ] || die "refusing root as the target user: run me with sudo, as the owner"
+home="$(getent passwd "$user" | cut -d: -f6)"
+[ -n "$home" ] && [ -d "$home" ] || die "no home directory for $user"
+uid="$(getent passwd "$user" | cut -d: -f3)"
+gid="$(getent passwd "$user" | cut -d: -f4)"
+[ -n "$uid" ] && [ -n "$gid" ] || die "cannot read $user's uid/gid"
+
+# Versions as dotted numbers, compared component by component over the
+# longer of the two (a missing component is 0): 2.1 < 2.1.270 < 2.2. No
+# sort -V, which a busybox rescue shell does not have.
+version_at_most() { # $1 <= $2
+  local i x y na nb n
+  IFS=. read -r -a na <<< "$1"
+  IFS=. read -r -a nb <<< "$2"
+  n="${#na[@]}"; [ "${#nb[@]}" -gt "$n" ] && n="${#nb[@]}"
+  for i in $(seq 0 $((n - 1))); do
+    x=$((10#${na[$i]:-0})); y=$((10#${nb[$i]:-0}))
+    [ "$x" -lt "$y" ] && return 0
+    [ "$x" -gt "$y" ] && return 1
+  done
+  return 0
+}
+
+MAX_VERSION="$(head -1 "$MAX_VERSION_FILE" | tr -d '[:space:]')"
+case "$MAX_VERSION" in *[!0-9.]*) die "$MAX_VERSION_FILE does not hold a version: $MAX_VERSION" ;; esac
+if [ -z "$VERSION" ]; then
+  VERSION="$MAX_VERSION"
+else
+  case "$VERSION" in
+    *[!0-9.]*) die "VERSION must be dotted numbers (like 2.1.270), not: $VERSION" ;;
+    *)         version_at_most "$VERSION" "$MAX_VERSION" || {
+                 [ "$FORCE" -eq 1 ] || die "$VERSION is above MAX_VERSION $MAX_VERSION: from 2.1.271 the full-screen interface stays blank under Node (--force to try it anyway)"
+               } ;;
+  esac
+fi
+
+# The installer works in /var/tmp (its own words: /tmp is often a tmpfs, and
+# the official binary alone weighs ~240 MB); the wrapper keeps its own state
+# (nothing so far) out of the way and removes the directory on exit.
+work="$(mktemp -d /var/tmp/t715-claude-install.XXXXXX)"
+trap 'rm -rf "$work"' EXIT
+: > "$work/start" # what the run creates in the user's home is newer than this
+
+printf 'Installing Claude Code %s for %s (%s)…\n' "$VERSION" "$user" "$home"
+# HOME is the user's: the installer's step 8 pins ~/.claude/settings.json
+# (USE_BUILTIN_RIPGREP=0, DISABLE_AUTOUPDATER=1) and, at step 6b, primes the
+# V8 cache; both must land on the owner's account, not root's. It runs from
+# the work directory: under sudo the caller's is the owner's home, and nothing
+# the installer leaves behind may stay anywhere but $work, removed on exit.
+( cd "$work" && HOME="$home" bash "$INSTALLER/install.sh" "$VERSION" )
+
+# The installer ran as root, so ~/.claude and its settings.json are root's:
+# give them to the user. The token file, if the owner has signed in already
+# (a re-run), is only chowned, never opened. So is everything else the run
+# left root's in the home: npm's cache (~/.npm) and the V8 cache, found as
+# root-owned and newer than the run's start.
+chown -R "$uid:$gid" "$home/.claude" 2>/dev/null || true
+find "$home" -xdev -user 0 -newer "$work/start" -exec chown -h "$uid:$gid" {} + 2>/dev/null || true
+if [ -f "$home/.claude/settings.json" ]; then
+  chown "$uid:$gid" "$home/.claude/settings.json"
+  chmod 600 "$home/.claude/settings.json"
+fi
+
+cat <<MSG
+
+Claude Code $VERSION installed. Sign in as $user, with a Claude Pro or Max
+account (no API key, no local browser — use another device to open the URL):
+
+    claude setup-token
+    claude-token-save      # then paste the printed 1-year token at its prompt
+
+(Not as an argument: the token would stay in the shell's history.)
+
+Update later: sudo t715-claude-install VERSION
+MSG

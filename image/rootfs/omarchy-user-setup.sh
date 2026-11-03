@@ -24,10 +24,10 @@
 #    "suspend-off" toggle (no Suspend entry in the system menu).
 #    Touch layer P1: the tablet block at the end of ~/.config/hypr/hyprland.lua
 #    (rootfs/t715-tablet.lua: keys, cover, on-screen keyboard layers, window
-#    sizes), the on-screen keyboard's gsettings (shown at all, US QWERTY
-#    first; through a private D-Bus session, as in step 1), squeekboard's
-#    terminal layouts with Esc, and no Lock entry in the system menu (nothing
-#    could unlock it without a keyboard).
+#    sizes), the on-screen keyboard's gsettings (shown at all, the layout of
+#    locale.env first; through a private D-Bus session, as in step 1), squeekboard's
+#    terminal layouts with Esc, auto-rotation on, and no Lock entry in the
+#    system menu (nothing could unlock it without a keyboard).
 # 5. Touch layer P2 (omamobile-shell): omamobile-setup-user as alarm, with
 #    the markers of its phone-only or P1-duplicate steps set first so that
 #    they are skipped (each recorded with its reason); its profile step seeds
@@ -45,6 +45,8 @@ OMARCHY_PATH=/usr/share/omarchy
 ADAPTED=/tmp/t715-omarchy-install
 RUNDIR="/run/user/$UID_U"
 LOG=/var/log/t715-omarchy-provision-user.log
+# T715_LANG and T715_XKB, as tools/build-rootfs wrote them.
+. /usr/share/t715-omarchy/locale.env
 
 record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$OUT"; }
 
@@ -64,7 +66,7 @@ as_user() {
     runuser -u "$U" -- env -i \
         HOME="$H" USER="$U" LOGNAME="$U" SHELL=/bin/bash \
         PATH="$OMARCHY_PATH/bin:/usr/local/bin:/usr/bin" \
-        LANG=en_US.UTF-8 XDG_RUNTIME_DIR="$RUNDIR" \
+        LANG="$T715_LANG" XDG_RUNTIME_DIR="$RUNDIR" \
         OMARCHY_PATH="$OMARCHY_PATH" OMARCHY_INSTALL="$ADAPTED" \
         OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log \
         OMARCHY_USER_NAME= OMARCHY_USER_EMAIL= \
@@ -248,12 +250,17 @@ else
 fi
 
 # squeekboard's layout is the first input source (GNOME's setting, which it
-# follows): US QWERTY, then French AZERTY one tap away in its layout menu.
+# follows): T715_XKB's, US QWERTY or French AZERTY, then the other one tap
+# away in its layout menu.
 src=(org.gnome.desktop.input-sources sources)
-want="[('xkb', 'us'), ('xkb', 'fr')]"
+if [ "$T715_XKB" = fr ]; then
+    want="[('xkb', 'fr'), ('xkb', 'us')]"
+else
+    want="[('xkb', 'us'), ('xkb', 'fr')]"
+fi
 as_user "${runner[@]}" gsettings set "${src[@]}" "$want" >> "$LOG" 2>&1
 if [ "$(as_user "${runner[@]}" gsettings get "${src[@]}" 2>>"$LOG")" = "$want" ]; then
-    record "gsettings: input-sources" ok "${src[*]} $want (squeekboard: QWERTY)"
+    record "gsettings: input-sources" ok "${src[*]} $want (squeekboard: $T715_XKB first)"
 else
     record "gsettings: input-sources" failed "${src[*]} is not $want; see $LOG"
 fi
@@ -267,6 +274,15 @@ step "squeekboard: terminal layouts" "~/.local/share/squeekboard/keyboards/termi
         for l in us fr; do
             ln -sfn "$1/$l.yaml" ~/.local/share/squeekboard/keyboards/terminal/$l.yaml && [ -f "$1/$l.yaml" ] || exit 1
         done' _ "$layouts"
+
+# Auto-rotation on, for alarm only (docs/image/ROTATION.md, owner's check of
+# 2026-11-03): a user link, not --global, so that the Rotation tile can still
+# turn it off.
+step "rotation: on" "~/.config/systemd/user/graphical-session.target.wants/omamobile-autorotate.service" \
+    as_user bash -c 'mkdir -p ~/.config/systemd/user/graphical-session.target.wants &&
+        ln -sfn /etc/systemd/user/omamobile-autorotate.service \
+            ~/.config/systemd/user/graphical-session.target.wants/omamobile-autorotate.service &&
+        [ -f /etc/systemd/user/omamobile-autorotate.service ]'
 
 # Lock in the system menu only once a PIN is set: before that nothing could
 # leave the lock. Omarchy's menu extension file, as omarchy-mobile hides rows
@@ -321,6 +337,8 @@ premark=(
     "omamobile-call-plugin|no modem (omamobile.call is not shipped)"
     "omamobile-access-plugin|no camera or location to ask about (omamobile.access is not shipped)"
     "omamobile-update-plugin|omamobile-update needs an [omamobile] repository (omamobile.update is not shipped)"
+    "omamobile-voice-plugin|no Voxtype daemon or Whisper model on armv7h (omamobile.voice is not shipped, since 0.2.94)"
+    "omamobile-menu-voice|the Setup > Voice row would summon omamobile.voice, which is not shipped"
     "omamobile-menu-update|Update > Omarchy stays Omarchy's own (no omamobile-update)"
     "omamobile-chromium-no-first-run|the launcher, pkg/t715-chromium, sets Chromium's flags"
     "omamobile-chromium-mobile|the launcher, pkg/t715-chromium, sets Chromium's flags"

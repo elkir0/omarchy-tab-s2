@@ -2,7 +2,8 @@ SM-T715 tablet: omamobile-set-pin says tablet, and sudo starts asking.
 
 Once the owner has set a PIN, the password protects something: sudo stops being
 free for the wheel group (t715-sudo-asks-password, in the image). Against
-omarchy-mobile 5f7ba48, packages/omamobile-shell.
+omarchy-mobile 87b8395 (omamobile-shell 0.2.94), packages/omamobile-shell
+(renumbered from 0011).
 
 diff --git a/bin/omamobile-set-pin b/bin/omamobile-set-pin
 index aa0794b..55ae66d 100644

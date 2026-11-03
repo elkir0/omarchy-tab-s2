@@ -1,0 +1,3 @@
+#!/bin/sh
+# Refuse a commit message that says something personal (.githooks/privacy-scan.py).
+exec python3 -I "$(git rev-parse --show-toplevel)/.githooks/privacy-scan.py" --message "$1"

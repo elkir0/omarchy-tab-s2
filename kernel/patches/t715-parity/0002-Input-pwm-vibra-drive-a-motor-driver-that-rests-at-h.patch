@@ -1,4 +1,4 @@
-From e803f01da99e30ad409a5d2bfafd57c9d0d97124 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 2/6] Input: pwm-vibra: drive a motor driver that rests at half

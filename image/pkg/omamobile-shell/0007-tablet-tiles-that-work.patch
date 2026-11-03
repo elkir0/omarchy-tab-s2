@@ -5,20 +5,23 @@ NetworkManager, and shannond keeps the radio off across boots. The Hotspot tile 
 back under "Add tiles", now that the modem can be its uplink, and it shows its
 password. The call card has no Speaker toggle: the tablet has no earpiece, so the
 toggle switched nothing and read "off" with the sound on the speaker. Against
-omarchy-mobile 5f7ba48, packages/omamobile-shell, after 0001 to 0007.
+omarchy-mobile 87b8395 (omamobile-shell 0.2.94), packages/omamobile-shell, after
+0001 to 0006 (renumbered from 0008).
 The modem and rfkill states are read with LC_ALL=C: the session runs in French,
 where rfkill says "bloqué", and upstream's tile never saw itself on.
 
 diff --git a/plugins/README.md b/plugins/README.md
-index d1d8411..5e5f23c 100644
+index bb39c37..2a712a9 100644
 --- a/plugins/README.md
 +++ b/plugins/README.md
-@@ -126,8 +126,8 @@ existed finds them under "Add tiles" too.
+@@ -126,9 +126,9 @@ existed finds them under "Add tiles" too.
+ | --- | --- |
  | Wi-Fi | `Networking.wifiEnabled` (NetworkManager); status shows the SSID. The chevron or a long-press opens the Wi-Fi picker (below) |
  | Bluetooth | `omarchy-bluetooth-power on/off`, the same rfkill path as Omarchy's Bluetooth panel. The chevron or a long-press opens the Bluetooth panel (below) |
- | Mobile data | `omamobile-sit data on/off` (omamobile-modem-sit), which starts or stops `omamobile-sit-data.service` through polkit; on while that unit is active, with the operator and technology from `/run/omamobile-sit/state.json`. "No modem" until omamobile-sitd publishes that file |
+-| Mobile data | `omamobile-sit data on/off` (omamobile-modem-sit), which starts or stops `omamobile-sit-data.service` through polkit; on while that unit is active, with the operator's name and technology from `/run/omamobile-sit/state.json` (just the technology when sitd has no name: a bare network code never shows) and "No signal" while unregistered. Its icon is the status bar's signal bars from that file's `signal`, crossed out only with no modem, mobile data off or no network. "No modem" until omamobile-sitd publishes that file |
 -| Airplane mode | Wi-Fi, Bluetooth and WWAN rfkill switches together; on when all are soft-blocked. Turning it off unblocks only the ones that were on (`~/.local/state/omamobile/airplane-restore`). NFC keeps its own tile, and the modem's radio (`omamobile-sit radio`) is not touched, since turning that back on needs a reboot today |
 -| Hotspot | `nmcli device wifi hotspot con-name Hotspot` (NetworkManager makes the SSID and password; the Wi-Fi client link drops while it runs) and `nmcli connection down Hotspot`. Long-press opens the Wi-Fi picker |
++| Mobile data | `omamobile-sit data on/off` (omamobile-modem-sit), which starts or stops `omamobile-sit-data.service` through polkit; on while that unit is active, with the operator's name and technology from `/run/omamobile-sit/state.json` (just the technology when sitd has no name: a bare network code never shows) and "No signal" while unregistered. Its icon is the status bar's signal bars from that file's `signal`, crossed out only with no modem, mobile data off or no network. "No modem" until omamobile-sitd publishes that file. SM-T715 tablet build: NetworkManager's gsm connection and shannond's signal, not omamobile-sit (0005); a long press (or a tap with no connection) opens Réseau mobile (0007) |
 +| Airplane mode | The Bluetooth rfkill switch, and Wi-Fi and the modem through `nmcli radio` (the modem has no rfkill device on the SM-T715, NetworkManager's state outlives a reboot, and shannond keeps the radio off across boots); on when all are off. Turning it off turns on only the ones that were on (`~/.local/state/omamobile/airplane-restore`). NFC keeps its own tile |
 +| Hotspot | `nmcli device wifi hotspot con-name Hotspot` (NetworkManager makes the SSID and password, which a notification shows; the Wi-Fi client link drops while it runs) and `nmcli connection down Hotspot`. Long-press opens the Wi-Fi picker |
  | Battery saver | power-profiles-daemon's `power-saver` profile, through `omarchy-powerprofiles-set autodetect power-saver/balanced` (remembered per AC or battery) |
@@ -40,7 +43,7 @@ index d47bc5c..1da0204 100644
          label: "Speaker"
          on: card.route === "speaker"
 diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
-index 6460e80..afeb40f 100644
+index dd993d4..892b3d8 100644
 --- a/plugins/omamobile.quicksettings/TilesModel.js
 +++ b/plugins/omamobile.quicksettings/TilesModel.js
 @@ -12,15 +12,17 @@
@@ -75,7 +78,7 @@ index 6460e80..afeb40f 100644
  // the image, and turning it off would let the idle lock come up, which
  // needs a PIN pad: P4).
 diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
-index f81b767..d1d8ae6 100755
+index 7625d0c..7fde781 100755
 --- a/plugins/omamobile.quicksettings/tile-action.sh
 +++ b/plugins/omamobile.quicksettings/tile-action.sh
 @@ -12,29 +12,45 @@ case $want in on | off) ;; *) echo "usage: tile-action.sh TILE on|off" >&2; exit
@@ -135,7 +138,7 @@ index f81b767..d1d8ae6 100755
        exec nmcli connection down Hotspot
      fi
 diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
-index 261068a..1add701 100755
+index 3ff3f78..1a4969e 100755
 --- a/plugins/omamobile.quicksettings/tile-state.sh
 +++ b/plugins/omamobile.quicksettings/tile-state.sh
 @@ -6,8 +6,8 @@
@@ -149,7 +152,7 @@ index 261068a..1add701 100755
  #   hotspot       on while NetworkManager's "Hotspot" connection is up
  #   powerprofile  power-profiles-daemon's active profile
  #   theme_mode    light or dark, as Omarchy resolves the current theme
-@@ -27,9 +27,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
+@@ -29,9 +29,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
  
  # airplane
  if have rfkill; then

@@ -2,11 +2,16 @@ SM-T715 tablet: the phone's modem pieces, on shannond's ModemManager facade.
 
 Puts the mobile data tile back (the SS333 modem now works) and drives it
 through NetworkManager's gsm connection, since omamobile-sit is the Pixel's
-modem daemon: tile-state.sh probes nmcli (and shannonctl for the technology),
-tile-action.sh brings the connection up or down. Against omarchy-mobile
-5f7ba48, packages/omamobile-shell, on top of patches 0001-0004 (applied with
-patch -p1 in that directory).
+modem daemon: tile-state.sh probes nmcli, tile-action.sh brings the
+connection up or down. Since upstream 0.2.94 the tile draws signal bars
+(TilesModel.dataIcon) from tile-state.sh's data_signal, so the probe now
+reads the signal percent and the technology from shannond's status too.
+Against omarchy-mobile 87b8395 (omamobile-shell 0.2.94),
+packages/omamobile-shell, on top of patches 0001 to 0003 (applied with
+patch -p1 in that directory; renumbered from 0005).
 
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index c366ccb..5dc35cb 100644
 --- a/plugins/omamobile.quicksettings/TilesModel.js
 +++ b/plugins/omamobile.quicksettings/TilesModel.js
 @@ -12,13 +12,14 @@
@@ -28,7 +33,7 @@ patch -p1 in that directory).
    { id: "airplane", label: "Airplane mode" },
    { id: "dnd", label: "Do not disturb" },
    { id: "battery-saver", label: "Battery saver" },
-@@ -42,9 +43,9 @@
+@@ -42,9 +43,9 @@ var CATALOG = [
  // the image, and turning it off would let the idle lock come up, which
  // needs a PIN pad: P4).
  var DEFAULT_LAYOUT = [
@@ -41,9 +46,11 @@ patch -p1 in that directory).
  ]
  
  var QUICK_COUNT = 4
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+index b7ab913..7625d0c 100755
 --- a/plugins/omamobile.quicksettings/tile-action.sh
 +++ b/plugins/omamobile.quicksettings/tile-action.sh
-@@ -86,7 +86,10 @@
+@@ -86,7 +86,10 @@ case $tile in
      fi
      ;;
    mobile-data)
@@ -54,29 +61,35 @@ patch -p1 in that directory).
 +    if [ "$want" = on ]; then exec nmcli -w 150 connection up "$con"; else exec nmcli connection down "$con"; fi
      ;;
    dictation)
-     # voxtype types what it hears into the focused window. A direction, not
+     # The voice bar (omamobile.voice), the same bar as the bottom bar's mic:
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+index 83d4732..3ff3f78 100755
 --- a/plugins/omamobile.quicksettings/tile-state.sh
 +++ b/plugins/omamobile.quicksettings/tile-state.sh
-@@ -15,9 +15,9 @@
+@@ -15,10 +15,9 @@
  #   nightlight    on while hyprsunset runs warmer than identity
  #   stayawake     on while Omarchy's stay-awake indicator exists
  #   record        on while omamobile-screenrecord (wf-recorder) records
 -#   data          on while omamobile-sit-data.service is active; none
 -#                 without omamobile-sitd running
--#   data_status   the operator and technology, when registered
+-#   data_status   the operator's name (never a bare network code) and the
+-#                 technology when registered, else "No signal"
 +#   data          on while NetworkManager's gsm connection is up; none
 +#                 without a gsm device and connection
 +#   data_status   the technology, when registered
+ #   data_signal   the signal, 0-100, while registered; -1 otherwise
  #   dictation     voxtype: on while recording, busy while transcribing, off
  #                 when idle; down when its user service isn't running, none
- #                 without voxtype (it is an optional Omarchy install)
-@@ -99,20 +99,25 @@
+@@ -102,37 +101,37 @@ else
    echo "dictation=none"
  fi
  
 -# data: the daemon's public state is world-readable; the bearer service's
 -# state is what "data on|off" switches.
--state=/run/omamobile-sit/state.json
+-# The status names the operator only by name: sitd's "operator" falls back
+-# to the numeric network code, which reads as noise, so a bare code is left
+-# out and the technology stands alone.
+-state=${OMAMOBILE_SIT_STATE:-/run/omamobile-sit/state.json}
 -if have omamobile-sit && [ -r "$state" ] && have python3; then
 -  if systemctl is-active --quiet omamobile-sit-data.service 2>/dev/null; then echo "data=on"; else echo "data=off"; fi
 -  python3 -I -c '
@@ -90,20 +103,42 @@ patch -p1 in that directory).
 +  else
 +    echo "data=off"
 +  fi
-+  tech=$(t shannonctl status | python3 -I -c '
++  # The tile's signal bars (TilesModel.dataIcon) and the technology, from
++  # shannond: the same answers its ModemManager facade gives.
++  t shannonctl status | python3 -I -c '
  import json, sys
  try:
 -    m = json.load(open(sys.argv[1])).get("modem") or {}
 -except (OSError, ValueError):
-+    r = json.load(sys.stdin)["reg"]
-+except (KeyError, ValueError):
+-    sys.exit(0)
+-if not isinstance(m, dict):
++    s = json.load(sys.stdin)
++    reg, sig = s["reg"], s["signal"]
++except (KeyError, TypeError, ValueError):
      sys.exit(0)
--words = [str(m.get(k)) for k in ("operator", "tech") if m.get(k)]
+-if m.get("state") != "registered":
++registered = "home" in (reg.get("cs"), reg.get("ps")) or "roaming" in (reg.get("cs"), reg.get("ps"))
++if not registered:
+     print("data_signal=-1")
+-    print("data_status=No signal")
+     sys.exit(0)
+ try:
+-    signal = max(0, min(100, int(m.get("signal") or 0)))
++    print("data_signal=%d" % max(0, min(100, int(sig.get("percent") or 0))))
+ except (TypeError, ValueError):
+-    signal = 0
+-print("data_signal=%d" % signal)
+-name = str(m.get("operator_name", m.get("operator")) or "").strip()
+-if name.replace(" ", "").isdigit():
+-    name = ""
+-words = [w for w in (name, str(m.get("tech") or "").strip()) if w]
 -print("data_status=" + " ".join(words))
 -' "$state"
-+print({"lte": "LTE", "umts": "3G", "gsm": "2G"}.get(r.get("rat"), ""))
-+')
-+  [ -z "$tech" ] || echo "data_status=$tech"
++    print("data_signal=0")
++tech = {"lte": "LTE", "umts": "3G", "gsm": "2G"}.get(reg.get("rat"))
++if tech:
++    print("data_status=" + tech)
++'
  else
    echo "data=none"
  fi

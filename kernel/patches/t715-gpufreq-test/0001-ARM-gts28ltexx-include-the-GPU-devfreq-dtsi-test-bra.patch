@@ -1,4 +1,4 @@
-From c756b027ce0279a042f1d4e32b7c4a90ad1d6e32 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH] ARM: gts28ltexx: include the GPU devfreq dtsi (test branch)

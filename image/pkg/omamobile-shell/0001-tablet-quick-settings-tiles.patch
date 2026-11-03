@@ -6,8 +6,11 @@ LED, NFC or fingerprint sensor, Hotspot would take the only Wi-Fi link, and
 rotation comes with P3), so they show neither in the sheet nor under "Add
 tiles"; a saved layout that names them loses them (sanitize() skips unknown
 ids). The default layout is the tablet's own tiles. Against omarchy-mobile
-5f7ba48, packages/omamobile-shell (applied with patch -p1 in that directory).
+87b8395 (omamobile-shell 0.2.94), packages/omamobile-shell (applied with
+patch -p1 in that directory).
 
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index 1b510df..c366ccb 100644
 --- a/plugins/omamobile.quicksettings/TilesModel.js
 +++ b/plugins/omamobile.quicksettings/TilesModel.js
 @@ -12,17 +12,15 @@
@@ -32,7 +35,7 @@ ids). The default layout is the tablet's own tiles. Against omarchy-mobile
    { id: "battery-saver", label: "Battery saver" },
    { id: "dark-theme", label: "Dark theme" },
    { id: "night-light", label: "Night light" },
-@@ -30,7 +28,6 @@
+@@ -30,7 +28,6 @@ var CATALOG = [
    { id: "mic", label: "Microphone" },
    { id: "screenshot", label: "Screenshot" },
    { id: "screen-record", label: "Screen record" },
@@ -40,7 +43,7 @@ ids). The default layout is the tablet's own tiles. Against omarchy-mobile
    { id: "keyboard", label: "Keyboard" },
    { id: "clipboard", label: "Clipboard" },
    { id: "dictation", label: "Dictation" }
-@@ -40,11 +37,14 @@
+@@ -40,11 +37,14 @@ var CATALOG = [
  // reached for most. Clipboard and Dictation close the second page: Omarchy
  // reaches them only by keyboard shortcut, so a tile is their touch path
  // (TOUCH-PLAN 1.12), and appending them leaves the first page as it was.

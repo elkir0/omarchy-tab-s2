@@ -1,4 +1,4 @@
-From 846440af3e992b67f7ad5096f18bdd19efea1bd8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 2/2] ARM: configs: gts28ltexx: GPIO sysfs for the GPS's power

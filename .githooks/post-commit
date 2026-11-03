@@ -1,0 +1,16 @@
+#!/bin/sh
+# Give the new commit the published identity and a date without a time of day:
+# elkir0 <elkir0@users.noreply.github.com>, its day at 12:00:00 +0000. A commit
+# time says when its author works. pre-push checks that every commit has them.
+# A rebase rewrites committer dates: run it with --committer-date-is-author-date.
+[ -n "${T715_NEUTRALIZING:-}" ] && exit 0
+g=$(git rev-parse --git-dir)
+[ -d "$g/rebase-merge" ] || [ -d "$g/rebase-apply" ] || [ -f "$g/CHERRY_PICK_HEAD" ] && exit 0
+name=elkir0
+mail=elkir0@users.noreply.github.com
+day=$(git log -1 --format=%ad --date=format:%Y-%m-%d)
+date="$day 12:00:00 +0000"
+[ "$(git log -1 --format='%an|%ae|%cn|%ce|%ad|%cd' --date=iso-strict)" = \
+  "$name|$mail|$name|$mail|${day}T12:00:00+00:00|${day}T12:00:00+00:00" ] && exit 0
+T715_NEUTRALIZING=1 GIT_COMMITTER_NAME=$name GIT_COMMITTER_EMAIL=$mail GIT_COMMITTER_DATE=$date \
+    git commit --amend --no-edit --no-verify --allow-empty --quiet --author="$name <$mail>" --date="$date"

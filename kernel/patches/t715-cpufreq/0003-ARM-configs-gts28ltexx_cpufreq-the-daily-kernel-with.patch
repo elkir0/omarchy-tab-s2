@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/3] ARM: configs: gts28ltexx_cpufreq: the daily kernel with
+ A53 scaling
+
+The daily build of the stage 1 tables: the modem fragment's lines first,
+unchanged, then cpufreq-dt as a module that udev loads from the root,
+after the initramfs's watchdog guard, schedutil by default, the
+userspace and performance governors for cpufreq.sh, CPU cooling, and
+the soft lockup and hung task detectors of the soak.
+
+The dtsi and the board say so: the test kernels still blacklist
+cpufreq-dt and load it by hand, the daily kernel does not.
+
+Passed on the tablet on 2026-11-03: a 2 hour soak from RECOVERY with the
+CP online and the persistent root, then BOOT and four clean reboots.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-cpufreq.dtsi        | 10 +++--
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |  2 +-
+ arch/arm/configs/gts28ltexx_cpufreq.config    | 43 +++++++++++++++++++
+ 3 files changed, 50 insertions(+), 5 deletions(-)
+ create mode 100644 arch/arm/configs/gts28ltexx_cpufreq.config
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
+index 847b9532b..4379d9baa 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
+@@ -4,10 +4,12 @@
+  * scaling, stage 1 for the A53s (docs/hardware/CPUFREQ.md in the
+  * omarchy-tab-s2 repository).
+  *
+- * TEST KERNELS ONLY, with gts28ltexx_cpufreq_test.config: cpufreq-dt is a
+- * module, blacklisted at boot (t715.modblacklist=cpufreq_dt) and loaded by
+- * hand, so a bad table cannot hang the boot before the initramfs guard
+- * (CPUFREQ.md section 8.3).
++ * Two builds use it. The test kernels (gts28ltexx_cpufreq_test.config) blacklist
++ * the cpufreq-dt module at boot (t715.modblacklist=cpufreq_dt) and load it by
++ * hand (CPUFREQ.md section 8.3). The daily kernel since 2026-11-03
++ * (gts28ltexx_cpufreq.config, after stage 1 and the 2-hour soak) lets udev
++ * load it from the root. In both, cpufreq-dt stays a module, so a bad table
++ * cannot hang the boot before the initramfs guard.
+  *
+  * The voltages are this chip's, not the SoC's: ASV table version 8, group 1,
+  * as the stock kernel logged them at every boot of this tablet (CPUFREQ.md
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index b5173848a..eb920a9fd 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -831,7 +831,7 @@ poweroff: syscon-poweroff {
+ /* TMUs and trips (docs/THERMAL.md); CPU cooling in the next file. */
+ #include "exynos5433-gts28ltexx-thermal.dtsi"
+ 
+-/* CPU frequency scaling, stage 1: test kernels only (docs/hardware/CPUFREQ.md). */
++/* CPU frequency scaling: the A53 levels, the A57s held at 1.2 GHz (docs/hardware/CPUFREQ.md). */
+ #include "exynos5433-gts28ltexx-cpufreq.dtsi"
+ 
+ /* ==================================================================== */
+diff --git a/arch/arm/configs/gts28ltexx_cpufreq.config b/arch/arm/configs/gts28ltexx_cpufreq.config
+new file mode 100644
+index 000000000..99aa33e05
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_cpufreq.config
+@@ -0,0 +1,43 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# The daily candidate with CPU frequency scaling (docs/hardware/CPUFREQ.md in
++# the omarchy-tab-s2 repository: stage 1 passed on 2026-11-03, the owner's
++# answer in section 11). Merged on top of gts28ltexx_defconfig
++# (kernel/kbuild-mainline.sh --fragment gts28ltexx_cpufreq.config), for the
++# board's exynos5433-gts28ltexx-cpufreq.dtsi. Takes the place of
++# gts28ltexx_modem.config: one fragment per build, so its lines come first,
++# unchanged.
++
++# --- gts28ltexx_modem.config ---
++# SPI core built in for the SS333 boot link; the controller, MIPI-LLI and
++# modem_v1 as modules that shannon-loader inserts (see that fragment).
++CONFIG_SPI=y
++CONFIG_SPI_S3C64XX=m
++CONFIG_MIPI_LLI=m
++CONFIG_SEC_MODEM_V1=m
++CONFIG_GPIO_SYSFS=y
++
++# --- CPU frequency scaling ---
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++
++# schedutil by default: stage 1's idle run held the A53s at 400 MHz 95 % of
++# the time. userspace stays for cpufreq.sh's steps.
++CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
++CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
++
++# A module, as in the test kernels: udev loads it from the root, after the
++# initramfs's watchdog guard, so a fault in it cannot loop the boot.
++CONFIG_CPUFREQ_DT=m
++
++# CPU cooling for the board's A53 maps.
++CONFIG_CPU_THERMAL=y
++CONFIG_CPU_FREQ_THERMAL=y
++
++# The soak's detectors (CPUFREQ.md section 9, 1f): a lockup or a hung task is
++# reported in the log. They only panic if their sysctls ask for it.
++CONFIG_DEBUG_KERNEL=y
++CONFIG_SOFTLOCKUP_DETECTOR=y
++CONFIG_DETECT_HUNG_TASK=y
+-- 
+2.52.0
+

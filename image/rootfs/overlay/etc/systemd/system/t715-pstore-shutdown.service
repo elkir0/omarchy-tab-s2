@@ -1,0 +1,12 @@
+# SM-T715: copy to /var/log/t715-shutdown/ what the previous shutdown left in
+# pstore's console (t715-stuck-procs, stop jobs that timed out).
+[Unit]
+Description=Keep the previous shutdown's stuck processes from pstore
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/t715-pstore-shutdown
+
+[Install]
+WantedBy=multi-user.target

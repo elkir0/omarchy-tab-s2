@@ -1,20 +1,21 @@
 # SM-T715 (armv7h) package of omarchy-mobile's omamobile-shell at commit
-# 5f7ba48, trimmed to the touch shell of an 8" tablet (touch layer P2,
-# docs/journal/PLAN.md §3; docs/image/ROOTFS.md "Touch layer P2").
+# 87b8395 (0.2.94), trimmed to the touch shell of an 8" tablet (touch
+# layer P2, docs/journal/PLAN.md §3; docs/image/ROOTFS.md "Touch layer P2").
 #
 # What it is: ordinary Omarchy shell plugins (QML) that turn Omarchy's shell
 # into a touch shell: a status bar with a pull-down quick-settings sheet
-# (omamobile.bar replaces omarchy.bar), the dock, app drawer and home pill
+# (omamobile.bar replaces omarchy.bar), the dock, app drawer and home strip
 # (omamobile.launcher), recent apps (omamobile.switcher), home screens
-# (omamobile.home; OWL widgets stay behind upstream's off-by-default flag),
-# the keyboard's hide button (omamobile.keyboard) and the edge back swipe
-# (omamobile.back); omamobile-setup-user links them into the user's config.
-# Nothing here is compiled and nothing patches Hyprland.
+# (omamobile.home; OWL widgets stay behind upstream's omamobile-owl-widgets
+# package, not shipped here), the keyboard's show/hide calls and language
+# sheet (omamobile.keyboard), and the edge back swipe (omamobile.back);
+# omamobile-setup-user links them into the user's config. Nothing here is
+# compiled and nothing patches Hyprland.
 #
 # Kept as upstream ships them: the seven plugins above, bin/omamobile-setup-user,
-# -launch, -osk-watch (keyboard visibility for the launcher and the hide
-# button), -bt-agent (quick settings' Bluetooth panel), -screenrecord and
-# -widget, branding/, the widget guides and examples, the polkit admin rule,
+# -launch, -osk-watch (keyboard visibility for the launcher), -bt-agent
+# (quick settings' Bluetooth panel), -screenrecord and -widget, branding/,
+# the widget guides and examples, the polkit admin rule,
 # omamobile-setup-user.service (the image masks it: docs/image/ROOTFS.md).
 # Changed for the tablet:
 #   - profile/shell.json is tablet-shell.json (only the plugins shipped
@@ -25,51 +26,74 @@
 #     (tablet-home.json: a 6x8 home grid with the image's apps), seeded by
 #     the image build;
 #   - 0001-tablet-quick-settings-tiles.patch: no hotspot, torch, location,
-#     NFC, fingerprint or rotation-lock tiles (0005 puts mobile data back, 0006
-#     the rotation lock, 0013 location);
+#     NFC, fingerprint or rotation-lock tiles (0004 puts mobile data back, 0005
+#     the rotation lock, 0010 location);
 #   - 0002-wifi-wpa2-without-sae.patch: the BCM4358 firmware has no SAE
 #     (WPA3), so the Wi-Fi panel joins a WPA3/WPA2 SSID with a WPA2-PSK
 #     profile through nmcli instead of Quickshell's key-mgmt=sae one (needs
 #     iw, to ask the radio);
-#   - 0003-tablet-drawer-opens-light.patch: the app drawer opens without
-#     rescanning every icon directory and without unfolding the keyboard
-#     (half the CPU and a third less GPU per opening);
-#   - 0004-tablet-quiet-pollers.patch: the home toggles watch the
+#   - 0003-tablet-quiet-pollers.patch: the home toggles watch the
 #     notification service's settings file instead of a `qs ipc` call every
 #     30 s, and the bar starts its modem and call watchers only when the
 #     bar's cellWatch / callWatch setting is true (true in tablet-shell.json);
-#   - 0005-tablet-modem.patch: the mobile data tile, through NetworkManager's
-#     gsm connection instead of the Pixel's omamobile-sit.
-#   - 0006-tablet-rotation.patch: the Rotation tile back, over t715-rotate
+#   - 0004-tablet-modem.patch: the mobile data tile, through NetworkManager's
+#     gsm connection and shannond's signal instead of the Pixel's
+#     omamobile-sit.
+#   - 0005-tablet-rotation.patch: the Rotation tile back, over t715-rotate
 #     (docs/image/ROTATION.md), and a Rotate tile for a turn by hand.
-#   - 0007-tablet-mobile-settings.patch: the mobile data tile opens Réseau
+#   - 0006-tablet-mobile-settings.patch: the mobile data tile opens Réseau
 #     mobile (t715-mobile-settings) on a long press, or a tap with no connection.
-#   - 0008-tablet-tiles-that-work.patch: Airplane mode turns the modem off too,
+#   - 0007-tablet-tiles-that-work.patch: Airplane mode turns the modem off too,
 #     the Hotspot tile is back and shows its password, no Speaker on the call card.
-#   - 0009-upstream-bottom-strip-keyboard-on-pill.patch and
-#     0010-upstream-app-names-in-recents.patch: from upstream's 0.2.40 to 0.2.43.
-#   - 0011-tablet-set-pin.patch: omamobile-set-pin says tablet, and sudo asks once
+#   - 0008-tablet-set-pin.patch: omamobile-set-pin says tablet, and sudo asks once
 #     a password is chosen.
-#   - 0012-tablet-back-gesture.patch: the edge swipe does what the Back key does.
+#   - 0009-tablet-back-gesture.patch: the edge swipe does what the Back key does.
+#   - 0010-tablet-location-tile.patch: the Location tile over t715-gps.
+# Upstream now does what three of our old patches did, so they are gone:
+#   - 0003-tablet-drawer-opens-light: since 0.2.56/0.2.62 the drawer opens
+#     with no icon rescan (refreshIcons moved after the slide, in settled())
+#     and the search field takes focus only when tapped (an open that asks
+#     for it needs '{"focus":true}'); the home screen swipes the drawer up
+#     (DrawerLink.js);
+#   - 0009-upstream-bottom-strip-keyboard-on-pill and
+#     0010-upstream-app-names-in-recents: backports of 0.2.40-0.2.43; the
+#     whole feature set (the one bottom strip with its reserved height, the
+#     keyboard-down key and double tap, app names in the switcher through
+#     SwitcherModel.js) is upstream and has moved on since.
 # Dropped (phone-only, or replaced by the image's touch layer P1):
 #   - plugins omamobile.fingerprint, .update (needs omamobile-update),
-#     .access (camera and location permission sheet);
+#     .access (camera and location permission sheet) and .voice (needs
+#     Voxtype's daemon and a speech model; the launcher's hold-to-talk and
+#     the Dictation tile degrade to "not installed" without it);
 #   - bin/omamobile-fp-enroll, -nfc-open (and its
 #     unit), -keys (t715-keys has the keys), -sleepd (and its unit; suspend
 #     is masked on this tablet), -onboarding (the owner sets a PIN from the
 #     menu), -portal-access (and portal/), -open-intent (Android links);
+#   - the keyboard's language sheet pieces (bins -keyboard-languages and
+#     -keyboard-theme, hooks/theme-set-keyboard): they serve squeekboard's
+#     globe key and theming, which hypr/phone.lua binds and P1's own
+#     squeekboard layouts and service replace here;
+#   - bin/omamobile-voice, -voice-preview (Voxtype), -weather (and its
+#     service and timer: the lock glance's weather, whose GeoClue path names
+#     omamobile-gnss's socket and agent, which t715-gps does not provide);
+#   - bin/omamobile-screenshot-open, -screenshot-edit and
+#     environment.d/30-omamobile-screenshot.conf (the screenshot toast's
+#     viewer is Loupe, from omamobile-apps, not installable on armv7h; the
+#     environment file that would point Omarchy at them is not shipped);
 #   - hypr/phone.lua (rootfs/t715-tablet.lua replaces it), the OSK pieces P1
 #     already has (environment.d/20-omamobile-osk.conf, the fcitx5 drop-in,
-#     squeekboard's terminal layout) and omamobile-osk-guard (and its unit):
-#     one mechanism per function, see docs/image/ROOTFS.md;
+#     squeekboard's layouts and squeekboard/generate) and
+#     omamobile-osk-guard (and its unit): one mechanism per function, see
+#     docs/image/ROOTFS.md;
 #   - xdg-desktop-portal-gnome's file chooser drop-in and portals.conf, the
-#     "AI Agent" desktop entry (no agent runs on armv7h);
+#     "AI Agent" and other desktop entries (applications/: the agent update
+#     and intent entries, all phone-side);
 #   - depends on omamobile-apps (needs neard, not in ALARM armv7h),
 #     omamobile-owl-widgets (the OWL built-ins: optional and heavy, off),
-#     xdg-desktop-portal-gnome, foot/xdg-terminal-exec and iproute2.
+#     xdg-desktop-portal-gnome, foot/xdg-terminal-exec, iproute2 and which.
 #
-# Source: the GitHub tarball of derekross/omarchy-mobile at 5f7ba48 (MIT;
-# squeekboard's layout, not shipped here, is GPL-3.0-or-later), checked by
+# Source: the GitHub tarball of derekross/omarchy-mobile at 87b8395 (MIT;
+# squeekboard's layouts, not shipped here, are GPL-3.0-or-later), checked by
 # sha256; only packages/omamobile-shell is extracted.
 # Build: tools/build-pkg omamobile-shell. Image: rootfs/install-mobile.sh,
 # rootfs/omarchy-user-setup.sh; checks: tests/verify-rootfs.sh.
@@ -77,8 +101,8 @@
 # Maintainer (upstream): Derek Ross <derekross@gmail.com>
 
 pkgname=omamobile-shell
-pkgver=0.2.32
-pkgrel=1.15
+pkgver=0.2.94
+pkgrel=1
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -91,39 +115,33 @@ optdepends=('wf-recorder: the Screen record tile'
             'playerctl: media keys for the home screen media widget')
 checkdepends=(python)
 install=omamobile-shell.install
-_commit=5f7ba487cec6ca66ee04606be9d71d1aad855ea0
+_commit=87b839567ad77911e948a4549f84198549191a36
 _tarball=omarchy-mobile-${_commit:0:7}.tar.gz
 _dir=omarchy-mobile-$_commit/packages/omamobile-shell
 source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit.tar.gz"
         0001-tablet-quick-settings-tiles.patch
         0002-wifi-wpa2-without-sae.patch
-        0003-tablet-drawer-opens-light.patch
-        0004-tablet-quiet-pollers.patch
-        0005-tablet-modem.patch
-        0006-tablet-rotation.patch
-        0007-tablet-mobile-settings.patch
-        0008-tablet-tiles-that-work.patch
-        0009-upstream-bottom-strip-keyboard-on-pill.patch
-        0010-upstream-app-names-in-recents.patch
-        0011-tablet-set-pin.patch
-        0012-tablet-back-gesture.patch
-        0013-tablet-location-tile.patch
+        0003-tablet-quiet-pollers.patch
+        0004-tablet-modem.patch
+        0005-tablet-rotation.patch
+        0006-tablet-mobile-settings.patch
+        0007-tablet-tiles-that-work.patch
+        0008-tablet-set-pin.patch
+        0009-tablet-back-gesture.patch
+        0010-tablet-location-tile.patch
         tablet-shell.json
         tablet-home.json)
-sha256sums=('3009362b931b4097b3222a9c048b80ba2832cf570cfbe99edf7a9a4282c2029d'
-            '4e726b82b0fedfa0cc215aecd290ceeeb93994d506e6e301e0c984dba9a795ff'
-            'a18f639018acaf0dceea0a2834ec3676e208ce7d4ee726f7a1c6a219cce0345b'
-            '9913f9052194cc7288099cfa348cefc0c51f769beffa449461fde3ccdbc5aa54'
-            '8171b4218f84b9de5d3a0a352e5c9cf90be4596e563b04cf888ded683f978d4f'
-            'e03df7aea748fbf612672d0ae087815ba521af4bb63cace1bc59737b8295b910'
-            'a0b42646c4c1111829677fc92d1d49da5905a0042c37372b4a50b75255a71423'
-            'fabfff15de67f184eb18a96fbd831f6c8521fa4d07ecd24405be25c7c04756d8'
-            'a50894fce827bffd3280caf3d8f2ad2e3dc6f080a7253962054a3bb411765915'
-            '15c1384d1049cbb1dfed832c4fd963a153b0fd394aad680e62cf08baac44aa06'
-            '28acc7cc56e4aede4a748844deeb1350837790db0af39cb07ba7ec8dd08c103a'
-            'fc5e6b8d2156aac2307433c8530dbac5700c59197b7e9592351ab05ab5431775'
-            'dfa8c77c1331c85eec161a89c858a69f238d8b85d487c5df0e0ba29b3d52156b'
-            'dac6c2abe0f4eca32d494846265a40800954e9df4f64454bb6dc7aba980dca2b'
+sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
+            'ca45666e11bb99c8f02f30a54e0cb50582b14e40eea31898f6b1d7b0f11441c5'
+            'adb6f6e4c802ffb0b303ccbf35c56dcabfa24fa27cd70927ddae29f95dc25afb'
+            '07c9d0428af5747d3e5a682d9ab5c00f89af493fb4e1d56d9df251719c39bcc5'
+            '69d1a5b82d431249e8bd9cc85643f4d3e73f000abd82d3abab497b52bc611422'
+            '34ae4a1f0dc78da42dd09b1113c136f78e7480a269293c934e31806f92945508'
+            '3752bf657abbb55fae2fa09e552dc5308d68a6e38147181cd0b7f0422bcad9ad'
+            '23f0f31aadf2bcfa0b9a13c68354829d9e215d5d562958290d87230441817958'
+            'eb0e574121256721f56b9e7fe042c807df547f1c7943f110fba97839839787ec'
+            'a053230db73e583344b547c965b0a932dd849ed7a052c70a575f1df9dc13b8c2'
+            '7f5a49ea2d46b0e7523f97cbc401e2af806c7cb3dffbe3f057d44ec3e5fe02ec'
             '1bb18754cd60203f28f5ad947c7dd9eddf52d66d3ddd6ee2e206b795a8126166'
             '7643f6faa8ed82e31f01ecc3a0767684c68df009318c02d1ae1158f497ce1450')
 noextract=("$_tarball")
@@ -140,17 +158,14 @@ prepare() {
   [[ $(cat version) == "$pkgver" ]] || { echo "upstream version is not $pkgver" >&2; return 1; }
   patch -Np1 -i "$srcdir/0001-tablet-quick-settings-tiles.patch"
   patch -Np1 -i "$srcdir/0002-wifi-wpa2-without-sae.patch"
-  patch -Np1 -i "$srcdir/0003-tablet-drawer-opens-light.patch"
-  patch -Np1 -i "$srcdir/0004-tablet-quiet-pollers.patch"
-  patch -Np1 -i "$srcdir/0005-tablet-modem.patch"
-  patch -Np1 -i "$srcdir/0006-tablet-rotation.patch"
-  patch -Np1 -i "$srcdir/0007-tablet-mobile-settings.patch"
-  patch -Np1 -i "$srcdir/0008-tablet-tiles-that-work.patch"
-  patch -Np1 -i "$srcdir/0009-upstream-bottom-strip-keyboard-on-pill.patch"
-  patch -Np1 -i "$srcdir/0010-upstream-app-names-in-recents.patch"
-  patch -Np1 -i "$srcdir/0011-tablet-set-pin.patch"
-  patch -Np1 -i "$srcdir/0012-tablet-back-gesture.patch"
-  patch -Np1 -i "$srcdir/0013-tablet-location-tile.patch"
+  patch -Np1 -i "$srcdir/0003-tablet-quiet-pollers.patch"
+  patch -Np1 -i "$srcdir/0004-tablet-modem.patch"
+  patch -Np1 -i "$srcdir/0005-tablet-rotation.patch"
+  patch -Np1 -i "$srcdir/0006-tablet-mobile-settings.patch"
+  patch -Np1 -i "$srcdir/0007-tablet-tiles-that-work.patch"
+  patch -Np1 -i "$srcdir/0008-tablet-set-pin.patch"
+  patch -Np1 -i "$srcdir/0009-tablet-back-gesture.patch"
+  patch -Np1 -i "$srcdir/0010-tablet-location-tile.patch"
   cp "$srcdir/tablet-shell.json" profile/shell.json
   cp "$srcdir/tablet-home.json" profile/home.json
 }
@@ -161,7 +176,7 @@ check() {
   for f in "${_bins[@]}"; do
     case "$(head -n1 "bin/$f")" in
       *python3*) python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "bin/$f" ;;
-      *bash*)    bash -n "bin/$f" ;;
+      *bash*|*sh*) bash -n "bin/$f" ;;
       *)         echo "bin/$f: unknown interpreter" >&2; return 1 ;;
     esac
   done
@@ -198,14 +213,8 @@ PY
   # The Wi-Fi panel's WPA2 path without SAE (0002).
   grep -q 'nmcliWpa2ConnectArgv' plugins/omamobile.quicksettings/WifiPanel.qml
   grep -q 'wifi-sec.key-mgmt wpa-psk' plugins/omamobile.quicksettings/WifiModel.js
-  # The drawer opens without an icon rescan or the keyboard (0003). (An
-  # `if`, not `! grep`: set -e ignores a negated command.)
-  if grep -nE 'refreshIcons\(\)|input\.forceActiveFocus' plugins/omamobile.launcher/Launcher.qml; then
-    echo "Launcher.qml still rescans icons or focuses the search field on opening" >&2
-    return 1
-  fi
   # No do-not-disturb poll in the home toggles, which watch the notification
-  # service's file; the bar's modem and call watchers off by default (0004).
+  # service's file; the bar's modem and call watchers off by default (0003).
   grep -q '"/.local/state/omarchy/notifications.json"' plugins/omamobile.home/TogglesWidget.qml
   if grep -nE 'dndState|interval: 30000' plugins/omamobile.home/TogglesWidget.qml; then
     echo "TogglesWidget.qml still polls do-not-disturb" >&2
@@ -215,8 +224,16 @@ PY
   grep -q 'readonly property bool callWatchEnabled: setting("callWatch", false) === true' plugins/omamobile.bar/Bar.qml
   grep -q 'running: root.cellWatchEnabled' plugins/omamobile.bar/Bar.qml
   grep -q 'running: root.callWatchEnabled' plugins/omamobile.bar/Bar.qml
-  # The patched tile catalogue: none of the phone's tiles but mobile data (0005),
-  # which goes through NetworkManager, not omamobile-sit, and Hotspot (0008).
+  # The drawer opens light, as upstream does it since 0.2.56/0.2.62: no icon
+  # rescan when it opens (the rescan moved after the slide, in settled()) and
+  # the search field not focused on open (only '{"focus":true}' focuses it).
+  if awk '/^  function open\(/,/^  }/' plugins/omamobile.launcher/Launcher.qml |
+      grep -nE 'refreshIcons\(\)|forceActiveFocus'; then
+    echo "Launcher.qml's open() rescans icons or focuses the field" >&2
+    return 1
+  fi
+  # The patched tile catalogue: none of the phone's tiles but mobile data (0004),
+  # which goes through NetworkManager, not omamobile-sit, and Hotspot (0007).
   if grep -nE '"(torch|nfc|fingerprint)"' \
       plugins/omamobile.quicksettings/TilesModel.js; then
     echo "TilesModel.js still lists a phone tile" >&2
@@ -225,17 +242,17 @@ PY
   grep -q '"mobile-data"' plugins/omamobile.quicksettings/TilesModel.js
   grep -q '"rotation-lock"' plugins/omamobile.quicksettings/TilesModel.js
   grep -q '"hotspot"' plugins/omamobile.quicksettings/TilesModel.js
-  # The Location tile over t715-gps (0013).
+  # The Location tile over t715-gps (0010).
   grep -q '"location"' plugins/omamobile.quicksettings/TilesModel.js
-  # The edge swipe goes through t715-keys (0012).
+  # The edge swipe goes through t715-keys (0009).
   grep -q 'signal=SIGHUP' plugins/omamobile.back/BackModel.js
-  # Airplane mode reaches the modem (0008).
+  # Airplane mode reaches the modem (0007).
   grep -q 'nmcli radio wwan off' plugins/omamobile.quicksettings/tile-action.sh
   if grep -nE '(exec|have) omamobile-sit' plugins/omamobile.quicksettings/tile-action.sh plugins/omamobile.quicksettings/tile-state.sh; then
     echo "the mobile data tile still calls omamobile-sit" >&2
     return 1
   fi
-  # The modem pieces are on: the call card and both watchers (0005, tablet-shell.json).
+  # The modem pieces are on: the call card and both watchers (0004, tablet-shell.json).
   python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); assert c["bar"]["cellWatch"] and c["bar"]["callWatch"]; assert {"id": "omamobile.call"} in c["plugins"]' profile/shell.json
 }
 

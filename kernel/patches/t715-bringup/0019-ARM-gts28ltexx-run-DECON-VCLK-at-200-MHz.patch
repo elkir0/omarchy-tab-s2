@@ -1,4 +1,4 @@
-From aabb8a57a39bd3993d68e2d530e017a32714e262 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 12:00:00 +0000
 Subject: [PATCH 19/24] ARM: gts28ltexx: run DECON VCLK at 200 MHz
