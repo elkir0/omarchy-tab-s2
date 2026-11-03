@@ -19,3 +19,4 @@ legacy/phosh/*.tar.gz
 
 .DS_Store
 __pycache__/
+.fleet-runs/
