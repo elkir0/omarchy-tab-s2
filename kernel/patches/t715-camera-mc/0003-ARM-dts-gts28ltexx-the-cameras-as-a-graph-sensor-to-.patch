@@ -1,0 +1,255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/4] ARM: dts: gts28ltexx: the cameras as a graph, sensor to
+ CSIS
+
+Each sensor becomes an I2C node on its bus, samsung,s5k4h5 at 0x37 and
+samsung,s5k6b2 at 0x35, with its rails, reset, MCLK, pinctrl states,
+firmware-name, orientation and, at the back, the focus motor.  An
+endpoint links it to its capture block, which keeps CSIS, FIMC-LITE, the
+PHY and their five clocks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-camera.dtsi | 156 +++++++++++-------
+ 1 file changed, 100 insertions(+), 56 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+index bb86a1749..0474bbfbd 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-camera.dtsi
+@@ -1,11 +1,15 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+  * The two cameras: S5K6B2 in front on CSIS1 and FIMC-LITE B, S5K4H5 at the back on CSIS0
+- * and FIMC-LITE A, 4 lanes, both on the 400 MHz branch, with no ISP.  t715-camera.ko
+- * drives them; docs/hardware/CAMERA.md has the path and the proofs.  The bit-banged buses
+- * are stock's i2c@35 for the front and the same thing on ch0 for the rear, proved on the
+- * tablet: 0x35 answers model 0x6b20, 0x37 answers 0x485b.  The rear camera's DW9807
+- * focus motor sits on ch1 of the ISP I2C, at 0x0c.
++ * and FIMC-LITE A, 4 lanes, both on the 400 MHz branch, with no ISP.  docs/hardware/
++ * CAMERA.md has the path and the proofs.
++ *
++ * Each sensor is an I2C device on its bit-banged bus (stock's i2c@35 for the front, the
++ * same thing on ch0 for the rear, proved on the tablet: 0x35 answers model 0x6b20, 0x37
++ * answers 0x485b), driven by t715-sensor.ko, which also owns its rails, reset, MCLK and,
++ * at the back, the DW9807 focus motor on ch1 of the ISP I2C at 0x0c.  The capture blocks
++ * (t715-camera.ko) hold CSIS, FIMC-LITE and the PHY, and reach their sensor through the
++ * graph: one media device per camera, sensor -> video node.
+  */
+ 
+ / {
+@@ -23,6 +27,42 @@ i2c_cam_rear: i2c-cam-rear {
+ 		i2c-gpio,delay-us = <2>;
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
++
++		camera-sensor@37 {
++			compatible = "samsung,s5k4h5";
++			reg = <0x37>;
++			/* The mode tables are t715/s5k4h5-m<N>.seq, N = 0..7, made by the owner. */
++			firmware-name = "t715/s5k4h5";
++			clocks = <&cmu_top CLK_SCLK_ISP_SENSOR0>;
++			clock-names = "mclk";
++			assigned-clocks = <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR0>,
++					  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_A>,
++					  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_B>;
++			assigned-clock-parents = <&xxti>, <0>, <0>;
++			assigned-clock-rates = <0>, <24000000>, <24000000>;
++			power-domains = <&pd_cam0>;
++			avdd-supply = <&ldo29_reg>;
++			dvdd-supply = <&ldo23_reg>;
++			af-supply = <&ldo26_reg>;
++			iovdd-supply = <&ldo22_reg>;
++			reset-gpios = <&gpc0 4 GPIO_ACTIVE_LOW>;
++			pinctrl-names = "default", "active";
++			pinctrl-0 = <&t715_cam0_mclk_off>;
++			pinctrl-1 = <&t715_cam0_mclk>;
++			orientation = <1>;
++			t715,af-bus = <&i2c_cam_af>;
++			t715,af-addr = <0x0c>;
++			/* 500 is sharp from about 1 m to infinity */
++			t715,af-default = <500>;
++
++			port {
++				rear_sensor_out: endpoint {
++					remote-endpoint = <&rear_csis_in>;
++					data-lanes = <1 2 3 4>;
++					link-frequencies = /bits/ 64 <338000000>;
++				};
++			};
++		};
+ 	};
+ 
+ 	i2c_cam_front: i2c-cam-front {
+@@ -32,6 +72,37 @@ i2c_cam_front: i2c-cam-front {
+ 		i2c-gpio,delay-us = <2>;
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
++
++		camera-sensor@35 {
++			compatible = "samsung,s5k6b2";
++			reg = <0x35>;
++			/* The mode table is t715/s5k6b2-m0.seq, made by the owner. */
++			firmware-name = "t715/s5k6b2";
++			clocks = <&cmu_top CLK_SCLK_ISP_SENSOR2>;
++			clock-names = "mclk";
++			assigned-clocks = <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR2>,
++					  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_A>,
++					  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_B>;
++			assigned-clock-parents = <&xxti>, <0>, <0>;
++			assigned-clock-rates = <0>, <24000000>, <24000000>;
++			power-domains = <&pd_cam0>;
++			avdd-supply = <&ldo27_reg>;
++			iovdd-supply = <&ldo21_reg>;
++			reset-gpios = <&gpc0 3 GPIO_ACTIVE_LOW>;
++			standby-gpios = <&gpc0 0 GPIO_ACTIVE_HIGH>;
++			pinctrl-names = "default", "active";
++			pinctrl-0 = <&t715_cam2_mclk_off>;
++			pinctrl-1 = <&t715_cam2_mclk>;
++			orientation = <0>;
++
++			port {
++				front_sensor_out: endpoint {
++					remote-endpoint = <&front_csis_in>;
++					data-lanes = <1>;
++					link-frequencies = /bits/ 64 <366000000>;
++				};
++			};
++		};
+ 	};
+ 
+ 	/* The rear camera's DW9807 focus motor, on ISP I2C channel 1. */
+@@ -81,30 +152,16 @@ t715_cam2_mclk_off: t715-cam2-mclk-off-pins {
+ &soc {
+ 	camera@12130000 {
+ 		compatible = "samsung,t715-camera-front";
+-		firmware-name = "t715/s5k6b2.seq";
+-		t715,lanes = <1>;
+ 		t715,settle = <16>;
+-		t715,width = <1936>;
+-		t715,height = <1090>;
+-		t715,i2c-bus = <&i2c_cam_front>;
+-		t715,i2c-addr = <0x35>;
+ 		reg = <0x12130000 0x1000>, <0x12110000 0x1000>;
+ 		interrupts = <GIC_SPI 141 IRQ_TYPE_LEVEL_HIGH>;
+ 		phys = <&mipi_phy 2>;
+ 		phy-names = "csis";
+ 		power-domains = <&pd_cam0>;
+-		avdd-supply = <&ldo27_reg>;
+-		iovdd-supply = <&ldo21_reg>;
+-		reset-gpios = <&gpc0 3 GPIO_ACTIVE_LOW>;
+-		standby-gpios = <&gpc0 0 GPIO_ACTIVE_HIGH>;
+-		pinctrl-names = "default", "active";
+-		pinctrl-0 = <&t715_cam2_mclk_off>;
+-		pinctrl-1 = <&t715_cam2_mclk>;
+ 		clocks = <&cmu_cam0 CLK_ACLK_CSIS1>, <&cmu_cam0 CLK_PCLK_CSIS1>,
+ 			 <&cmu_cam0 CLK_ACLK_LITE_B>, <&cmu_cam0 CLK_PCLK_LITE_B>,
+-			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>,
+-			 <&cmu_top CLK_SCLK_ISP_SENSOR2>;
+-		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy", "mclk";
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
++		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy";
+ 		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S2A_USER>,
+ 				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
+@@ -113,53 +170,37 @@ camera@12130000 {
+ 				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_B>,
+ 				  <&cmu_cam0 CLK_DIV_ACLK_CSIS1>,
+ 				  <&cmu_cam0 CLK_DIV_ACLK_LITE_B>,
+-				  <&cmu_cam0 CLK_DIV_PCLK_LITE_B>,
+-				  <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR2>,
+-				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_A>,
+-				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR2_B>;
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_B>;
+ 		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
+ 					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S2A_PHY>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS1_A>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_B_A>,
+-					 <0>, <0>, <0>, <&xxti>, <0>, <0>;
++					 <0>, <0>, <0>;
+ 		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
+-				       <400000000>, <400000000>, <200000000>,
+-				       <0>, <24000000>, <24000000>;
++				       <400000000>, <400000000>, <200000000>;
++
++		port {
++			front_csis_in: endpoint {
++				remote-endpoint = <&front_sensor_out>;
++				data-lanes = <1>;
++			};
++		};
+ 	};
+ 
+ 	camera@12120000 {
+ 		compatible = "samsung,t715-camera-rear";
+-		firmware-name = "t715/s5k4h5.seq";
+-		t715,lanes = <4>;
+ 		t715,settle = <15>;
+-		t715,width = <3280>;
+-		t715,height = <2458>;
+-		t715,i2c-bus = <&i2c_cam_rear>;
+-		t715,i2c-addr = <0x37>;
+-		t715,af-bus = <&i2c_cam_af>;
+-		t715,af-addr = <0x0c>;
+-		/* 500 is sharp from about 1 m to infinity */
+-		t715,af-default = <500>;
+ 		reg = <0x12120000 0x1000>, <0x12100000 0x1000>;
+ 		interrupts = <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>;
+ 		phys = <&mipi_phy 0>;
+ 		phy-names = "csis";
+ 		power-domains = <&pd_cam0>;
+-		avdd-supply = <&ldo29_reg>;
+-		dvdd-supply = <&ldo23_reg>;
+-		af-supply = <&ldo26_reg>;
+-		iovdd-supply = <&ldo22_reg>;
+-		reset-gpios = <&gpc0 4 GPIO_ACTIVE_LOW>;
+-		pinctrl-names = "default", "active";
+-		pinctrl-0 = <&t715_cam0_mclk_off>;
+-		pinctrl-1 = <&t715_cam0_mclk>;
+ 		clocks = <&cmu_cam0 CLK_ACLK_CSIS0>, <&cmu_cam0 CLK_PCLK_CSIS0>,
+ 			 <&cmu_cam0 CLK_ACLK_LITE_A>, <&cmu_cam0 CLK_PCLK_LITE_A>,
+-			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>,
+-			 <&cmu_top CLK_SCLK_ISP_SENSOR0>;
+-		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy", "mclk";
++			 <&cmu_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
++		clock-names = "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy";
+ 		assigned-clocks = <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 				  <&cmu_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S4_USER>,
+ 				  <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
+@@ -168,19 +209,22 @@ camera@12120000 {
+ 				  <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_B>,
+ 				  <&cmu_cam0 CLK_DIV_ACLK_CSIS0>,
+ 				  <&cmu_cam0 CLK_DIV_ACLK_LITE_A>,
+-				  <&cmu_cam0 CLK_DIV_PCLK_LITE_A>,
+-				  <&cmu_top CLK_MOUT_SCLK_ISP_SENSOR0>,
+-				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_A>,
+-				  <&cmu_top CLK_DIV_SCLK_ISP_SENSOR0_B>;
++				  <&cmu_cam0 CLK_DIV_PCLK_LITE_A>;
+ 		assigned-clock-parents = <&cmu_top CLK_ACLK_CAM0_400>,
+ 					 <&cmu_cam0 CLK_PHYCLK_RXBYTEECLKHS0_S4_PHY>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CSIS0_A>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_CAM0_400_USER>,
+ 					 <&cmu_cam0 CLK_MOUT_ACLK_LITE_A_A>,
+-					 <0>, <0>, <0>, <&xxti>, <0>, <0>;
++					 <0>, <0>, <0>;
+ 		assigned-clock-rates = <0>, <0>, <0>, <0>, <0>, <0>,
+-				       <400000000>, <400000000>, <200000000>,
+-				       <0>, <24000000>, <24000000>;
++				       <400000000>, <400000000>, <200000000>;
++
++		port {
++			rear_csis_in: endpoint {
++				remote-endpoint = <&rear_sensor_out>;
++				data-lanes = <1 2 3 4>;
++			};
++		};
+ 	};
+ };
+-- 
+2.52.0
+

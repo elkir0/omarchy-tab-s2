@@ -1,0 +1,1666 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/4] media: i2c: t715-sensor: the S5K4H5 and S5K6B2 as V4L2
+ subdevices
+
+libcamera's simple pipeline handler wants a media graph with the sensor
+as a subdevice, but t715-camera.ko drove both sensors itself, behind a
+single video node.
+
+t715-sensor.ko is an I2C driver for the two sensors, each on its
+bit-banged bus.  It owns their rails, reset (and the front's standby),
+MCLK and pinctrl states, with the power sequences t715-camera.c used.
+Its modes come from the firmware files <firmware-name>-m<N>.seq, written
+verbatim; the size, the line and frame lengths and the pixel clock are
+read back from the SMIA registers each table sets.  Controls: exposure,
+analogue gain, both blankings, pixel rate, link frequency, test pattern,
+flips and orientation, with the crop selections.  The rear DW9807 focus
+motor is a lens subdevice tied to the sensor by an ancillary link, and
+ramps as before.
+
+The tables are Samsung's and are not in the tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/i2c/Kconfig       |   14 +
+ drivers/media/i2c/Makefile      |    1 +
+ drivers/media/i2c/t715-sensor.c | 1589 +++++++++++++++++++++++++++++++
+ 3 files changed, 1604 insertions(+)
+ create mode 100644 drivers/media/i2c/t715-sensor.c
+
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 470307135..2cd19329e 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -691,6 +691,20 @@ config VIDEO_S5K6A3
+ 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
+ 	  camera sensor.
+ 
++config VIDEO_T715_SENSOR
++	tristate "SM-T715 cameras' S5K4H5 and S5K6B2 sensors"
++	depends on I2C && VIDEO_DEV && OF && PM
++	select V4L2_CCI_I2C
++	help
++	  This is a V4L2 sensor driver for the Samsung S5K4H5 (rear,
++	  4 lanes) and S5K6B2 (front, 1 lane) camera sensors of the
++	  Galaxy Tab S2 8.0 (SM-T715).  Their mode register tables
++	  are not in the kernel: the owner installs them as
++	  <firmware-name>-m<N>.seq firmware files.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called t715-sensor.
++
+ config VIDEO_VGXY61
+ 	tristate "ST VGXY61 sensor support"
+ 	select V4L2_CCI_I2C
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index fbb988bd0..00bea3d55 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -129,6 +129,7 @@ obj-$(CONFIG_VIDEO_SAA717X) += saa717x.o
+ obj-$(CONFIG_VIDEO_SAA7185) += saa7185.o
+ obj-$(CONFIG_VIDEO_SONY_BTF_MPX) += sony-btf-mpx.o
+ obj-$(CONFIG_VIDEO_ST_MIPID02) += st-mipid02.o
++obj-$(CONFIG_VIDEO_T715_SENSOR) += t715-sensor.o
+ obj-$(CONFIG_VIDEO_TC358743) += tc358743.o
+ obj-$(CONFIG_VIDEO_TC358746) += tc358746.o
+ obj-$(CONFIG_VIDEO_TDA1997X) += tda1997x.o
+diff --git a/drivers/media/i2c/t715-sensor.c b/drivers/media/i2c/t715-sensor.c
+new file mode 100644
+index 000000000..905a3c8ba
+--- /dev/null
++++ b/drivers/media/i2c/t715-sensor.c
+@@ -0,0 +1,1589 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * The SM-T715's camera sensors: S5K4H5 at the back (4 lanes, with the DW9807
++ * focus motor) and S5K6B2 in front (1 lane).  Both follow the SMIA 1.0
++ * register layout and send RAW10 GRBG over MIPI CSI-2, which libcamera's
++ * simple pipeline handler can drive once they are proper subdevices.
++ *
++ * The register tables are Samsung's and are not in this tree: the owner makes
++ * them from their own copy of the ISP firmware as <firmware-name>-m<N>.seq, one
++ * file per mode, each a list of records { le16 reg; le16 width; le32 value }.
++ * A table holds the whole mode (PLL, geometry, analogue tuning) and is written
++ * verbatim, so only the exposure, the gain, the blanking, the flips and the
++ * test pattern ever have to be computed here.
++ *
++ * The power sequences come from Samsung's fimc-is-device-4h5.c and -6b2.c
++ * (GPL-2.0), as ported to t715-camera.c.  The driver structure follows
++ * imx219.c and imx290.c, and the lens is driven like dw9807-vcm.c.
++ */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/math.h>
++#include <linux/math64.h>
++#include <linux/minmax.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/sort.h>
++
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-mediabus.h>
++#include <media/v4l2-subdev.h>
++
++/* SMIA 1.0 registers both sensors share. */
++#define T715_REG_MODEL_ID			CCI_REG16(0x0000)
++#define T715_REG_MODE_SELECT			CCI_REG8(0x0100)
++#define  T715_MODE_STANDBY			0
++#define  T715_MODE_STREAMING			1
++#define T715_REG_IMAGE_ORIENTATION		CCI_REG8(0x0101)
++#define T715_REG_COARSE_INTEGRATION_TIME	CCI_REG16(0x0202)
++#define T715_REG_ANALOGUE_GAIN_CODE_GLOBAL	CCI_REG16(0x0204)
++#define T715_REG_FRAME_LENGTH_LINES		CCI_REG16(0x0340)
++#define T715_REG_TEST_PATTERN_MODE		CCI_REG16(0x0600)
++
++/* Gain = code / 32. */
++#define T715_GAIN_MIN				32
++#define T715_GAIN_MAX				512
++#define T715_GAIN_DEFAULT			32
++
++#define T715_FLL_MAX				0xffff
++#define T715_EXPOSURE_DEFAULT			1000
++
++#define T715_NUM_MODES				8
++
++/* One firmware record: an address, a width in bytes, and a value. */
++struct t715_seq_record {
++	__le16 reg;
++	__le16 width;
++	__le32 value;
++};
++
++/*
++ * A mode, parsed out of one firmware table.  The records are written verbatim
++ * at stream on; the rest is what the format handling and the controls need.
++ */
++struct t715_mode {
++	struct t715_seq_record *records;
++	unsigned int num_records;
++
++	/* The output size, and the address window it is cropped out of. */
++	u32 width, height;
++	u32 crop_left, crop_top, crop_width, crop_height;
++
++	u32 fll, llp;
++	u64 pixel_rate;
++};
++
++/* What the compatible gives. */
++struct t715_variant {
++	const char *name;
++	u16 model_id;
++	const char *const *supplies;
++	unsigned int num_supplies;
++	u32 coarse_margin;
++	u32 vblank_min;
++	u32 native_width, native_height;
++	u32 lanes;
++	bool has_standby;
++	bool has_motor;
++};
++
++struct t715_sensor {
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++	struct regmap *regmap;
++	struct i2c_client *client;
++	const struct t715_variant *variant;
++
++	struct regulator_bulk_data supplies[4];
++	struct gpio_desc *reset, *standby;
++	struct clk *mclk;
++	struct pinctrl *pins;
++	struct pinctrl_state *pins_off, *pins_on;
++
++	struct t715_mode *modes;
++	unsigned int num_modes;
++
++	struct v4l2_ctrl_handler ctrls;
++	struct v4l2_ctrl *pixel_rate, *link_freq, *exposure;
++	struct v4l2_ctrl *vblank, *hblank, *hflip, *vflip;
++
++	s64 link_frequency;
++
++	/* The rear camera's focus motor, on a bus of its own. */
++	struct i2c_client *af_client;
++	struct v4l2_subdev lens_sd;
++	struct v4l2_ctrl_handler lens_ctrls;
++	struct v4l2_ctrl *focus;
++	int focus_pos;			/* < 0 while the motor is off */
++
++	/*
++	 * Streaming state, under the active subdev state lock.  streaming_pm
++	 * is set when s_stream took the PM reference itself, pre_streamon_pm
++	 * when pre_streamon did, so the puts stay balanced either way.
++	 */
++	bool streaming;
++	bool streaming_pm;
++	bool pre_streamon_pm;
++};
++
++static inline struct t715_sensor *to_t715_sensor(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct t715_sensor, sd);
++}
++
++static void t715_lens_off(struct t715_sensor *sensor);
++
++static int t715_write_records(struct t715_sensor *sensor,
++			      const struct t715_seq_record *records,
++			      unsigned int num_records)
++{
++	unsigned int i;
++	int ret = 0;
++
++	for (i = 0; i < num_records; i++) {
++		u32 reg = le16_to_cpu(records[i].reg);
++		u64 val = le32_to_cpu(records[i].value);
++
++		if (le16_to_cpu(records[i].width) == 2)
++			cci_write(sensor->regmap, CCI_REG16(reg), val, &ret);
++		else
++			cci_write(sensor->regmap, CCI_REG8(reg), val, &ret);
++	}
++
++	return ret;
++}
++
++/* ------------------------------------------------------------------
++ * Power, ported from t715-camera.c without behavioural change.
++ * ------------------------------------------------------------------
++ */
++
++/* fimc-is-device-4h5.c:126-139: A2.8, core, AF, 2 ms, IO, 2 ms, pins, reset */
++static int t715_rear_power_on(struct t715_sensor *sensor)
++{
++	unsigned int i = 0;
++	int ret;
++
++	for (i = 0; i < sensor->variant->num_supplies; i++) {
++		ret = regulator_enable(sensor->supplies[i].consumer);
++		if (ret)
++			goto off;
++		if (i >= 2)
++			usleep_range(2000, 3000);
++	}
++	ret = pinctrl_select_state(sensor->pins, sensor->pins_on);
++	if (ret)
++		goto off;
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(sensor->reset, 0);
++	usleep_range(10000, 11000);
++	return 0;
++off:
++	while (i--)
++		regulator_disable(sensor->supplies[i].consumer);
++	return ret;
++}
++
++/* fimc-is-device-4h5.c:142-152 */
++static void t715_rear_power_off(struct t715_sensor *sensor)
++{
++	regulator_disable(sensor->supplies[2].consumer);
++	usleep_range(2000, 3000);
++	pinctrl_select_state(sensor->pins, sensor->pins_off);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(sensor->reset, 1);
++	regulator_disable(sensor->supplies[3].consumer);
++	regulator_disable(sensor->supplies[1].consumer);
++	regulator_disable(sensor->supplies[0].consumer);
++}
++
++/* fimc-is-device-6b2.c:609-627 */
++static int t715_front_power_on(struct t715_sensor *sensor)
++{
++	int ret;
++
++	gpiod_set_value_cansleep(sensor->standby, 0);
++	ret = regulator_enable(sensor->supplies[0].consumer);
++	if (ret)
++		return ret;
++	ret = regulator_enable(sensor->supplies[1].consumer);
++	if (ret)
++		goto a;
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(sensor->reset, 0);
++	ret = pinctrl_select_state(sensor->pins, sensor->pins_on);
++	if (ret)
++		goto b;
++	usleep_range(10000, 11000);
++	return 0;
++b:
++	gpiod_set_value_cansleep(sensor->reset, 1);
++	regulator_disable(sensor->supplies[1].consumer);
++a:
++	regulator_disable(sensor->supplies[0].consumer);
++	return ret;
++}
++
++/* fimc-is-device-6b2.c:630-650 */
++static void t715_front_power_off(struct t715_sensor *sensor)
++{
++	gpiod_set_value_cansleep(sensor->standby, 0);
++	pinctrl_select_state(sensor->pins, sensor->pins_off);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(sensor->reset, 1);
++	regulator_disable(sensor->supplies[1].consumer);
++	regulator_disable(sensor->supplies[0].consumer);
++}
++
++static int t715_sensor_power_on(struct t715_sensor *sensor)
++{
++	int ret;
++
++	/* As t715_start_streaming does: the clock before the rails. */
++	ret = clk_prepare_enable(sensor->mclk);
++	if (ret)
++		return ret;
++
++	if (sensor->variant->has_standby)
++		ret = t715_front_power_on(sensor);
++	else
++		ret = t715_rear_power_on(sensor);
++	if (ret)
++		clk_disable_unprepare(sensor->mclk);
++
++	return ret;
++}
++
++static int t715_sensor_power_off(struct t715_sensor *sensor)
++{
++	/* Park the lens while its rail, and the motor's pull-ups, are up. */
++	t715_lens_off(sensor);
++
++	if (sensor->variant->has_standby)
++		t715_front_power_off(sensor);
++	else
++		t715_rear_power_off(sensor);
++
++	clk_disable_unprepare(sensor->mclk);
++
++	return 0;
++}
++
++static int t715_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++
++	return t715_sensor_power_on(to_t715_sensor(sd));
++}
++
++static int t715_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++
++	return t715_sensor_power_off(to_t715_sensor(sd));
++}
++
++static const struct dev_pm_ops t715_pm_ops = {
++	SET_RUNTIME_PM_OPS(t715_power_off, t715_power_on, NULL)
++};
++
++/* ------------------------------------------------------------------
++ * The focus motor, ported from t715-camera.c.
++ * ------------------------------------------------------------------
++ */
++
++/* DW9807 registers, dw9807-vcm.c:28-39. */
++#define VCM_CTL			0x02
++#define VCM_MSB			0x03
++#define VCM_STATUS		0x05
++#define VCM_MAX_POS		1023
++#define VCM_STEP		16
++#define VCM_MAX_RETRY		10
++
++static int t715_vcm_write(struct t715_sensor *sensor, u8 reg, u8 val)
++{
++	u8 buf[2] = { reg, val };
++	int ret;
++
++	ret = i2c_master_send(sensor->af_client, buf, sizeof(buf));
++	return ret < 0 ? ret : 0;
++}
++
++/* dw9807-vcm.c:53-74: point the address pointer at STATUS, then read it. */
++static int t715_vcm_status(struct t715_sensor *sensor)
++{
++	u8 reg = VCM_STATUS, val;
++	int ret;
++
++	ret = i2c_master_send(sensor->af_client, &reg, sizeof(reg));
++	if (ret < 0)
++		return ret;
++	ret = i2c_master_recv(sensor->af_client, &val, sizeof(val));
++	if (ret < 0)
++		return ret;
++	return val;
++}
++
++static int t715_vcm_wait(struct t715_sensor *sensor)
++{
++	int ret, i;
++
++	for (i = 0; i < VCM_MAX_RETRY; i++) {
++		ret = t715_vcm_status(sensor);
++		if (ret < 0)
++			return ret;
++		if (!ret)
++			return 0;
++		usleep_range(1000, 1100);
++	}
++	return -EBUSY;
++}
++
++static int t715_vcm_set(struct t715_sensor *sensor, int pos)
++{
++	u8 buf[3] = { VCM_MSB, (pos >> 8) & 3, pos & 0xff };
++	int ret;
++
++	ret = t715_vcm_wait(sensor);
++	if (ret)
++		return ret;
++	ret = i2c_master_send(sensor->af_client, buf, sizeof(buf));
++	if (ret < 0)
++		return ret;
++	sensor->focus_pos = pos;
++	return 0;
++}
++
++/*
++ * The soft movement dw9807_vcm_suspend/resume use: towards to in steps of
++ * VCM_STEP, the last step landing exactly on it.
++ */
++static int t715_vcm_ramp(struct t715_sensor *sensor, int to)
++{
++	int ret, pos = sensor->focus_pos;
++
++	while (pos != to) {
++		if (abs(to - pos) <= VCM_STEP)
++			pos = to;
++		else if (to > pos)
++			pos += VCM_STEP;
++		else
++			pos -= VCM_STEP;
++		ret = t715_vcm_set(sensor, pos);
++		if (ret)
++			return ret;
++		usleep_range(1000, 1100);
++	}
++	return 0;
++}
++
++/*
++ * The rail is on and the pull-ups with it: wake the motor and ramp to the
++ * control.
++ */
++static void t715_lens_on(struct t715_sensor *sensor)
++{
++	struct device *dev = &sensor->client->dev;
++	int ret;
++
++	if (!sensor->af_client)
++		return;
++
++	v4l2_ctrl_lock(sensor->focus);
++	ret = t715_vcm_write(sensor, VCM_CTL, 0x00);
++	if (!ret) {
++		sensor->focus_pos = 0;
++		ret = t715_vcm_ramp(sensor, sensor->focus->cur.val);
++	}
++	if (ret) {
++		/* Streaming goes on without focus rather than failing on it. */
++		sensor->focus_pos = -1;
++		dev_warn_once(dev, "focus motor off line: %d\n", ret);
++	}
++	v4l2_ctrl_unlock(sensor->focus);
++}
++
++/* Back to rest, then power down.  A failure here must not stop the rest. */
++static void t715_lens_off(struct t715_sensor *sensor)
++{
++	struct device *dev = &sensor->client->dev;
++	int ret;
++
++	if (!sensor->af_client || sensor->focus_pos < 0)
++		return;
++
++	v4l2_ctrl_lock(sensor->focus);
++	ret = t715_vcm_ramp(sensor, 0);
++	if (ret)
++		dev_warn(dev, "focus motor stuck at %d: %d\n",
++			 sensor->focus_pos, ret);
++	ret = t715_vcm_write(sensor, VCM_CTL, 0x01);
++	if (ret)
++		dev_warn(dev, "focus motor power down failed: %d\n", ret);
++	sensor->focus_pos = -1;
++	v4l2_ctrl_unlock(sensor->focus);
++}
++
++static int t715_lens_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct t715_sensor *sensor =
++		container_of(ctrl->handler, struct t715_sensor, lens_ctrls);
++
++	if (ctrl->id != V4L2_CID_FOCUS_ABSOLUTE)
++		return -EINVAL;
++
++	/* Kept and applied by t715_lens_on() at the next stream on. */
++	if (sensor->focus_pos < 0)
++		return 0;
++
++	return t715_vcm_set(sensor, ctrl->val);
++}
++
++static const struct v4l2_ctrl_ops t715_lens_ctrl_ops = {
++	.s_ctrl = t715_lens_set_ctrl,
++};
++
++/* The lens subdev has no pads and no ops of its own, only controls. */
++static const struct v4l2_subdev_ops t715_lens_ops = { };
++
++/* ------------------------------------------------------------------
++ * Controls.
++ * ------------------------------------------------------------------
++ */
++
++/*
++ * The native Bayer order is GRBG: mirroring swaps the first pair of a line,
++ * flipping swaps the lines, and doing both gives RGGB.  Reading the two
++ * controls is safe here: they share the lock the caller holds.
++ */
++static u32 t715_format_code(struct t715_sensor *sensor)
++{
++	unsigned int flips;
++
++	flips = (sensor->vflip->val ? 2 : 0) |
++		(sensor->hflip->val ? 1 : 0);
++
++	switch (flips) {
++	case 1:
++		return MEDIA_BUS_FMT_SRGGB10_1X10;
++	case 2:
++		return MEDIA_BUS_FMT_SBGGR10_1X10;
++	case 3:
++		return MEDIA_BUS_FMT_SGBRG10_1X10;
++	default:
++		return MEDIA_BUS_FMT_SGRBG10_1X10;
++	}
++}
++
++static void t715_adjust_exposure_range(struct t715_sensor *sensor, s32 fll)
++{
++	s32 exposure_max = fll - sensor->variant->coarse_margin;
++	s32 exposure_def = min_t(s32, exposure_max, T715_EXPOSURE_DEFAULT);
++
++	__v4l2_ctrl_modify_range(sensor->exposure, 1, exposure_max, 1,
++				 exposure_def);
++}
++
++static int t715_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct t715_sensor *sensor =
++		container_of(ctrl->handler, struct t715_sensor, ctrls);
++	struct device *dev = &sensor->client->dev;
++	struct v4l2_subdev_state *state;
++	struct v4l2_mbus_framefmt *format;
++	int ret = 0;
++
++	state = v4l2_subdev_get_locked_active_state(&sensor->sd);
++	format = v4l2_subdev_state_get_format(state, 0);
++
++	/*
++	 * The frame length bounds the exposure: adjust the range before the
++	 * power check, so it moves even while the sensor is off.
++	 */
++	if (ctrl->id == V4L2_CID_VBLANK)
++		t715_adjust_exposure_range(sensor, format->height + ctrl->val);
++
++	/* A flip changes the Bayer order the pad reports. */
++	if (ctrl->id == V4L2_CID_HFLIP || ctrl->id == V4L2_CID_VFLIP)
++		format->code = t715_format_code(sensor);
++
++	/*
++	 * Values are applied when the sensor is on, and otherwise by the
++	 * control handler setup at the next stream on.
++	 */
++	if (pm_runtime_get_if_in_use(dev) <= 0)
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_EXPOSURE:
++		cci_write(sensor->regmap, T715_REG_COARSE_INTEGRATION_TIME,
++			  ctrl->val, &ret);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		cci_write(sensor->regmap, T715_REG_ANALOGUE_GAIN_CODE_GLOBAL,
++			  ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		cci_write(sensor->regmap, T715_REG_TEST_PATTERN_MODE,
++			  ctrl->val, &ret);
++		break;
++	case V4L2_CID_VBLANK:
++		cci_write(sensor->regmap, T715_REG_FRAME_LENGTH_LINES,
++			  format->height + ctrl->val, &ret);
++		break;
++	case V4L2_CID_HFLIP:
++	case V4L2_CID_VFLIP:
++		cci_write(sensor->regmap, T715_REG_IMAGE_ORIENTATION,
++			  sensor->hflip->val | (sensor->vflip->val << 1), &ret);
++		break;
++	default:
++		dev_info(dev, "ctrl(id:0x%x,val:0x%x) is not handled\n",
++			 ctrl->id, ctrl->val);
++		ret = -EINVAL;
++		break;
++	}
++
++	pm_runtime_put(dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops t715_ctrl_ops = {
++	.s_ctrl = t715_set_ctrl,
++};
++
++static const char * const t715_test_pattern_menu[] = {
++	"Disabled",
++	"Solid Colour",
++	"Colour Bars",
++	"Colour Bars Fade To Grey",
++	"PN9",
++};
++
++static int t715_init_controls(struct t715_sensor *sensor)
++{
++	struct v4l2_ctrl_handler *hdl = &sensor->ctrls;
++	const struct t715_mode *mode = &sensor->modes[0];
++	struct device *dev = &sensor->client->dev;
++	struct v4l2_fwnode_device_properties props;
++	s32 hblank, exposure_max;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(hdl, 12);
++	if (ret)
++		return ret;
++
++	sensor->pixel_rate = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops,
++					       V4L2_CID_PIXEL_RATE,
++					       mode->pixel_rate,
++					       mode->pixel_rate, 1,
++					       mode->pixel_rate);
++	if (sensor->pixel_rate)
++		sensor->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	sensor->link_freq = v4l2_ctrl_new_int_menu(hdl, &t715_ctrl_ops,
++						   V4L2_CID_LINK_FREQ, 0, 0,
++						   &sensor->link_frequency);
++	if (sensor->link_freq)
++		sensor->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	sensor->vblank = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops, V4L2_CID_VBLANK,
++					   sensor->variant->vblank_min,
++					   T715_FLL_MAX - mode->height, 1,
++					   mode->fll - mode->height);
++
++	hblank = mode->llp - mode->width;
++	sensor->hblank = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops, V4L2_CID_HBLANK,
++					   hblank, hblank, 1, hblank);
++	if (sensor->hblank)
++		sensor->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	exposure_max = mode->fll - sensor->variant->coarse_margin;
++	sensor->exposure = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops,
++					     V4L2_CID_EXPOSURE, 1,
++					     exposure_max, 1,
++					     min_t(s32, exposure_max,
++						   T715_EXPOSURE_DEFAULT));
++
++	v4l2_ctrl_new_std(hdl, &t715_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++			  T715_GAIN_MIN, T715_GAIN_MAX, 1, T715_GAIN_DEFAULT);
++
++	v4l2_ctrl_new_std_menu_items(hdl, &t715_ctrl_ops, V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(t715_test_pattern_menu) - 1,
++				     0, 0, t715_test_pattern_menu);
++
++	sensor->hflip = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops,
++					  V4L2_CID_HFLIP, 0, 1, 1, 0);
++	if (sensor->hflip)
++		sensor->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	sensor->vflip = v4l2_ctrl_new_std(hdl, &t715_ctrl_ops,
++					  V4L2_CID_VFLIP, 0, 1, 1, 0);
++	if (sensor->vflip)
++		sensor->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	if (hdl->error) {
++		ret = hdl->error;
++		goto error;
++	}
++
++	ret = v4l2_fwnode_device_parse(dev, &props);
++	if (ret)
++		goto error;
++
++	ret = v4l2_ctrl_new_fwnode_properties(hdl, &t715_ctrl_ops, &props);
++	if (ret)
++		goto error;
++
++	sensor->sd.ctrl_handler = hdl;
++
++	return 0;
++
++error:
++	v4l2_ctrl_handler_free(hdl);
++	return ret;
++}
++
++/* ------------------------------------------------------------------
++ * The mode tables.
++ * ------------------------------------------------------------------
++ */
++
++/* The two SMIA register ranges the parser looks at, 16 registers each. */
++#define T715_PLL_BASE		0x0300
++#define T715_GEO_BASE		0x0340
++#define T715_RANGE_SIZE		16
++
++/*
++ * Copy every write a table makes to one register range into a byte map of it:
++ * a 16-bit write sets the byte at reg (high) and reg + 1 (low), and the tables
++ * just as often write the two halves as separate 8-bit records.
++ */
++static void t715_map_range(const struct firmware *fw, u32 base, u8 *range)
++{
++	unsigned int num = fw->size / sizeof(struct t715_seq_record);
++	unsigned int i, j;
++	u32 end = base + T715_RANGE_SIZE;
++
++	memset(range, 0, T715_RANGE_SIZE);
++
++	for (i = 0; i < num; i++) {
++		const struct t715_seq_record *rec =
++			(const struct t715_seq_record *)fw->data + i;
++		u32 reg = le16_to_cpu(rec->reg);
++		u32 val = le32_to_cpu(rec->value);
++		unsigned int width = le16_to_cpu(rec->width);
++
++		for (j = 0; j < width; j++)
++			if (reg + j >= base && reg + j < end)
++				range[reg + j - base] =
++					val >> (8 * (width - 1 - j));
++	}
++}
++
++static u16 t715_range_read16(const u8 *range, u32 reg)
++{
++	return (range[reg] << 8) | range[reg + 1];
++}
++
++static int t715_parse_mode(struct t715_sensor *sensor,
++			   const struct firmware *fw, const char *name,
++			   struct t715_mode *mode)
++{
++	struct device *dev = &sensor->client->dev;
++	u8 pll[T715_RANGE_SIZE], geo[T715_RANGE_SIZE];
++	u16 vt_pix_div, vt_sys_div, pre_pll_div, pll_mult;
++	u16 x_start, y_start, x_end, y_end;
++	u64 pixel_rate;
++
++	t715_map_range(fw, T715_PLL_BASE, pll);
++	t715_map_range(fw, T715_GEO_BASE, geo);
++
++	vt_pix_div = t715_range_read16(pll, 0x0300 - T715_PLL_BASE);
++	vt_sys_div = t715_range_read16(pll, 0x0302 - T715_PLL_BASE);
++	pre_pll_div = t715_range_read16(pll, 0x0304 - T715_PLL_BASE);
++	pll_mult = t715_range_read16(pll, 0x0306 - T715_PLL_BASE);
++
++	mode->fll = t715_range_read16(geo, 0x0340 - T715_GEO_BASE);
++	mode->llp = t715_range_read16(geo, 0x0342 - T715_GEO_BASE);
++	x_start = t715_range_read16(geo, 0x0344 - T715_GEO_BASE);
++	y_start = t715_range_read16(geo, 0x0346 - T715_GEO_BASE);
++	x_end = t715_range_read16(geo, 0x0348 - T715_GEO_BASE);
++	y_end = t715_range_read16(geo, 0x034A - T715_GEO_BASE);
++	mode->width = t715_range_read16(geo, 0x034C - T715_GEO_BASE);
++	mode->height = t715_range_read16(geo, 0x034E - T715_GEO_BASE);
++
++	if (!mode->width || !mode->height || !mode->fll || !mode->llp ||
++	    !vt_pix_div || !vt_sys_div || !pre_pll_div || !pll_mult ||
++	    x_end < x_start || y_end < y_start) {
++		dev_err(dev, "table %s: no size, frame length, line length or PLL values\n",
++			name);
++		return -EINVAL;
++	}
++
++	mode->crop_left = x_start;
++	mode->crop_top = y_start;
++	mode->crop_width = x_end - x_start + 1;
++	mode->crop_height = y_end - y_start + 1;
++
++	/*
++	 * clk / pre_pll_div * pll_mult / (vt_sys_div * vt_pix_div), in 64
++	 * bits throughout: no 64-by-64 division in a module on 32-bit ARM.
++	 */
++	pixel_rate = (u64)clk_get_rate(sensor->mclk) * pll_mult;
++	pixel_rate = div64_u64(pixel_rate, pre_pll_div);
++	pixel_rate = div64_u64(pixel_rate, vt_sys_div * vt_pix_div);
++	mode->pixel_rate = pixel_rate;
++
++	return 0;
++}
++
++/* Largest area first, so the biggest mode is what a fresh subdev gets. */
++static int t715_mode_area_cmp(const void *a, const void *b)
++{
++	const struct t715_mode *ma = a, *mb = b;
++	u64 area_a = (u64)ma->width * ma->height;
++	u64 area_b = (u64)mb->width * mb->height;
++
++	if (area_a == area_b)
++		return 0;
++	return area_a > area_b ? -1 : 1;
++}
++
++static void t715_free_modes(struct t715_sensor *sensor)
++{
++	unsigned int i;
++
++	for (i = 0; i < sensor->num_modes; i++)
++		kfree(sensor->modes[i].records);
++	kfree(sensor->modes);
++	sensor->modes = NULL;
++	sensor->num_modes = 0;
++}
++
++static int t715_load_modes(struct t715_sensor *sensor)
++{
++	struct device *dev = &sensor->client->dev;
++	const char *fw_name;
++	char name[64];
++	unsigned int i, j;
++	int ret;
++
++	ret = of_property_read_string(dev->of_node, "firmware-name", &fw_name);
++	if (ret)
++		return dev_err_probe(dev, ret, "no firmware-name property\n");
++
++	sensor->modes = kcalloc(T715_NUM_MODES, sizeof(*sensor->modes),
++				GFP_KERNEL);
++	if (!sensor->modes)
++		return -ENOMEM;
++
++	for (i = 0; i < T715_NUM_MODES; i++) {
++		const struct firmware *fw;
++		struct t715_mode *mode;
++		unsigned int num;
++
++		snprintf(name, sizeof(name), "%s-m%d.seq", fw_name, i);
++		ret = request_firmware_direct(&fw, name, dev);
++		if (ret)
++			/* A missing table just leaves that mode out. */
++			continue;
++
++		if (!fw->size || fw->size % sizeof(struct t715_seq_record)) {
++			dev_err(dev, "table %s: bad size %zu\n", name,
++				fw->size);
++			release_firmware(fw);
++			continue;
++		}
++
++		/* j reaches num only if every width is 1 or 2. */
++		num = fw->size / sizeof(struct t715_seq_record);
++		for (j = 0; j < num; j++) {
++			const struct t715_seq_record *rec =
++				(const struct t715_seq_record *)fw->data + j;
++			unsigned int width = le16_to_cpu(rec->width);
++
++			if (width != 1 && width != 2) {
++				dev_err(dev, "table %s: record %u has width %u\n",
++					name, j, width);
++				break;
++			}
++		}
++		if (j < num) {
++			release_firmware(fw);
++			continue;
++		}
++
++		mode = &sensor->modes[sensor->num_modes];
++		ret = t715_parse_mode(sensor, fw, name, mode);
++		if (ret) {
++			release_firmware(fw);
++			continue;
++		}
++
++		mode->records = kmemdup(fw->data, fw->size, GFP_KERNEL);
++		mode->num_records = num;
++		release_firmware(fw);
++		if (!mode->records) {
++			ret = -ENOMEM;
++			goto error;
++		}
++		sensor->num_modes++;
++	}
++
++	sort(sensor->modes, sensor->num_modes, sizeof(*sensor->modes),
++	     t715_mode_area_cmp, NULL);
++
++	/* Modes 4 and 5 repeat the sizes of 0 and 1: keep the first of each. */
++	for (i = 0; i < sensor->num_modes; i++) {
++		for (j = 0; j < i; j++) {
++			if (sensor->modes[j].width &&
++			    sensor->modes[j].width == sensor->modes[i].width &&
++			    sensor->modes[j].height == sensor->modes[i].height) {
++				dev_info(dev, "mode %u (%ux%u) dropped: mode %u has that size\n",
++					 i, sensor->modes[i].width,
++					 sensor->modes[i].height, j);
++				kfree(sensor->modes[i].records);
++				memset(&sensor->modes[i], 0,
++				       sizeof(sensor->modes[i]));
++				break;
++			}
++		}
++	}
++
++	/* Compact the survivors down, the array is indexed by enum and set_fmt. */
++	for (i = 0, j = 0; i < sensor->num_modes; i++) {
++		if (!sensor->modes[i].width)
++			continue;
++		if (i != j)
++			sensor->modes[j] = sensor->modes[i];
++		j++;
++	}
++	sensor->num_modes = j;
++
++	for (i = 0; i < sensor->num_modes; i++) {
++		const struct t715_mode *mode = &sensor->modes[i];
++
++		dev_info(dev, "mode %u: %ux%u, frame length %u, line length %u, pixel rate %llu\n",
++			 i, mode->width, mode->height, mode->fll, mode->llp,
++			 mode->pixel_rate);
++	}
++
++	if (!sensor->num_modes) {
++		dev_err(dev, "no mode tables: run t715-cam-seq.py on your ISP firmware and install %s-m<N>.seq in /lib/firmware\n",
++			fw_name);
++		ret = -ENOENT;
++		goto error;
++	}
++
++	return 0;
++
++error:
++	t715_free_modes(sensor);
++	return ret;
++}
++
++/* ------------------------------------------------------------------
++ * Subdev operations.
++ * ------------------------------------------------------------------
++ */
++
++static void t715_update_pad_format(struct t715_sensor *sensor,
++				   const struct t715_mode *mode,
++				   struct v4l2_mbus_framefmt *fmt)
++{
++	fmt->code = t715_format_code(sensor);
++	fmt->width = mode->width;
++	fmt->height = mode->height;
++	fmt->field = V4L2_FIELD_NONE;
++	fmt->colorspace = V4L2_COLORSPACE_RAW;
++	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
++	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++static int t715_enum_mbus_code(struct v4l2_subdev *sd,
++			       struct v4l2_subdev_state *state,
++			       struct v4l2_subdev_mbus_code_enum *code)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	if (code->index)
++		return -EINVAL;
++
++	code->code = t715_format_code(sensor);
++	return 0;
++}
++
++static int t715_enum_frame_size(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *state,
++				struct v4l2_subdev_frame_size_enum *fse)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	if (fse->index >= sensor->num_modes)
++		return -EINVAL;
++
++	fse->min_width = sensor->modes[fse->index].width;
++	fse->max_width = fse->min_width;
++	fse->min_height = sensor->modes[fse->index].height;
++	fse->max_height = fse->min_height;
++
++	return 0;
++}
++
++static int t715_set_pad_format(struct v4l2_subdev *sd,
++			       struct v4l2_subdev_state *state,
++			       struct v4l2_subdev_format *fmt)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++	const struct t715_mode *mode;
++	struct v4l2_mbus_framefmt *format;
++	struct v4l2_rect *crop;
++
++	mode = v4l2_find_nearest_size(sensor->modes, sensor->num_modes,
++				      width, height,
++				      fmt->format.width, fmt->format.height);
++
++	t715_update_pad_format(sensor, mode, &fmt->format);
++
++	format = v4l2_subdev_state_get_format(state, 0);
++	*format = fmt->format;
++
++	crop = v4l2_subdev_state_get_crop(state, 0);
++	crop->left = mode->crop_left;
++	crop->top = mode->crop_top;
++	crop->width = mode->crop_width;
++	crop->height = mode->crop_height;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
++		s32 vblank_def = mode->fll - mode->height;
++		s32 hblank = mode->llp - mode->width;
++
++		/* Update limits and set the FPS to the mode's default. */
++		__v4l2_ctrl_modify_range(sensor->vblank,
++					 sensor->variant->vblank_min,
++					 T715_FLL_MAX - mode->height, 1,
++					 vblank_def);
++		__v4l2_ctrl_s_ctrl(sensor->vblank, vblank_def);
++		__v4l2_ctrl_modify_range(sensor->hblank, hblank, hblank, 1,
++					 hblank);
++		__v4l2_ctrl_modify_range(sensor->pixel_rate, mode->pixel_rate,
++					 mode->pixel_rate, 1,
++					 mode->pixel_rate);
++		t715_adjust_exposure_range(sensor, mode->fll);
++	}
++
++	return 0;
++}
++
++static int t715_get_selection(struct v4l2_subdev *sd,
++			      struct v4l2_subdev_state *state,
++			      struct v4l2_subdev_selection *sel)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		sel->r = *v4l2_subdev_state_get_crop(state, 0);
++		return 0;
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++		sel->r.left = sensor->modes[0].crop_left;
++		sel->r.top = sensor->modes[0].crop_top;
++		sel->r.width = sensor->modes[0].crop_width;
++		sel->r.height = sensor->modes[0].crop_height;
++		return 0;
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = sensor->variant->native_width;
++		sel->r.height = sensor->variant->native_height;
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
++static int t715_init_state(struct v4l2_subdev *sd,
++			   struct v4l2_subdev_state *state)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_TRY,
++		.pad = 0,
++		.format = {
++			.code = MEDIA_BUS_FMT_SGRBG10_1X10,
++			.width = sensor->modes[0].width,
++			.height = sensor->modes[0].height,
++		},
++	};
++
++	return t715_set_pad_format(sd, state, &fmt);
++}
++
++static int t715_sensor_registered(struct v4l2_subdev *sd)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++	struct device *dev = &sensor->client->dev;
++	struct media_link *link;
++	int ret;
++
++	if (!sensor->af_client)
++		return 0;
++
++	/*
++	 * The lens rides along with the sensor: registered here, where the
++	 * v4l2_device is known, and linked to it as its ancillary.
++	 */
++	ret = v4l2_device_register_subdev(sd->v4l2_dev, &sensor->lens_sd);
++	if (ret) {
++		dev_err(dev, "cannot register the lens subdev: %d\n", ret);
++		return ret;
++	}
++
++	link = media_create_ancillary_link(&sd->entity, &sensor->lens_sd.entity);
++	if (IS_ERR(link)) {
++		dev_err(dev, "cannot link the lens to the sensor: %ld\n",
++			PTR_ERR(link));
++		v4l2_device_unregister_subdev(&sensor->lens_sd);
++		return PTR_ERR(link);
++	}
++
++	return 0;
++}
++
++static void t715_sensor_unregistered(struct v4l2_subdev *sd)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	/* Registered from t715_sensor_registered(); the link goes with it. */
++	if (sensor->af_client && sensor->lens_sd.v4l2_dev)
++		v4l2_device_unregister_subdev(&sensor->lens_sd);
++}
++
++static const struct v4l2_subdev_internal_ops t715_sensor_internal_ops = {
++	.init_state = t715_init_state,
++	.registered = t715_sensor_registered,
++	.unregistered = t715_sensor_unregistered,
++};
++
++static int t715_pre_streamon(struct v4l2_subdev *sd, u32 flags)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++	int ret;
++
++	/*
++	 * The capture driver calls this before it turns on CSIS and the PHY,
++	 * so the sensor and its MCLK are up first, as on the tablet today.
++	 */
++	ret = pm_runtime_resume_and_get(sd->dev);
++	if (!ret)
++		sensor->pre_streamon_pm = true;
++
++	return ret;
++}
++
++static void t715_put_autosuspend(struct v4l2_subdev *sd)
++{
++	pm_runtime_mark_last_busy(sd->dev);
++	pm_runtime_put_autosuspend(sd->dev);
++}
++
++static int t715_s_stream(struct v4l2_subdev *sd, int enable)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++	struct v4l2_subdev_state *state;
++	struct v4l2_mbus_framefmt *format;
++	int ret = 0;
++
++	state = v4l2_subdev_lock_and_get_active_state(sd);
++	format = v4l2_subdev_state_get_format(state, 0);
++
++	if (enable) {
++		const struct t715_mode *mode;
++		unsigned int i;
++
++		if (sensor->streaming)
++			goto unlock;
++
++		/*
++		 * pre_streamon may have powered the sensor already: track
++		 * which path took the reference, so the puts stay balanced.
++		 */
++		if (!sensor->pre_streamon_pm) {
++			ret = pm_runtime_resume_and_get(sd->dev);
++			if (ret)
++				goto unlock;
++			sensor->streaming_pm = true;
++		}
++
++		/* The mode the state's format has settled on. */
++		for (i = 0; i < sensor->num_modes; i++)
++			if (sensor->modes[i].width == format->width &&
++			    sensor->modes[i].height == format->height)
++				break;
++		if (i == sensor->num_modes) {
++			ret = -EINVAL;
++			goto pm_put;
++		}
++		mode = &sensor->modes[i];
++
++		ret = t715_write_records(sensor, mode->records,
++					 mode->num_records);
++		if (ret)
++			goto pm_put;
++
++		ret = __v4l2_ctrl_handler_setup(sensor->sd.ctrl_handler);
++		if (ret)
++			goto pm_put;
++
++		/* Focus before the frames: a motor failure must not stop it. */
++		t715_lens_on(sensor);
++
++		ret = cci_write(sensor->regmap, T715_REG_MODE_SELECT,
++				T715_MODE_STREAMING, NULL);
++		if (ret)
++			goto pm_put;
++
++		/* The Bayer order cannot change during streaming. */
++		__v4l2_ctrl_grab(sensor->hflip, true);
++		__v4l2_ctrl_grab(sensor->vflip, true);
++
++		sensor->streaming = true;
++
++		goto unlock;
++	}
++
++	if (sensor->streaming) {
++		cci_write(sensor->regmap, T715_REG_MODE_SELECT,
++			  T715_MODE_STANDBY, &ret);
++		__v4l2_ctrl_grab(sensor->hflip, false);
++		__v4l2_ctrl_grab(sensor->vflip, false);
++		sensor->streaming = false;
++	}
++
++	/*
++	 * A caller that went through pre_streamon gets its reference back at
++	 * post_streamoff; one that only used s_stream gets it here.
++	 */
++	if (sensor->streaming_pm) {
++		sensor->streaming_pm = false;
++		t715_put_autosuspend(sd);
++	}
++
++unlock:
++	v4l2_subdev_unlock_state(state);
++	return ret;
++
++pm_put:
++	if (sensor->streaming_pm) {
++		sensor->streaming_pm = false;
++		t715_put_autosuspend(sd);
++	}
++	goto unlock;
++}
++
++static int t715_post_streamoff(struct v4l2_subdev *sd)
++{
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	/* Balances the pre_streamon resume. */
++	if (sensor->pre_streamon_pm) {
++		sensor->pre_streamon_pm = false;
++		t715_put_autosuspend(sd);
++	}
++
++	return 0;
++}
++
++static const struct v4l2_subdev_core_ops t715_core_ops = {
++	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
++	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
++};
++
++static const struct v4l2_subdev_video_ops t715_video_ops = {
++	.s_stream = t715_s_stream,
++	.pre_streamon = t715_pre_streamon,
++	.post_streamoff = t715_post_streamoff,
++};
++
++static const struct v4l2_subdev_pad_ops t715_pad_ops = {
++	.enum_mbus_code = t715_enum_mbus_code,
++	.enum_frame_size = t715_enum_frame_size,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.set_fmt = t715_set_pad_format,
++	.get_selection = t715_get_selection,
++};
++
++static const struct v4l2_subdev_ops t715_sensor_ops = {
++	.core = &t715_core_ops,
++	.video = &t715_video_ops,
++	.pad = &t715_pad_ops,
++};
++
++/* ------------------------------------------------------------------
++ * Probe and remove.
++ * ------------------------------------------------------------------
++ */
++
++static const char * const t715_rear_supplies[] = { "avdd", "dvdd", "af", "iovdd" };
++static const char * const t715_front_supplies[] = { "avdd", "iovdd" };
++
++static const struct t715_variant t715_variants[] = {
++	{
++		.name = "s5k4h5",
++		.model_id = 0x485b,
++		.supplies = t715_rear_supplies,
++		.num_supplies = 4,
++		.coarse_margin = 5,
++		.vblank_min = 38,
++		.native_width = 3280,
++		.native_height = 2464,
++		.lanes = 4,
++		.has_standby = false,
++		.has_motor = true,
++	}, {
++		.name = "s5k6b2",
++		.model_id = 0x6b20,
++		.supplies = t715_front_supplies,
++		.num_supplies = 2,
++		.coarse_margin = 6,
++		.vblank_min = 20,
++		.native_width = 1936,
++		.native_height = 1096,
++		.lanes = 1,
++		.has_standby = true,
++		.has_motor = false,
++	},
++};
++
++/*
++ * A phandle to a bit-banged bus plus an address: a dummy client to talk
++ * through, as t715-camera.c does.  No phandle means no device there.
++ */
++static struct i2c_client *t715_i2c_dummy(struct device *dev,
++					 const char *bus_prop,
++					 const char *addr_prop,
++					 u16 addr_default)
++{
++	struct device_node *bus_np;
++	struct i2c_adapter *bus;
++	struct i2c_client *client;
++	u32 addr = addr_default;
++
++	bus_np = of_parse_phandle(dev->of_node, bus_prop, 0);
++	if (!bus_np)
++		return NULL;
++
++	bus = of_get_i2c_adapter_by_node(bus_np);
++	of_node_put(bus_np);
++	if (!bus)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	of_property_read_u32(dev->of_node, addr_prop, &addr);
++
++	client = devm_i2c_new_dummy_device(dev, bus, addr);
++	i2c_put_adapter(bus);
++	return client;
++}
++
++static int t715_check_hwcfg(struct t715_sensor *sensor)
++{
++	struct device *dev = &sensor->client->dev;
++	struct fwnode_handle *endpoint;
++	struct v4l2_fwnode_endpoint ep = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY,
++	};
++	int ret = -EINVAL;
++
++	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
++	if (!endpoint)
++		return dev_err_probe(dev, -EINVAL, "endpoint node not found\n");
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &ep);
++	if (ret) {
++		dev_err_probe(dev, ret, "could not parse endpoint\n");
++		goto error_out;
++	}
++
++	if (ep.bus.mipi_csi2.num_data_lanes != sensor->variant->lanes) {
++		dev_err_probe(dev, -EINVAL, "expected %u data lanes, found %u\n",
++			      sensor->variant->lanes,
++			      ep.bus.mipi_csi2.num_data_lanes);
++		ret = -EINVAL;
++		goto error_out;
++	}
++
++	if (!ep.nr_of_link_frequencies) {
++		dev_err_probe(dev, -EINVAL, "no link-frequencies property\n");
++		ret = -EINVAL;
++		goto error_out;
++	}
++
++	sensor->link_frequency = ep.link_frequencies[0];
++	ret = 0;
++
++error_out:
++	v4l2_fwnode_endpoint_free(&ep);
++	fwnode_handle_put(endpoint);
++	return ret;
++}
++
++static int t715_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct t715_sensor *sensor;
++	u32 af_default = 0;
++	u64 model_id;
++	unsigned int i;
++	int ret;
++
++	sensor = devm_kzalloc(dev, sizeof(*sensor), GFP_KERNEL);
++	if (!sensor)
++		return -ENOMEM;
++
++	sensor->client = client;
++	sensor->variant = i2c_get_match_data(client);
++	if (!sensor->variant)
++		return -ENODEV;
++	sensor->focus_pos = -1;
++
++	sensor->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(sensor->regmap))
++		return dev_err_probe(dev, PTR_ERR(sensor->regmap),
++				     "failed to initialize CCI\n");
++
++	/* Everything the device tree gives, in the order of the binding. */
++	for (i = 0; i < sensor->variant->num_supplies; i++)
++		sensor->supplies[i].supply = sensor->variant->supplies[i];
++	ret = devm_regulator_bulk_get(dev, sensor->variant->num_supplies,
++				      sensor->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "no supplies\n");
++
++	sensor->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(sensor->reset))
++		return dev_err_probe(dev, PTR_ERR(sensor->reset), "no reset\n");
++
++	if (sensor->variant->has_standby) {
++		sensor->standby = devm_gpiod_get_optional(dev, "standby",
++							  GPIOD_OUT_LOW);
++		if (IS_ERR(sensor->standby))
++			return dev_err_probe(dev, PTR_ERR(sensor->standby),
++					     "no standby\n");
++	}
++
++	sensor->mclk = devm_clk_get(dev, "mclk");
++	if (IS_ERR(sensor->mclk))
++		return dev_err_probe(dev, PTR_ERR(sensor->mclk), "no mclk\n");
++
++	sensor->pins = devm_pinctrl_get(dev);
++	if (IS_ERR(sensor->pins))
++		return dev_err_probe(dev, PTR_ERR(sensor->pins), "no pins\n");
++	sensor->pins_off = pinctrl_lookup_state(sensor->pins,
++						PINCTRL_STATE_DEFAULT);
++	if (IS_ERR(sensor->pins_off))
++		return dev_err_probe(dev, PTR_ERR(sensor->pins_off),
++				     "no default pinctrl state\n");
++	sensor->pins_on = pinctrl_lookup_state(sensor->pins, "active");
++	if (IS_ERR(sensor->pins_on))
++		return dev_err_probe(dev, PTR_ERR(sensor->pins_on),
++				     "no active pinctrl state\n");
++
++	ret = t715_check_hwcfg(sensor);
++	if (ret)
++		return ret;
++
++	/* The motor's bus is claimed before anything is powered. */
++	if (sensor->variant->has_motor) {
++		sensor->af_client = t715_i2c_dummy(dev, "t715,af-bus",
++						   "t715,af-addr", 0x0c);
++		if (IS_ERR(sensor->af_client))
++			return dev_err_probe(dev,
++					     PTR_ERR(sensor->af_client),
++					     "no focus motor bus\n");
++	}
++
++	ret = t715_load_modes(sensor);
++	if (ret)
++		return ret;
++
++	/*
++	 * Identify: power on and read the model id.  The sensor stays on: runtime
++	 * PM takes it over as active below and suspends it a second later.
++	 */
++	ret = t715_sensor_power_on(sensor);
++	if (ret)
++		goto free_modes;
++
++	ret = cci_read(sensor->regmap, T715_REG_MODEL_ID, &model_id, NULL);
++	if (ret)
++		goto power_off;
++
++	if (model_id != sensor->variant->model_id) {
++		dev_err(dev, "model id mismatch: expected %04x, read %04llx\n",
++			sensor->variant->model_id, model_id);
++		ret = -ENODEV;
++		goto power_off;
++	}
++
++	/* The sensor subdev. */
++	v4l2_i2c_subdev_init(&sensor->sd, client, &t715_sensor_ops);
++	sensor->sd.internal_ops = &t715_sensor_internal_ops;
++	v4l2_i2c_subdev_set_name(&sensor->sd, client, sensor->variant->name,
++				 NULL);
++
++	sensor->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
++			    V4L2_SUBDEV_FL_HAS_EVENTS;
++	sensor->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&sensor->sd.entity, 1, &sensor->pad);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init entity pads\n");
++		goto power_off;
++	}
++
++	ret = t715_init_controls(sensor);
++	if (ret)
++		goto free_pads;
++
++	/* The lens subdev, registered with the sensor when it binds. */
++	if (sensor->af_client) {
++		of_property_read_u32(dev->of_node, "t715,af-default",
++				     &af_default);
++		af_default = clamp_t(u32, af_default, 0, VCM_MAX_POS);
++
++		ret = v4l2_ctrl_handler_init(&sensor->lens_ctrls, 1);
++		if (ret)
++			goto free_ctrls;
++
++		sensor->focus = v4l2_ctrl_new_std(&sensor->lens_ctrls,
++						  &t715_lens_ctrl_ops,
++						  V4L2_CID_FOCUS_ABSOLUTE,
++						  0, VCM_MAX_POS, 1,
++						  af_default);
++		if (sensor->lens_ctrls.error) {
++			ret = sensor->lens_ctrls.error;
++			goto free_lens;
++		}
++		sensor->lens_sd.ctrl_handler = &sensor->lens_ctrls;
++
++		v4l2_subdev_init(&sensor->lens_sd, &t715_lens_ops);
++		sensor->lens_sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++		sensor->lens_sd.entity.function = MEDIA_ENT_F_LENS;
++		snprintf(sensor->lens_sd.name, sizeof(sensor->lens_sd.name),
++			 "dw9807 %s", dev_name(&sensor->af_client->dev));
++		sensor->lens_sd.owner = THIS_MODULE;
++		sensor->lens_sd.dev = &sensor->af_client->dev;
++		v4l2_set_subdevdata(&sensor->lens_sd, sensor->af_client);
++		ret = media_entity_pads_init(&sensor->lens_sd.entity, 0, NULL);
++		if (ret) {
++			dev_err_probe(dev, ret, "failed to init lens pads\n");
++			goto free_lens;
++		}
++	}
++
++	sensor->sd.state_lock = sensor->sd.ctrl_handler->lock;
++	ret = v4l2_subdev_init_finalize(&sensor->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "subdev init error\n");
++		goto free_lens;
++	}
++
++	/*
++	 * As imx290.c: the device is active because it was just identified,
++	 * so enable runtime PM with autosuspend and drop the reference after
++	 * registering; it suspends a second later.
++	 */
++	pm_runtime_set_active(dev);
++	pm_runtime_get_noresume(dev);
++	pm_runtime_enable(dev);
++	pm_runtime_set_autosuspend_delay(dev, 1000);
++	pm_runtime_use_autosuspend(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to register sensor subdev\n");
++		goto error_pm;
++	}
++
++	pm_runtime_mark_last_busy(dev);
++	pm_runtime_put_autosuspend(dev);
++
++	return 0;
++
++error_pm:
++	pm_runtime_disable(dev);
++	pm_runtime_put_noidle(dev);
++	pm_runtime_set_suspended(dev);
++	v4l2_subdev_cleanup(&sensor->sd);
++free_lens:
++	if (sensor->af_client)
++		v4l2_ctrl_handler_free(&sensor->lens_ctrls);
++free_ctrls:
++	v4l2_ctrl_handler_free(&sensor->ctrls);
++free_pads:
++	media_entity_cleanup(&sensor->sd.entity);
++power_off:
++	t715_sensor_power_off(sensor);
++free_modes:
++	t715_free_modes(sensor);
++	return ret;
++}
++
++static void t715_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct t715_sensor *sensor = to_t715_sensor(sd);
++
++	v4l2_async_unregister_subdev(sd);
++
++	/* Before the controls go: powering off parks the lens through them. */
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev)) {
++		t715_power_off(&client->dev);
++		pm_runtime_set_suspended(&client->dev);
++	}
++
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++
++	if (sensor->af_client)
++		v4l2_ctrl_handler_free(&sensor->lens_ctrls);
++	v4l2_ctrl_handler_free(&sensor->ctrls);
++
++	t715_free_modes(sensor);
++}
++
++static const struct of_device_id t715_sensor_of_match[] = {
++	{ .compatible = "samsung,s5k4h5", .data = &t715_variants[0] },
++	{ .compatible = "samsung,s5k6b2", .data = &t715_variants[1] },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, t715_sensor_of_match);
++
++static struct i2c_driver t715_sensor_driver = {
++	.driver = {
++		.name = "t715-sensor",
++		.of_match_table = t715_sensor_of_match,
++		.pm = &t715_pm_ops,
++	},
++	.probe = t715_probe,
++	.remove = t715_remove,
++};
++module_i2c_driver(t715_sensor_driver);
++
++MODULE_DESCRIPTION("SM-T715 S5K4H5 and S5K6B2 camera sensors");
++MODULE_LICENSE("GPL");
+-- 
+2.52.0
+

@@ -1,0 +1,1092 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/4] media: samsung: t715-camera: one media device per camera
+
+What stays in t715-camera.ko is the capture side of one camera: CSIS,
+FIMC-LITE and the PHY, programmed as proven on the device.  Each camera
+is a media device; the sensor subdevice is found through the device tree
+graph and linked to the video node.  The video node still exposes the
+sensor's and the lens's controls, so the raw Photo and Selfie tools keep
+working.
+
+The sensors, their power, their mode tables and the focus motor moved to
+VIDEO_T715_SENSOR.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/samsung/Kconfig       |  13 +-
+ drivers/media/platform/samsung/t715-camera.c | 804 ++++++++-----------
+ 2 files changed, 363 insertions(+), 454 deletions(-)
+
+diff --git a/drivers/media/platform/samsung/Kconfig b/drivers/media/platform/samsung/Kconfig
+index 9adaf52d2..4413384dc 100644
+--- a/drivers/media/platform/samsung/Kconfig
++++ b/drivers/media/platform/samsung/Kconfig
+@@ -4,13 +4,18 @@ comment "Samsung media platform drivers"
+ 
+ config VIDEO_T715_CAMERA
+ 	tristate "SM-T715 cameras, raw Bayer through CSIS and FIMC-LITE"
+-	depends on V4L_PLATFORM_DRIVERS && VIDEO_DEV && ARCH_EXYNOS && I2C && OF && PM
++	depends on V4L_PLATFORM_DRIVERS && VIDEO_DEV && ARCH_EXYNOS && OF && PM
+ 	depends on GENERIC_PHY
++	select MEDIA_CONTROLLER
++	select VIDEO_V4L2_SUBDEV_API
++	select V4L2_FWNODE
+ 	select VIDEOBUF2_DMA_CONTIG
+ 	help
+-	  The two cameras of the Galaxy Tab S2, with no ISP.  Needs the sensors'
+-	  register tables as firmware files, which only the owner's copy of
+-	  Samsung's ISP firmware holds.
++	  The capture side of the Galaxy Tab S2's two cameras, with no ISP:
++	  one media device per camera, the MIPI CSIS receiver and FIMC-LITE
++	  DMA feeding a video node, the sensor reached through the device
++	  tree graph.  The sensors themselves, their power and mode tables
++	  and the rear focus motor are driven by VIDEO_T715_SENSOR.
+ 
+ 
+ source "drivers/media/platform/samsung/exynos-gsc/Kconfig"
+diff --git a/drivers/media/platform/samsung/t715-camera.c b/drivers/media/platform/samsung/t715-camera.c
+index ceabe846c..436e3fdb4 100644
+--- a/drivers/media/platform/samsung/t715-camera.c
++++ b/drivers/media/platform/samsung/t715-camera.c
+@@ -1,41 +1,42 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * SM-T715 cameras: S5K6B2 (front) and S5K4H5 (rear), raw Bayer through MIPI CSIS and
+- * FIMC-LITE into memory, with no ISP.  One V4L2 capture node per camera.
+- * docs/hardware/CAMERA.md has the whole path and how it was found.
++ * SM-T715 capture side: the MIPI CSIS receiver and the FIMC-LITE DMA of one
++ * camera, 16-bit unpacked RAW Bayer into memory with no ISP.  Each camera is
++ * one media device, sensor subdev -> video capture node, the sensor reached
++ * through the device tree graph.  docs/hardware/CAMERA.md has the whole path
++ * and how it was found.
+  *
+- * The power sequences come from Samsung's fimc-is-device-6b2.c and -4h5.c, the
+- * CSIS and FIMC-LITE programming from fimc-is-hw-csi.c and fimc-is-device-flite.c
+- * (GPL-2.0).  The sensors' register tables are not here: they are read at stream on
+- * from request_firmware(), a list of records { le16 reg; le16 width; le32 value },
+- * which the owner extracts from his own copy of the ISP firmware.
++ * The sensors, their power, MCLK, mode tables and the rear focus motor moved
++ * to the t715-sensor driver (VIDEO_T715_SENSOR).  What stayed here is the
++ * CSIS, FIMC-LITE and PHY programming that was proven on the device, from
++ * Samsung's fimc-is-hw-csi.c and fimc-is-device-flite.c (GPL-2.0).
+  *
+- * The gates this driver touches are the functional ones only.  The rest of CMU_CAM0
+- * is the block's bus (CLK_IGNORE_UNUSED), and turning it off hangs the SoC.
+- *
+- * The rear camera's DW9807 focus motor lives on its own bit-banged bus and is ramped
+- * like dw9807-vcm.c, as V4L2_CID_FOCUS_ABSOLUTE on the rear video node.
++ * The gates this driver touches are the functional ones only.  The rest of
++ * CMU_CAM0 is the block's bus (CLK_IGNORE_UNUSED), and turning it off hangs
++ * the SoC.
+  */
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+-#include <linux/firmware.h>
+-#include <linux/gpio/consumer.h>
+-#include <linux/i2c.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
++#include <linux/math.h>
++#include <linux/minmax.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/phy/phy.h>
+-#include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+-#include <linux/regulator/consumer.h>
+ 
++#include <media/media-device.h>
++#include <media/v4l2-async.h>
+ #include <media/v4l2-ctrls.h>
+ #include <media/v4l2-dev.h>
+ #include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
+ #include <media/v4l2-ioctl.h>
++#include <media/v4l2-mediabus.h>
++#include <media/v4l2-subdev.h>
+ #include <media/videobuf2-dma-contig.h>
+ #include <media/videobuf2-v4l2.h>
+ 
+@@ -92,22 +93,45 @@
+ #define LITE_CIFCNTSEQ		0x100
+ #define LITE_CIOSAN(n)		(0x200 + 4 * (n))
+ 
+-/* CCS registers both sensors share. */
+-#define SENSOR_MODE_SELECT	0x0100
+-#define SENSOR_COARSE		0x0202
+-#define SENSOR_GAIN		0x0204
+-#define SENSOR_FLL		0x0340
+-
+-/* DW9807 registers, dw9807-vcm.c:23-35. */
+-#define VCM_CTL			0x02
+-#define VCM_MSB			0x03
+-#define VCM_STATUS		0x05
+-#define VCM_MAX_POS		1023
+-#define VCM_STEP		16
+-#define VCM_MAX_RETRY		10
++/* Width in multiples of 8, height even: what CSIS and FIMC-LITE take. */
++#define T715_WIDTH_MIN		16
++#define T715_WIDTH_MAX		3280
++#define T715_HEIGHT_MIN		16
++#define T715_HEIGHT_MAX		2464
+ 
+ enum { CAM_FRONT, CAM_REAR };
+ 
++/* The four RAW10 Bayer orders the sensors send, one 16-bit word per pixel. */
++static const struct t715_format {
++	u32 pixelformat;
++	u32 mbus_code;
++} t715_formats[] = {
++	{ V4L2_PIX_FMT_SBGGR10, MEDIA_BUS_FMT_SBGGR10_1X10 },
++	{ V4L2_PIX_FMT_SGBRG10, MEDIA_BUS_FMT_SGBRG10_1X10 },
++	{ V4L2_PIX_FMT_SGRBG10, MEDIA_BUS_FMT_SGRBG10_1X10 },
++	{ V4L2_PIX_FMT_SRGGB10, MEDIA_BUS_FMT_SRGGB10_1X10 },
++};
++
++static const struct t715_format *t715_format_by_fourcc(u32 pixelformat)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(t715_formats); i++)
++		if (t715_formats[i].pixelformat == pixelformat)
++			return &t715_formats[i];
++	return NULL;
++}
++
++static const struct t715_format *t715_format_by_mbus(u32 mbus_code)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(t715_formats); i++)
++		if (t715_formats[i].mbus_code == mbus_code)
++			return &t715_formats[i];
++	return NULL;
++}
++
+ struct t715_cam_buf {
+ 	struct vb2_v4l2_buffer vb;
+ 	struct list_head list;
+@@ -120,266 +144,26 @@ struct t715_cam {
+ 	struct phy *phy;
+ 	int irq;
+ 	struct clk_bulk_data clks[5];
+-	struct clk *mclk;
+-	struct regulator_bulk_data supplies[4];
+-	int nsupplies;
+-	struct gpio_desc *reset, *standby;
+-	struct pinctrl *pins;
+-	struct pinctrl_state *st_off, *st_on;
+-	struct i2c_client *sensor;
+-	struct i2c_client *vcm;
+-	int vcm_pos;
+-	const char *fw_name;
++	u32 pixelformat;
+ 	u32 lanes, settle, width, height;
+ 
++	struct media_device mdev;
+ 	struct v4l2_device v4l2;
+-	struct v4l2_ctrl_handler ctrls;
+-	struct v4l2_ctrl *exposure, *gain, *vblank, *focus;
++	struct v4l2_async_notifier notifier;
+ 	struct video_device vdev;
++	struct media_pad pad;
++	struct v4l2_ctrl_handler ctrls;
++	struct media_pipeline pipe;
++	struct v4l2_subdev *sensor;
++	int sensor_pad;
+ 	struct vb2_queue queue;
+ 	struct mutex lock;
+ 	spinlock_t irqlock;
+ 	struct list_head pending;
+ 	struct t715_cam_buf *active;
+ 	unsigned int sequence;
+-	bool streaming;
+ };
+ 
+-static int t715_sensor_write(struct t715_cam *c, u16 reg, u32 val, unsigned int width)
+-{
+-	u8 buf[6] = { reg >> 8, reg };
+-	int ret;
+-
+-	if (width == 2) {
+-		buf[2] = val >> 8;
+-		buf[3] = val;
+-	} else {
+-		buf[2] = val;
+-	}
+-	ret = i2c_master_send(c->sensor, buf, 2 + width);
+-	return ret < 0 ? ret : 0;
+-}
+-
+-static int t715_sensor_load(struct t715_cam *c)
+-{
+-	const struct firmware *fw;
+-	const __le16 *p;
+-	size_t i;
+-	int ret;
+-
+-	ret = request_firmware(&fw, c->fw_name, c->dev);
+-	if (ret) {
+-		dev_err(c->dev, "no sensor table %s: extract it from your ISP firmware\n", c->fw_name);
+-		return ret;
+-	}
+-	if (!fw->size || fw->size % 8) {
+-		release_firmware(fw);
+-		return -EINVAL;
+-	}
+-	for (i = 0; i < fw->size; i += 8) {
+-		p = (const __le16 *)(fw->data + i);
+-		ret = t715_sensor_write(c, le16_to_cpu(p[0]), le16_to_cpu(p[2]), le16_to_cpu(p[1]));
+-		if (ret)
+-			break;
+-	}
+-	release_firmware(fw);
+-	return ret;
+-}
+-
+-/* --- DW9807 focus motor, rear camera only, on its own bit-banged bus. --- */
+-
+-static int t715_vcm_write(struct t715_cam *c, u8 reg, u8 val)
+-{
+-	u8 buf[2] = { reg, val };
+-	int ret;
+-
+-	ret = i2c_master_send(c->vcm, buf, sizeof(buf));
+-	return ret < 0 ? ret : 0;
+-}
+-
+-/* dw9807-vcm.c:53-74: point the address pointer at STATUS, then read it back. */
+-static int t715_vcm_status(struct t715_cam *c)
+-{
+-	u8 reg = VCM_STATUS, val;
+-	int ret;
+-
+-	ret = i2c_master_send(c->vcm, &reg, sizeof(reg));
+-	if (ret < 0)
+-		return ret;
+-	ret = i2c_master_recv(c->vcm, &val, sizeof(val));
+-	if (ret < 0)
+-		return ret;
+-	return val;
+-}
+-
+-static int t715_vcm_wait(struct t715_cam *c)
+-{
+-	int ret, i;
+-
+-	for (i = 0; i < VCM_MAX_RETRY; i++) {
+-		ret = t715_vcm_status(c);
+-		if (ret < 0)
+-			return ret;
+-		if (!ret)
+-			return 0;
+-		usleep_range(1000, 1100);
+-	}
+-	return -EBUSY;
+-}
+-
+-static int t715_vcm_set(struct t715_cam *c, int pos)
+-{
+-	u8 buf[3] = { VCM_MSB, (pos >> 8) & 3, pos & 0xff };
+-	int ret;
+-
+-	ret = t715_vcm_wait(c);
+-	if (ret)
+-		return ret;
+-	ret = i2c_master_send(c->vcm, buf, sizeof(buf));
+-	if (ret < 0)
+-		return ret;
+-	c->vcm_pos = pos;
+-	return 0;
+-}
+-
+-/*
+- * The soft movement dw9807_vcm_suspend/resume use: towards to in steps of
+- * VCM_STEP, the last step landing exactly on it.
+- */
+-static int t715_vcm_ramp(struct t715_cam *c, int to)
+-{
+-	int ret, pos = c->vcm_pos;
+-
+-	while (pos != to) {
+-		if (abs(to - pos) <= VCM_STEP)
+-			pos = to;
+-		else if (to > pos)
+-			pos += VCM_STEP;
+-		else
+-			pos -= VCM_STEP;
+-		ret = t715_vcm_set(c, pos);
+-		if (ret)
+-			return ret;
+-		usleep_range(1000, 1100);
+-	}
+-	return 0;
+-}
+-
+-/* The rail is on and the pull-ups with it: wake the motor and ramp to the control. */
+-static void t715_vcm_on(struct t715_cam *c)
+-{
+-	int ret;
+-
+-	if (!c->vcm)
+-		return;
+-	v4l2_ctrl_lock(c->focus);
+-	ret = t715_vcm_write(c, VCM_CTL, 0x00);
+-	if (!ret) {
+-		c->vcm_pos = 0;
+-		ret = t715_vcm_ramp(c, c->focus->cur.val);
+-	}
+-	if (ret) {
+-		/* Streaming goes on without focus rather than failing on it. */
+-		c->vcm_pos = -1;
+-		dev_warn_once(c->dev, "focus motor off line: %d\n", ret);
+-	}
+-	v4l2_ctrl_unlock(c->focus);
+-}
+-
+-/* Back to rest, then power down.  A failure here must not stop the rest. */
+-static void t715_vcm_off(struct t715_cam *c)
+-{
+-	int ret;
+-
+-	if (!c->vcm || c->vcm_pos < 0)
+-		return;
+-	v4l2_ctrl_lock(c->focus);
+-	ret = t715_vcm_ramp(c, 0);
+-	if (ret)
+-		dev_warn(c->dev, "focus motor stuck at %d: %d\n", c->vcm_pos, ret);
+-	ret = t715_vcm_write(c, VCM_CTL, 0x01);
+-	if (ret)
+-		dev_warn(c->dev, "focus motor power down failed: %d\n", ret);
+-	c->vcm_pos = -1;
+-	v4l2_ctrl_unlock(c->focus);
+-}
+-
+-/* fimc-is-device-6b2.c:609-627 */
+-static int t715_front_on(struct t715_cam *c)
+-{
+-	int ret;
+-
+-	gpiod_set_value_cansleep(c->standby, 0);
+-	ret = regulator_enable(c->supplies[0].consumer);
+-	if (ret)
+-		return ret;
+-	ret = regulator_enable(c->supplies[1].consumer);
+-	if (ret)
+-		goto a;
+-	usleep_range(1000, 2000);
+-	gpiod_set_value_cansleep(c->reset, 0);
+-	ret = pinctrl_select_state(c->pins, c->st_on);
+-	if (ret)
+-		goto b;
+-	usleep_range(10000, 11000);
+-	return 0;
+-b:
+-	gpiod_set_value_cansleep(c->reset, 1);
+-	regulator_disable(c->supplies[1].consumer);
+-a:
+-	regulator_disable(c->supplies[0].consumer);
+-	return ret;
+-}
+-
+-/* fimc-is-device-6b2.c:630-650 */
+-static void t715_front_off(struct t715_cam *c)
+-{
+-	gpiod_set_value_cansleep(c->standby, 0);
+-	pinctrl_select_state(c->pins, c->st_off);
+-	usleep_range(1000, 2000);
+-	gpiod_set_value_cansleep(c->reset, 1);
+-	regulator_disable(c->supplies[1].consumer);
+-	regulator_disable(c->supplies[0].consumer);
+-}
+-
+-/* fimc-is-device-4h5.c:126-139: A2.8, core, AF, 2 ms, IO, 2 ms, pins, reset */
+-static int t715_rear_on(struct t715_cam *c)
+-{
+-	int i, ret;
+-
+-	for (i = 0; i < 4; i++) {
+-		ret = regulator_enable(c->supplies[i].consumer);
+-		if (ret)
+-			goto off;
+-		if (i >= 2)
+-			usleep_range(2000, 3000);
+-	}
+-	ret = pinctrl_select_state(c->pins, c->st_on);
+-	if (ret)
+-		goto off;
+-	usleep_range(1000, 2000);
+-	gpiod_set_value_cansleep(c->reset, 0);
+-	usleep_range(10000, 11000);
+-	return 0;
+-off:
+-	while (--i >= 0)
+-		regulator_disable(c->supplies[i].consumer);
+-	return ret;
+-}
+-
+-/* fimc-is-device-4h5.c:142-152 */
+-static void t715_rear_off(struct t715_cam *c)
+-{
+-	regulator_disable(c->supplies[2].consumer);
+-	usleep_range(2000, 3000);
+-	pinctrl_select_state(c->pins, c->st_off);
+-	usleep_range(1000, 2000);
+-	gpiod_set_value_cansleep(c->reset, 1);
+-	regulator_disable(c->supplies[3].consumer);
+-	regulator_disable(c->supplies[1].consumer);
+-	regulator_disable(c->supplies[0].consumer);
+-}
+-
+ static void t715_csis_on(struct t715_cam *c)
+ {
+ 	void __iomem *b = c->csis;
+@@ -531,33 +315,39 @@ static void t715_return_all(struct t715_cam *c, enum vb2_buffer_state state)
+ static int t715_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct t715_cam *c = vb2_get_drv_priv(q);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
++		.pad = c->sensor_pad,
++	};
+ 	struct t715_cam_buf *first;
+ 	int ret;
+ 
+-	ret = pm_runtime_resume_and_get(c->dev);
++	/* Starts the media pipeline, which runs the link validation. */
++	ret = video_device_pipeline_start(&c->vdev, &c->pipe);
+ 	if (ret)
+ 		goto err;
+-	ret = clk_prepare_enable(c->mclk);
++
++	/* What CSIS RESOL and the FIMC-LITE sizes are programmed with. */
++	ret = v4l2_subdev_call_state_active(c->sensor, pad, get_fmt, &fmt);
+ 	if (ret)
+-		goto put;
+-	ret = c->kind == CAM_FRONT ? t715_front_on(c) : t715_rear_on(c);
++		goto pipe;
++	c->width = fmt.format.width;
++	c->height = fmt.format.height;
++
++	ret = v4l2_subdev_call(c->sensor, video, pre_streamon, 0);
++	if (ret && ret != -ENOIOCTLCMD)
++		goto pipe;
++
++	ret = pm_runtime_resume_and_get(c->dev);
+ 	if (ret)
+-		goto mclk;
++		goto post;
+ 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(c->clks), c->clks);
+ 	if (ret)
+-		goto power;
++		goto put;
+ 	ret = phy_power_on(c->phy);
+ 	if (ret)
+ 		goto clks;
+ 
+-	ret = t715_sensor_load(c);
+-	if (ret)
+-		goto phy;
+-	t715_vcm_on(c);
+-	ret = v4l2_ctrl_handler_setup(&c->ctrls);
+-	if (ret)
+-		goto phy;
+-
+ 	first = list_first_entry(&c->pending, struct t715_cam_buf, list);
+ 	list_del(&first->list);
+ 	c->active = first;
+@@ -565,30 +355,24 @@ static int t715_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	t715_csis_on(c);
+ 	t715_lite_on(c, vb2_dma_contig_plane_dma_addr(&first->vb.vb2_buf, 0));
+ 	enable_irq(c->irq);
+-	ret = t715_sensor_write(c, SENSOR_MODE_SELECT, 1, 1);
++	ret = v4l2_subdev_call(c->sensor, video, s_stream, 1);
+ 	if (ret)
+ 		goto lite;
+-	c->streaming = true;
+ 	return 0;
+ 
+ lite:
+ 	disable_irq(c->irq);
+ 	writel(readl(c->lite + LITE_CIIMGCPT) & ~LITE_IMGCPTEN, c->lite + LITE_CIIMGCPT);
+ 	t715_csis_off(c);
+-phy:
+-	t715_vcm_off(c);
+ 	phy_power_off(c->phy);
+ clks:
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(c->clks), c->clks);
+-power:
+-	if (c->kind == CAM_FRONT)
+-		t715_front_off(c);
+-	else
+-		t715_rear_off(c);
+-mclk:
+-	clk_disable_unprepare(c->mclk);
+ put:
+ 	pm_runtime_put_sync(c->dev);
++post:
++	v4l2_subdev_call(c->sensor, video, post_streamoff);
++pipe:
++	video_device_pipeline_stop(&c->vdev);
+ err:
+ 	t715_return_all(c, VB2_BUF_STATE_QUEUED);
+ 	return ret;
+@@ -598,8 +382,7 @@ static void t715_stop_streaming(struct vb2_queue *q)
+ {
+ 	struct t715_cam *c = vb2_get_drv_priv(q);
+ 
+-	c->streaming = false;
+-	t715_sensor_write(c, SENSOR_MODE_SELECT, 0, 1);
++	v4l2_subdev_call(c->sensor, video, s_stream, 0);
+ 	msleep(100);
+ 	disable_irq(c->irq);
+ 	writel(readl(c->lite + LITE_CIIMGCPT) & ~LITE_IMGCPTEN, c->lite + LITE_CIIMGCPT);
+@@ -607,13 +390,9 @@ static void t715_stop_streaming(struct vb2_queue *q)
+ 	t715_csis_off(c);
+ 	phy_power_off(c->phy);
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(c->clks), c->clks);
+-	t715_vcm_off(c);
+-	if (c->kind == CAM_FRONT)
+-		t715_front_off(c);
+-	else
+-		t715_rear_off(c);
+-	clk_disable_unprepare(c->mclk);
+ 	pm_runtime_put_sync(c->dev);
++	v4l2_subdev_call(c->sensor, video, post_streamoff);
++	video_device_pipeline_stop(&c->vdev);
+ 	t715_return_all(c, VB2_BUF_STATE_ERROR);
+ }
+ 
+@@ -627,56 +406,58 @@ static const struct vb2_ops t715_vb2_ops = {
+ 	.wait_finish = vb2_ops_wait_finish,
+ };
+ 
+-static int t715_s_ctrl(struct v4l2_ctrl *ctrl)
+-{
+-	struct t715_cam *c = container_of(ctrl->handler, struct t715_cam, ctrls);
+-
+-	/* Written while the sensor is on; the setup at stream on sends the rest. */
+-	if (!vb2_start_streaming_called(&c->queue) && !pm_runtime_active(c->dev))
+-		return 0;
+-	switch (ctrl->id) {
+-	case V4L2_CID_EXPOSURE:
+-		return t715_sensor_write(c, SENSOR_COARSE, ctrl->val, 2);
+-	case V4L2_CID_ANALOGUE_GAIN:
+-		return t715_sensor_write(c, SENSOR_GAIN, ctrl->val, 2);
+-	case V4L2_CID_VBLANK:
+-		return t715_sensor_write(c, SENSOR_FLL, c->height + ctrl->val, 2);
+-	case V4L2_CID_FOCUS_ABSOLUTE:
+-		/* Kept and applied by t715_vcm_on() at the next stream on. */
+-		if (c->vcm_pos < 0)
+-			return 0;
+-		return t715_vcm_set(c, ctrl->val);
+-	}
+-	return -EINVAL;
+-}
+-
+-static const struct v4l2_ctrl_ops t715_ctrl_ops = { .s_ctrl = t715_s_ctrl };
+-
+ static int t715_querycap(struct file *f, void *fh, struct v4l2_capability *cap)
+ {
+ 	struct t715_cam *c = video_drvdata(f);
+ 
+ 	strscpy(cap->driver, "t715-camera", sizeof(cap->driver));
+ 	strscpy(cap->card, c->vdev.name, sizeof(cap->card));
++	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s", dev_name(c->dev));
+ 	return 0;
+ }
+ 
+ static int t715_enum_fmt(struct file *f, void *fh, struct v4l2_fmtdesc *fmt)
+ {
+-	if (fmt->index)
+-		return -EINVAL;
+-	fmt->pixelformat = V4L2_PIX_FMT_SGRBG10;
++	const struct t715_format *tf;
++
++	/* With a media bus code given, only the pixel format matching it. */
++	if (fmt->mbus_code) {
++		tf = t715_format_by_mbus(fmt->mbus_code);
++		if (!tf || fmt->index)
++			return -EINVAL;
++	} else {
++		if (fmt->index >= ARRAY_SIZE(t715_formats))
++			return -EINVAL;
++		tf = &t715_formats[fmt->index];
++	}
++	fmt->pixelformat = tf->pixelformat;
+ 	return 0;
+ }
+ 
++static void t715_try_pix(struct v4l2_pix_format *p)
++{
++	const struct t715_format *tf = t715_format_by_fourcc(p->pixelformat);
++
++	/* An unknown order falls back to the sensors' default one. */
++	if (!tf)
++		tf = t715_format_by_fourcc(V4L2_PIX_FMT_SGRBG10);
++	p->pixelformat = tf->pixelformat;
++	p->width = rounddown(clamp(p->width, T715_WIDTH_MIN, T715_WIDTH_MAX), 8);
++	p->height = rounddown(clamp(p->height, T715_HEIGHT_MIN, T715_HEIGHT_MAX), 2);
++	p->field = V4L2_FIELD_NONE;
++	p->bytesperline = p->width * 2;
++	p->sizeimage = p->bytesperline * p->height;
++	p->colorspace = V4L2_COLORSPACE_RAW;
++}
++
+ static int t715_g_fmt(struct file *f, void *fh, struct v4l2_format *fmt)
+ {
+ 	struct t715_cam *c = video_drvdata(f);
+ 	struct v4l2_pix_format *p = &fmt->fmt.pix;
+ 
++	p->pixelformat = c->pixelformat;
+ 	p->width = c->width;
+ 	p->height = c->height;
+-	p->pixelformat = V4L2_PIX_FMT_SGRBG10;
+ 	p->field = V4L2_FIELD_NONE;
+ 	p->bytesperline = c->width * 2;
+ 	p->sizeimage = p->bytesperline * c->height;
+@@ -684,15 +465,37 @@ static int t715_g_fmt(struct file *f, void *fh, struct v4l2_format *fmt)
+ 	return 0;
+ }
+ 
+-static int t715_enum_framesizes(struct file *f, void *fh, struct v4l2_frmsizeenum *fs)
++static int t715_try_fmt(struct file *f, void *fh, struct v4l2_format *fmt)
++{
++	t715_try_pix(&fmt->fmt.pix);
++	return 0;
++}
++
++static int t715_s_fmt(struct file *f, void *fh, struct v4l2_format *fmt)
+ {
+ 	struct t715_cam *c = video_drvdata(f);
++	struct v4l2_pix_format *p = &fmt->fmt.pix;
++
++	if (vb2_is_busy(&c->queue))
++		return -EBUSY;
++	t715_try_pix(p);
++	c->pixelformat = p->pixelformat;
++	c->width = p->width;
++	c->height = p->height;
++	return 0;
++}
+ 
+-	if (fs->index || fs->pixel_format != V4L2_PIX_FMT_SGRBG10)
++static int t715_enum_framesizes(struct file *f, void *fh, struct v4l2_frmsizeenum *fs)
++{
++	if (fs->index || !t715_format_by_fourcc(fs->pixel_format))
+ 		return -EINVAL;
+-	fs->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+-	fs->discrete.width = c->width;
+-	fs->discrete.height = c->height;
++	fs->type = V4L2_FRMSIZE_TYPE_STEPWISE;
++	fs->stepwise.min_width = T715_WIDTH_MIN;
++	fs->stepwise.max_width = T715_WIDTH_MAX;
++	fs->stepwise.step_width = 8;
++	fs->stepwise.min_height = T715_HEIGHT_MIN;
++	fs->stepwise.max_height = T715_HEIGHT_MAX;
++	fs->stepwise.step_height = 2;
+ 	return 0;
+ }
+ 
+@@ -722,8 +525,8 @@ static const struct v4l2_ioctl_ops t715_ioctl_ops = {
+ 	.vidioc_querycap = t715_querycap,
+ 	.vidioc_enum_fmt_vid_cap = t715_enum_fmt,
+ 	.vidioc_g_fmt_vid_cap = t715_g_fmt,
+-	.vidioc_s_fmt_vid_cap = t715_g_fmt,
+-	.vidioc_try_fmt_vid_cap = t715_g_fmt,
++	.vidioc_s_fmt_vid_cap = t715_s_fmt,
++	.vidioc_try_fmt_vid_cap = t715_try_fmt,
+ 	.vidioc_enum_framesizes = t715_enum_framesizes,
+ 	.vidioc_enum_input = t715_enum_input,
+ 	.vidioc_g_input = t715_g_input,
+@@ -746,46 +549,146 @@ static const struct v4l2_file_operations t715_fops = {
+ 	.poll = vb2_fop_poll,
+ };
+ 
+-/*
+- * A phandle to a bit-banged bus plus an address: a dummy client to talk through.
+- * No phandle means no device; an addr_default of 0 means the address is required.
+- */
+-static struct i2c_client *t715_i2c_client(struct device *dev, const char *bus_prop,
+-					  const char *addr_prop, u16 addr_default)
++/* The sensor's format must be the video node's, byte for byte. */
++static int t715_link_validate(struct media_link *link)
++{
++	struct video_device *vdev = media_entity_to_video_device(link->sink->entity);
++	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(link->source->entity);
++	struct t715_cam *c = video_get_drvdata(vdev);
++	const struct t715_format *tf = t715_format_by_fourcc(c->pixelformat);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
++		.pad = link->source->index,
++	};
++
++	if (WARN_ON(!tf))
++		return -EINVAL;
++	if (v4l2_subdev_call_state_active(sd, pad, get_fmt, &fmt))
++		return -EPIPE;
++	if (fmt.format.width != c->width || fmt.format.height != c->height ||
++	    fmt.format.code != tf->mbus_code) {
++		dev_dbg(c->dev, "sensor %ux%u mbus 0x%04x, video %ux%u mbus 0x%04x\n",
++			fmt.format.width, fmt.format.height, fmt.format.code,
++			c->width, c->height, tf->mbus_code);
++		return -EPIPE;
++	}
++	return 0;
++}
++
++static const struct media_entity_operations t715_media_ops = {
++	.link_validate = t715_link_validate,
++};
++
++static int t715_notifier_bound(struct v4l2_async_notifier *nf, struct v4l2_subdev *sd,
++			       struct v4l2_async_connection *asc)
++{
++	struct t715_cam *c = container_of(nf, struct t715_cam, notifier);
++	int ret;
++
++	ret = media_entity_get_fwnode_pad(&sd->entity, sd->fwnode, MEDIA_PAD_FL_SOURCE);
++	if (ret < 0) {
++		dev_err(c->dev, "no source pad on %s\n", sd->entity.name);
++		return ret;
++	}
++	c->sensor = sd;
++	c->sensor_pad = ret;
++	return 0;
++}
++
++static void t715_notifier_unbind(struct v4l2_async_notifier *nf, struct v4l2_subdev *sd,
++				 struct v4l2_async_connection *asc)
++{
++	struct t715_cam *c = container_of(nf, struct t715_cam, notifier);
++
++	if (c->sensor != sd)
++		return;
++	/* Streams off through vb2 while the sensor is still a live subdev. */
++	media_device_unregister(&c->mdev);
++	vb2_video_unregister_device(&c->vdev);
++	c->vdev.ctrl_handler = NULL;
++	v4l2_ctrl_handler_free(&c->ctrls);
++	c->sensor = NULL;
++}
++
++static int t715_notifier_complete(struct v4l2_async_notifier *nf)
+ {
+-	struct device_node *bus_np;
+-	struct i2c_adapter *bus;
+-	struct i2c_client *client;
+-	u32 addr = addr_default;
++	struct t715_cam *c = container_of(nf, struct t715_cam, notifier);
++	struct media_entity *sensor = &c->sensor->entity;
++	struct media_link *link;
+ 	int ret;
+ 
+-	bus_np = of_parse_phandle(dev->of_node, bus_prop, 0);
+-	if (!bus_np)
+-		return NULL;
+-	bus = of_get_i2c_adapter_by_node(bus_np);
+-	of_node_put(bus_np);
+-	if (!bus)
+-		return ERR_PTR(-EPROBE_DEFER);
+-	ret = of_property_read_u32(dev->of_node, addr_prop, &addr);
+-	if (ret && !addr_default) {
+-		i2c_put_adapter(bus);
+-		return ERR_PTR(ret);
++	/*
++	 * The sensor's controls on the video node keep the old tools working;
++	 * libcamera ignores them and drives the subdev node.  The rear focus
++	 * motor hangs off the sensor through an ancillary link.
++	 */
++	ret = v4l2_ctrl_handler_init(&c->ctrls, 16);
++	if (ret)
++		return ret;
++	ret = v4l2_ctrl_add_handler(&c->ctrls, c->sensor->ctrl_handler, NULL, true);
++	if (ret)
++		goto ctrls;
++	list_for_each_entry(link, &sensor->links, list) {
++		struct media_entity *lens = gobj_to_entity(link->gobj1);
++		struct v4l2_subdev *sd;
++
++		if (!(link->flags & MEDIA_LNK_FL_ANCILLARY_LINK))
++			continue;
++		if (lens->function != MEDIA_ENT_F_LENS)
++			continue;
++		sd = media_entity_to_v4l2_subdev(lens);
++		ret = v4l2_ctrl_add_handler(&c->ctrls, sd->ctrl_handler, NULL, true);
++		if (ret)
++			goto ctrls;
+ 	}
+-	client = devm_i2c_new_dummy_device(dev, bus, addr);
+-	i2c_put_adapter(bus);
+-	return client;
++	c->vdev.ctrl_handler = &c->ctrls;
++
++	ret = v4l2_device_register_subdev_nodes(&c->v4l2);
++	if (ret)
++		goto ctrls;
++	ret = video_register_device(&c->vdev, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto ctrls;
++	/*
++	 * The pad link could not go in bound(): media_create_pad_link() needs
++	 * the sink entity registered with the media device, which only
++	 * video_register_device() does.
++	 */
++	ret = media_create_pad_link(sensor, c->sensor_pad, &c->vdev.entity, 0,
++				    MEDIA_LNK_FL_ENABLED | MEDIA_LNK_FL_IMMUTABLE);
++	if (ret)
++		goto video;
++	ret = media_device_register(&c->mdev);
++	if (ret)
++		goto video;
++	return 0;
++
++video:
++	vb2_video_unregister_device(&c->vdev);
++ctrls:
++	c->vdev.ctrl_handler = NULL;
++	v4l2_ctrl_handler_free(&c->ctrls);
++	return ret;
+ }
+ 
++static const struct v4l2_async_notifier_operations t715_notifier_ops = {
++	.bound = t715_notifier_bound,
++	.unbind = t715_notifier_unbind,
++	.complete = t715_notifier_complete,
++};
++
+ static int t715_cam_probe(struct platform_device *pdev)
+ {
+-	static const char * const front_rails[] = { "avdd", "iovdd" };
+-	static const char * const rear_rails[] = { "avdd", "dvdd", "af", "iovdd" };
+-	static const char * const clk_names[] = { "aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy" };
++	static const char * const clk_names[5] = {
++		"aclk_csis", "pclk_csis", "aclk_lite", "pclk_lite", "phy"
++	};
+ 	struct device *dev = &pdev->dev;
++	struct v4l2_fwnode_endpoint vep = { .bus_type = V4L2_MBUS_CSI2_DPHY };
++	struct v4l2_async_connection *asc;
++	struct fwnode_handle *ep;
+ 	struct video_device *vdev;
+ 	struct vb2_queue *q;
+ 	struct t715_cam *c;
+-	u32 af_def = 0;
+ 	int i, ret;
+ 
+ 	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
+@@ -808,14 +711,6 @@ static int t715_cam_probe(struct platform_device *pdev)
+ 	if (c->irq < 0)
+ 		return c->irq;
+ 
+-	of_property_read_u32(dev->of_node, "t715,lanes", &c->lanes);
+-	of_property_read_u32(dev->of_node, "t715,settle", &c->settle);
+-	of_property_read_u32(dev->of_node, "t715,width", &c->width);
+-	of_property_read_u32(dev->of_node, "t715,height", &c->height);
+-	ret = of_property_read_string(dev->of_node, "firmware-name", &c->fw_name);
+-	if (ret)
+-		return ret;
+-
+ 	c->phy = devm_phy_get(dev, "csis");
+ 	if (IS_ERR(c->phy))
+ 		return dev_err_probe(dev, PTR_ERR(c->phy), "no phy\n");
+@@ -824,75 +719,56 @@ static int t715_cam_probe(struct platform_device *pdev)
+ 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(c->clks), c->clks);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "no clocks\n");
+-	c->mclk = devm_clk_get(dev, "mclk");
+-	if (IS_ERR(c->mclk))
+-		return PTR_ERR(c->mclk);
+-
+-	c->nsupplies = c->kind == CAM_FRONT ? 2 : 4;
+-	for (i = 0; i < c->nsupplies; i++)
+-		c->supplies[i].supply = c->kind == CAM_FRONT ? front_rails[i] : rear_rails[i];
+-	ret = devm_regulator_bulk_get(dev, c->nsupplies, c->supplies);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "no supplies\n");
+-
+-	c->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+-	if (IS_ERR(c->reset))
+-		return PTR_ERR(c->reset);
+-	c->standby = devm_gpiod_get_optional(dev, "standby", GPIOD_OUT_LOW);
+-	if (IS_ERR(c->standby))
+-		return PTR_ERR(c->standby);
+-
+-	c->pins = devm_pinctrl_get(dev);
+-	if (IS_ERR(c->pins))
+-		return PTR_ERR(c->pins);
+-	c->st_off = pinctrl_lookup_state(c->pins, PINCTRL_STATE_DEFAULT);
+-	if (IS_ERR(c->st_off))
+-		return PTR_ERR(c->st_off);
+-	c->st_on = pinctrl_lookup_state(c->pins, "active");
+-	if (IS_ERR(c->st_on))
+-		return PTR_ERR(c->st_on);
+-
+-	c->sensor = t715_i2c_client(dev, "t715,i2c-bus", "t715,i2c-addr", 0);
+-	if (IS_ERR_OR_NULL(c->sensor))
+-		return c->sensor ? PTR_ERR(c->sensor) : -EINVAL;
+-	/* The focus motor is optional; the front camera has none. */
+-	c->vcm = t715_i2c_client(dev, "t715,af-bus", "t715,af-addr", 0x0c);
+-	if (IS_ERR(c->vcm))
+-		return PTR_ERR(c->vcm);
+-	c->vcm_pos = -1;
++
++	/* The lane count comes from the endpoint, the sensor from its remote. */
++	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(dev), 0, 0,
++					     FWNODE_GRAPH_ENDPOINT_NEXT);
++	if (!ep)
++		return dev_err_probe(dev, -ENODEV, "no endpoint\n");
++	ret = v4l2_fwnode_endpoint_parse(ep, &vep);
++	if (ret) {
++		dev_err_probe(dev, ret, "bad endpoint\n");
++		goto put_ep;
++	}
++	c->lanes = vep.bus.mipi_csi2.num_data_lanes;
++	if (!c->lanes || c->lanes > 4) {
++		ret = dev_err_probe(dev, -EINVAL, "%u data lanes\n", c->lanes);
++		goto put_ep;
++	}
++	of_property_read_u32(dev->of_node, "t715,settle", &c->settle);
+ 
+ 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+ 	if (ret)
+-		return ret;
++		goto put_ep;
+ 	/* The line is undefined while the block is off: unmasked at stream on only. */
+ 	ret = devm_request_irq(dev, c->irq, t715_cam_irq, IRQF_NO_AUTOEN, dev_name(dev), c);
+ 	if (ret)
+-		return ret;
++		goto put_ep;
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)
+-		return ret;
+-
++		goto put_ep;
++
++	strscpy(c->mdev.driver_name, "t715-camera", sizeof(c->mdev.driver_name));
++	strscpy(c->mdev.model,
++		c->kind == CAM_FRONT ? "SM-T715 front camera" : "SM-T715 rear camera",
++		sizeof(c->mdev.model));
++	snprintf(c->mdev.bus_info, sizeof(c->mdev.bus_info), "platform:%s", dev_name(dev));
++	c->mdev.dev = dev;
++	media_device_init(&c->mdev);
++	c->v4l2.mdev = &c->mdev;
+ 	ret = v4l2_device_register(dev, &c->v4l2);
+ 	if (ret)
+-		return ret;
++		goto media;
+ 
+-	v4l2_ctrl_handler_init(&c->ctrls, 4);
+-	c->exposure = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_EXPOSURE,
+-					1, 0xfff0, 1, c->height);
+-	c->gain = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+-				    0x20, 0x200, 1, 0x80);
+-	c->vblank = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_VBLANK,
+-				      36, 0xfff0 - c->height, 1, 36);
+-	if (c->vcm) {
+-		of_property_read_u32(dev->of_node, "t715,af-default", &af_def);
+-		af_def = clamp(af_def, 0, VCM_MAX_POS);
+-		c->focus = v4l2_ctrl_new_std(&c->ctrls, &t715_ctrl_ops, V4L2_CID_FOCUS_ABSOLUTE,
+-					     0, VCM_MAX_POS, 1, af_def);
++	/* The sensors' default mode, so a tool that sets no format still works. */
++	c->pixelformat = V4L2_PIX_FMT_SGRBG10;
++	if (c->kind == CAM_FRONT) {
++		c->width = 1936;
++		c->height = 1090;
++	} else {
++		c->width = 3280;
++		c->height = 2458;
+ 	}
+-	ret = c->ctrls.error;
+-	if (ret)
+-		goto ctrls;
+-	c->v4l2.ctrl_handler = &c->ctrls;
+ 
+ 	q = &c->queue;
+ 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+@@ -907,26 +783,51 @@ static int t715_cam_probe(struct platform_device *pdev)
+ 	q->dev = dev;
+ 	ret = vb2_queue_init(q);
+ 	if (ret)
+-		goto ctrls;
++		goto v4l2;
+ 
+ 	vdev = &c->vdev;
+-	strscpy(vdev->name, c->kind == CAM_FRONT ? "S5K6B2 front" : "S5K4H5 rear", sizeof(vdev->name));
++	strscpy(vdev->name, c->kind == CAM_FRONT ? "t715-camera front" : "t715-camera rear",
++		sizeof(vdev->name));
+ 	vdev->release = video_device_release_empty;
+ 	vdev->fops = &t715_fops;
+ 	vdev->ioctl_ops = &t715_ioctl_ops;
+ 	vdev->v4l2_dev = &c->v4l2;
+ 	vdev->queue = q;
+ 	vdev->lock = &c->lock;
+-	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
++	vdev->vfl_dir = VFL_DIR_RX;
++	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING | V4L2_CAP_IO_MC;
++	vdev->entity.ops = &t715_media_ops;
+ 	video_set_drvdata(vdev, c);
+-	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
++	c->pad.flags = MEDIA_PAD_FL_SINK;
++	ret = media_entity_pads_init(&vdev->entity, 1, &c->pad);
+ 	if (ret)
+-		goto ctrls;
++		goto v4l2;
++
++	/* The node itself is registered from complete(), once the sensor is bound. */
++	v4l2_async_nf_init(&c->notifier, &c->v4l2);
++	asc = v4l2_async_nf_add_fwnode_remote(&c->notifier, ep,
++					      struct v4l2_async_connection);
++	fwnode_handle_put(ep);
++	if (IS_ERR(asc)) {
++		ret = PTR_ERR(asc);
++		goto v4l2;
++	}
++	c->notifier.ops = &t715_notifier_ops;
++	ret = v4l2_async_nf_register(&c->notifier);
++	if (ret)
++		goto notifier;
++
+ 	return 0;
+ 
+-ctrls:
+-	v4l2_ctrl_handler_free(&c->ctrls);
++notifier:
++	v4l2_async_nf_unregister(&c->notifier);
++	v4l2_async_nf_cleanup(&c->notifier);
++v4l2:
+ 	v4l2_device_unregister(&c->v4l2);
++media:
++	media_device_cleanup(&c->mdev);
++put_ep:
++	fwnode_handle_put(ep);
+ 	return ret;
+ }
+ 
+@@ -934,9 +835,12 @@ static void t715_cam_remove(struct platform_device *pdev)
+ {
+ 	struct t715_cam *c = platform_get_drvdata(pdev);
+ 
+-	vb2_video_unregister_device(&c->vdev);
++	/* Unbind, when the sensor ever came, did the video and media side. */
++	v4l2_async_nf_unregister(&c->notifier);
++	v4l2_async_nf_cleanup(&c->notifier);
+ 	v4l2_ctrl_handler_free(&c->ctrls);
+ 	v4l2_device_unregister(&c->v4l2);
++	media_device_cleanup(&c->mdev);
+ }
+ 
+ static const struct of_device_id t715_cam_of_match[] = {
+@@ -958,5 +862,5 @@ static struct platform_driver t715_cam_driver = {
+ };
+ module_platform_driver(t715_cam_driver);
+ 
+-MODULE_DESCRIPTION("SM-T715 cameras, raw Bayer through CSIS and FIMC-LITE");
++MODULE_DESCRIPTION("SM-T715 cameras, CSIS and FIMC-LITE capture through the media controller");
+ MODULE_LICENSE("GPL");
+-- 
+2.52.0
+
