@@ -42,7 +42,12 @@ in shipped code.
 What is left for applications: a preview, autofocus on the rear camera (DW9807), and
 libcamera, whose `simple` pipeline wants a media controller and a sensor subdev. The sensors'
 tables stay outside the repository (section 7): `t715-cam-seq.py` makes them from the
-owner's own ISP firmware, and they go to `/usr/lib/firmware/t715/` on the tablet.
+owner's own ISP firmware, and they go to `/usr/lib/firmware/t715/` on the tablet. On an
+installed image, `t715-camera-tables.service` (package `t715-camera`) does this once at the
+first boot: it reads `vendor/firmware/fimc_is_fw2_4h5.bin` from the SYSTEM partition (read-only,
+firmware `T715XXU2CRH1`'s file only, checked by sha256), writes the rear modes 0-3, 6 and 7 and
+the front mode 0, then binds the two sensors. The script holds only offsets: the rear tables'
+array, and for the front, the instructions whose immediates `ex6b2b.py` decodes.
 
 **FIMC-IS (the A5 ISP) is not reachable as a port.** No signature, no secure boot and
 no hard lock was found, but it is a large vendor stack with an undocumented protocol

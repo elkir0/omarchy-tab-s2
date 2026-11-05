@@ -1,0 +1,16 @@
+# The cameras' mode tables, made once from this tablet's own ISP firmware (t715-camera-tables):
+# they are Samsung's, so the image cannot carry them, and t715-sensor.ko finds no camera
+# without them. Runs again only while one is missing.
+[Unit]
+Description=Camera mode tables from this tablet's ISP firmware
+ConditionPathExists=|!/usr/lib/firmware/t715/s5k4h5-m0.seq
+ConditionPathExists=|!/usr/lib/firmware/t715/s5k6b2-m0.seq
+Wants=dev-disk-by\x2dpartlabel-SYSTEM.device
+After=dev-disk-by\x2dpartlabel-SYSTEM.device systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/t715-camera-tables
+
+[Install]
+WantedBy=multi-user.target

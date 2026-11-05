@@ -1,0 +1,182 @@
+#!/usr/bin/python3
+# t715-camera-tables: the sensors' mode tables t715-sensor.ko loads, made once on this tablet
+# from its own ISP firmware (vendor/firmware/fimc_is_fw2_4h5.bin on the SYSTEM partition,
+# read-only, journal not replayed). The tables are Samsung's data: they are never in the
+# package or the image. This script holds only where they sit in that file: the rear S5K4H5's
+# mode tables are a plain array; the front S5K6B2's writes are immediates in the firmware's
+# code, and FRONT lists the offsets of the instructions that hold each register and value
+# (found by research/parity/camera/ex6b2b.py's static decode).
+#
+#   t715-camera-tables [--fw FILE] [--out DIR] [--force]
+#
+# Without --force, an existing table is never rewritten. After writing, the sensors are bound
+# again so that the cameras appear without a reboot. Only firmware T715XXU2CRH1's file is
+# accepted (its sha256 below): another one would put other bytes at these offsets.
+import hashlib, os, struct, subprocess, sys, tempfile, time
+
+SYSTEM = '/dev/disk/by-partlabel/SYSTEM'
+FW_PATH = 'vendor/firmware/fimc_is_fw2_4h5.bin'
+FW_SHA256 = '788827452b0b834864edf41190c5422d37a9f6db8b90cb0b5170b4148bb49a73'
+OUT = '/usr/lib/firmware/t715'
+
+# Rear: 106 { le32 width; le32 reg; le32 value } per mode, 0x4f8 bytes apart. The modes the
+# driver was tested with; 4 and 5 repeat the sizes of 0 and 1.
+REAR_BASE, REAR_STRIDE, REAR_COUNT = 0x188490, 0x4f8, 106
+REAR_MODES = (0, 1, 2, 3, 6, 7)
+
+# Front: (width, offset of the register's instruction, offset of the value's instruction).
+FRONT = [
+    (1, 0x774c8, 0x774c6), (1, 0x774d6, 0x774d4), (1, 0x774e4, 0x774e2), (1, 0x774f2, 0x774f0),
+    (1, 0x77500, 0x774fe), (1, 0x7750e, 0x7750c), (1, 0x7751c, 0x7751a), (1, 0x7752a, 0x77528),
+    (1, 0x77538, 0x77536), (1, 0x77546, 0x77544), (1, 0x77554, 0x77552), (1, 0x77562, 0x77560),
+    (1, 0x77570, 0x7756e), (1, 0x7757e, 0x7757c), (1, 0x7758c, 0x7758a), (1, 0x7759a, 0x77598),
+    (1, 0x775ac, 0x775a6), (1, 0x775ba, 0x775b8), (1, 0x775c8, 0x775c6), (1, 0x775d6, 0x775d4),
+    (2, 0x775e4, 0x775e2), (1, 0x775f4, 0x775f0), (2, 0x77606, 0x77602), (2, 0x77614, 0x77612),
+    (2, 0x77622, 0x77620), (2, 0x77630, 0x7762e), (2, 0x7763e, 0x7763c), (2, 0x7764c, 0x7764a),
+    (2, 0x7765a, 0x77658), (2, 0x7766a, 0x77666), (2, 0x7767a, 0x77676), (1, 0x77688, 0x77686),
+    (1, 0x77696, 0x77694), (1, 0x776a4, 0x776a2), (1, 0x776b2, 0x776b0), (1, 0x776c0, 0x776be),
+    (1, 0x776ce, 0x776cc), (1, 0x776dc, 0x776da), (1, 0x77708, 0x77706), (1, 0x77716, 0x77714),
+    (1, 0x77724, 0x77722), (1, 0x785a4, 0x785a0), (1, 0x785b4, 0x785b2), (1, 0x78616, 0x78614),
+    (1, 0x78624, 0x78622), (1, 0x78632, 0x78630), (1, 0x78640, 0x7863e), (1, 0x7864e, 0x7864c),
+    (1, 0x7865c, 0x7865a), (1, 0x7866a, 0x78668), (1, 0x78678, 0x78676), (1, 0x78686, 0x78684),
+    (1, 0x78694, 0x78692),
+]
+
+
+def thumb_expand_imm(imm12):
+    if imm12 >> 10 == 0:
+        b = imm12 & 0xff
+        return (b, b << 16 | b, b << 24 | b << 8, b * 0x01010101)[(imm12 >> 8) & 3]
+    v, rot = 0x80 | (imm12 & 0x7f), imm12 >> 7
+    return ((v >> rot) | (v << (32 - rot))) & 0xffffffff
+
+
+def immediate(fw, off):
+    """The constant a MOVS (T1), MOVW (T3) or MOV.W (T2) instruction at off puts in its register."""
+    h1, = struct.unpack_from('<H', fw, off)
+    if h1 & 0xf800 == 0x2000:
+        return h1 & 0xff
+    h1, h2 = struct.unpack_from('<HH', fw, off)
+    if h2 & 0x8000 == 0:
+        if h1 & 0xfbf0 == 0xf240:
+            return (h1 & 0xf) << 12 | ((h1 >> 10) & 1) << 11 | ((h2 >> 12) & 7) << 8 | (h2 & 0xff)
+        if h1 & 0xfbef == 0xf04f:
+            return thumb_expand_imm(((h1 >> 10) & 1) << 11 | ((h2 >> 12) & 7) << 8 | (h2 & 0xff))
+    raise ValueError('no move-immediate instruction at 0x%x' % off)
+
+
+def records(items):
+    return b''.join(struct.pack('<HHI', reg, width, val) for reg, width, val in items)
+
+
+def rear(fw, mode):
+    items = [(0x0104, 1, 1)]
+    for i in range(REAR_COUNT):
+        width, reg, val = struct.unpack_from('<III', fw, REAR_BASE + mode * REAR_STRIDE + i * 12)
+        if width not in (1, 2):
+            raise ValueError('rear mode %d, entry %d: not a register write' % (mode, i))
+        items.append((reg, width, val))
+    return items + [(0x0104, 1, 0)]
+
+
+def front(fw):
+    return [(immediate(fw, r), w, immediate(fw, v)) for w, r, v in FRONT]
+
+
+def tables(fw):
+    out = {'s5k4h5-m%d.seq' % m: records(rear(fw, m)) for m in REAR_MODES}
+    out['s5k6b2-m0.seq'] = records(front(fw))
+    return out
+
+
+def read_system_fw():
+    if not os.path.exists(SYSTEM):
+        sys.exit('t715-camera-tables: no SYSTEM partition')
+    mnt = tempfile.mkdtemp(prefix='t715-camera-system.')
+    subprocess.check_call(['mount', '-t', 'ext4', '-o', 'ro,noload,nosuid,nodev,noexec', SYSTEM, mnt])
+    try:
+        with open(os.path.join(mnt, FW_PATH), 'rb') as f:
+            return f.read()
+    finally:
+        subprocess.call(['umount', mnt])
+        os.rmdir(mnt)
+
+
+def unbound_sensors():
+    found = []
+    for dev in sorted(os.listdir('/sys/bus/i2c/devices')):
+        path = '/sys/bus/i2c/devices/' + dev
+        try:
+            with open(path + '/modalias') as f:
+                alias = f.read()
+        except OSError:
+            continue
+        if ('samsung,s5k4h5' in alias or 'samsung,s5k6b2' in alias) and not os.path.exists(path + '/driver'):
+            found.append(dev)
+    return found
+
+
+def rebind():
+    """Bind the sensors whose probe found no table: t715-sensor.ko loads the tables at probe.
+    A sensor still probing when the tables appeared may fail once more: try a few times."""
+    drv = '/sys/bus/i2c/drivers/t715-sensor'
+    for attempt in range(5):
+        if not os.path.isdir(drv):
+            return          # not loaded yet: its probe will find the tables
+        devs = unbound_sensors()
+        if not devs:
+            return
+        for dev in devs:
+            try:
+                with open(drv + '/bind', 'w') as f:
+                    f.write(dev)
+                print('t715-camera-tables: bound', dev)
+            except OSError as e:
+                print('t715-camera-tables: binding %s: %s' % (dev, e), file=sys.stderr)
+        time.sleep(2)
+
+
+def main(argv):
+    fw_file, out, force = None, OUT, False
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == '--fw' and args:
+            fw_file = args.pop(0)
+        elif a == '--out' and args:
+            out = args.pop(0)
+        elif a == '--force':
+            force = True
+        else:
+            sys.exit('usage: t715-camera-tables [--fw FILE] [--out DIR] [--force]')
+    if fw_file:
+        with open(fw_file, 'rb') as f:
+            fw = f.read()
+    else:
+        fw = read_system_fw()
+    sha = hashlib.sha256(fw).hexdigest()
+    if sha != FW_SHA256:
+        sys.exit('t715-camera-tables: %s is not firmware T715XXU2CRH1\'s (sha256 %s): no tables'
+                 % (FW_PATH, sha[:16]))
+    os.makedirs(out, mode=0o755, exist_ok=True)
+    wrote = 0
+    for name, data in tables(fw).items():
+        dst = os.path.join(out, name)
+        if os.path.exists(dst) and not force:
+            continue
+        tmp = dst + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+        print('t715-camera-tables: %s, %d writes' % (name, len(data) // 8))
+        wrote += 1
+    if wrote and out == OUT:
+        rebind()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
