@@ -33,6 +33,15 @@ while IFS= read -r name; do
 done < <(sed -n 's/^[[:space:]]*\([^#[:space:]][^#[:space:]]*\).*/\1/p' "$LIST")
 [ "${#names[@]}" -gt 0 ] || die "no package in $LIST"
 
+# The pacman cache is a BuildKit cache mount that every build of this image
+# shares: it can hold another build of a local package under the same file
+# name (another checkout's build-pkg run), which pacman then rejects as
+# corrupted. [t715-omarchy] is the only source of these files: drop their
+# cached copies, so that pacman takes them from /repo.
+for f in /repo/*.pkg.tar.zst; do
+    rm -f "/var/cache/pacman/pkg/${f##*/}" "/var/cache/pacman/pkg/${f##*/}.sig"
+done
+
 pacman -Sy --noconfirm
 for name in "${names[@]}"; do
     pacman -Sp "$name" >/dev/null 2>&1 \
