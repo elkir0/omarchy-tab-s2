@@ -660,6 +660,13 @@ check "libcamera holds the two cameras' tuning files (s5k4h5, s5k6b2, in its or 
 seqs="$(dfs "ls -p /usr/lib/firmware/t715" | awk -F/ '$6 ~ /\.seq$/ {print $6}' | tr '\n' ' ')"
 check "no sensor .seq table in /usr/lib/firmware/t715 (Samsung's, made on the tablet)${seqs:+: found$seqs}" \
     sh -c '[ -z "$1" ]' _ "$seqs"
+t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-camera-tables.service || true)"
+check "the tables' maker: t715-camera-tables.service enabled (-> ${t:-missing}), so the first boot makes them" \
+    test "$t" = /usr/lib/systemd/system/t715-camera-tables.service
+check "  /usr/bin/t715-camera-tables is pkg's, byte for byte, mode 0755" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" /our-pkg/t715-camera/t715-camera-tables' _ \
+    "$(fmode /usr/bin/t715-camera-tables)" \
+    "$(get /usr/bin/t715-camera-tables; cp "$W/f" "$W/camtab"; echo "$W/camtab")"
 
 echo "== Pi: the terminal coding agent (pkg/pi-coding-agent) =="
 check "pi-coding-agent installed ($(pkg_ver pi-coding-agent))" has_pkg pi-coding-agent
@@ -888,6 +895,10 @@ check "$BTFW/brcmfmac4358-pcie.bin: the linux-firmware build for the 4358 A3 ROM
     sh -c '[ "$(sha256sum < "$1" | cut -d" " -f1)" = "$2" ] && [ "$3" = "0644 0:0" ]' _ "$W/f" "$LFSHA" \
     "$(fmode $BTFW/brcmfmac4358-pcie.bin) $(fuid $BTFW/brcmfmac4358-pcie.bin):$(fgid $BTFW/brcmfmac4358-pcie.bin)"
 check "  linux-firmware-broadcom itself not installed (one file taken from it)" sh -c '! grep -qx "linux-firmware-broadcom" "$1"' _ "$W/pkgs"
+BCMLIC=/usr/share/licenses/linux-firmware-broadcom/LICENCE.broadcom_bcm43xx
+check "  its licence, $BCMLIC, mode 0644 (redistribution requires it)" \
+    sh -c '[ "$1" = 0644 ] && [ -s "$2" ] && grep -qi broadcom "$2"' _ \
+    "$(fmode $BCMLIC)" "$(get $BCMLIC; cp "$W/f" "$W/bcmlic"; echo "$W/bcmlic")"
 nvsha="$(sha256sum < /wifi-nvram.txt | cut -d' ' -f1)"
 NV=$BTFW/samsung-gts28/nvram_net.txt
 if [ "$PUBLIC" = 1 ]; then
