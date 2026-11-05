@@ -719,6 +719,24 @@ latency on incoming traffic while the radio dozes. The section is named
 named section that matches the device comes before Omarchy's plain
 `[connection]`, whatever the order of the files.
 
+PCIe ASPM is on for the Wi-Fi link (`60-t715-wifi-aspm.rules`): L1 with its
+L1.1 and L1.2 substates, no L0s, as the vendor kernel had it. The kernel's
+default policy kept ASPM as the bootloader left it, off, so both ends of the
+link stayed in L0. Measured on battery, screen off, six alternating 7-minute
+windows: 1.35 W with ASPM off, 1.30 W with L1 alone, 1.07 W with L1 and its
+substates (`docs/hardware/BATTERY.md`, section 10). The rule waits for the
+interface, i.e. for brcmfmac to have the chip's firmware running: on the PCI
+device's own add event the policy changed before the probe, and the chip, with
+no firmware yet, answered its first register read with 0xffffffff.
+
+The chip goes back to sleep 100 ms after the last frame
+(`/etc/modprobe.d/t715-brcmfmac.conf`, `options brcmfmac ps_timeout=100`,
+from kernel `#6` of branch `t715-power`). brcmfmac otherwise turned
+cfg80211's unset timeout (-1, no wireless extensions on this kernel) into
+2 s, and with a few broadcasts a second on the network the chip never
+slept: 75 to 120 mW more with the screen off (`docs/hardware/BATTERY.md`,
+section 11). An older brcmfmac ignores the line with a warning.
+
 The Hotspot tile needs more while it is on: DHCP and DNS on the Wi-Fi interface and
 forwarding towards the modem, which `/etc/NetworkManager/dispatcher.d/50-t715-hotspot-firewall`
 adds when the access point named Hotspot comes up and removes when it goes down, straight

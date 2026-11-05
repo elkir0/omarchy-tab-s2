@@ -1,0 +1,13 @@
+# SM-T715: PCIe ASPM on the BCM4358 Wi-Fi link, L1 with its L1.1 and L1.2
+# substates and no L0s, as the vendor kernel had it (kernel_universal5433
+# drivers/pci/host/pcie-designware.c dw_pcie_config_l1ss(): L1 only in the
+# endpoint's link control, then the L1 substates).  The kernel's default
+# policy keeps the link as the bootloader left it, ASPM off, so both PHYs
+# stayed in L0 (docs/hardware/BATTERY.md, section 10).
+#
+# Applied when the interface appears, that is once brcmfmac has the chip's
+# firmware running.  On the PCI device's own add event the policy changed
+# before brcmfmac probed, and the chip, still without firmware, answered
+# brcmf_chip_recognition with 0xffffffff: no Wi-Fi on that boot (2026-11-04).
+# L0s goes off first, then the policy enables the rest.
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", RUN+="/bin/sh -c 'for l in /sys/bus/pci/drivers/brcmfmac/*/link/l0s_aspm; do echo 0 > $$l; done; echo powersupersave > /sys/module/pcie_aspm/parameters/policy'"

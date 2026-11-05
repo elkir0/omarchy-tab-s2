@@ -1,0 +1,6 @@
+# SM-T715: t715-keys takes the A57 cores (cpu4-7) offline while the screen is
+# dark and back online with it, as the vendor kernel's dynamic hotplug did on
+# display hibernation (docs/hardware/BATTERY.md, section 10).  Their online
+# files exist only on a kernel with the Exynos5433 hot-unplug (t715-power);
+# they are made writable for wheel, the session user's group.
+SUBSYSTEM=="cpu", KERNEL=="cpu[4-7]", ACTION=="add", TEST=="online", RUN+="/bin/chgrp wheel /sys%p/online", RUN+="/bin/chmod 0664 /sys%p/online"

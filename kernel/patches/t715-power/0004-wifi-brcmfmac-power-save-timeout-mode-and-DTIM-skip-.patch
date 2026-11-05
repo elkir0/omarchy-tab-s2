@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 4/4] wifi: brcmfmac: power save timeout, mode and DTIM skip as
+ parameters
+
+cfg80211's power save timeout is -1 unless wireless extensions set it,
+and brcmfmac turns it into its 2000 ms maximum pm2_sleep_ret: after each
+frame the BCM4358 stayed awake 2 s, so a network with a few broadcasts
+a second never let it sleep.  ps_timeout sets pm2_sleep_ret, ps_mode
+picks PM_MAX instead of PM_FAST, bcn_li_dtim wakes the chip for every
+Nth DTIM only.  Their defaults change nothing, and all three are read at
+each set_power_mgmt, so that one boot can compare them.
+
+Measured on the tablet, screen off, Wi-Fi connected (omarchy-tab-s2
+docs/hardware/BATTERY.md section 11): ps_timeout=100 saves 75 to
+120 mW, as much as PM_MAX without its slow transfers.  The root sets it
+in /etc/modprobe.d/t715-brcmfmac.conf.
+
+Kernel #6, in BOOT since 2026-11-05: a 2 hour soak from RECOVERY with
+the CP online (239 pings of 239 answered, no kernel line), then four
+clean reboots.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 33 +++++++++++++++++--
+ 1 file changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index c3a3a0817..ba60afe63 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -89,6 +89,25 @@
+ 
+ #define BRCMF_PS_MAX_TIMEOUT_MS		2000
+ 
++/*
++ * Power save tuning, applied at each set_power_mgmt (iw ... set power_save
++ * on).  cfg80211's timeout is -1 unless wireless extensions set it, and
++ * becomes a pm2_sleep_ret of BRCMF_PS_MAX_TIMEOUT_MS: after each frame the
++ * chip stays awake 2 s, so a network with a few broadcasts a second never
++ * lets it sleep.
++ */
++static int brcmf_ps_timeout = -1;
++module_param_named(ps_timeout, brcmf_ps_timeout, int, 0644);
++MODULE_PARM_DESC(ps_timeout, "pm2_sleep_ret in ms while power save is on (-1: cfg80211's timeout, at most 2000)");
++
++static int brcmf_ps_mode = PM_FAST;
++module_param_named(ps_mode, brcmf_ps_mode, int, 0644);
++MODULE_PARM_DESC(ps_mode, "power save mode while on: 2 PM_FAST (default), 1 PM_MAX");
++
++static int brcmf_bcn_li_dtim;
++module_param_named(bcn_li_dtim, brcmf_bcn_li_dtim, int, 0644);
++MODULE_PARM_DESC(bcn_li_dtim, "while power save is on, wake for every Nth DTIM (0: every one)");
++
+ /* Dump obss definitions */
+ #define ACS_MSRMNT_DELAY		80
+ #define CHAN_NOISE_DUMMY		(-80)
+@@ -3272,7 +3291,7 @@ brcmf_cfg80211_set_power_mgmt(struct wiphy *wiphy, struct net_device *ndev,
+ 			   bool enabled, s32 timeout)
+ {
+ 	s32 pm;
+-	s32 err = 0;
++	s32 err = 0, dtim_err;
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct brcmf_if *ifp = netdev_priv(ndev);
+ 	struct brcmf_pub *drvr = cfg->pub;
+@@ -3293,7 +3312,7 @@ brcmf_cfg80211_set_power_mgmt(struct wiphy *wiphy, struct net_device *ndev,
+ 		goto done;
+ 	}
+ 
+-	pm = enabled ? PM_FAST : PM_OFF;
++	pm = enabled ? (brcmf_ps_mode == PM_MAX ? PM_MAX : PM_FAST) : PM_OFF;
+ 	/* Do not enable the power save after assoc if it is a p2p interface */
+ 	if (ifp->vif->wdev.iftype == NL80211_IFTYPE_P2P_CLIENT) {
+ 		brcmf_dbg(INFO, "Do not enable power save for P2P clients\n");
+@@ -3309,11 +3328,21 @@ brcmf_cfg80211_set_power_mgmt(struct wiphy *wiphy, struct net_device *ndev,
+ 			bphy_err(drvr, "error (%d)\n", err);
+ 	}
+ 
++	if (brcmf_ps_timeout >= 0)
++		timeout = brcmf_ps_timeout;
+ 	err = brcmf_fil_iovar_int_set(ifp, "pm2_sleep_ret",
+ 				min_t(u32, timeout, BRCMF_PS_MAX_TIMEOUT_MS));
+ 	if (err)
+ 		bphy_err(drvr, "Unable to set pm timeout, (%d)\n", err);
+ 
++	dtim_err = brcmf_fil_iovar_int_set(ifp, "bcn_li_dtim",
++					   pm != PM_OFF && brcmf_bcn_li_dtim > 0 ?
++					   brcmf_bcn_li_dtim : 0);
++	if (dtim_err)
++		brcmf_dbg(INFO, "Unable to set bcn_li_dtim, (%d)\n", dtim_err);
++	brcmf_dbg(INFO, "PM %d, pm2_sleep_ret %u, bcn_li_dtim %d\n", pm,
++		  min_t(u32, timeout, BRCMF_PS_MAX_TIMEOUT_MS), brcmf_bcn_li_dtim);
++
+ done:
+ 	brcmf_dbg(TRACE, "Exit\n");
+ 	return err;
+-- 
+2.52.0
+

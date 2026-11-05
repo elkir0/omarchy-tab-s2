@@ -39,7 +39,7 @@ DUMPS="${T715_DUMPS_DIR:-$REPO_DIR/../dumps}"
 BT_FIRMWARE="$DUMPS/vendor_firmware/bcm4358A3_V0086.0144.hcd"
 WIFI_NVRAM="$DUMPS/etc_wifi/nvram_net.txt"
 # The Wi-Fi overlay files, with their modes as git records them.
-WIFI_FILES="usr/local/sbin/t715-wifi-addr etc/udev/rules.d/90-t715-wifi-addr.rules etc/NetworkManager/conf.d/20-t715-wifi-mac.conf"
+WIFI_FILES="usr/local/sbin/t715-wifi-addr etc/udev/rules.d/90-t715-wifi-addr.rules etc/udev/rules.d/60-t715-wifi-aspm.rules etc/modprobe.d/t715-brcmfmac.conf etc/NetworkManager/conf.d/20-t715-wifi-mac.conf"
 HELPER_IMAGE="t715-omarchy-rootfs-helper:latest"
 CTR="t715-omarchy-rootfs-verify"
 
@@ -368,6 +368,9 @@ get $K; cp "$W/f" "$W/keys"
 check "  identical to rootfs/overlay (a python3 script; python3 installed)" \
     sh -c 'cmp -s "$1" /our-overlay/usr/local/bin/t715-keys && head -n1 "$1" | grep -qx "#!/usr/bin/python3"' _ "$W/keys"
 check "  python3 present" exists /usr/bin/python3
+get /etc/udev/rules.d/60-t715-big-cores.rules
+check "  60-t715-big-cores.rules identical to rootfs/overlay (cpu4-7 online writable for wheel)" \
+    cmp -s "$W/f" /our-overlay/etc/udev/rules.d/60-t715-big-cores.rules
 check "  long press at 0.6 s, the only hold time (HOLD = 0.6)" \
     sh -c 'grep -qx "HOLD = 0.6" "$1" && [ "$(grep -c "^HOLD = " "$1")" = 1 ]' _ "$W/keys"
 get /etc/systemd/user/t715-keys.service; cp "$W/f" "$W/keys.unit"

@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/4] ARM: exynos: Exynos5433 hot-unplug of the A57 cores
+
+The vendor kernel's hot-unplug handshake (hotplug.c:99-153, its
+TrustZone side), in exynos_cpu_die() for the 5433: the HOTPLUG boot
+flag, the core's local power off in the PMU, then SMC_CMD_SHUTDOWN,
+which cleans the caches, takes the core out of coherency and powers it
+off, with the cluster when no other core of it is online.  That is
+decided by MPIDR, since __cpu_disable() has reset the sibling masks by
+then.  A cpu_kill waits up to 100 ms for the PMU status to drop.
+
+cpu_can_disable allows cpu4-7 only, the A57 cluster, which the vendor
+kernel took offline while the display slept (dm_cpu_hotplug.c,
+CMD_BIG_OUT).  t715-keys does the same with the screen.
+
+Passed on the tablet on 2026-11-04 (image/tests/ondevice/hotplug-a57.sh):
+30 cycles each of one core, two cores, the whole cluster and the
+cluster with the A53s busy, then the cluster off for 120 s; 234
+power-ups, the same sha256 on every A57 after every stage, no kernel
+line.  The cluster offline saves 169 +- 4 mW with the screen off
+(omarchy-tab-s2 docs/hardware/BATTERY.md section 10).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/mach-exynos/platsmp.c | 99 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 94 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/mach-exynos/platsmp.c b/arch/arm/mach-exynos/platsmp.c
+index c11a0a0ef..b7d67bcc6 100644
+--- a/arch/arm/mach-exynos/platsmp.c
++++ b/arch/arm/mach-exynos/platsmp.c
+@@ -23,6 +23,7 @@
+ #include <asm/firmware.h>
+ 
+ #include "common.h"
++#include "smc.h"
+ 
+ extern void exynos4_secondary_startup(void);
+ 
+@@ -818,6 +819,86 @@ static void __init exynos_smp_prepare_cpus(unsigned int max_cpus)
+ }
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
++/*
++ * Exynos5433 hot-unplug: stock exynos_power_down_cpu() and the
++ * CONFIG_ARM_TRUSTZONE side of platform_do_lowpower() (hotplug.c:99-153).
++ * The HOTPLUG boot flag, the core's local power off in the PMU, then
++ * SMC_CMD_SHUTDOWN: the monitor cleans the caches, takes the core out of
++ * coherency and powers it off at its own WFI, with the cluster when no
++ * other core of the cluster is online (stock :102-104,114-119).  As in
++ * stock, nothing here leaves coherency first: on the A53/A57 that is the
++ * monitor's job (CPUECTLR.SMPEN, cpuidle-exynos5433.c:553-557).  The call
++ * returns only if the core stayed powered; stock then calls it again
++ * until the pen releases the core, which restarts from
++ * secondary_start_kernel (arch_cpu_idle_dead()).
++ */
++static void exynos5433_cpu_die(unsigned int cpu)
++{
++	u32 mpidr = cpu_logical_map(cpu);
++	u32 core = MPIDR_AFFINITY_LEVEL(mpidr, 0);
++	u32 cluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
++	unsigned int idx = exynos5433_pmu_core(mpidr);
++	bool last = true;
++	int spurious = 0;
++	unsigned int c;
++	u32 val;
++
++	/*
++	 * Stock tests cpu_online_mask against cpu_coregroup_mask(cpu)
++	 * (hotplug.c:102), but here __cpu_disable() has already reset this
++	 * CPU's sibling masks to itself (remove_cpu_topology()): look for
++	 * another online core of the same cluster by MPIDR instead.
++	 */
++	for_each_online_cpu(c)
++		if (MPIDR_AFFINITY_LEVEL(cpu_logical_map(c), 1) == cluster)
++			last = false;
++
++	for (;;) {
++		exynos_set_boot_flag(idx, EXYNOS5433_BOOT_FLAG_HOTPLUG);
++
++		/* stock exynos5433_cpu_down(), pmu-exynos5433.c:130-144 */
++		val = pmu_raw_readl(EXYNOS_ARM_CORE_CONFIGURATION(idx));
++		val &= ~EXYNOS5433_CORE_PWR_EN;
++		pmu_raw_writel(val, EXYNOS_ARM_CORE_CONFIGURATION(idx));
++
++		exynos_smc(SMC_CMD_SHUTDOWN, last ? OP_TYPE_CLUSTER : OP_TYPE_CORE,
++			   SMC_POWERSTATE_IDLE, 0);
++
++		if (exynos_pen_release == core)
++			break;
++
++		spurious++;
++	}
++
++	if (spurious)
++		pr_warn("CPU%u: %u spurious wakeup calls\n", cpu, spurious);
++}
++
++/*
++ * The PMU status of the core drops once the monitor has powered it off.
++ * Wait for it, so that a quick replug never finds the core half way down,
++ * and so that a monitor that keeps the core powered shows in the log.
++ */
++static int exynos_cpu_kill(unsigned int cpu)
++{
++	unsigned int idx, ms;
++
++	if (!exynos5433_smp)
++		return 1;
++
++	idx = exynos5433_pmu_core(cpu_logical_map(cpu));
++	for (ms = 0; ms < 100; ms++) {
++		if (!exynos5433_core_powered(idx))
++			return 1;
++		mdelay(1);
++	}
++
++	pr_err("EXYNOS5433: CPU%u: PMU core %u still powered 100 ms after its shutdown call\n",
++	       cpu, idx);
++	exynos5433_show_core("kill", idx);
++	return 0;
++}
++
+ /*
+  * platform-specific code to shutdown a CPU
+  *
+@@ -829,6 +910,11 @@ static void exynos_cpu_die(unsigned int cpu)
+ 	u32 mpidr = cpu_logical_map(cpu);
+ 	u32 core_id = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+ 
++	if (exynos5433_smp) {
++		exynos5433_cpu_die(cpu);
++		return;
++	}
++
+ 	v7_exit_coherency_flush(louis);
+ 
+ 	platform_do_lowpower(cpu, &spurious);
+@@ -846,13 +932,15 @@ static void exynos_cpu_die(unsigned int cpu)
+ static bool exynos_cpu_can_disable(unsigned int cpu)
+ {
+ 	/*
+-	 * Exynos5433: exynos_cpu_die() powers down PMU core Aff0, a core of
+-	 * the other cluster for every A53, and the vendor hot-unplug
+-	 * handshake (boot flag, SMC_CMD_SHUTDOWN: stock hotplug.c:99-119) is
+-	 * not ported, so no CPU may be taken offline.
++	 * Exynos5433: the A57 cores only (cluster 0), which stock takes
++	 * offline while the display sleeps (dm_cpu_hotplug.c:578-583,
++	 * CMD_BIG_OUT), through exynos5433_cpu_die().  The A53s stay online:
++	 * CPU0 is the boot CPU, and no other A53 has been taken down on this
++	 * kernel yet.
+ 	 */
+ 	if (of_machine_is_compatible("samsung,exynos5433"))
+-		return false;
++		return exynos5433_smp_ready &&
++		       MPIDR_AFFINITY_LEVEL(cpu_logical_map(cpu), 1) == 0;
+ 
+ 	/* arm32 default without .cpu_can_disable (kernel/smp.c) */
+ 	return cpu != 0;
+@@ -865,6 +953,7 @@ const struct smp_operations exynos_smp_ops __initconst = {
+ 	.smp_boot_secondary	= exynos_boot_secondary,
+ #ifdef CONFIG_HOTPLUG_CPU
+ 	.cpu_die		= exynos_cpu_die,
++	.cpu_kill		= exynos_cpu_kill,
+ 	.cpu_can_disable	= exynos_cpu_can_disable,
+ #endif
+ };
+-- 
+2.52.0
+

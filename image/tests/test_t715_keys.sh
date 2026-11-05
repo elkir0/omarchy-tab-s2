@@ -58,9 +58,10 @@ case "\$1" in
     done
     printf '{"DSI-1": {"levels": {"2": [%s]}}}\n' "\$ns" ;;
   dispatch)
+    # The panel's DPMS file follows, as DRM's does, when a test has one.
     case "\$2" in
-      *'action = "disable"'*) echo false > "$t/dpms" ;;
-      *'action = "enable"'*) echo true > "$t/dpms" ;;
+      *'action = "disable"'*) echo false > "$t/dpms"; [ -f "$t/dpms-sysfs" ] && echo Off > "$t/dpms-sysfs" ;;
+      *'action = "enable"'*) echo true > "$t/dpms"; [ -f "$t/dpms-sysfs" ] && echo On > "$t/dpms-sysfs" ;;
     esac ;;
 esac
 exit 0
@@ -131,6 +132,8 @@ start() {
     # Read-write, so neither side's open blocks and t715-keys never sees EOF.
     exec 3<>"$t/fifo"
     env PATH="$t/bin:$PATH" XDG_RUNTIME_DIR="$t/run" HOME="$t" HYPRLAND_INSTANCE_SIGNATURE=test \
+        T715_KEYS_BIG_CORES="$t/cpu%d-online" \
+        T715_KEYS_DPMS="$t/no-dpms" \
         "$@" "$PY" "$KEYS" --device "$t/fifo" 2> "$t/daemon.log" &
     pid=$!
     local i=0
@@ -223,6 +226,39 @@ has "$TOUCH_ON" || fail "dark: a short press turns the touchscreen back on"
 has "$DPMS_OFF" && fail "dark: a short press does not turn the screen off again"
 has "omarchy-menu" && fail "dark: a short press opens no menu"
 echo "ok - power, short: screen and touchscreen off when lit, on when dark"
+
+# The A57 cores follow the screen, on a kernel that has their online files.
+cores() { cat "$t"/cpu4-online "$t"/cpu5-online "$t"/cpu6-online "$t"/cpu7-online | tr -d '\n'; }
+for n in 4 5 6 7; do echo 1 > "$t/cpu$n-online"; done
+lit; reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "cores: the screen goes off"
+[ "$(cores)" = 0000 ] || fail "cores: cpu4-7 offline with the screen (got $(cores))"
+reset; tap $K_POWER
+eventually "$DPMS_ON" || fail "cores: the screen comes back"
+[ "$(cores)" = 1111 ] || fail "cores: cpu4-7 online with the screen (got $(cores))"
+rm -f "$t"/cpu?-online
+lit; reset; tap $K_POWER; reset; tap $K_POWER
+grep -q "did not go" "$t/daemon.log" && fail "cores: no files, no complaint"
+echo "ok - power, short: the A57 cores offline while dark, online when lit, nothing without the files"
+
+# The A57s come back before the screen lights: hyprctl's stand-in records
+# cpu4's online file at DPMS on.
+for n in 4 5 6 7; do echo 1 > "$t/cpu$n-online"; done
+lit; reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "wake order: the screen goes off"
+cp "$t/bin/hyprctl" "$t/hyprctl.real"
+cat > "$t/bin/hyprctl" <<STUB
+#!/bin/bash
+case "\$*" in *'action = "enable"'*) echo "cpu4 at wake \$(cat "$t/cpu4-online")" >> "$log" ;; esac
+exec "$t/hyprctl.real" "\$@"
+STUB
+chmod +x "$t/bin/hyprctl"
+reset; tap $K_POWER
+eventually "$DPMS_ON" || fail "wake order: the screen comes back"
+has "cpu4 at wake 1" || fail "wake order: the A57s online before the screen lights"
+mv "$t/hyprctl.real" "$t/bin/hyprctl"
+rm -f "$t"/cpu?-online
+echo "ok - power, short: the A57s come back before the screen lights"
 
 # A saved brightness of 0 would wake to the panel's dimmest level.
 dark; echo 0 > "$t/brightness"; reset; tap $K_POWER
@@ -348,6 +384,20 @@ tap $K_POWER; [ "$(cat "$t/dpms")" = false ] || fail "resync: dark again"
 lit; reset; start
 has "$TOUCH_ON" || fail "restart: a lit screen gets its touchscreen back"
 echo "ok - the touchscreen comes back when something else lit the screen, and after a restart"
+
+# With the panel's DPMS file, the resync reads it and asks Hyprland nothing.
+echo On > "$t/dpms-sysfs"
+start T715_KEYS_RESYNC=0.2 T715_KEYS_DPMS="$t/dpms-sysfs"
+lit; reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "dpms file: the screen goes off"
+reset; sleep 1
+has "hyprctl monitors" && fail "dpms file: no hyprctl while dark"
+has "$TOUCH_ON" && fail "dpms file: still dark, the touchscreen stays off"
+echo On > "$t/dpms-sysfs"; sleep 0.8
+has "$TOUCH_ON" || fail "dpms file: lit by something else, the touchscreen comes back"
+tap $K_POWER; rm -f "$t/dpms-sysfs"
+echo "ok - the panel's DPMS file replaces hyprctl for the screen checks"
+start
 
 # --- backlight mode (T715_KEYS_SCREEN_OFF=backlight) ---------------------------------------
 start T715_KEYS_SCREEN_OFF=backlight

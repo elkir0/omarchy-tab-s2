@@ -368,3 +368,275 @@ some latency on incoming traffic while the radio dozes.
 **What remains**, about 1.5 W, is the CPU rails at their 1.2 GHz voltages with
 no cpuidle, the memory at its top level and the modem link; CPU frequency
 scaling (`docs/hardware/CPUFREQ.md`, stage 1) is the next lever.
+
+## 10. Screen-off drain and its causes (2026-11-04)
+
+**What the owner saw.** Left with the screen off, the tablet lost about
+25 % in 5 h, against far less under Android. UPower's history for that day:
+from 95 % to 55 % in 4 h 41 min, one point every 7 minutes, about 1.3 W all
+along.
+Nothing sleeps: `/sys/power/mem_sleep` offers `[s2idle]` only, every sleep
+target is masked, there is no cpuidle driver, and every CPU cluster stays
+powered.
+
+**What stays on with the screen off**, read on the daily kernel
+(`#1`, built 2026-11-03):
+
+| What | State | Why |
+|---|---|---|
+| PCIe link to the BCM4358 | ASPM off on both ends (`LnkCtl: ASPM Disabled`), though both support L1, L1.1 and L1.2 | the kernel's default policy keeps the bootloader's setting |
+| G3D power domain | on, `aclk_g3d` and the G3D PLL running at 266 MHz while the GPU is runtime suspended | panfrost keeps its clock prepared for its whole lifetime, which keeps `cmu_g3d` resumed (`GPU.md`, "When the domain actually switches") |
+| A57 cores | four online at 1.2 GHz and 1 062 500 uV | no hot-unplug: `exynos_cpu_can_disable()` refuses every CPU |
+| Modem | CP online, wakeup sources `lli_ap_wlock` and `ss333_cp_power` active since boot, a `CP2AP_WAKEUP` pulse every 15 to 60 s | the modem stack, frozen since 2026-11-02 |
+| AUD power domain | on | the Bluetooth UART (`11460000.serial`) and `114b0000.pinctrl` have no runtime PM, which genpd counts as active |
+| A53 frequency | 12 transitions a second at idle, each a voltage write to the PMIC: 210 interrupts a second on `14e40000.i2c` (S2MPS13), the largest interrupt source | schedutil |
+
+**ASPM, measured.** Battery, screen off, USB cut by the MUIC (`MANSW1` 0x00,
+`CONTROL` 0x1a), six alternating windows of 7 minutes after a 5-minute settle,
+first 60 s of each dropped, means fitted with a linear drift:
+
+| Wi-Fi link | Power | Against L1 + substates |
+|---|---|---|
+| ASPM off (the boot default until now) | 1 350 mW | +277 ± 19 mW |
+| L1 only | 1 296 mW | +223 ± 21 mW |
+| **L1 + L1.1 + L1.2, no L0s** | **1 073 mW** | — |
+
+The battery was at 31 °C and the TMU at 36-37 °C, against 44 °C in section 9:
+part of the gap with the 1.48 W of section 9 is temperature. Wi-Fi throughput
+over SSH was 21-34 MB/s with and without ASPM (radio-limited); ping 2-4 ms.
+`60-t715-wifi-aspm.rules` (`image/rootfs/overlay/etc/udev/rules.d/`, installed
+on the tablet) sets it at every boot. A first version acted on the PCI device's
+add event, before brcmfmac's probe: the chip, with no firmware yet, answered
+`brcmf_chip_recognition` with 0xffffffff and the boot had no Wi-Fi. Acting on
+the interface's add event, once the firmware runs, two boots and a live
+re-probe were clean. Left: brcmfmac's own reset path (`brcmf_pcie_reset()`,
+after a firmware crash) reloads the firmware with the substates still on;
+none of the 7 boots in the journal had such a reset.
+
+**The GPU domain, first try (failed).** A panfrost flag that unprepares the
+clocks at runtime suspend, for `samsung,exynos5433-mali`, hung the test kernel
+at panfrost's probe, then looped (watchdog reset, RECOVERY again: that test
+image had `t715.wdtguard=0`; recovered through Download mode and heimdall). The
+cause, from the clock tree: `aclk_g3d` comes from the G3D PLL through
+`mout_aclk_g3d_400`, and so do CMU_G3D's own register clock and the G3D block's
+APB. Gating `aclk_g3d` cascades to `fout_g3d_pll`, whose `pll_35xx` ops
+disable it, and CMU_G3D's runtime suspend then reads its registers with no
+clock (`clk-exynos-arm64.c` `exynos_arm64_cmu_suspend()`: `samsung_clk_save()`
+first). Upstream never takes that path, since panfrost never releases the
+clock. Second try, on branch `t715-power`: the block runs from CMU_TOP's
+`aclk_g3d_400` at 800/3 MHz (`assigned-clocks` in the board's GPU file), which
+CMU_G3D holds while resumed, and the flag (`panfrost.rt_clk_off`) is off until
+set through sysfs (on by default in the daily candidate). Booted in RECOVERY,
+image mode, CP off, watchdog guard on:
+`aclk_g3d` at 266 666 667 Hz, the G3D PLL off; with the flag set, `pd_g3d`
+reads `off-0` while the GPU idles, comes back for every frame, and a screenshot
+taken after the cycles shows the home screen drawn right. 17 power-offs in the
+hour, no kernel line. One register does not survive a power-off of the
+domain: SYSREG_G3D + 0x700 (0x14a90700), the G3D block's NoC timeout, which
+the bootloader sets and stock sets again after every power-on
+(`pm_domains-exynos5433.c:101-102`, "set noc-bus timeout"). It read 0 after
+the cycles; panfrost's power-on quirk for this SoC now writes 1 through the
+`sysreg_g3d` syscon (board GPU file), and it read 1 after 35 power-offs.
+Without it, a GPU transaction that stalls would hang the bus instead of
+failing. Stock also turned BUCK6 off through a PMIC pin with the domain
+(`s2m_set_g3d_pin()`), which the board keeps on, and switched the G3D TMU
+core off and on around it, which mainline does not.
+
+GPU job faults (`DATA_INVALID_FAULT`, a page fault at VA 0, `JOB_BUS_FAULT`)
+showed once, at a session start of the first candidate; the daily kernel had
+the same kind on 2026-11-03 (`Page fault in AS0 at VA 0x200`,
+`JOB_BUS_FAULT`) with the domain never off, so they are older than this work.
+
+**The A57 cores offline.** Stock's hot-unplug handshake, ported to
+`exynos_cpu_die()` for the 5433 (`platsmp.c`, branch `t715-power`): the HOTPLUG
+boot flag, the core's local power off in the PMU, `SMC_CMD_SHUTDOWN` with the
+cluster when no other core of it is online (decided by MPIDR: by then
+`__cpu_disable()` has reset the sibling masks), and a `cpu_kill` that waits
+for the PMU status. `cpu_can_disable` allows cpu4-7 only.
+`image/tests/ondevice/hotplug-a57.sh`: 30 cycles each of one core, two cores,
+the whole cluster and the whole cluster with the A53s busy, then the cluster
+off for 120 s. All passed, 234 power-ups (`STATUS 0x10380000 -> 0x2004000f`,
+1 ms each), the sha256 of a 32 MiB buffer the same on every A57 after every
+stage, no kernel line.
+
+**Both, measured** in the same boot (Wi-Fi radio off, CP off, screen off, eight
+alternating 6-minute windows, `image/tests/ondevice/power-windows.sh`, fitted
+by `image/tests/power-stats.py`):
+
+| Change | Saving |
+|---|---|
+| A57 cluster offline | 169 ± 4 mW |
+| G3D domain off while the GPU idles | 30 ± 5 mW |
+
+With ASPM, the three changes take about 475 mW off the screen-off draw of
+section 9's figures: from about 1.35 W to about 0.87 W, roughly 11 h to
+17 h of standby on the 15.2 Wh battery. `t715-keys` takes cpu4-7 offline
+whenever it turns the touchscreen off, that is with the screen, and back with
+it (`60-t715-big-cores.rules` lets wheel write their `online` files).
+
+**The daily candidate's soak.** Kernel `#5` of branch `t715-power` (the GPU
+flag on, the NoC timeout quirk), BOOT's knobs, booted from RECOVERY on the
+persistent root with the CP online; `image/tests/ondevice/soak-sample.sh`
+every 30 s for 2 h, `usage-sim.sh` alongside. The screen stayed off
+throughout, so the simulator ran its headless cycles (a real-time H.264
+decode on the A53s, then idle). 239 samples: cpu4-7 offline, `pd_g3d` off,
+the CP online, no failed unit, no kernel line, the hottest zone at 45 °C.
+Then, in the same boot, after the cluster had been off for 2 h, the four A57s
+came back in 0.17 s, and `hotplug-a57.sh` passed 20 cycles of each of its
+first four stages (80 cycles, 40 of them the whole cluster), the CP still
+online. The boot's one GPU fault (`DATA_INVALID_FAULT` on job slot 1) came at
+the session start, 40 s in, before the soak.
+
+**In BOOT since 2026-11-04** (`out/boot-power-daily/boot.img`,
+`8a22c8c7e6cd`, the soak's image but for one header byte), the rescue back
+in RECOVERY (`058d0481b509`) first. First boot from BOOT: the CP and Wi-Fi up
+35 s after the restart, ASPM `powersupersave`, the NoC timeout at 1,
+no kernel line, no GPU fault; `t715-keys` turned the screen off at 49 s
+and cpu4-7 went offline with it. Replaced by `#6` on 2026-11-05
+(section 11); this image stays as the way back.
+
+**What is left**, by the source studies (`research/cpuidle/FINDINGS.md`,
+`research/suspend/FINDINGS.md`): suspend to RAM, the only way to Android's
+standby, which needs the CP off before every suspend (the modem port's
+`modem_suspend()` returns -EBUSY while the CP is powered,
+`drivers/misc/modem_v1/modem_main.c:615-618`).
+
+## 11. What stays awake with the screen off (2026-11-04)
+
+**Baseline.** Kernel `#5` in BOOT, the persistent root, the CP online, Wi-Fi
+connected with power save and ASPM L1.2, Bluetooth soft-blocked, the A57s
+offline and the G3D domain off: **856 mW** on battery (215.8 mA at 3.97 V,
+120 s after a 90 s settle, `image/tests/ondevice/screenoff-inventory.sh`).
+The test kernel of section 10 drew 827-831 mW in the same state with the CP
+off and the Wi-Fi radio off, so the CP and the Wi-Fi together cost only tens
+of milliwatts: nearly all of the draw is the SoC awake.
+
+**What the inventory saw** (two snapshots 127 s apart, screen off, idle 97.5 %):
+
+| item | rate | cause |
+|---|---|---|
+| I2C 14e40000 (the PMIC, S2MPS13) | 473 interrupts/s | 20.6 A53 frequency changes a second (schedutil), each a BUCK voltage write; 91 % of the time at 400 MHz, 2.8 % at 1.2 GHz; `sugov:0` 1.5 % of a CPU |
+| `quickshell` (the shell) | 4.2 % of a CPU, 67 wake-ups/s | its main thread polls with a 15-16 ms timeout (`ppoll`, read from `/proc/PID/mem`): Qt's animation timer, so an animation runs while nothing is drawn. Not found by reading the QML (no unconditional infinite animation in Omarchy's shell or in omamobile's plugins; no media player; the session locked) |
+| `t715-keys` | 1 % of a CPU in children | `hyprctl monitors -j` every 5 s while dark, to see whether something else lit the screen |
+| MCT ticks | 52-120/s per A53 | the wake-ups above |
+| Wi-Fi (brcmf_pcie_intr) | 10.5/s | traffic |
+
+Power domains: all off but AUD, held by `exynos-lpass` for its UART
+(`0009-mfd-exynos-lpass-keep-LPASS-active-while-its-UART-is.patch`: a
+runtime PM reference from probe, by design; unbinding Bluetooth does not
+release it). Running PLLs: BUS 800 MHz, MFC 666 MHz, AUD 196.6 MHz. Every
+CMU_TOP bus clock stays at its top rate (`aclk_bus0/1/2_400` 400 MHz) and
+the branches that feed the powered-off domains (MSCL, MFC, ISP, HEVC, G2D,
+CAM0/1 at 400 MHz, GSCL and DISP at 333) stay enabled: mainline marks those
+gates `CLK_IS_CRITICAL` (`clk-exynos5433.c:604-652`), as a domain's bus must
+run through its power transitions. `vdd_int` stays at 0.975 V and `vdd_mif`
+at 1.0125 V with DRAM at 825 MHz (CPUFREQ.md section 6), where stock goes
+down to 78 MHz at 0.8125 V when idle.
+
+**Measured, two factors** (`power-windows.sh`, eight alternating 6-minute
+windows, the daily kernel, the screen off): the A53 policy held at 400 MHz
+while dark, +0.2 ± 5.3 mW, nothing, though it halves the interrupts (the
+PMIC's I2C traffic and the voltage steps cost nothing measurable); the
+Wi-Fi radio on and connected against off, **+90.1 ± 5.3 mW**, the largest
+share that can be touched without the modem. `t715-keys` does not cap the
+A53s for that reason; it brings the A57s back before it lights the screen
+rather than after, and reads the panel's DPMS file instead of starting
+`hyprctl` every 5 s while dark.
+
+**Why the Wi-Fi costs that much.** With the screen off the BCM4358 receives
+about 8.5 frames a second and sends almost nothing (510 frames in, 2 out,
+in 60 s; 513 `brcmf_pcie_intr` interrupts): the network's broadcasts and
+multicasts. brcmfmac enables power save as `PM_FAST` with a `pm2_sleep_ret`
+of cfg80211's timeout, which is -1 unless wireless extensions set it (this
+kernel has none, `net/wireless/core.c:1461`); `min_t(u32, -1, 2000)` makes
+it 2000 ms (`cfg80211.c` `brcmf_cfg80211_set_power_mgmt()`). The chip
+stays awake 2 s after each frame, so it never sleeps. Android's bcmdhd
+switches to `PM_MAX`, every third DTIM and a unicast-only packet filter
+when the screen goes off.
+
+Kernel `#6` (branch `t715-power`) adds three brcmfmac parameters, read at
+each power save request (`iw dev wlp1s0 set power_save on`): `ps_timeout`
+(ms), `ps_mode` (2 `PM_FAST`, 1 `PM_MAX`) and `bcn_li_dtim`. Their defaults
+keep `#5`'s behaviour. brcmfmac cannot be reloaded on this board: after a
+`modprobe -r` the firmware boots again but the core reports "No clock" and
+no command answers; only a power cycle brings it back. The chip's WL_REG_ON
+(WLAN_EN, gpj2-0) is the PCIe host's `vdd18` supply, modelled
+`regulator-always-on`, so nothing ever cycles it but a reboot. Without
+`regulator-always-on` (test image, 2026-11-05), unbinding the PCIe host
+(`15700000.pcie`) cuts it, binding it again powers the chip up, and
+brcmfmac comes back with a working radio.
+
+**Suspend, up to the firmware call** (test kernels of branch `t715-sleep`
+with research/suspend's 5433 code, `image/tests/ondevice/pmtest.sh`,
+image mode, the CP off, the watchdog armed and kept running through the
+test; every crash ended in `oops=panic` and a reboot into BOOT, and its
+dump was read back from `/sys/fs/pstore/dmesg-ramoops-0`). Three things
+stood in the way, found in this order:
+
+1. **brcmfmac.** `pm_test=devices` fails at `brcmf_pcie_pm_enter_D3`: the
+   firmware never answers the D3 request, -EIO, the suspend aborts. With
+   the Wi-Fi unbound, `devices` passes. Still open. With WL_REG_ON no
+   longer always-on, the PCIe host cuts the chip's power in its noirq
+   suspend: brcmfmac unbound before `pm_test` `platform`+`none` and bound
+   after came back and held; unbound around a real suspend-to-idle, its
+   firmware loaded but the chip's interrupt then went silent
+   (`research/suspend/PORT.md` section 10).
+2. **GPIO_FINGER belongs to the secure world.** `pm_test=platform` oopses
+   in the late phase, in `samsung_pinctrl_suspend()`. With
+   `/sys/power/pm_print_times`, the controller is `14cb0000.pinctrl` (the
+   faulting page maps 0x14cb0000): gpd5, the fingerprint sensor's SPI.
+   Its bus clock runs and the controllers on the same clock read fine just
+   before, but a read from Linux aborts; stock skips that bank in its
+   sleep save and restore when the fingerprint is secure
+   (`ENABLE_SENSORS_FPRINT_SECURE`, `CONFIG_SENSORS_FP_SPI_GPIO="gpd5"`).
+   The first dump had been put down to AUD; the AUD bus clock added for it
+   changed nothing. Fix: `pinctrl_finger` disabled (nothing in Linux uses
+   gpd5).
+3. **The AUD domain does not power off.** Once `exynos-lpass` lets it go,
+   genpd powers AUD off in the noirq phase: "Power domain AUD disable
+   failed", and the block stays unreachable. The first access after resume
+   aborts: CMU_AUD's own register restore, or PipeWire opening the PCM
+   (`i2s_runtime_resume`, `ENABLE_PCLK_AUD`). Stock opens every AUD clock
+   gate before the domain goes off (`lpass_reset_clk_default()`); mainline
+   CMU_AUD only moves its muxes to OSC. Fix: the gates in CMU_AUD's
+   suspend values (`clk-exynos5433.c`). Stock's boot-time LPI mask for the
+   AUD trace bus alone did not do it; both are in the test kernel.
+
+With the three fixes (`research/suspend/patches/0006-0008`, image
+`test-recovery-sleep6`), the whole ladder passes: `freezer`, `devices`,
+`platform`, `processors`, `core` and `none`. `none` runs the 5433 sleep
+entry with every register written, the wake masks, the SLEEP column and
+the clock writes included, and stops short of `SMC_CMD_SLEEP` (the
+`exynos5433_sleep=dryrun` switch). Five more dry runs in a row pass, about
+0.9 s each, with AUD reachable afterwards. A real suspend-to-idle (`rtcwake
+-m freeze -s 10`) sleeps and wakes on the PMIC RTC alarm, 11.4 s, no
+error. sboot drops the boot header's command line and the kernel keeps
+1023 characters of the whole, sboot's own taking 878: a test switch goes
+into `CONFIG_CMDLINE` only if it fits in the 145 left, otherwise it is a
+module parameter set at run time.
+
+**The Wi-Fi settings, measured** on kernel `#6` from RECOVERY, the
+persistent root, the CP online, the screen off, nine alternating 5-minute
+windows (`power-windows.sh` actions `wps_*`, which set the parameters and
+turn power save off and on): the stock driver (`PM_FAST`, 2 s) 851, 974
+and 835 mW; `PM_FAST` with 100 ms 776, 774 and 754 mW; `PM_MAX` waking for
+every third DTIM 854, 748 and 773 mW. The fit gives -118 ± 49 mW for 100 ms
+and -94 ± 49 mW for `PM_MAX`; without the stock window at 974 mW the 100 ms
+gain is about 75 mW. 100 ms does as well as `PM_MAX` without a mode to
+switch with the screen and without `PM_MAX`'s slow transfers (one PS-Poll
+per buffered frame), and it is the timeout mac80211 drivers use, so the
+root image sets it: `/etc/modprobe.d/t715-brcmfmac.conf`,
+`options brcmfmac ps_timeout=100`. The gateway answers a ping in 8 ms with
+it, screen off.
+
+**`#6` in BOOT since 2026-11-05** (`out/boot-power6/boot.img`,
+`1ecbdca02837`; `#5`'s image stays as the way back). Its 2-hour soak from
+RECOVERY was clean (the CP online and the Wi-Fi connected in all 239
+samples, 239 gateway pings of 239, no kernel line, no failed unit), and so
+were four control reboots; it also came back from BOOT after each of the
+five panics of the suspend tests (the first one checked in full).
+As installed, the same method as the baseline above
+(`screenoff-inventory.sh`, a 90 s settle, then 119 gauge samples over
+10 minutes, the CP online, the Wi-Fi connected, cpu0-3): **754 mW**
+(184 mA at 4.10 V), 102 mW under `#5`'s 856. On the 15.2 Wh battery that
+is about 20 hours with the screen off, 5 % an hour.

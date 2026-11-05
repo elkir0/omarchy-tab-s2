@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/4] ARM: dts: gts28ltexx: the G3D block from aclk_g3d_400,
+ and SYSREG_G3D
+
+The GPU's clock comes from CMU_TOP's aclk_g3d_400 at 800/3 MHz instead
+of the G3D PLL the bootloader left at 266 MHz, the rate within 0.25 %.
+CMU_G3D's own registers are clocked from the same mux: behind the PLL,
+gating the GPU clock stopped the PLL (pll_35xx has a disable op), and
+CMU_G3D's runtime suspend, which reads its registers next, hung the bus
+at panfrost's first runtime suspend (2026-11-04).  CMU_G3D holds
+aclk_g3d_400 while it is resumed.
+
+SYSREG_G3D gets a syscon node, for panfrost to set the G3D block's NoC
+timeout again after each power-on of pd_g3d, as the vendor kernel did.
+Nothing else touches it, and only with the domain on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-gpu.dtsi    | 31 +++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+index 9bbbbebab..96849e68f 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+@@ -15,6 +15,17 @@
+  * here.
+  */
+ 
++&soc {
++	/*
++	 * SYSREG_G3D (kernel_universal5433 mach/map.h:327), inside pd_g3d:
++	 * only panfrost's power-on quirk touches it, with the domain on.
++	 */
++	sysreg_g3d: syscon@14a90000 {
++		compatible = "samsung,exynos5433-sysreg", "syscon";
++		reg = <0x14a90000 0x1000>;
++	};
++};
++
+ &gpu {
+ 	/*
+ 	 * GPU rail: BUCK6, "vdd_g3d" in the stock tree (live_fdt.dts:2399-2407)
+@@ -30,6 +41,26 @@ &gpu {
+ 	mali-supply = <&buck6_reg>;
+ 	status = "okay";
+ 
++	/*
++	 * The G3D block runs from CMU_TOP's aclk_g3d_400 at 800/3 MHz, not
++	 * from the G3D PLL the bootloader left at 266 MHz.  CMU_G3D's own
++	 * registers are clocked from that same mux: with the PLL behind it,
++	 * gating the GPU clock stopped the PLL (pll_35xx has a disable op)
++	 * and CMU_G3D's runtime suspend, which reads its registers next,
++	 * hung the bus at panfrost's first runtime suspend (2026-11-04).
++	 * From aclk_g3d_400, which CMU_G3D holds while it is resumed
++	 * (clk-exynos-arm64.c exynos_arm64_cmu_resume()), the registers keep
++	 * a clock until the unit has switched itself to OSCCLK and released
++	 * it.  The rate stays the same within 0.25 %.
++	 */
++	assigned-clocks = <&cmu_g3d CLK_MOUT_ACLK_G3D_400>,
++			  <&cmu_top CLK_DIV_ACLK_G3D_400>;
++	assigned-clock-parents = <&cmu_top CLK_ACLK_G3D_400>, <0>;
++	assigned-clock-rates = <0>, <266666667>;
++
++	/* the NoC timeout that a power-off of pd_g3d clears (panfrost_gpu.c) */
++	samsung,sysreg = <&sysreg_g3d>;
++
+ 	/*
+ 	 * No OPP table, hence no devfreq: panfrost_devfreq_init() returns 0
+ 	 * when the device has no table (panfrost_devfreq.c:151-157) and the
+-- 
+2.52.0
+

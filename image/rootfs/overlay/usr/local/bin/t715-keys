@@ -52,9 +52,10 @@
 # The touchscreen goes off with the screen: Hyprland keeps delivering touches
 # to apps while the panel is off, and nothing locks the session.
 #
-# The screen's state comes from Hyprland (dpmsStatus) at each press. Only a
-# positive "off" counts: a Hyprland that does not answer reads as lit, so a
-# press never wakes the screen blind (as omamobile-keys).
+# The screen's state comes from the panel's DPMS file in sysfs, or from
+# Hyprland (dpmsStatus) where there is none, at each press. Only a positive
+# "off" counts: a Hyprland that does not answer reads as lit, so a press never
+# wakes the screen blind (as omamobile-keys).
 #
 # Environment:
 #   T715_KEYS_DEVICES     input devices, colon-separated (default: every
@@ -119,6 +120,16 @@ DPMS_OFF = 'hl.dsp.dpms({ action = "disable" })'
 DPMS_ON = 'hl.dsp.dpms({ action = "enable" })'
 GO_HOME = 'hl.dsp.focus({ workspace = "empty" })'
 TOUCH = "hl.config({ input = { touchdevice = { enabled = %s } } })"
+# The A57 cores follow the touchscreen, i.e. the screen: offline while it is
+# dark, as the vendor kernel's dynamic hotplug did on display hibernation
+# (docs/hardware/BATTERY.md section 10).  60-t715-big-cores.rules makes the
+# files writable for wheel; a kernel without the hot-unplug has none.
+BIG_CORES = os.environ.get("T715_KEYS_BIG_CORES", "/sys/devices/system/cpu/cpu%d/online")
+BIG_CORE_IDS = (7, 6, 5, 4)
+# The panel's DPMS state as DRM keeps it: read without a hyprctl process,
+# which the resync would otherwise start every T715_KEYS_RESYNC seconds while
+# the screen is dark.
+DPMS_SYSFS = os.environ.get("T715_KEYS_DPMS", "/sys/class/drm/card*-DSI-1/dpms")
 MENU_SYSTEM = ["omarchy-menu", "toggle", "system"]
 MENU_CLOSE = ["omarchy-menu", "close"]
 # The touch shell (omamobile-shell) through the Omarchy shell's IPC, as its
@@ -253,6 +264,7 @@ class Screen:
         self.touch_flag = os.path.join(state_dir, "touch-off")
         self.saved_flag = os.path.join(state_dir, "saved-brightness")
         self._device = None
+        self.big_cores_failed = False
 
     def device(self):
         if self._device is None:
@@ -283,6 +295,10 @@ class Screen:
     def dark(self):
         if self.backlight_mode():
             return self.brightness() == 0
+        for path in sorted(glob.glob(DPMS_SYSFS)):
+            state = read_sysfs(path)
+            if state:
+                return state == "Off"
         monitors = hypr_json("monitors")
         if not isinstance(monitors, list):
             return False
@@ -291,7 +307,21 @@ class Screen:
     def touch_off_by_us(self):
         return os.path.exists(self.touch_flag)
 
+    def big_cores(self, online):
+        ids = reversed(BIG_CORE_IDS) if online else BIG_CORE_IDS
+        for n in ids:
+            try:
+                with open(BIG_CORES % n, "w") as f:
+                    f.write("1" if online else "0")
+            except FileNotFoundError:
+                return
+            except OSError as e:
+                if not self.big_cores_failed:
+                    log("cpu%d did not go %s: %s" % (n, "online" if online else "offline", e))
+                    self.big_cores_failed = True
+
     def touch(self, enabled):
+        self.big_cores(enabled)
         # The flag says what Hyprland was told: left as it was on a failure, so
         # that the resync of a lit screen tries again.
         rc, _ = run(["hyprctl", "eval", TOUCH % ("true" if enabled else "false")])
@@ -347,6 +377,8 @@ class Screen:
             run(["hyprctl", "dispatch", DPMS_OFF])
 
     def on(self):
+        # The A57s first, so that the wake below runs on all eight cores.
+        self.big_cores(True)
         if self.backlight_mode():
             try:
                 with open(self.saved_flag) as f:

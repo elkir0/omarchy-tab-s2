@@ -17,6 +17,7 @@ rebuild the kernel:
 | `patches/t715-charger/` (5 patches) | `t715-gps` (`846440af3`) | the charger driver and the battery thermistor, the MUIC's interrupt (no pull, level trigger), an attach read again while the MUIC has not identified the cable, the charger looking again while VBUS lags the cable, and the UDC core's `connected` flag after a failed stop (docs/hardware/BATTERY.md §8); the daily kernel from 2026-11-01 to 2026-11-02 (0.9.3). Built with `--fragment gts28ltexx_modem.config` |
 | `patches/t715-camera-af/` (2 patches) | `t715-charger` (`d24304ac1`) | the rear camera's DW9807 focus motor in `t715-camera.c`, ramped like `dw9807-vcm.c` and exposed as `V4L2_CID_FOCUS_ABSOLUTE` (default 500), and its bit-banged bus on `gpc2-2/3` under alias `i2c19`, which leaves the other bus numbers alone (research/camera/ETAPE1.md); **the daily kernel since 2026-11-02** (`out/boot-camaf/boot.img`). Built with `--fragment gts28ltexx_modem.config` and `KBUILD_OUT_DIR` given as an absolute path |
 | `patches/t715-cpufreq/` (3 patches) | `t715-camera-af` (`04df00007`) | in BOOT since 2026-11-03 (`out/boot-cpufreq-daily`, `69b4e6c8bc8b`): A53 frequency scaling from 400 MHz to 1.2 GHz at this chip's voltages under schedutil, the A57s held at 1.2 GHz by a single level, BUCK2 held and BUCK3 bounded, A53 cooling at stock's thresholds. Stage 1 and the 2-hour soak passed (`docs/hardware/CPUFREQ.md` §9). The daily kernel is built with `--fragment gts28ltexx_cpufreq.config` (the modem drivers in, `cpufreq-dt` a module that udev loads); the test kernels with `--fragment gts28ltexx_cpufreq_test.config` (no modem drivers, `cpufreq-dt` blacklisted and loaded by hand) |
+| `patches/t715-power/` (4 patches) | `t715-cpufreq` (`12d27cc6a`) | **the daily kernel since 2026-11-05** (`#6`, `out/boot-power6/boot.img`): the Exynos5433 hot-unplug of the A57 cores (the vendor kernel's handshake: HOTPLUG flag, local power off, `SMC_CMD_SHUTDOWN`), which `t715-keys` uses with the screen off; the G3D block clocked from `aclk_g3d_400` with a `SYSREG_G3D` syscon; panfrost's `GPU_PM_RT_CLK_OFF` for the 5433, so that pd_g3d powers off while the GPU idles, with the NoC timeout set again at each power-on (`rt_clk_off`, on by default); brcmfmac's `ps_timeout`, `ps_mode` and `bcn_li_dtim` parameters, whose defaults change nothing (the root sets `ps_timeout=100`). Measured with the screen off: 856 to 754 mW (`docs/hardware/BATTERY.md` sections 10 and 11). Built with `--fragment gts28ltexx_cpufreq.config` |
 | `patches/t715-camtest/` | `t715-parity` at `7d34675d8`, before the cameras | test only, in RECOVERY: the debugfs bring-up modules `t715-cam-probe` and `t715-cam-capture`, each camera step by hand; its copy of `t715-camera.c` is older than `t715-parity`'s. Built with `--fragment gts28ltexx_camtest.config` |
 
 Recreate the tree (the `t715-bringup` branch is what `kernel/kbuild-mainline.sh`
@@ -67,6 +68,14 @@ and a side branch against its base, for example:
 ```bash
 rm -f kernel/patches/t715-g3d-abb/*.patch && git -C src/linux-6.12 format-patch -q --no-signature -o "$PWD/kernel/patches/t715-g3d-abb" t715-bringup..t715-g3d-abb
 ```
+
+The daily line's tip (`t715-power`, from `t715-cpufreq`):
+
+```bash
+rm -f kernel/patches/t715-power/*.patch && git -C src/linux-6.12 format-patch -q --zero-commit -o "$PWD/kernel/patches/t715-power" t715-cpufreq..t715-power
+```
+
+Then give each patch the published identity and a noon date (`docs/PRIVACY.md`).
 
 The modem series (`t715-modem`, from `t715-bringup`):
 

@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/4] drm/panfrost: let the Exynos 5433's G3D domain power off
+
+The 5433's G3D clock controller sits in pd_g3d with the GPU, and the
+clock framework keeps it resumed while any of its clocks is prepared.
+With the core clock prepared for the driver's whole lifetime, the domain
+never powered off and the G3D PLL kept running while the GPU idled.
+
+GPU_PM_RT_CLK_OFF unprepares the clocks at runtime suspend and prepares
+them again at resume, for the samsung,exynos5433-mali data.  The
+rt_clk_off parameter (on by default) turns it off at run time, so that
+one boot can compare both.  The same data brings the vendor kernel's
+power-on step: SYSREG_G3D + 0x700, the G3D block's NoC timeout, which a
+power-off of the domain clears, is set to 1 again at every GPU power-on.
+
+Passed on the tablet on 2026-11-04: pd_g3d off while the GPU idles and
+back for every frame, the home screen drawn right, the NoC timeout at 1
+after 35 power-offs, then a 2 hour soak with the CP online.  30 +- 5 mW
+less with the screen off (omarchy-tab-s2 docs/hardware/BATTERY.md
+section 10).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/panfrost/panfrost_device.c | 26 ++++++++++++++++++++++
+ drivers/gpu/drm/panfrost/panfrost_device.h |  6 +++++
+ drivers/gpu/drm/panfrost/panfrost_drv.c    | 15 +++++++++++++
+ drivers/gpu/drm/panfrost/panfrost_gpu.c    | 23 +++++++++++++++++++
+ drivers/gpu/drm/panfrost/panfrost_gpu.h    |  1 +
+ 5 files changed, 71 insertions(+)
+
+diff --git a/drivers/gpu/drm/panfrost/panfrost_device.c b/drivers/gpu/drm/panfrost/panfrost_device.c
+index a45e4addc..a8c0b5f49 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_device.c
++++ b/drivers/gpu/drm/panfrost/panfrost_device.c
+@@ -403,9 +403,29 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
+ 	panfrost_job_enable_interrupts(pfdev);
+ }
+ 
++/* read at each runtime suspend, so that both behaviours can be compared in one boot */
++static bool rt_clk_off = true;
++module_param(rt_clk_off, bool, 0644);
++MODULE_PARM_DESC(rt_clk_off,
++		 "Unprepare the clocks while runtime suspended, where the SoC data allows it (default: true)");
++
+ static int panfrost_device_runtime_resume(struct device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
++	int ret;
++
++	if (pfdev->clk_unprepared) {
++		ret = clk_prepare_enable(pfdev->clock);
++		if (ret)
++			return ret;
++
++		ret = clk_prepare_enable(pfdev->bus_clock);
++		if (ret) {
++			clk_disable_unprepare(pfdev->clock);
++			return ret;
++		}
++		pfdev->clk_unprepared = false;
++	}
+ 
+ 	panfrost_device_reset(pfdev);
+ 	panfrost_devfreq_resume(pfdev);
+@@ -426,6 +446,12 @@ static int panfrost_device_runtime_suspend(struct device *dev)
+ 	panfrost_gpu_suspend_irq(pfdev);
+ 	panfrost_gpu_power_off(pfdev);
+ 
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT_CLK_OFF) && rt_clk_off) {
++		clk_disable_unprepare(pfdev->bus_clock);
++		clk_disable_unprepare(pfdev->clock);
++		pfdev->clk_unprepared = true;
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/panfrost/panfrost_device.h b/drivers/gpu/drm/panfrost/panfrost_device.h
+index cffcb0ac7..97a0879c1 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h
+@@ -36,10 +36,14 @@ enum panfrost_drv_comp_bits {
+  * enum panfrost_gpu_pm - Supported kernel power management features
+  * @GPU_PM_CLK_DIS:  Allow disabling clocks during system suspend
+  * @GPU_PM_VREG_OFF: Allow turning off regulators during system suspend
++ * @GPU_PM_RT_CLK_OFF: Unprepare the clocks while the GPU is runtime
++ *                     suspended, so that a clock controller sitting in the
++ *                     GPU's power domain can suspend and the domain power off
+  */
+ enum panfrost_gpu_pm {
+ 	GPU_PM_CLK_DIS,
+ 	GPU_PM_VREG_OFF,
++	GPU_PM_RT_CLK_OFF,
+ };
+ 
+ struct panfrost_features {
+@@ -113,6 +117,8 @@ struct panfrost_device {
+ 	struct device *pm_domain_devs[MAX_PM_DOMAINS];
+ 	struct device_link *pm_domain_links[MAX_PM_DOMAINS];
+ 	bool coherent;
++	/* the clocks were unprepared at the last runtime suspend */
++	bool clk_unprepared;
+ 
+ 	struct panfrost_features features;
+ 	const struct panfrost_compatible *comp;
+diff --git a/drivers/gpu/drm/panfrost/panfrost_drv.c b/drivers/gpu/drm/panfrost/panfrost_drv.c
+index c20a817dc..f07892dd5 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
+@@ -738,6 +738,20 @@ static const struct panfrost_compatible default_data = {
+ 	.pm_domain_names = NULL,
+ };
+ 
++/*
++ * The Exynos 5433's G3D clock controller sits in pd_g3d with the GPU, and the
++ * clock framework keeps it resumed while any of its clocks is prepared.  With
++ * the core clock prepared for the driver's whole lifetime, the domain never
++ * powers off and the G3D PLL keeps running while the GPU idles.
++ */
++static const struct panfrost_compatible exynos5433_data = {
++	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
++	.supply_names = default_supplies,
++	.num_pm_domains = 1,
++	.pm_features = BIT(GPU_PM_RT_CLK_OFF),
++	.vendor_quirk = panfrost_gpu_exynos5433_quirk,
++};
++
+ static const struct panfrost_compatible amlogic_data = {
+ 	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
+ 	.supply_names = default_supplies,
+@@ -805,6 +819,7 @@ static const struct of_device_id dt_match[] = {
+ 	  .data = &amlogic_data, },
+ 	{ .compatible = "amlogic,meson-g12a-mali",
+ 	  .data = &amlogic_data, },
++	{ .compatible = "samsung,exynos5433-mali", .data = &exynos5433_data, },
+ 	{ .compatible = "arm,mali-t604", .data = &default_data, },
+ 	{ .compatible = "arm,mali-t624", .data = &default_data, },
+ 	{ .compatible = "arm,mali-t628", .data = &default_data, },
+diff --git a/drivers/gpu/drm/panfrost/panfrost_gpu.c b/drivers/gpu/drm/panfrost/panfrost_gpu.c
+index b52dd510e..f2a2542da 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_gpu.c
++++ b/drivers/gpu/drm/panfrost/panfrost_gpu.c
+@@ -9,8 +9,10 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/regmap.h>
+ 
+ #include "panfrost_device.h"
+ #include "panfrost_features.h"
+@@ -112,6 +114,27 @@ void panfrost_gpu_amlogic_quirk(struct panfrost_device *pfdev)
+ 	gpu_write(pfdev, GPU_PWR_OVERRIDE1, 0xfff | (0x20 << 16));
+ }
+ 
++/* SYSREG_G3D NoC bus timeout, kernel_universal5433 pm_domains-exynos5433.c:101-102 */
++#define EXYNOS5433_SYSREG_G3D_NOC_TIMEOUT	0x700
++
++void panfrost_gpu_exynos5433_quirk(struct panfrost_device *pfdev)
++{
++	struct regmap *sysreg;
++
++	/*
++	 * The G3D block's NoC timeout, which the bootloader sets and a
++	 * power-off of pd_g3d clears: the vendor kernel sets it again after
++	 * every power-on of the domain.  This runs at every GPU power-on, with
++	 * the domain on.
++	 */
++	sysreg = syscon_regmap_lookup_by_phandle(pfdev->dev->of_node,
++						 "samsung,sysreg");
++	if (IS_ERR(sysreg))
++		return;
++
++	regmap_write(sysreg, EXYNOS5433_SYSREG_G3D_NOC_TIMEOUT, 1);
++}
++
+ static void panfrost_gpu_init_quirks(struct panfrost_device *pfdev)
+ {
+ 	u32 quirks = 0;
+diff --git a/drivers/gpu/drm/panfrost/panfrost_gpu.h b/drivers/gpu/drm/panfrost/panfrost_gpu.h
+index d841b8650..1fa5de183 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_gpu.h
++++ b/drivers/gpu/drm/panfrost/panfrost_gpu.h
+@@ -22,5 +22,6 @@ void panfrost_cycle_counter_put(struct panfrost_device *pfdev);
+ unsigned long long panfrost_cycle_counter_read(struct panfrost_device *pfdev);
+ 
+ void panfrost_gpu_amlogic_quirk(struct panfrost_device *pfdev);
++void panfrost_gpu_exynos5433_quirk(struct panfrost_device *pfdev);
+ 
+ #endif
+-- 
+2.52.0
+
