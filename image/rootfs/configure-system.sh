@@ -42,7 +42,8 @@ log "locales en_US.UTF-8 fr_FR.UTF-8 $T715_LANG, LANG=$T715_LANG, $T715_TZ"
 sed -i -e 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' \
        -e 's/^#fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' \
        -e "s/^#$T715_LANG UTF-8/$T715_LANG UTF-8/" /etc/locale.gen
-grep -qx "$T715_LANG UTF-8" /etc/locale.gen || die "no locale $T715_LANG in /etc/locale.gen"
+# glibc 2.43's locale.gen ends its lines with two spaces: match them too.
+grep -qE "^${T715_LANG//./\\.} UTF-8[[:space:]]*\$" /etc/locale.gen || die "no locale $T715_LANG in /etc/locale.gen"
 locale-gen
 echo "LANG=$T715_LANG" > /etc/locale.conf
 [ -e "/usr/share/zoneinfo/$T715_TZ" ] || die "no zoneinfo for $T715_TZ"
