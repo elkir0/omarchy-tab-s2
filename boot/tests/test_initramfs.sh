@@ -14,14 +14,20 @@
 #     device (partitions EFS, SYSTEM, USERDATA) carries an ext4 USERDATA
 #     with media/0/linux/rootfs.img: a tiny ext4 "rootfs" whose /sbin/init
 #     checks, after the real switch_root, what the initramfs handed over.
-#     Scenarios: shell (t715.shell=1, DHCP lease + telnet from the "host"
-#     end of the veth, then continue), direct boot, missing image, invalid
-#     t715.rootimg, no USERDATA.  USERDATA's checksum must not change in
-#     any of them.  Then the persistent root (rootfs.select line 2
-#     persist=omarchy): first boot (e2fsck, seed over an interrupted one,
-#     read-write bind root), second boot (no seed, state kept), rescue
-#     (t715.persist=0: image mode), a directory without the marker
-#     (refused, image mode); USERDATA must stay fsck-clean.
+#     Scenarios: shell (t715.shell=1 t715.telnet=1, DHCP lease + telnet
+#     from the "host" end of the veth, then continue), direct boot, missing
+#     image, invalid t715.rootimg, no USERDATA.  USERDATA's checksum must
+#     not change in any of them.  Then the persistent root (rootfs.select
+#     line 2 persist=omarchy): first boot (e2fsck, seed over an interrupted
+#     one, read-write bind root, on-screen progress lines), second boot (no
+#     seed, state kept), rescue (t715.persist=0: image mode), a directory
+#     without the marker (refused, image mode), a good rootfs-alt.img.sha256
+#     sidecar (checked, seed runs), a bad one (refused: no seed directory,
+#     USERDATA untouched), a too-small USERDATA (fallback to image mode
+#     with the "Not enough free space" line).  Also the end-user defaults:
+#     no telnet on the default boot (port closed, log says so), and
+#     t715.failreboot=0 turning a failure into exit 97 with the on-screen
+#     failure line.  USERDATA must stay fsck-clean.
 #
 # Usage: bash boot/tests/test_initramfs.sh
 # (internal: --in-container CPIO_GZ, run inside the test container)
@@ -268,9 +274,9 @@ detach_disk() {
 # --- scenarios ---------------------------------------------------------------
 
 scenario_shell() {
-  echo "--- scenario: t715.shell=1 (debug link, DHCP, telnet, then continue)"
+  echo "--- scenario: t715.shell=1 t715.telnet=1 (debug link, DHCP, telnet, then continue)"
   prepare_boot shell
-  run_init shell "t715.shell=1 t715.rootwait=30 t715.failwait=120 t715.modblacklist=pci_exynos,brcmfmac t715.autotest=1" &
+  run_init shell "t715.shell=1 t715.telnet=1 t715.rootwait=30 t715.failwait=120 t715.modblacklist=pci_exynos,brcmfmac t715.autotest=1" &
   BOOT_PID=$!
   if ! wait_for shell "staying in the initramfs" 240; then
     ko "initramfs reached the shell-mode wait"; show_log shell
@@ -338,10 +344,29 @@ EOF
 }
 
 scenario_direct() {
-  echo "--- scenario: default boot (no shell)"
+  echo "--- scenario: default boot (no shell, no telnet)"
   prepare_boot direct
   local rc=0
-  run_init direct "t715.rootwait=30 t715.modblacklist=pci_exynos,brcmfmac t715.autotest=1 t715.quiet=1" || rc=$?
+  run_init direct "t715.rootwait=30 t715.modblacklist=pci_exynos,brcmfmac t715.autotest=1 t715.quiet=1" &
+  BOOT_PID=$!
+  # Probe while the initramfs is up: an unattended boot reaches the
+  # hand-over within seconds of "debug link up", which deletes usb0, so
+  # the probes run at once, not after a sleep.
+  if ! wait_for direct "debug link up" 240; then
+    ko "debug link came up"; show_log direct
+    kill "$BOOT_PID" 2>/dev/null || true; wait "$BOOT_PID" 2>/dev/null || true; BOOT_PID=""
+    return
+  fi
+  ok "debug link up"
+  check "usb0 carries 172.16.42.1/24" sh -c 'ip -4 addr show dev usb0 | grep -q "inet 172.16.42.1/24 "'
+  # nc exits 1 at once when nothing listens on 23 (connection refused).
+  if timeout 5 "$BB" nc 172.16.42.1 23 </dev/null >/dev/null 2>&1; then
+    ko "telnet port closed by default (something answered)"
+  else
+    ok "telnet port closed by default (nothing answers on 172.16.42.1:23)"
+  fi
+  wait "$BOOT_PID" || rc=$?
+  BOOT_PID=""
   check "switch_root reached the image's /sbin/init (exit $rc)" test "$rc" -eq 0
   check "image /sbin/init checks pass" log_has direct "T715TEST RESULT: PASS"
   check "USERDATA found by GPT name" log_has direct "USERDATA is /dev/${OUTER#/dev/}p3"
@@ -349,6 +374,10 @@ scenario_direct() {
   check "rootfs.select followed" log_has direct "rootfs.select: booting rootfs-alt.img"
   check "selected image attached" log_has direct "root image media/0/linux/rootfs-alt.img:"
   check "t715.quiet=1 read" log_has direct "t715.quiet: console loglevel 3, VT cleared"
+  check "knobs defaults logged" log_has direct "telnet=0 failreboot=1"
+  check "telnet shell off by default, log says so" log_has direct "telnet shell off (t715.telnet=1 turns it on)"
+  check "no shell on the debug link by default" log_has direct "no shell (t715.telnet=0)"
+  check "DHCP server still up by default" log_has direct "DHCP 172.16.42.2-172.16.42.10, no shell"
   [[ $rc -eq 0 ]] || show_log direct
   detach_inner_loops
   ip link del usb0 2>/dev/null || true
@@ -364,10 +393,25 @@ scenario_missing() {
   check "t715.rootimg= wins over rootfs.select" sh -c "! grep -q 'rootfs.select: booting' '$W/missing.log'"
   check "reason logged" log_has missing "ERROR: root image 'media/0/linux/nope.img' not found in USERDATA"
   check "missing component logged" log_has missing "first missing path component: media/0/linux/nope.img"
+  check "failure said on screen" log_has missing "t715-say: Omarchy could not start: the Linux image file is missing."
+  check "rebooting-in-N said on screen" log_has missing "t715-say: rebooting in 2 seconds"
   check "debug shell offered" log_has missing "boot stopped: debug shell on telnet 172.16.42.1 for 2s"
   check "reboot logged" log_has missing "rebooting (reboot -f)"
   check "owner's files not listed" sh -c "! grep -qE 'DCIM|Download|notes.txt' '$W/missing.log'"
   [[ $rc -eq 99 ]] || show_log missing
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_failwait_screen() {
+  echo "--- scenario: t715.failreboot=0 (failure waits on screen, exit 97)"
+  prepare_boot fwait
+  local rc=0
+  run_init fwait "t715.rootimg=media/0/linux/nope.img t715.rootwait=30 t715.failreboot=0" || rc=$?
+  check "exit 97 with t715.failreboot=0 (got $rc)" test "$rc" -eq 97
+  check "failure reason said on screen" log_has fwait "t715-say: Omarchy could not start: the Linux image file is missing. Hold Power and Volume down to restart."
+  check "waiting line said on screen" log_has fwait "t715-say: waiting: hold Power and Volume down to restart"
+  check "no reboot timer" sh -c "! grep -q 'boot stopped: debug shell on telnet' '$W/fwait.log'"
+  [[ $rc -eq 97 ]] || show_log fwait
   ip link del usb0 2>/dev/null || true
 }
 
@@ -398,6 +442,35 @@ with_userdata() {
 }
 select_persist() { printf 'rootfs-alt.img\npersist=omarchy\n' >"$W/ud/media/0/linux/rootfs.select"; }
 plant_partial_seed() { mkdir -p "$W/ud/.omarchy.t715-seed/half" && echo partial >"$W/ud/.omarchy.t715-seed/half/file"; }
+# plant_sidecar [bad]: a one-line sha256sum sidecar for the selected image
+# (rootfs-alt.img); with "bad", a syntactically valid but wrong hash.
+plant_sidecar() {
+  local h zeros
+  h=$(sha256sum "$W/ud/media/0/linux/rootfs-alt.img" | cut -d' ' -f1)
+  if [[ "${1:-}" == bad ]]; then
+    zeros=$(printf '%063d' 0)
+    h="${zeros}${h: -1}"
+  fi
+  printf '%s  rootfs-alt.img\n' "$h" >"$W/ud/media/0/linux/rootfs-alt.img.sha256"
+}
+# fill_userdata: eat USERDATA's free space until the seed's check (the
+# image's use, about 1.4 MiB, + the test's 1 MiB margin) fails: one file
+# sized to leave well under 2 MiB free.
+fill_userdata() {
+  local free want
+  free=$(df -Pk "$W/ud" | awk 'NR == 2 {print $4}')
+  want=$((free - 1024))
+  ((want > 0)) || return 0
+  dd if=/dev/zero of="$W/ud/t715-fill" bs=1024 count=$want status=none || return 1
+  sync
+  [[ "$(df -Pk "$W/ud" | awk 'NR == 2 {print $4}')" -lt 2304 ]]
+}
+# userdata_sum: USERDATA's content checksum (its files, not the raw
+# partition: a persistent-root boot remounts it read-write).  Runs inside
+# with_userdata; see the sidecar scenario.
+userdata_sum() {
+  (cd "$W/ud" && find . -type f -print0 | sort -z | xargs -0 cat | sha256sum | cut -d' ' -f1)
+}
 persist_state() {
   echo "marker=$(head -n 1 "$W/ud/omarchy/.t715-persist" 2>/dev/null)"
   echo "boots=$(cat "$W/ud/omarchy/var/t715-boots" 2>/dev/null)"
@@ -422,6 +495,9 @@ scenario_persist_seed() {
   check "e2fsck ran clean" log_has pseed "e2fsck exit 0"
   check "interrupted seed removed" log_has pseed "removing an interrupted seed"
   check "seed logged" log_has pseed "seeding USERDATA/omarchy from media/0/linux/rootfs-alt.img"
+  check "seed start said on screen" log_has pseed "t715-say: Setting up Omarchy (first boot), this takes a few minutes"
+  check "seed progress said on screen (1-99%)" sh -c "grep -E 't715-say: Setting up Omarchy \(first boot\): [0-9]+%' '$W/pseed.log' >/dev/null"
+  check "seed end said on screen" log_has pseed "t715-say: Setup finished. Starting Omarchy."
   check "rw mount logged" log_has pseed "USERDATA mounted rw,noatime,errors=remount-ro"
   local st
   st=$(with_userdata persist_state)
@@ -476,6 +552,82 @@ scenario_persist_foreign() {
   ip link del usb0 2>/dev/null || true
 }
 
+# scenario_persist_sidecar GOOD|BAD: the .sha256 sidecar next to the
+# selected image, verified before the seed.  Runs after scenario_persist_
+# seed/again/rescue/foreign, whose omarchy root must be removed first
+# (that is the machine's state at the factory: image present, no root).
+scenario_persist_sidecar() {
+  local good=$1
+  echo "--- scenario: persistent root, first boot, $good .sha256 sidecar"
+  if ! with_userdata select_persist || ! with_userdata plant_sidecar "$good" ||
+    ! with_userdata rm -rf "$W/ud/omarchy"; then
+    ko "rootfs.select line 2 and the sidecar written"; return
+  fi
+  # USERDATA's content checksum before the boot: a bad sidecar must leave
+  # the partition byte-identical (the check runs while it is read-only).
+  local sum_before
+  sum_before=$(with_userdata userdata_sum)
+  prepare_boot "pside-$good"
+  local rc=0
+  run_init "pside-$good" "$PERSIST_KNOBS" || rc=$?
+  # An image-mode fallback leaves the image's loop attached (the namespace
+  # dies at the hand-over): detach it before mounting USERDATA again, or
+  # the loop's open file keeps the mount busy.
+  detach_inner_loops
+  if [[ "$good" == good ]]; then
+    check "switch_root reached the seeded /sbin/init (exit $rc)" test "$rc" -eq 0
+    check "checksum verified" log_has "pside-$good" "image checksum verified"
+    check "Checking-the-image said on screen" log_has "pside-$good" "t715-say: Checking the image..."
+    check "persistent root checks pass" log_has "pside-$good" "T715TEST RESULT: PASS"
+    local st
+    st=$(with_userdata persist_state)
+    check "seed did run (marker present)" grep -qx "marker=persistent root omarchy, seeded from media/0/linux/rootfs-alt.img" <<<"$st"
+  else
+    check "fell back to image mode (exit $rc)" test "$rc" -eq 0
+    check "image mode checks pass" log_has "pside-$good" "T715TEST RESULT: PASS"
+    check "mode image" log_has "pside-$good" "T715TEST mode=image"
+    check "checksum refused" log_has "pside-$good" "ERROR: image checksum check failed: checksum mismatch"
+    check "damage said on screen" log_has "pside-$good" "t715-say: The image file is damaged (bad checksum). Copy it to the tablet again."
+    check "no seed directory created" sh -c "! grep -q 'seeding USERDATA' '$W/pside-$good.log'"
+    local st
+    st=$(with_userdata persist_state)
+    check "no persistent root created" grep -qx "marker=" <<<"$st"
+    check "no seed directory left" grep -qx "leftover=0" <<<"$st"
+    check "USERDATA's files untouched (checksum unchanged)" test "$sum_before" = "$(with_userdata userdata_sum)"
+  fi
+  [[ $rc -eq 0 ]] || show_log "pside-$good"
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_persist_space() {
+  echo "--- scenario: persistent root, first boot, not enough space on USERDATA"
+  if ! with_userdata select_persist || ! with_userdata rm -rf "$W/ud/omarchy" ||
+    ! with_userdata rm -f "$W/ud/media/0/linux/rootfs-alt.img.sha256"; then
+    ko "rootfs.select line 2 written"; return
+  fi
+  if ! with_userdata fill_userdata; then
+    ko "USERDATA filled"; return
+  fi
+  prepare_boot pspace
+  local rc=0
+  run_init pspace "$PERSIST_KNOBS" || rc=$?
+  detach_inner_loops
+  check "fell back to image mode (exit $rc)" test "$rc" -eq 0
+  check "image mode checks pass" log_has pspace "T715TEST RESULT: PASS"
+  check "mode image" log_has pspace "T715TEST mode=image"
+  check "space refusal logged" log_has pspace "ERROR: USERDATA has"
+  check "fallback logged" log_has pspace "booting the image read-only instead"
+  check "not-enough-space said on screen" sh -c "grep -qE 't715-say: Not enough free space: running from the image; changes are lost at reboot\. Free about [0-9]+ GB and restart' '$W/pspace.log'"
+  check "the fill file is still there (nothing removed)" with_userdata test -f "$W/ud/t715-fill"
+  local st
+  st=$(with_userdata persist_state)
+  check "no seed directory left" grep -qx "leftover=0" <<<"$st"
+  [[ $rc -eq 0 ]] || show_log pspace
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
 scenario_nouserdata() {
   echo "--- scenario: no USERDATA partition"
   prepare_boot nouserdata
@@ -506,6 +658,7 @@ in_container() {
   scenario_shell
   scenario_direct
   scenario_missing
+  scenario_failwait_screen
   scenario_badpath
   detach_inner_loops
 
@@ -517,6 +670,9 @@ in_container() {
   scenario_persist_again
   scenario_persist_rescue
   scenario_persist_foreign
+  scenario_persist_sidecar good
+  scenario_persist_sidecar bad
+  scenario_persist_space
   detach_inner_loops
   detach_disk
   scenario_nouserdata

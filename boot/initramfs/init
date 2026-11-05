@@ -9,8 +9,9 @@
 #   1. mount devtmpfs, proc, sysfs, devpts and a /run tmpfs;
 #   2. bring up the USB RNDIS debug link exactly like the rootfs does
 #      (image/rootfs/overlay/usr/local/sbin/usb-rndis-setup: configfs
-#      gadget g1, same IDs, 172.16.42.1/24), plus busybox udhcpd
-#      (172.16.42.2-10) and telnetd (/bin/sh) bound to that address only;
+#      gadget g1, same IDs, 172.16.42.1/24) plus busybox udhcpd
+#      (172.16.42.2-10); the root telnet shell (/bin/sh, that address
+#      only) runs when t715.telnet=1 asks for it;
 #   3. wait for the partition whose GPT name is USERDATA, make the block
 #      device read-only (BLKROSET) and mount it ro,noload on /userdata;
 #   4. losetup -r the image, mount it read-only and stack an overlayfs
@@ -20,12 +21,16 @@
 #      move /run (USERDATA ends up at /run/t715/userdata), /dev, /proc and
 #      /sys into the new root and exec switch_root /newroot /sbin/init.
 # On any failure: log the reason, keep the debug shell up for
-# t715.failwait seconds, then reboot -f (back to Android).  This script
-# never exits on purpose: PID 1 exiting would panic the kernel.
+# t715.failwait seconds, then reboot -f (back to Android), or wait on
+# screen instead with t715.failreboot=0.  This script never exits on
+# purpose: PID 1 exiting would panic the kernel.
 #
 # Every progress/error line goes to /dev/kmsg prefixed "t715-initramfs:"
 # (the kernel log is what survives the reboot) and to
-# /run/t715/initramfs.log (kept in /run after the switch_root).
+# /run/t715/initramfs.log (kept in /run after the switch_root).  What an
+# owner unplugging the tablet at a hotel must see (first-boot progress,
+# failures, the space fallback) also goes to the screen through say (),
+# which writes to /dev/tty0 whatever the console loglevel is.
 #
 # Knobs, from the kernel command line (they win) and from /etc/t715-knobs
 # (same syntax, written by boot/build-initramfs.sh --knobs):
@@ -62,32 +67,43 @@
 #                        Android app that can write /sdcard can plant that
 #                        script, so never bake this knob into a daily image.
 #   t715.usbfn=rndis|ecm USB network function (default rndis, as the rootfs)
+#   t715.telnet=0|1      1: the root telnet shell on the USB network link
+#                        (telnet NET_IP, no password; with 0, the default,
+#                        the link still comes up with DHCP but no shell)
 #   t715.persist=NAME    persistent root USERDATA/NAME (see below)
 #   t715.persist=0       image mode even if rootfs.select asks for a
 #                        persistent root (rescue boot)
+#   t715.failreboot=0|1  0: after a failure, show the error on screen and
+#                        wait (Power + Volume down restarts the board)
+#                        instead of rebooting after t715.failwait (1)
 #   t715.quiet=1         a quiet screen until the splash: console loglevel
 #                        3 from here on (CONFIG_CMDLINE's loglevel=8 comes
 #                        after anything sboot or the boot image could add),
-#                        the VT cleared and its cursor hidden
+#                        the VT cleared and its cursor hidden; say () still
+#                        writes first-boot progress and errors to the VT
 #
 # Persistent root (a tablet that keeps no Android): instead of steps 3-4,
 # USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
 # (noatime, errors=remount-ro: its superblock says panic) and the
 # directory NAME at its top is bind-mounted on /newroot; changes survive
-# reboots.  On the first boot NAME does not exist: the selected image is
-# attached read-only and its tree copied into USERDATA/.NAME.t715-seed by
-# the image's own cp (GNU cp -a keeps owners, modes, hard links, xattrs and
-# file capabilities), the marker .t715-persist is written, then the
+# reboots.  On the first boot NAME does not exist: a checksum sidecar
+# <image>.sha256 (sha256sum format) next to the selected image, when one
+# is there, is verified first ("Checking the image..." on screen); then
+# the image is attached read-only and its tree copied into
+# USERDATA/.NAME.t715-seed by the image's own cp (GNU cp -a keeps owners,
+# modes, hard links, xattrs and file capabilities) while the screen shows
+# the progress (say ()), the marker .t715-persist is written, then the
 # directory is renamed NAME.  A NAME that exists without the marker is
 # never touched.  Knob-written files (modprobe blacklist, autotest unit)
 # go to /run, not into the root.  If anything fails, the boot falls back to
-# image mode with USERDATA read-only again.
+# image mode with USERDATA read-only again, and the reason goes on screen.
 # Host-side tests (boot/tests/test_initramfs.sh) set
 # T715_INITRAMFS_TEST=host-test: log to stderr, read the knobs from
 # $T715_TEST_CMDLINE, use the test's veth "usb0" instead of the USB
-# gadget, keep the test's stdio, exit 99 instead of rebooting, and leave
-# 1 MiB instead of 512 MiB free after a seed (the test's USERDATA is tiny).
-# Nothing else differs.
+# gadget, keep the test's stdio, exit 99 instead of rebooting (97 with
+# t715.failreboot=0: the on-screen wait replaces the exit), print say ()
+# lines on stderr prefixed "t715-say:", and leave 1 MiB instead of 512 MiB
+# free after a seed (the test's USERDATA is tiny).  Nothing else differs.
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -136,6 +152,8 @@ QUIET=0
 PERSIST_KNOB=0      # 1 once t715.persist= is given: rootfs.select's line 2 is ignored
 SEED_MARGIN_KIB=524288  # free space a seed must leave on USERDATA (512 MiB)
 [ -z "$TEST" ] || SEED_MARGIN_KIB=1024
+TELNET=0            # 1: the root telnet shell on the USB network link
+FAILREBOOT=1        # 0: wait on screen after a failure instead of rebooting
 
 # --- paths
 RUNDIR=/run/t715
@@ -151,6 +169,7 @@ KNOBS_FILE=/etc/t715-knobs
 PERSIST_MARK=.t715-persist  # marks a directory of USERDATA as a persistent root
 CONTINUE_FLAG=/tmp/t715-continue
 STAY_FLAG=/tmp/t715-stay
+SCREEN=/dev/tty0        # the VT say () writes to (t715.quiet cannot mute it)
 
 # --- state
 NET_UP=
@@ -162,6 +181,7 @@ UDHCPD_PID=
 UD_DEV=
 LOOP_DEV=
 PERSIST_ON=         # 1 once the persistent root is bind-mounted on /newroot
+FAIL_REASON=        # one line for the screen when the boot fails
 
 # ---------------------------------------------------------------------------
 # logging
@@ -187,6 +207,23 @@ _log() {
 log() { _log 5 "$@"; }
 warn() { _log 4 "WARNING: $*"; }
 err() { _log 3 "ERROR: $*"; }
+
+# say MSG...: one line for the owner looking at the black screen, in plain
+# words: first-boot progress and failures, which the kernel log (t715.quiet
+# sets the console loglevel to 3) would keep invisible for hours.  It goes
+# to the VT whatever the loglevel (no console ioctl needed: writing to
+# /dev/tty0 cannot be muted) and is logged as usual.  Not for the steps
+# that flash by: the screen stays otherwise as quiet as t715.quiet made
+# it.  Host-test: stderr, prefixed "t715-say:".
+say() {
+    if [ -n "$TEST" ]; then
+        printf 't715-say: %s\n' "$*" >&2
+    elif [ -c "$SCREEN" ] && printf '%s\n' "$*" >"$SCREEN" 2>/dev/null; then
+        :
+    fi
+    log "$@"
+    return 0
+}
 
 # _log_lines LEVEL TEXT: log every non-empty line of TEXT, indented.
 _log_lines() {
@@ -326,6 +363,12 @@ parse_knobs() {
         t715.usbfn=rndis | t715.usbfn=ecm)
             USBFN=${_pk#*=}
             ;;
+        t715.telnet=0 | t715.telnet=1)
+            TELNET=${_pk#*=}
+            ;;
+        t715.failreboot=0 | t715.failreboot=1)
+            FAILREBOOT=${_pk#*=}
+            ;;
         t715.quiet=0 | t715.quiet=1)
             QUIET=${_pk#*=}
             ;;
@@ -360,7 +403,7 @@ read_knobs() {
         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
     fi
     parse_knobs "$_rk_cmdline" "cmdline"
-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT"
 }
 
 # ---------------------------------------------------------------------------
@@ -481,9 +524,12 @@ test_link_up() {
 }
 
 write_issue() {
+    if [ "$TELNET" != 1 ]; then
+        return 0
+    fi
     cat >/etc/issue.net <<EOF
 
-SM-T715 initramfs debug shell (busybox). Log: $LOGFILE
+SM-T715 initramfs debug shell (busybox, t715.telnet=1). Log: $LOGFILE
   touch $CONTINUE_FLAG   switch_root to the prepared $NEWROOT
   touch $STAY_FLAG       cancel the reboot timer after a failure
   reboot -f                  reboot (back to Android)
@@ -546,11 +592,21 @@ net_up() {
     NET_UP=1
     write_issue
     start_udhcpd
-    start_telnetd
+    if [ "$TELNET" = 1 ]; then
+        start_telnetd
+    else
+        # t715.telnet=0: the link and DHCP still come up (Arch's own
+        # services use them after the hand-over), only the shell is off.
+        log "telnet shell off (t715.telnet=1 turns it on)"
+    fi
     sleep 1
     check_daemon udhcpd "$UDHCPD_PID" "$RUNDIR/udhcpd.log" || UDHCPD_PID=
-    check_daemon telnetd "$TELNETD_PID" "$RUNDIR/telnetd.log" || TELNETD_PID=
-    log "debug link up: $NET_IFACE $NET_CIDR, DHCP $DHCP_START-$DHCP_END, shell: telnet $NET_IP"
+    if [ "$TELNET" = 1 ]; then
+        check_daemon telnetd "$TELNETD_PID" "$RUNDIR/telnetd.log" || TELNETD_PID=
+        log "debug link up: $NET_IFACE $NET_CIDR, DHCP $DHCP_START-$DHCP_END, shell: telnet $NET_IP"
+    else
+        log "debug link up: $NET_IFACE $NET_CIDR, DHCP $DHCP_START-$DHCP_END, no shell (t715.telnet=0)"
+    fi
 }
 
 # stop_daemon NAME PID: SIGTERM, then SIGKILL after 3 s, then reap.
@@ -623,6 +679,7 @@ check_rootimg() {
     case "/$_cr/" in
     // | */../* | */./* | *//*)
         err "invalid t715.rootimg '$ROOTIMG' (relative path inside USERDATA, no . or .. components)"
+        FAIL_REASON="Omarchy could not start: the image setting is wrong. Hold Power and Volume down to restart."
         return 1
         ;;
     esac
@@ -663,6 +720,7 @@ find_userdata() {
         set +f
         if [ "$#" -gt 1 ]; then
             err "several partitions are named USERDATA ($_fu_hits), refusing to guess"
+            FAIL_REASON="Omarchy could not start: the tablet's storage looks unusual. Hold Power and Volume down to restart."
             return 1
         fi
         if [ "$#" -eq 1 ] && [ -b "/dev/$1" ]; then
@@ -672,6 +730,7 @@ find_userdata() {
         fi
         if [ "$_fu_waited" -ge "$ROOTWAIT" ]; then
             err "no partition named USERDATA after ${ROOTWAIT}s"
+            FAIL_REASON="Omarchy could not start: the tablet's storage was not found. Hold Power and Volume down to restart."
             _fu_all=$(list_partnames | tr ' \n' '= ')
             log "named partitions seen: ${_fu_all:-none}"
             return 1
@@ -710,15 +769,20 @@ mount_userdata() {
     run blockdev --setro "$UD_DEV" || return 1
     if [ "$(blockdev --getro "$UD_DEV" 2>/dev/null)" != 1 ]; then
         err "$UD_DEV did not become read-only"
+        FAIL_REASON="Omarchy could not start: the tablet's storage was not found. Hold Power and Volume down to restart."
         return 1
     fi
     log "$UD_DEV set read-only (BLKROSET)"
     check_ext4 "$UD_DEV" || return 1
     mkdir -p "$UD_MNT"
-    run mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$UD_DEV" "$UD_MNT" || return 1
+    if ! run mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$UD_DEV" "$UD_MNT"; then
+        FAIL_REASON="Omarchy could not start: the tablet's storage could not be read. Hold Power and Volume down to restart."
+        return 1
+    fi
     if ! is_mounted_ro "$UD_MNT"; then
         err "USERDATA is not mounted read-only ($(mount_opts "$UD_MNT")): unmounting"
         run umount "$UD_MNT"
+        FAIL_REASON="Omarchy could not start: the tablet's storage could not be read. Hold Power and Volume down to restart."
         return 1
     fi
     log "USERDATA mounted ro,noload on $UD_MNT"
@@ -777,6 +841,7 @@ attach_image() {
     _ai_img=$UD_MNT/$ROOTIMG
     if [ ! -f "$_ai_img" ]; then
         err "root image '$ROOTIMG' not found in USERDATA"
+        FAIL_REASON="Omarchy could not start: the Linux image file is missing. Hold Power and Volume down to restart."
         # Name the first missing component; never list the owner's files.
         _ai_p=$UD_MNT
         _ai_rest=$ROOTIMG
@@ -802,9 +867,12 @@ attach_image() {
     if ! LOOP_DEV=$(losetup -f 2>/dev/null) || [ -z "$LOOP_DEV" ]; then
         err "no free loop device (BLK_DEV_LOOP missing?)"
         LOOP_DEV=
+        FAIL_REASON="Omarchy could not start: a system limit was hit. Hold Power and Volume down to restart."
         return 1
     fi
     if ! run losetup -r "$LOOP_DEV" "$_ai_img"; then
+        err "could not attach $ROOTIMG read-only"
+        FAIL_REASON="Omarchy could not start: the Linux image file could not be read. Hold Power and Volume down to restart."
         LOOP_DEV=
         return 1
     fi
@@ -819,15 +887,23 @@ attach_image() {
 
 mount_newroot() {
     mkdir -p "$LOWER" "$RWDIR" "$NEWROOT"
-    run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER" || return 1
+    if ! run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER"; then
+        err "could not mount $LOOP_DEV read-only"
+        FAIL_REASON="Omarchy could not start: the Linux image file is damaged. Copy it to the tablet again, then restart. Hold Power and Volume down to restart."
+        return 1
+    fi
     if ! is_mounted_ro "$LOWER"; then
         err "the image is not mounted read-only"
+        FAIL_REASON="Omarchy could not start: the Linux image file is damaged. Copy it to the tablet again, then restart. Hold Power and Volume down to restart."
         return 1
     fi
     run mount -t tmpfs -o mode=0755 t715-rw "$RWDIR" || return 1
     mkdir -p "$RWDIR/upper" "$RWDIR/work"
-    run mount -t overlay -o "lowerdir=$LOWER,upperdir=$RWDIR/upper,workdir=$RWDIR/work" \
-        t715-root "$NEWROOT" || return 1
+    if ! run mount -t overlay -o "lowerdir=$LOWER,upperdir=$RWDIR/upper,workdir=$RWDIR/work" \
+        t715-root "$NEWROOT"; then
+        FAIL_REASON="Omarchy could not start: a system limit was hit. Hold Power and Volume down to restart."
+        return 1
+    fi
     log "overlay root on $NEWROOT: image read-only below, tmpfs above (changes are lost at reboot)"
 }
 
@@ -1026,10 +1102,14 @@ seed_cleanup() {
 # chrooted into the image, onto /mnt, where USERDATA/.NAME.t715-seed is
 # bind-mounted; /mnt itself is created empty.  The marker goes in last,
 # then the directory is renamed NAME.  An interrupted seed leaves only the
-# hidden directory, which the next attempt removes.
+# hidden directory, which the next attempt removes.  The owner watching
+# the tablet sees the start, a percentage every 10 s and the end (say):
+# the copy takes minutes, and the screen is the only feedback without a
+# USB cable.
 seed_persist() {
     _sp_tmp=$UD_MNT/.$PERSIST.t715-seed
     log "seeding USERDATA/$PERSIST from $ROOTIMG (first boot of this persistent root)"
+    say "Setting up Omarchy (first boot), this takes a few minutes"
     attach_image || return 1
     mkdir -p "$LOWER"
     if ! run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER"; then
@@ -1060,6 +1140,11 @@ seed_persist() {
     fi
     if [ "$_sp_free" -lt $((_sp_used + SEED_MARGIN_KIB)) ]; then
         err "USERDATA has $((_sp_free / 1024)) MiB free, the seed needs $(((_sp_used + SEED_MARGIN_KIB) / 1024)) MiB"
+        # Not fatal for the boot: image mode still starts, but the owner
+        # must know why their changes will not survive a reboot.
+        _sp_short=$((_sp_used + SEED_MARGIN_KIB - _sp_free))
+        [ "$_sp_short" -lt 1048576 ] && _sp_short=1048576
+        say "Not enough free space: running from the image; changes are lost at reboot. Free about $((_sp_short / 1048576)) GB and restart"
         seed_cleanup
         return 1
     fi
@@ -1067,8 +1152,39 @@ seed_persist() {
         seed_cleanup
         return 1
     fi
-    log "copying $((_sp_used / 1024)) MiB from the image (one-time, the screen stays dark)"
+    log "copying $((_sp_used / 1024)) MiB from the image (one-time, progress on screen)"
     _sp_t0=$(date +%s)
+    # Progress monitor: bytes written to USERDATA since the seed began
+    # (statfs of USERDATA; du on the growing tree would compete with the
+    # copy for the disk) over the space the image's tree uses.  A say
+    # every 10 s (a first one at once: a fast copy still shows something),
+    # 1-second sleeps so at most one orphaned sleep outlives the kill
+    # below.  Capped at 99 %: 100 % belongs to the final line.
+    (
+        _sp_b0=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $3 }')
+        case $_sp_b0 in
+        '' | *[!0-9]*) exit 0 ;;
+        esac
+        _sp_i=0
+        while :; do
+            if [ "$_sp_i" -gt 0 ]; then
+                sleep 1
+            fi
+            _sp_i=$((_sp_i + 1))
+            [ $((_sp_i % 10)) -eq 1 ] || continue
+            _sp_b=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $3 }')
+            case $_sp_b in
+            '' | *[!0-9]*) continue ;;
+            esac
+            _sp_d=$((_sp_b - _sp_b0))
+            [ "$_sp_d" -lt 0 ] && _sp_d=0
+            _sp_p=$((_sp_d * 100 / _sp_used))
+            [ "$_sp_p" -gt 99 ] && _sp_p=99
+            [ "$_sp_p" -lt 1 ] && _sp_p=1
+            say "Setting up Omarchy (first boot): $_sp_p%"
+        done
+    ) &
+    _sp_prog=$!
     _sp_rc=0
     for _sp_e in "$LOWER"/* "$LOWER"/.[!.]* "$LOWER"/..?*; do
         [ -e "$_sp_e" ] || [ -L "$_sp_e" ] || continue
@@ -1079,6 +1195,13 @@ seed_persist() {
         *) run chroot "$LOWER" /usr/bin/cp -a "/$_sp_n" /mnt/ || _sp_rc=1 ;;
         esac
     done
+    kill "$_sp_prog" 2>/dev/null
+    wait "$_sp_prog" 2>/dev/null
+    if [ "$_sp_rc" != 0 ]; then
+        err "copying the image into USERDATA/.$PERSIST.t715-seed failed"
+        seed_cleanup
+        return 1
+    fi
     run umount "$LOWER/mnt" || _sp_rc=1
     if [ "$_sp_rc" != 0 ]; then
         err "copying the image into USERDATA/.$PERSIST.t715-seed failed"
@@ -1099,12 +1222,80 @@ seed_persist() {
     sync
     seed_cleanup
     log "USERDATA/$PERSIST seeded in $(($(date +%s) - _sp_t0))s"
+    say "Setup finished. Starting Omarchy."
+}
+
+# check_image_sum: before a seed (only then: an image-mode boot or an
+# existing persistent root never verifies anything), if the selected image
+# has a checksum sidecar next to it, <image>.sha256 (sha256sum format, one
+# line naming the image's own file name), verify the image with sha256sum
+# -c.  USERDATA is still mounted read-only here: a mismatch (a truncated
+# copy on the tablet) or a malformed sidecar then leaves the tablet byte-
+# identical, and the boot falls back to image mode.  A sidecar naming
+# anything but the image's own file name is malformed: the sidecar travels
+# with the image (same push, same rename), and letting it name another
+# file would invite copy/paste mistakes to pass.  No sidecar: no check
+# (older images never had one), the boot goes on as before.
+check_image_sum() {
+    _cs_img=$UD_MNT/$ROOTIMG
+    _cs_sum=$_cs_img.sha256
+    if [ ! -f "$_cs_sum" ]; then
+        log "no checksum file for $ROOTIMG, copying without a check"
+        return 0
+    fi
+    say "Checking the image..."
+    case $ROOTIMG in
+    */*) _cs_dir=$UD_MNT/${ROOTIMG%/*} ;;
+    *) _cs_dir=$UD_MNT ;;
+    esac
+    _cs_name=${ROOTIMG##*/}
+    # One line: the hash, whitespace, the image's own file name.  Strict
+    # on purpose: the sidecar travels with the image (same push, same
+    # rename), so anything else is a copy/paste mistake, and a whole
+    # SHA256SUMS pasted next to an image must not pass as this image's
+    # checksum.
+    _cs_nlines=$(grep -c . "$_cs_sum" 2>/dev/null)
+    _cs_line=$(head -n 1 "$_cs_sum" 2>/dev/null)
+    _cs_hash=${_cs_line%%[!0-9a-fA-F]*}
+    _cs_rest=${_cs_line#"$_cs_hash"}
+    case ${_cs_rest} in
+    [[:space:]]$_cs_name | [[:space:]]*[[:space:]]$_cs_name | [[:space:]]*"$_cs_name") ;;
+    *)
+        err "malformed checksum file $ROOTIMG.sha256 (expected: one line, the hash, the image's file name)"
+        _log_lines 3 "$(cat "$_cs_sum" 2>/dev/null)"
+        say "The image file is damaged (bad checksum). Copy it to the tablet again."
+        return 1
+        ;;
+    esac
+    if [ "${#_cs_hash}" != 64 ] || [ "${_cs_nlines:-0}" != 1 ]; then
+        err "malformed checksum file $ROOTIMG.sha256 (expected: one line, the hash, the image's file name)"
+        say "The image file is damaged (bad checksum). Copy it to the tablet again."
+        return 1
+    fi
+    # sha256sum -c runs in the image's directory: sidecars written by
+    # sha256sum NAME (GNU or busybox) carry the file name as given, and
+    # busybox does not accept absolute paths in the check file.
+    _cs_out=$(cd "$_cs_dir" && sha256sum -c "$_cs_sum" 2>&1)
+    _cs_rc=$?
+    if [ "$_cs_rc" -eq 0 ]; then
+        log "image checksum verified ($ROOTIMG.sha256)"
+        return 0
+    fi
+    err "image checksum check failed: checksum mismatch (exit $_cs_rc)"
+    _log_lines 3 "$_cs_out"
+    say "The image file is damaged (bad checksum). Copy it to the tablet again."
+    return 1
 }
 
 # persist_root: USERDATA read-write, the persistent root on /newroot.
 persist_root() {
     _pr_dir=$UD_MNT/$PERSIST
     log "persistent root $PERSIST: USERDATA goes read-write"
+    if [ ! -e "$_pr_dir" ] && [ ! -L "$_pr_dir" ]; then
+        # A first boot seeds: verify the image while USERDATA is still
+        # read-only, so a bad sidecar changes nothing on the tablet.
+        check_image_sum || return 1
+    fi
     run umount "$UD_MNT" || return 1
     run blockdev --setrw "$UD_DEV" || return 1
     fsck_userdata || return 1
@@ -1213,10 +1404,12 @@ return_timer_start() {
 handoff() {
     if ! is_mounted "$NEWROOT"; then
         err "$NEWROOT is not mounted"
+        FAIL_REASON="Omarchy could not start. Hold Power and Volume down to restart."
         return 1
     fi
     if [ ! -x "$NEWROOT$NEW_INIT" ]; then
         err "$NEW_INIT is missing or not executable in the image"
+        FAIL_REASON="Omarchy could not start: the Linux image file is damaged. Copy it to the tablet again, then restart. Hold Power and Volume down to restart."
         return 1
     fi
     if [ "$$" != 1 ]; then
@@ -1285,8 +1478,34 @@ shell_wait() {
 }
 
 # fail_wait: returns 0 when the debug shell asks to retry the hand-over,
-# 1 when the reboot timer expired.
+# 1 when the reboot timer expired.  The reason goes on screen first, then
+# what happens next: "rebooting in N seconds", or, with t715.failreboot=0,
+# an endless wait (the owner decides when to restart: hold Power and
+# Volume down; a battery drained on an error screen is better than five
+# minutes of reboot loop in a bag).  The touch flags still work when the
+# shell is up (t715.telnet=1).
 fail_wait() {
+    if [ -z "$FAIL_REASON" ]; then
+        FAIL_REASON="Omarchy could not start. Hold Power and Volume down to restart."
+    fi
+    say "$FAIL_REASON"
+    if [ "$FAILREBOOT" = 0 ]; then
+        say "waiting: hold Power and Volume down to restart"
+        log "boot stopped: waiting on screen instead of rebooting (t715.failreboot=0; $CONTINUE_FLAG retries the switch_root)"
+        # Host-test: exit 97 right after the message, so a test can see it.
+        if [ -n "$TEST" ]; then
+            exit 97
+        fi
+        while :; do
+            if [ -e "$CONTINUE_FLAG" ]; then
+                rm -f "$CONTINUE_FLAG"
+                log "continue requested from the debug shell"
+                return 0
+            fi
+            sleep 1
+        done
+    fi
+    say "rebooting in ${FAILWAIT} seconds"
     if [ -z "$NET_UP" ]; then
         log "retrying the USB debug link"
         net_up || warn "no USB debug link"
@@ -1393,6 +1612,8 @@ main() {
     quiet_console
     wdt_guard
     [ -n "$TEST" ] || load_modules
+    # The debug link (DHCP with telnet off, telnetd with t715.telnet=1) is
+    # up before the first seed: its progress takes minutes.
     net_up || warn "USB debug link not available, booting without it"
     if prepare_root; then
         if [ "$SHELL_MODE" = 1 ]; then

@@ -62,10 +62,12 @@ file can look stale. The initramfs logs a warning in that case.
 | Knob | Default | Effect |
 |------|---------|--------|
 | `t715.rootimg=PATH` | `media/0/linux/rootfs.img` | image path inside USERDATA (no `..`) |
-| `t715.shell=1` | `0` | prepare `/newroot`, then wait in the debug shell; `touch /tmp/t715-continue` there to boot Arch |
+| `t715.shell=1` | `0` | prepare `/newroot`, then wait in the debug shell; `touch /tmp/t715-continue` there to boot Arch (needs `t715.telnet=1`) |
 | `t715.failwait=SECS` | `300` | on failure, keep the debug shell up this long, then `reboot -f` (back to Android); `touch /tmp/t715-stay` cancels the timer |
+| `t715.failreboot=0` | `1` | on failure, show the error on screen and wait (hold Power + Volume down to restart) instead of rebooting after `t715.failwait` |
 | `t715.rootwait=SECS` | `20` | how long to wait for USERDATA |
 | `t715.usbfn=rndis\|ecm` | `rndis` | USB function of the debug link (`ecm` = CDC-ECM) |
+| `t715.telnet=1` | `0` | the root telnet shell on the USB debug link (no password); off by default, the link and DHCP still come up |
 | `t715.modules=0` | `1` | do not insert `/lib/t715-modules/*.ko` (the GPU modules packed with `--modules`; the module tree is still copied into the root) |
 | `t715.modblacklist=a,b` | (none) | write `blacklist a` / `blacklist b` into `/run/modprobe.d` (for this boot only): udev no longer autoloads them, `modprobe` by hand still works (bring-up tests) |
 | `t715.autotest=1` | `0` | **test images only**: once Arch is up, run `t715-autotest.sh` from the root image's directory (Android `/sdcard/linux/`) as root through a runtime `t715-autotest.service` in `/run/systemd/system`, journal forwarded to the kernel log (read back from Android in `/proc/last_kmsg`). Any Android app that can write `/sdcard` can plant that script: never bake it into a daily image |
@@ -122,16 +124,25 @@ Android's USERDATA says "panic" on errors), bind-mounts `USERDATA/NAME` on
 `/newroot` and hands over. Everything changed in Arch survives reboots:
 Wi-Fi networks, pairings, settings, installed packages.
 
-On the first boot `NAME` does not exist yet. The image of the first line
-is attached read-only and copied into `USERDATA/.NAME.t715-seed` by the
-image's own `cp -a` (chrooted into the image, so GNU cp keeps owners,
-modes, hard links, xattrs and file capabilities; `lost+found` is
-skipped). The marker `.t715-persist` (seed image, kernel, initramfs build,
-date) goes in last, then the directory is renamed `NAME`. The copy of the
-3.2 GiB Omarchy image takes a few minutes with a dark screen; the debug
-shell is up meanwhile (`tail /run/t715/initramfs.log`). An interrupted
-seed leaves only the hidden directory, removed by the next attempt. The
-seed refuses to start with less than the image's use + 512 MiB free.
+On the first boot `NAME` does not exist yet. If a checksum sidecar
+`<image>.sha256` (one `sha256sum`-format line naming the image's own file
+name) sits next to the selected image, it is verified first ("Checking
+the image..." on screen); a mismatch or a malformed sidecar refuses the
+seed without touching USERDATA (still read-only at that point) and falls
+back to image mode. Without a sidecar the seed runs unchecked, as before.
+
+The image is then attached read-only and copied into
+`USERDATA/.NAME.t715-seed` by the image's own `cp -a` (chrooted into the
+image, so GNU cp keeps owners, modes, hard links, xattrs and file
+capabilities; `lost+found` is skipped). The marker `.t715-persist` (seed
+image, kernel, initramfs build, date) goes in last, then the directory is
+renamed `NAME`. The screen shows the start, a percentage about every
+10 s and the end: the copy of the 3.2 GiB Omarchy image takes a few
+minutes. An interrupted seed leaves only the hidden directory, removed by
+the next attempt. The seed refuses to start with less than the image's
+use + 512 MiB free — then the tablet says so on screen ("Not enough free
+space: running from the image; changes are lost at reboot. Free about N
+GB and restart") and boots the image read-only instead.
 
 Safety rules: a `NAME` that exists without the marker is never touched
 (the boot falls back to the image), and so is any failure (e2fsck,
@@ -159,9 +170,25 @@ nc 172.16.42.1 23            # macOS has no telnet since 10.13 (or: brew install
 sudo ifconfig enX inet 172.16.42.2/24   # only if DHCP did not configure it
 ```
 
-telnetd listens on 172.16.42.1:23 only, and the shell has no password.
-macOS has no built-in RNDIS driver. If no interface appears, rebuild with
-`--knobs "t715.usbfn=ecm"` (CDC-ECM is native on macOS).
+The root telnet shell is **off by default** (`t715.telnet=0`: the link
+still comes up, DHCP still answers, but nothing listens on port 23 — the
+default for a tablet handed to an end user). Bake
+`--knobs "t715.telnet=1"` (or pass it on the kernel command line) to get
+it back; telnetd then listens on 172.16.42.1:23 only, and the shell has
+no password. macOS has no built-in RNDIS driver. If no interface appears,
+rebuild with `--knobs "t715.usbfn=ecm"` (CDC-ECM is native on macOS).
+
+### On-screen messages
+
+`t715.quiet=1` keeps the screen black until the splash, which also hid
+first-boot progress and errors. What the owner must see now goes to the
+VT whatever the console loglevel: a first boot says "Setting up Omarchy
+(first boot), this takes a few minutes" and a percentage about every
+10 s; every failure shows its reason and what happens next (rebooting in
+N seconds, or waiting with `t715.failreboot=0`: hold Power and Volume
+down to restart); a persistent root that falls back to the image for lack
+of space says how much to free. These lines are in the kernel log too,
+prefixed `t715-initramfs:`.
 
 ### Logs and layout
 
