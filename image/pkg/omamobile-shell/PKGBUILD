@@ -49,6 +49,9 @@
 #     a password is chosen.
 #   - 0009-tablet-back-gesture.patch: the edge swipe does what the Back key does.
 #   - 0010-tablet-location-tile.patch: the Location tile over t715-gps.
+#   - 0011-tablet-modem-tile.patch: the Modem tile over t715-modem-power (the
+#     CP off now and at boot; a long press opens Réseau mobile and its standby
+#     setting), and "Modem off" on the Mobile data tile while it is off.
 # Upstream now does what three of our old patches did, so they are gone:
 #   - 0003-tablet-drawer-opens-light: since 0.2.56/0.2.62 the drawer opens
 #     with no icon rescan (refreshIcons moved after the slide, in settled())
@@ -102,7 +105,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.94
-pkgrel=1
+pkgrel=2
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -129,6 +132,7 @@ source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit
         0008-tablet-set-pin.patch
         0009-tablet-back-gesture.patch
         0010-tablet-location-tile.patch
+        0011-tablet-modem-tile.patch
         tablet-shell.json
         tablet-home.json)
 sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
@@ -142,6 +146,7 @@ sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
             'eb0e574121256721f56b9e7fe042c807df547f1c7943f110fba97839839787ec'
             'a053230db73e583344b547c965b0a932dd849ed7a052c70a575f1df9dc13b8c2'
             '7f5a49ea2d46b0e7523f97cbc401e2af806c7cb3dffbe3f057d44ec3e5fe02ec'
+            'dc8db0711566e1463938c5bc4ea725e08e05e2853100903447ff2eaa9c664cd1'
             '1bb18754cd60203f28f5ad947c7dd9eddf52d66d3ddd6ee2e206b795a8126166'
             '7643f6faa8ed82e31f01ecc3a0767684c68df009318c02d1ae1158f497ce1450')
 noextract=("$_tarball")
@@ -166,6 +171,7 @@ prepare() {
   patch -Np1 -i "$srcdir/0008-tablet-set-pin.patch"
   patch -Np1 -i "$srcdir/0009-tablet-back-gesture.patch"
   patch -Np1 -i "$srcdir/0010-tablet-location-tile.patch"
+  patch -Np1 -i "$srcdir/0011-tablet-modem-tile.patch"
   cp "$srcdir/tablet-shell.json" profile/shell.json
   cp "$srcdir/tablet-home.json" profile/home.json
 }
@@ -244,6 +250,10 @@ PY
   grep -q '"hotspot"' plugins/omamobile.quicksettings/TilesModel.js
   # The Location tile over t715-gps (0010).
   grep -q '"location"' plugins/omamobile.quicksettings/TilesModel.js
+  # The Modem tile over t715-modem-power (0011).
+  grep -q '{ id: "modem", label: "Modem" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'exec t715-modem-power "$want"' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q '"modem": modem' plugins/omamobile.quicksettings/QuickSettings.qml
   # The edge swipe goes through t715-keys (0009).
   grep -q 'signal=SIGHUP' plugins/omamobile.back/BackModel.js
   # Airplane mode reaches the modem (0007).

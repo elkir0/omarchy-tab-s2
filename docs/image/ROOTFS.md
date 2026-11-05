@@ -414,7 +414,7 @@ a widget a bar has instantiated, so they were already absent here, and
 | Surface | Plugin | On the tablet |
 |---|---|---|
 | Status bar | `omamobile.bar` | 44 px at the top: clock, Bluetooth, Wi-Fi, battery, unread count; a tap or a pull down opens quick settings |
-| Quick settings | `omamobile.quicksettings` | a sheet from the top: Wi-Fi, Bluetooth, Do not disturb, Airplane mode in the collapsed row, then Battery saver, Dark theme, Night light, Keyboard, Clipboard, Screenshot (3 columns at 768 px); brightness and volume; the gear opens Omarchy's menu; the notification shade under it; the Wi-Fi picker and the Bluetooth panel (`omamobile-bt-agent`) |
+| Quick settings | `omamobile.quicksettings` | a sheet from the top: Wi-Fi, Bluetooth, Mobile data, Do not disturb first, then Airplane mode, Rotation, Rotate, Battery saver, Dark theme, Night light, Keyboard, Clipboard, Screenshot, Location and Modem (3 columns at 768 px); brightness and volume; the gear opens Omarchy's menu; the notification shade under it; the Wi-Fi picker and the Bluetooth panel (`omamobile-bt-agent`) |
 | Home screens | `omamobile.home` | pages on the wallpaper, a 6x8 grid: clock, quick toggles and Phone, Messages, Chromium, Firefox, Files, foot, btop, Papers, mpv on page 1, media and battery on page 2 (`image/pkg/omamobile-shell/tablet-home.json`); long press for edit mode |
 | Dock, drawer, home pill | `omamobile.launcher` | on an empty workspace the dock's search pill opens the drawer (6 columns); over an app the home pill: swipe up for home, swipe up and hold for recent apps; under the keyboard a 32 px strip does the same |
 | Recent apps | `omamobile.switcher` | swipe up on the dock, or Home held; cards with live previews, flick up to close, Clear all |
@@ -811,10 +811,10 @@ unit skips itself and the image behaves as before.
 
 | Package | Role |
 |---|---|
-| `t715-modem` (`image/pkg/t715-modem`, from `modem/`) | loader and supervisor, `shannond` and its ModemManager facade, units, NV provisioning from EFS (read only, first boot), call audio hook, `t715-call-profile` (the "Voice Call" PipeWire profile, while WirePlumber is older than 0.5.15), `t715-sim-pin` (SIM PIN dialog), udev rules, modprobe blacklist |
-| `t715-mobile-settings` (in `t715-modem`) | the APN, data, roaming, technologies and SIM state. omarchy-mobile's plan has a "Mobile network" sheet; its code at `5f7ba48` does not |
+| `t715-modem` (`image/pkg/t715-modem`, from `modem/`) | loader and supervisor, `shannond` and its ModemManager facade, units, NV provisioning from EFS (read only, first boot), call audio hook, `t715-call-profile` (the "Voice Call" PipeWire profile, while WirePlumber is older than 0.5.15), `t715-sim-pin` (SIM PIN dialog), `t715-modem-power` (the modem's switch and its standby setting, `docs/hardware/MODEM.md` §5.4), udev rules, modprobe blacklist |
+| `t715-mobile-settings` (in `t715-modem`) | the modem's switch and its standby setting, the APN, data, roaming, technologies and SIM state. omarchy-mobile's plan has a "Mobile network" sheet; its code at `5f7ba48` does not |
 | `omatel-agent`, `omaphone`, `omamessages` | omarchy-mobile's telephony: the session service (ringing, call log, SMS store, notifications) and the Phone and Messages apps, over the ModemManager API; `configure-system.sh` enables the agent for every user |
-| `omamobile-shell` | the bar's cellular icon and call chip, the call card (`omamobile.call`) and the mobile data tile, on NetworkManager's gsm connection (`0005-tablet-modem.patch`) |
+| `omamobile-shell` | the bar's cellular icon and call chip, the call card (`omamobile.call`) and the mobile data tile, on NetworkManager's gsm connection (`0004-tablet-modem.patch`); the Modem tile over `t715-modem-power` (`0011-tablet-modem-tile.patch`) |
 | `modemmanager` | `mmcli` only; `ModemManager.service` is masked, shannond's facade owns the bus name |
 
 `configure-system.sh` puts `alarm` in the `radio` group (`shannonctl`, the

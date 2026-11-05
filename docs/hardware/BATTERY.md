@@ -640,3 +640,48 @@ As installed, the same method as the baseline above
 10 minutes, the CP online, the Wi-Fi connected, cpu0-3): **754 mW**
 (184 mA at 4.10 V), 102 mW under `#5`'s 856. On the 15.2 Wh battery that
 is about 20 hours with the screen off, 5 % an hour.
+
+## 12. The modem's share of standby (2026-11-05)
+
+**A real standby.** Off USB for 1 h 54 min, the screen off but for ten
+seconds (the Home key, in `t715-keys`' log), the tablet lost 8 points in 103
+minutes by upower's history: 4.7 % an hour, about 0.71 W on the 15.2 Wh
+battery. The owner read it as 8 % an hour. It is the 754 mW of section 11: the CP online and the Wi-Fi
+connected, the CP here without a SIM (CS registration denied, UMTS, radio
+on).
+
+**Measured** (`power-windows.sh` actions `modem_off`, `modem_on`, `wwan_off`
+and `wwan_on`, kernel `#6` from BOOT, the persistent root, the Wi-Fi
+connected, the screen off, nine alternating 5-minute windows after a 4-minute
+settle, the first 90 s of each dropped; `power-stats.py --skip 90`):
+
+| State | Windows |
+|---|---|
+| CP online, radio on (no SIM) | 750, 814, 742 mW |
+| CP online, radio off (airplane mode's `nmcli radio wwan off`) | 742, 734, 753 mW |
+| CP off (shannond and the loader stopped, `MODEM_OFF`) | 572, 588, 604 mW |
+
+The fit gives **+155 ± 22 mW for the CP powered**, its radio off, and +28 ±
+22 mW for the radio on, which the noise does not separate from zero. Airplane
+mode therefore saves next to nothing; powering the CP off saves a fifth of the
+screen-off draw: about 0.59 W, 3.9 % an hour, 26 hours on the battery,
+against 20 with the CP online. The interrupt rate and the CPUs' idle share did
+not change with the CP (700-790 interrupts a second, 98-99 % idle in every
+window): the cost is the CP's own, not the AP's.
+
+Why a CP with its radio off costs that much: the port holds the MIPI-LLI link
+up for as long as the CP runs (`start_pm` raises AP2CP_WAKEUP and keeps it;
+decision D2 of `research/modem/research/SYNTHESIS.md`, "cost accepted: higher
+idle power during bring-up"), so the CP is never let go to sleep. Stock
+Android releases the link about every three seconds through a CP-led
+handshake (SYNTHESIS §2.16), and the CP can sleep in between. Porting that
+state machine (D2's fallback F2) is what would make a modem kept on cheap.
+Until then the switch is the lever: `t715-modem-power off`, the Modem tile, or
+Réseau mobile's "Éteindre en veille" (`docs/hardware/MODEM.md` §5.4).
+
+The measurement powered the CP off and on three times: each stop ended with
+`MODEM_OFF` 3.6 s after the request, each power-on reached ONLINE in 9.92 to
+9.94 s, and `power-windows.sh` put the modem back online at its end (CP
+session 4 of that boot). The 40 to 50 `NOSPC in RAW_TXQ` lines of the
+kernel's modem driver during each power-on are the boot channel's flow
+control while MAIN streams; the tablet's first boot that day had as many.

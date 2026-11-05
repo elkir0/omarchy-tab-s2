@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The modem off in standby: started by "t715-modem-power dark" when the screen goes off
+# and the standby setting is off; "lit" stops it. Once the screen has stayed off this
+# long, t715-modem-standby.service powers the CP off. A minute, so that a short dark
+# screen does not boot the CP again.
+
+[Unit]
+Description=Modem off after a minute of dark screen
+
+[Timer]
+OnActiveSec=60
+AccuracySec=5s
+# Inactive once elapsed, so that the next "dark" starts it again.
+RemainAfterElapse=no

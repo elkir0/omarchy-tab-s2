@@ -15,10 +15,15 @@
 # kernel that allows it), a53_on, wifi_off (NetworkManager's radio), wifi_on,
 # and on a brcmfmac with ps_mode/ps_timeout/bcn_li_dtim: wps_fast2000 (PM_FAST,
 # pm2_sleep_ret 2 s: the stock driver), wps_fast100 (PM_FAST, 100 ms),
-# wps_max3 (PM_MAX, every third DTIM); none.  Cuts USB by the MUIC (20-0025: MANSW1 0x13 = 0x00,
-# CONTROL 0x02 = 0x1a), samples the gauge every DT seconds (default 5) with
+# wps_max3 (PM_MAX, every third DTIM); modem_off (shannond and shannon-loader
+# stopped: the loader powers the CP off), modem_on (shannon-modem-prepare
+# started: the CP boots again), wwan_off and wwan_on (NetworkManager's WWAN
+# radio: the CP's radio off or on, as airplane mode does); none.  Cuts USB by
+# the MUIC (20-0025: MANSW1 0x13 = 0x00, CONTROL 0x02 = 0x1a), samples the
+# gauge every DT seconds (default 5) with
 # shell builtins only, then always puts USB back (0x02 = 0x1e, 0x13 = 0x27)
-# and the online CPUs, the A53 limit and the Wi-Fi radio as it found them.
+# and the online CPUs, the A53 limit, the Wi-Fi radio and its power save
+# settings, and the modem as it found them.
 # NOUSB=1 keeps USB.  Never reads the MUIC INT registers (0x03-0x04).
 # Analyse with image/tests/power-stats.py.
 set -u
@@ -35,7 +40,10 @@ G3D=/sys/kernel/debug/pm_genpd/G3D/current_state
 CPUS0=""; for n in 1 2 3 4 5 6 7; do [ -r $CPU/cpu$n/online ] && CPUS0="$CPUS0 $n:$(cat $CPU/cpu$n/online)"; done
 read -r LIMIT0 < $POL0/scaling_max_freq
 WIFI0=$(nmcli radio wifi 2>/dev/null)
+WWAN0=$(nmcli radio wwan 2>/dev/null)
+MODEM0=$(systemctl is-active shannon-loader.service)
 BRCMF=/sys/module/brcmfmac/parameters
+PS0=""; [ -r $BRCMF/ps_mode ] && PS0="$(cat $BRCMF/ps_mode) $(cat $BRCMF/ps_timeout) $(cat $BRCMF/bcn_li_dtim)"
 
 wps() { # power save mode, pm2_sleep_ret, bcn_li_dtim; applied by power save off and on
 	[ -w $BRCMF/ps_mode ] || return
@@ -68,6 +76,10 @@ act() {
 	wps_fast2000) wps 2 -1 0 ;;
 	wps_fast100)  wps 2 100 0 ;;
 	wps_max3)     wps 1 -1 3 ;;
+	modem_off) systemctl stop shannond.service shannon-loader.service ;;
+	modem_on)  systemctl start shannon-modem-prepare.service ;;
+	wwan_off)  nmcli radio wwan off ;;
+	wwan_on)   nmcli radio wwan on ;;
 	none) ;;
 	*) echo "# unknown action $1" >> "$OUT" ;;
 	esac
@@ -81,8 +93,9 @@ sample() {
 	read -r t1 < /sys/class/thermal/thermal_zone1/temp
 	read -r on < $CPU/online
 	g3d=-; [ -r $G3D ] && read -r g3d < $G3D
+	cp=-; [ -r /run/shannon/cp-state ] && { read -r _ cp < /run/shannon/cp-state; cp=${cp#state=}; }
 	{ read -r _ u n s i _; while read -r k v _; do [ "$k" = intr ] && break; done; } < /proc/stat
-	echo "$up ph=$PH ma=$((ua / 1000)) mv=$((uv / 1000)) cap=$cap t=$bt tz=$t0,$t1 user=$u sys=$s idle=$i intr=$v cpus=$on g3d=$g3d" >> "$OUT"
+	echo "$up ph=$PH ma=$((ua / 1000)) mv=$((uv / 1000)) cap=$cap t=$bt tz=$t0,$t1 user=$u sys=$s idle=$i intr=$v cpus=$on g3d=$g3d cp=$cp" >> "$OUT"
 }
 
 finish() {
@@ -90,7 +103,9 @@ finish() {
 	for e in $CPUS0; do echo "${e#*:}" > $CPU/cpu${e%:*}/online 2>/dev/null; done
 	echo "$LIMIT0" > $POL0/scaling_max_freq
 	[ "$WIFI0" = enabled ] && act wifi_on
-	wps 2 -1 0
+	[ "$WWAN0" = enabled ] && act wwan_on
+	[ "$MODEM0" = active ] && [ "$(systemctl is-active shannon-loader.service)" != active ] && act modem_on
+	[ -n "$PS0" ] && wps $PS0
 	echo "# end $(cut -d' ' -f1 /proc/uptime)" >> "$OUT"
 }
 trap finish EXIT

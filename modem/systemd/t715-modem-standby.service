@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The modem off in standby, from t715-modem-standby.timer: the CP goes off unless a call
+# is up or the hotspot shares mobile data (t715-modem-power cut).
+
+[Unit]
+Description=Modem off in standby
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/t715-modem-power cut

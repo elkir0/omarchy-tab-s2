@@ -1,0 +1,178 @@
+The Modem tile, over t715-modem-power
+
+The modem's own switch, next to Airplane mode: off powers the SS333's CP down and
+keeps it off across a reboot, on boots it again (t715-modem-power, package
+t715-modem, through polkit; docs/hardware/MODEM.md §5.4). A long press opens
+Réseau mobile, which also holds the modem's standby setting. The Mobile data tile
+says "Modem off" rather than "Set up" while the switch is off. Against
+omarchy-mobile 87b8395 (omamobile-shell 0.2.94) and the patches before it,
+packages/omamobile-shell.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -221,7 +221,7 @@
+   // status, icon and toggle(); details (a chevron and a page) or longPress
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+-    "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane,
++    "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane, "modem": modem,
+     "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+@@ -1003,7 +1003,7 @@
+     // Bars from the signal sitd reports; crossed out with no modem, data
+     // off, or no network (TilesModel.dataIcon).
+     readonly property string icon: TilesModel.dataIcon(available, enabled, root.probed.data_signal)
+-    readonly property string status: !available ? "Set up"
++    readonly property string status: !available ? (root.probed.modem === "off" ? "Modem off" : "Set up")
+       : !enabled ? "Off" : (root.probed.data_status || "On")
+     readonly property bool longPress: true
+     function toggle() {
+@@ -1014,6 +1014,37 @@
+       root.dismiss()
+       Quickshell.execDetached(["t715-mobile-settings"])
+     }
++  }
++
++  // SM-T715 tablet: the modem itself (t715-modem-power, package t715-modem).
++  // Off powers the CP down, and it stays off across a reboot; on boots it
++  // again, about 10 s to the network, and the sheet looks again 12 s later.
++  // A long press opens Réseau mobile, which also has the modem's standby
++  // setting (off with the screen). "No modem" without the command or on a
++  // kernel without the modem.
++  QtObject {
++    id: modem
++    readonly property bool available: root.probedHas("modem")
++    readonly property bool enabled: available && root.probedOn("modem", "modem")
++    readonly property string icon: enabled ? "󰠕" : "󰥐"
++    readonly property string status: !available ? "No modem" : !enabled ? "Off"
++      : root.optimistic["modem"] !== undefined ? "Starting…" : TilesModel.modemStatus(root.probed.modem_cp)
++    readonly property bool longPress: true
++    function toggle() {
++      if (!available) return
++      root.runTileAction("modem", !enabled)
++      if (!enabled) modemProbeLater.restart()
++    }
++    function openDetails() {
++      root.dismiss()
++      Quickshell.execDetached(["t715-mobile-settings"])
++    }
++  }
++
++  Timer {
++    id: modemProbeLater
++    interval: 12000
++    onTriggered: root.refreshProbe()
+   }
+ 
+   // Rotation lock over omamobile-autorotate (omamobile-sensors): it rotates
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -17,12 +17,14 @@
+ // under upstream's omamobile-gnss command (docs/hardware/GPS.md).
+ // Mobile data goes through NetworkManager. Rotation is t715-rotate
+ // (docs/image/ROTATION.md). Hotspot needs the modem as its uplink: the tile
+-// takes the Wi-Fi radio off the client network while it is on.
++// takes the Wi-Fi radio off the client network while it is on. Modem is the
++// modem's own switch, t715-modem-power (docs/hardware/MODEM.md §5.4).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
++  { id: "modem", label: "Modem" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
+@@ -52,7 +54,7 @@
+   "wifi", "bluetooth", "mobile-data", "dnd",
+   "airplane", "rotation-lock", "rotate", "battery-saver",
+   "dark-theme", "night-light", "keyboard", "clipboard",
+-  "screenshot", "location"
++  "screenshot", "location", "modem"
+ ]
+ 
+ var QUICK_COUNT = 4
+@@ -214,6 +216,19 @@
+   return "Not installed"
+ }
+ 
++// The Modem tile's status while it is on, from tile-state.sh's modem_cp (the
++// CP's state as t715-modem-power reads it): online, booting, waiting (the
++// battery gate before a boot), crashed or offline (the loader's silent reset),
++// stopping, off (the loader stopped: a refused boot, or the standby's cut).
++function modemStatus(cp) {
++  if (cp === "online") return "On"
++  if (cp === "booting" || cp === "waiting") return "Starting…"
++  if (cp === "crashed" || cp === "offline") return "Restarting…"
++  if (cp === "stopping") return "Stopping…"
++  if (cp === "off") return "Not running"
++  return "On"
++}
++
+ function themeName(name) {
+   return String(name || "").split("-").filter(function(part) { return part.length > 0 })
+     .map(function(part) { return part.charAt(0).toUpperCase() + part.slice(1) }).join(" ")
+@@ -264,6 +279,7 @@
+     parseProbe: parseProbe,
+     powerStatus: powerStatus,
+     dictationStatus: dictationStatus,
++    modemStatus: modemStatus,
+     themeName: themeName,
+     dataSignal: dataSignal,
+     dataIcon: dataIcon
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -101,6 +101,11 @@
+       exec omamobile-screenrecord stop
+     fi
+     ;;
++  modem)
++    # SM-T715: the modem's own switch (t715-modem-power, through polkit). Off
++    # powers the CP down and keeps it off across a reboot; on boots it again.
++    exec t715-modem-power "$want"
++    ;;
+   mobile-data)
+     # The first gsm connection (t715-mobile on the SM-T715).
+     con=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2 == "gsm" { print $1; exit }')
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -23,6 +23,11 @@
+ #                 when idle; down when its user service isn't running, none
+ #                 without voxtype (in the root image; Remove > Dictation
+ #                 takes it out)
++#   modem         SM-T715: on while the modem's switch is on (t715-modem-power),
++#                 off when it is off; none without the command, or on a kernel
++#                 without the modem
++#   modem_cp      the CP's state while it is on: online, booting, waiting,
++#                 crashed, offline, stopping or off
+ 
+ t() { timeout 3 "$@" 2>/dev/null; }
+ have() { command -v "$1" >/dev/null 2>&1; }
+@@ -105,6 +110,22 @@
+   fi
+ else
+   echo "dictation=none"
++fi
++
++# modem: the switch's state from t715-modem-power's JSON, read with the
++# shell's own patterns (no other process).
++if have t715-modem-power; then
++  json=$(t t715-modem-power status --json)
++  case $json in
++    *'"installed":true'*)
++      case $json in *'"modem":"on"'*) echo "modem=on" ;; *) echo "modem=off" ;; esac
++      cp=${json#*\"cp\":\"}
++      echo "modem_cp=${cp%%\"*}"
++      ;;
++    *) echo "modem=none" ;;
++  esac
++else
++  echo "modem=none"
+ fi
+ 
+ # data: the NetworkManager gsm connection on the modem (SM-T715: the modem is

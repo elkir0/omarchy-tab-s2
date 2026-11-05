@@ -52,6 +52,13 @@
 # The touchscreen goes off with the screen: Hyprland keeps delivering touches
 # to apps while the panel is off, and nothing locks the session.
 #
+# So may the modem, when Réseau mobile's "Éteindre en veille" is on
+# (t715-modem-power standby-off, docs/hardware/MODEM.md §5.4): at each screen off
+# this starts "t715-modem-power dark", which arms a minute's timer before the CP
+# goes off, and at each screen on "t715-modem-power lit", which stops the timer
+# and boots the CP again if it went off. Neither is started while the setting
+# keeps the modem on.
+#
 # The screen's state comes from the panel's DPMS file in sysfs, or from
 # Hyprland (dpmsStatus) where there is none, at each press. Only a positive
 # "off" counts: a Hyprland that does not answer reads as lit, so a press never
@@ -67,6 +74,9 @@
 #   T715_KEYS_RESYNC      seconds between screen checks while dark (default
 #                         5): if something else lit the screen, the
 #                         touchscreen comes back on
+#   T715_KEYS_MODEM_STANDBY, T715_KEYS_MODEM_CUT
+#                         t715-modem-power's standby setting and the file that
+#                         says the standby powered the CP off (for tests)
 #
 # SIGUSR1 turns the screen off as a short Power press does (touch first):
 # t715-idle.service (hypridle) sends it after two minutes without input, and
@@ -130,6 +140,11 @@ BIG_CORE_IDS = (7, 6, 5, 4)
 # which the resync would otherwise start every T715_KEYS_RESYNC seconds while
 # the screen is dark.
 DPMS_SYSFS = os.environ.get("T715_KEYS_DPMS", "/sys/class/drm/card*-DSI-1/dpms")
+# The modem's standby (t715-modem-power): its setting ("off" powers the CP down
+# with the screen), and the mark it leaves while the CP is off for that.
+MODEM_STANDBY = os.environ.get("T715_KEYS_MODEM_STANDBY", "/var/lib/t715-modem-power/standby")
+MODEM_CUT = os.environ.get("T715_KEYS_MODEM_CUT", "/run/t715-modem-power/cut")
+MODEM_POWER = "t715-modem-power"
 MENU_SYSTEM = ["omarchy-menu", "toggle", "system"]
 MENU_CLOSE = ["omarchy-menu", "close"]
 # The touch shell (omamobile-shell) through the Omarchy shell's IPC, as its
@@ -258,9 +273,10 @@ def namespaces(tree):
 
 
 class Screen:
-    def __init__(self, mode, state_dir):
+    def __init__(self, mode, state_dir, spawn=None):
         self.mode = mode
         self.state_dir = state_dir
+        self.spawn = spawn
         self.touch_flag = os.path.join(state_dir, "touch-off")
         self.saved_flag = os.path.join(state_dir, "saved-brightness")
         self._device = None
@@ -320,8 +336,16 @@ class Screen:
                     log("cpu%d did not go %s: %s" % (n, "online" if online else "offline", e))
                     self.big_cores_failed = True
 
+    def modem(self, lit):
+        # Started, not waited for: polkit and systemd answer in their own time.
+        if read_sysfs(MODEM_STANDBY) != "off" and not (lit and os.path.exists(MODEM_CUT)):
+            return
+        if self.spawn and shutil.which(MODEM_POWER):
+            self.spawn([MODEM_POWER, "lit" if lit else "dark"])
+
     def touch(self, enabled):
         self.big_cores(enabled)
+        self.modem(enabled)
         # The flag says what Hyprland was told: left as it was on a failure, so
         # that the resync of a lit screen tries again.
         rc, _ = run(["hyprctl", "eval", TOUCH % ("true" if enabled else "false")])
@@ -698,7 +722,7 @@ def main(argv):
         glance = 20.0
 
     spawn = Spawner()
-    screen = Screen(mode, state_dir)
+    screen = Screen(mode, state_dir, spawn)
     touch = TouchWatch(find_touchscreen())
     keys = Keys(screen, spawn, resync, touch, glance)
 

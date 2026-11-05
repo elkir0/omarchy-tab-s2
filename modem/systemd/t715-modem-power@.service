@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The modem switch for the shell's Modem tile, Réseau mobile and t715-keys: runs
+# "t715-modem-power %i" as root. The active local user may start it
+# (50-t715-modem-power.rules).
+
+[Unit]
+Description=Modem switch: %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/t715-modem-power %i

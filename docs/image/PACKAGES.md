@@ -170,7 +170,7 @@ targets Omarchy 4.0.6.
   The tarball's two package directories were compared with a clone at
   5f7ba48: identical.
 - **Version**: upstream's `version` file (checked in `prepare()`) and
-  upstream's pkgrel 1 plus `.N`: `0.1.27-1.2`; the shell is `0.2.94-1`.
+  upstream's pkgrel 1 plus `.N`: `0.1.27-1.2`; the shell is `0.2.94-2`.
 - **`arch = any`**, no compiled file (checked by `image/tools/build-pkg`).
 - **Build order**: `omamobile-omarchy` first: `omamobile-shell` depends on
   it, and `image/tools/build-pkg` checks that every runtime depend resolves.
@@ -236,9 +236,10 @@ targets Omarchy 4.0.6.
   ours, none found upstream, and the 19 patched QML and JS files parse
   (`qmlformat`).
 
-### omamobile-shell 0.2.94-1
+### omamobile-shell 0.2.94-2
 
-Moved from 0.2.32-1.15 on 2026-11-03 (the owner's yes). What the tablet
+Moved from 0.2.32-1.15 on 2026-11-03 (the owner's yes); 0.2.94-2 (2026-11-05)
+adds the Modem tile. What the tablet
 gains from upstream: the drawer swiped up from anywhere and following the
 finger, with no keyboard and no icon rescan; the home pill in a 44 px bottom
 bar that apps no longer draw under; recents named by app; a media card in the
@@ -252,7 +253,7 @@ is what lets the widgets idle while the panel is off.
   `omamobile-setup-user`, `-launch`, `-osk-watch`, `-bt-agent`,
   `-screenrecord`, `-widget`; `omamobile-setup-user.service` (masked in the
   image); the polkit rule that asks a wheel member for their own password.
-- **Changed for the tablet**, ten patches against 87b8395:
+- **Changed for the tablet**, eleven patches against 87b8395:
   `0001-tablet-quick-settings-tiles.patch`
   (`TilesModel.js`: no mobile data, hotspot, torch, location, NFC,
   fingerprint or rotation-lock tile; the tablet's default layout;
@@ -269,7 +270,10 @@ is what lets the widgets idle while the panel is off.
   tiles" and shows its password, no Speaker on the call card),
   `0008-tablet-set-pin.patch` (`omamobile-set-pin` ships, says tablet, and sudo
   asks for the password once one is chosen), `0009-tablet-back-gesture.patch` (the edge swipe
-  goes through `t715-keys`, its Escape by name finds no key here). Upstream
+  goes through `t715-keys`, its Escape by name finds no key here),
+  `0011-tablet-modem-tile.patch` (the Modem tile over `t715-modem-power`, from
+  `t715-modem`: the CP off now and at boot, a long press for Réseau mobile and its
+  standby setting; "Modem off" on the Mobile data tile meanwhile). Upstream
   now has what 0.2.32's 0003 (the light drawer), 0009 and 0010 (the bottom
   strip, app names in recents) did, so they are gone. `tablet-shell.json` as `profile/shell.json` (the eight
   plugins, the watchers on, the drawer at 6 columns, Omarchy's idle values, and since 1.4

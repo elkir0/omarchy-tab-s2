@@ -585,6 +585,18 @@ check "telephony: omatel-agent and t715-call-profile enabled for every user" \
         "$(linkto /etc/systemd/user/default.target.wants/t715-call-profile.service 2>/dev/null)"
 check "telephony: ModemManager masked, shannond's facade owns its bus name" \
     test "$(linkto /etc/systemd/system/ModemManager.service 2>/dev/null)" = /dev/null
+mp_missing=""
+for f in /usr/bin/t715-modem-power /usr/lib/systemd/system/t715-modem-power@.service \
+         /usr/lib/systemd/system/t715-modem-standby.timer /usr/lib/systemd/system/t715-modem-standby.service \
+         /usr/share/polkit-1/rules.d/50-t715-modem-power.rules; do
+    exists "$f" || mp_missing="$mp_missing $f"
+done
+check "telephony: the modem's switch, t715-modem-power, its units and polkit rule${mp_missing:+; missing:$mp_missing}" test -z "$mp_missing"
+mp_standby=$(exists /var/lib/t715-modem-power/standby && echo set || true)
+check "  no standby setting in the image: the modem stays on with the screen off" test -z "$mp_standby"
+get /usr/share/omamobile/shell/plugins/omamobile.quicksettings/TilesModel.js; cp "$W/f" "$W/tiles"
+check "  the Modem tile in the quick settings catalogue (pkg/omamobile-shell 0011)" \
+    grep -q '{ id: "modem", label: "Modem" }' "$W/tiles"
 rot_missing=""
 for f in /usr/local/bin/t715-rotate /etc/systemd/user/omamobile-autorotate.service /etc/udev/rules.d/61-t715-accelerometer.rules /usr/lib/systemd/system/iio-sensor-proxy.service; do
     exists "$f" || rot_missing="$rot_missing $f"

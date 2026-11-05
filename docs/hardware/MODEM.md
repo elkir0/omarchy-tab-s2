@@ -22,6 +22,7 @@ operating summary.
 | Cold boots, units | **6/6** cold boots to ONLINE (9.89-9.94 s) through `shannon-loader.service`; `shannond.service` with the facade; NetworkManager data at the first attempt once the PDP retry below was fixed | §6.1 |
 | Starts by itself | **works** on the persistent root: CP ONLINE 22.8 s after the kernel started, no command typed | §5.1 |
 | From the desktop | **works** as the desktop user in the graphical session: `nmcli` data, SMS to the own line, voicemail call | §5.1 |
+| Switch and standby (2026-11-05) | **works**: `t715-modem-power` off (`MODEM_OFF`, the CP off at boot) and on (ONLINE about 11 s later) through polkit from the desktop user's manager, refused from a remote session; with the standby set off, the CP goes off a minute after `t715-keys` darkens the screen and is ONLINE again within 15 s of the wake. The Modem tile is built (`omamobile-shell` 0.2.94-2), not yet on the tablet | §5.4, `image/tests/ondevice/modem-switch.sh` |
 
 > **Emergency calls: do not rely on this tablet.** Emergency numbers were
 > never dialled during the bring-up (it is forbidden for tests), `shannond`
@@ -271,6 +272,45 @@ Emergency CP off (CP_RESET low, then CP_ON low, through `/dev/mem`):
 python3 /root/modem/tools/cp-kill.py
 ```
 
+### 5.4 Switching it off: the Modem tile and the standby setting
+
+`t715-modem-power` (package `t715-modem`, `modem/systemd/`) is the modem's own
+switch, asked for by the owner on 2026-11-05 for a tablet without a SIM. The
+shell's **Modem** tile (quick settings, `omamobile-shell`'s
+`0011-tablet-modem-tile.patch`) and the **Modem** group at the top of Réseau
+mobile call it. As the desktop user, each verb starts
+`t715-modem-power@VERB.service`, which the active local user may do
+(`50-t715-modem-power.rules`).
+
+| Command | What it does |
+|---|---|
+| `t715-modem-power off` | the reboot path: stops `shannond` and `shannon-loader`, whose clean stop ends with `MODEM_OFF` (after BOOT's eFuse window when the CP is in it), and disables `shannon-modem-prepare.service`, so the CP stays off at the next boot |
+| `t715-modem-power on` | the boot path: enables `shannon-modem-prepare.service` and starts it (modules, `allow_hw`, the battery gate, the loader, `shannond`); ONLINE about 10 s later |
+| `t715-modem-power standby-off` | Réseau mobile's "Éteindre en veille": once the screen has stayed off for a minute (`t715-modem-standby.timer`), the CP goes off; it boots again when the screen lights. Not while a call is up or the Wi-Fi hotspot shares mobile data: then the timer looks again a minute later |
+| `t715-modem-power standby-keep` | the default: the modem stays on with the screen off |
+| `t715-modem-power status [--json]` | the switch, the CP's state (`/run/shannon/cp-state` while the loader runs), the standby setting |
+
+`t715-keys` drives the standby: at each screen off it starts
+`t715-modem-power dark` (the timer), at each screen on `t715-modem-power lit`
+(the timer stopped, and the CP booted again if the standby cut it), and neither
+while the setting keeps the modem on. The setting lives in
+`/var/lib/t715-modem-power/standby`; `/run/t715-modem-power/cut` marks a CP the
+standby powered off.
+
+Off, the modem takes no calls and no SMS and carries no data, and the Mobile
+data tile says "Modem off". Airplane mode is not the same thing: it turns the
+CP's radio off (`nmcli radio wwan off`) while the CP stays powered and
+`shannond` runs. Measured with the screen off (`docs/hardware/BATTERY.md`
+§12): the CP powered costs 155 ± 22 mW, radio on or off, a fifth of the
+screen-off draw; its radio adds 28 ± 22 mW without a SIM. Airplane mode saves
+next to nothing, the switch saves all of it. Every power-on is a full CP boot through BOOT's eFuse window,
+as at each reboot: BOOT programs a slot only when it is blank or different,
+and on this tablet the slots are believed to match already (inferred, not
+proven: SYNTHESIS §2.4); the loader holds `MODEM_OFF` back until the window has
+closed. The minute's wait keeps a short dark screen from booting the CP again,
+so the standby setting costs at most one CP boot per screen-off of a minute or
+more.
+
 ## 6. Results on the device
 
 ### 6.1 Cold boots
@@ -463,6 +503,12 @@ cycle.
 
 - `debugfs mipi-lli/status` keeps reporting `LLI_MOUNTED` after `MODEM_OFF`
   (cosmetic: the next power-on resets the link).
+- The CP never sleeps: the port holds the LLI link up while the CP runs
+  (locked-on, SYNTHESIS decision D2), where stock lets the CP release it every
+  few seconds. A powered CP costs 155 mW with the screen off, radio on or off
+  (`docs/hardware/BATTERY.md` §12). D2's fallback F2, the stock state machine
+  with `pm_enable = 1`, is the way to a cheap modem kept on; until then
+  `t715-modem-power` (§5.4) switches it off.
 - `shannond`: no USSD.
 - Two `NET_REGIST` reads sent together are sometimes both answered with the
   second one's `aseq`: the first one then times out after 10 s ("no answer" in

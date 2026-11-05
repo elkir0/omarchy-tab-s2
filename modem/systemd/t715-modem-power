@@ -1,0 +1,160 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# t715-modem-power: the modem's own switch, under the shell's Modem tile, Réseau mobile
+# (t715-mobile-settings) and t715-keys (docs/hardware/MODEM.md §5.4).
+#
+#   t715-modem-power on             the CP on now, and at every boot
+#   t715-modem-power off            the CP off now, and left off at boot: no calls, SMS
+#                                   or data, and nothing drawn
+#   t715-modem-power standby-keep   the modem stays on while the screen is off (default)
+#   t715-modem-power standby-off    the CP goes off once the screen has been off for a
+#                                   minute, and comes back when it lights
+#   t715-modem-power dark | lit     from t715-keys: the screen went off, or lit again
+#   t715-modem-power status [--json]
+#
+# As the session user every verb but status goes through polkit: it starts
+# t715-modem-power@VERB.service, which runs this as root (50-t715-modem-power.rules).
+#
+# Off is the reboot path: shannond and shannon-loader are stopped, and the loader's clean
+# stop (SIGTERM) ends with MODEM_OFF, after BOOT's eFuse window when the CP is in one
+# (modem/loader/README.md). On is the boot path: shannon-modem-prepare.service loads the
+# modules, sets allow_hw, waits for the battery gate, then starts the loader and shannond.
+# Whether the modem starts at boot is whether that service is enabled.
+#
+# In standby the cut waits for t715-modem-standby.timer (a minute), so that a short dark
+# screen does not boot the CP again, and it is put off while a call is up or the Wi-Fi
+# hotspot shares mobile data. /run/t715-modem-power/cut says the standby powered the CP
+# off; "lit" powers it on again.
+set -u
+PREPARE=shannon-modem-prepare.service
+LOADER=shannon-loader.service
+DAEMON=shannond.service
+TIMER=t715-modem-standby.timer
+STANDBY=/var/lib/t715-modem-power/standby
+CUT=/run/t715-modem-power/cut
+CP_STATE=/run/shannon/cp-state
+
+as_root() {
+  [[ $EUID -eq 0 ]] && return
+  exec systemctl start "t715-modem-power@$1.service"
+}
+
+installed() {
+  [[ -f /usr/lib/systemd/system/$PREPARE ]] &&
+    compgen -G "/usr/lib/modules/$(uname -r)/kernel/drivers/misc/modem_v1/sec_modem_v1.ko*" >/dev/null
+}
+
+enabled() { [[ $(systemctl is-enabled "$PREPARE" 2>/dev/null) == enabled ]]; }
+
+standby() { [[ $(cat "$STANDBY" 2>/dev/null) == off ]] && echo off || echo keep; }
+
+# online, booting, crashed or offline (the loader's own state, a silent reset among
+# them), stopping, waiting (the battery gate, before the loader starts) or off.
+cp_state() {
+  local state
+  case $(systemctl is-active "$LOADER" 2>/dev/null) in
+    active)
+      state=$(sed -n 's/.* state=\([a-z]*\).*/\1/p' "$CP_STATE" 2>/dev/null)
+      echo "${state:-booting}"
+      ;;
+    activating) echo booting ;;     # Type=notify: READY=1 comes with ONLINE
+    deactivating) echo stopping ;;
+    *)
+      if [[ $(systemctl is-active "$PREPARE" 2>/dev/null) == active ]]; then
+        echo waiting
+      else
+        echo off
+      fi
+      ;;
+  esac
+}
+
+cp_on() {
+  rm -f "$CUT"
+  systemctl start --no-block "$PREPARE"
+}
+
+cp_off() {
+  # The prepare service first: during its battery wait it would start the loader again.
+  systemctl stop "$PREPARE"
+  systemctl stop "$DAEMON" "$LOADER"
+}
+
+# A call, or the hotspot sharing mobile data: the standby leaves the CP on.
+in_use() {
+  timeout 5 shannonctl status 2>/dev/null |
+    python3 -I -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("calls") else 1)' 2>/dev/null &&
+    return 0
+  timeout 5 nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx Hotspot
+}
+
+status() {
+  local cut=false
+  [[ -e $CUT ]] && cut=true
+  if [[ ${1:-} == --json ]]; then
+    local inst=false modem=off
+    installed && inst=true
+    enabled && modem=on
+    printf '{"installed":%s,"modem":"%s","cp":"%s","standby":"%s","cut":%s}\n' \
+      "$inst" "$modem" "$(cp_state)" "$(standby)" "$cut"
+  else
+    echo "Modem: $(enabled && echo on || echo off)"
+    echo "CP: $(cp_state)"
+    echo "Standby: $(standby)$([[ $cut == true ]] && echo ", powered off by it now")"
+  fi
+}
+
+case ${1:-status} in
+  on)
+    as_root on
+    systemctl enable "$PREPARE" 2>/dev/null
+    cp_on
+    ;;
+  off)
+    as_root off
+    systemctl disable "$PREPARE" 2>/dev/null
+    systemctl stop "$TIMER"
+    rm -f "$CUT"
+    cp_off
+    ;;
+  standby-keep | standby-off)
+    as_root "$1"
+    mkdir -p "${STANDBY%/*}"
+    echo "${1#standby-}" > "$STANDBY"
+    if [[ $1 == standby-keep ]]; then
+      systemctl stop "$TIMER"
+      [[ -e $CUT ]] && enabled && cp_on
+      rm -f "$CUT"
+    fi
+    ;;
+  dark)
+    as_root dark
+    [[ $(standby) == off ]] && enabled && systemctl start "$TIMER"
+    exit 0
+    ;;
+  lit)
+    as_root lit
+    systemctl stop "$TIMER"
+    [[ -e $CUT ]] && enabled && cp_on
+    rm -f "$CUT"
+    ;;
+  cut)
+    # t715-modem-standby.service, once the screen has been off for the timer's minute.
+    [[ $EUID -eq 0 ]] || { echo "t715-modem-power cut: from t715-modem-standby.service only" >&2; exit 1; }
+    [[ $(standby) == off ]] && enabled || exit 0
+    if in_use; then
+      echo "a call or the hotspot is up: the CP stays on, checked again in a minute"
+      systemctl start --no-block "$TIMER"
+      exit 0
+    fi
+    mkdir -p "${CUT%/*}"
+    : > "$CUT"
+    cp_off
+    echo "screen off for a minute: CP off until it lights"
+    ;;
+  status) status "${2:-}" ;;
+  *)
+    echo "usage: t715-modem-power on|off|standby-keep|standby-off|dark|lit|status [--json]" >&2
+    exit 2
+    ;;
+esac

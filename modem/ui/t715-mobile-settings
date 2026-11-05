@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Réseau mobile: state of the modem, mobile data, APN, technologies, SIM.
+"""Réseau mobile: the modem's switch, state of the modem, mobile data, APN, technologies, SIM.
 
 omarchy-mobile plans this as a sheet and has not written it. It speaks
 ModemManager's API (shannond's facade) for the modem, and NetworkManager, through
 nmcli, for the connection t715-mobile, the one the mobile data tile uses. The APN
-list comes from mobile-broadband-provider-info, by the SIM's operator code.
+list comes from mobile-broadband-provider-info, by the SIM's operator code. The
+modem's own switch and its standby setting are t715-modem-power's, as on the
+shell's Modem tile.
 
 Changing the SIM's PIN is left out: the facade does not offer it, and it could not
 be tried on a SIM in use. A locked SIM goes to t715-sim-pin.
 """
+import json
 import sys
 import threading
 import xml.etree.ElementTree as ET
@@ -83,6 +86,8 @@ class Window(Adw.ApplicationWindow):
         self.code = ""
         self.suggestions = []
         self.quiet = False      # no action while a refresh sets a widget
+        self.power = {}         # t715-modem-power status --json, the last one read
+        self.pending = 0        # t715-modem-power commands still running
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
         view.add_top_bar(Adw.HeaderBar())
@@ -90,6 +95,18 @@ class Window(Adw.ApplicationWindow):
         self.toasts.set_child(page)
         view.set_content(self.toasts)
         self.set_content(view)
+
+        power = Adw.PreferencesGroup(title="Modem")
+        self.s_modem = Adw.SwitchRow(title="Modem",
+                                     subtitle="Éteint : ni appels, ni SMS, ni données, et il le reste au redémarrage")
+        self.s_modem.connect("notify::active", self.on_modem)
+        power.add(self.s_modem)
+        self.s_standby = Adw.SwitchRow(title="Éteindre en veille",
+                                       subtitle="Une minute après l'extinction de l'écran, jusqu'à son rallumage : "
+                                                "ni appels ni SMS entre-temps")
+        self.s_standby.connect("notify::active", self.on_standby)
+        power.add(self.s_standby)
+        page.add(power)
 
         state = Adw.PreferencesGroup(title="État")
         self.r_state = self.info(state, "Modem")
@@ -177,13 +194,41 @@ class Window(Adw.ApplicationWindow):
         self.quiet = True
         if modem is None:
             self.modem_path = None
-            self.r_state.set_subtitle("Pas de modem")
+            self.show_no_modem()
             for row in (self.r_operator, self.r_tech, self.r_signal, self.r_number, self.r_sim):
                 row.set_subtitle("—")
         else:
             self.show_modem(modem[0], modem[1], objects)
         self.quiet = False
         self.run(["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"], self.show_active)
+        self.run(["t715-modem-power", "status", "--json"], self.show_power)
+
+    def show_no_modem(self):
+        """The state row with no modem on the bus, after the switch's last status."""
+        if self.power.get("modem") == "off":
+            self.r_state.set_subtitle("Éteint")
+        elif self.power.get("cp") in ("booting", "waiting") or self.power.get("cut"):
+            self.r_state.set_subtitle("Démarrage")
+        else:
+            self.r_state.set_subtitle("Pas de modem")
+
+    def show_power(self, ok, out, _err):
+        if self.pending:
+            return              # the switches show what was asked until it is done
+        try:
+            power = json.loads(out) if ok else {}
+        except ValueError:
+            power = {}
+        self.power = power if isinstance(power, dict) else {}
+        if self.modem_path is None:
+            self.show_no_modem()
+        on = self.power.get("modem") == "on"
+        self.quiet = True
+        self.s_modem.set_active(on)
+        self.s_standby.set_active(self.power.get("standby") == "off")
+        self.quiet = False
+        self.s_modem.set_sensitive(self.power.get("installed") is True)
+        self.s_standby.set_sensitive(on)
 
     def show_modem(self, path, ifaces, objects):
         self.modem_path = path
@@ -278,6 +323,26 @@ class Window(Adw.ApplicationWindow):
                         "connection.autoconnect", "no", "ipv6.method", "ignore"] + values
             self.run(argv, self.report("APN enregistré"))
         self.run(["nmcli", "-t", "-g", "connection.id", "connection", "show", CONNECTION], after_check)
+
+    def power_command(self, verb, what):
+        self.pending += 1
+
+        def done(ok, out, err):
+            self.pending -= 1
+            self.report(what)(ok, out, err)
+        self.run(["t715-modem-power", verb], done)
+
+    def on_modem(self, row, _p):
+        if not self.quiet:
+            on = row.get_active()
+            self.s_standby.set_sensitive(on)
+            self.power_command("on" if on else "off", "Modem en démarrage" if on else "Modem éteint")
+
+    def on_standby(self, row, _p):
+        if not self.quiet:
+            off = row.get_active()
+            self.power_command("standby-off" if off else "standby-keep",
+                               "Le modem s'éteindra en veille" if off else "Le modem reste allumé en veille")
 
     def on_data(self, row, _p):
         if self.quiet:

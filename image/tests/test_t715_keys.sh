@@ -573,5 +573,33 @@ reset; tap $K_POWER
 has "$DPMS_OFF" || has "$DPMS_ON" || fail "glance: the daemon survives a key and a touch together"
 echo "ok - a key and a touch in one batch during a glance"
 
+# --- the modem's standby (t715-modem-power) ----------------------------------------------
+cat > "$t/bin/t715-modem-power" <<STUB
+#!/bin/bash
+echo "t715-modem-power \$*" >> "$log"
+STUB
+chmod +x "$t/bin/t715-modem-power"
+rm -f "$t/modem-standby" "$t/modem-cut"
+start T715_KEYS_MODEM_STANDBY="$t/modem-standby" T715_KEYS_MODEM_CUT="$t/modem-cut"
+lit; reset; tap $K_POWER; tap $K_POWER
+eventually "$DPMS_ON" || fail "modem: the screen comes back"
+sleep 0.3
+has "t715-modem-power" && fail "modem: no setting, no call"
+echo keep > "$t/modem-standby"
+lit; reset; tap $K_POWER; tap $K_POWER; sleep 0.3
+has "t715-modem-power" && fail "modem: kept on in standby, no call"
+echo off > "$t/modem-standby"
+lit; reset; tap $K_POWER
+eventually "t715-modem-power dark" || fail "modem: off in standby, the screen going off arms it"
+has "t715-modem-power lit" && fail "modem: no lit while the screen goes off"
+reset; tap $K_POWER
+eventually "t715-modem-power lit" || fail "modem: the screen lighting calls lit"
+has "t715-modem-power dark" && fail "modem: no dark while the screen lights"
+# Kept on again while the standby has the CP off: the wake still brings it back.
+lit; tap $K_POWER; echo keep > "$t/modem-standby"; touch "$t/modem-cut"; reset; tap $K_POWER
+eventually "t715-modem-power lit" || fail "modem: a CP the standby cut comes back at the wake"
+rm -f "$t/modem-cut" "$t/modem-standby" "$t/bin/t715-modem-power"
+echo "ok - the modem's standby: dark and lit follow the screen when it is set off, nothing when kept"
+
 stop
 echo "PASS"

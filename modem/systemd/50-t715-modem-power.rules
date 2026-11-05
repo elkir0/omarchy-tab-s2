@@ -1,0 +1,10 @@
+// The modem switch: the active local user may start t715-modem-power@VERB.service
+// (the shell's Modem tile, Réseau mobile, t715-keys).
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      subject.local && subject.active &&
+      /^t715-modem-power@(on|off|standby-keep|standby-off|dark|lit)\.service$/.test(action.lookup("unit")) &&
+      action.lookup("verb") == "start") {
+    return polkit.Result.YES;
+  }
+});

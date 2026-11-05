@@ -135,12 +135,16 @@ def run(hold):
 
 def follow_calls():
     hold = IdleHold()
+    said = -600.0
     while True:
         try:
             run(hold)
         except (CtlError, OSError, ValueError) as exc:
             hold.update(False)
-            print("shannond not reachable (%s), retrying in 5 s" % exc, flush=True)
+            # At most every 10 minutes: the modem may be off for hours (t715-modem-power).
+            if time.monotonic() - said >= 600:
+                print("shannond not reachable (%s), retrying every 5 s" % exc, flush=True)
+                said = time.monotonic()
         time.sleep(5)
 
 
