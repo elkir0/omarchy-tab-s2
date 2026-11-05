@@ -1,0 +1,84 @@
+#!/bin/bash
+# t715-claude-guide — the drawer entry: a guided, opt-in install of Claude Code.
+#
+# The image ships no Claude Code (Anthropic's licence): what it ships is an
+# installer, and this script is the friendly face the desktop entry opens in a
+# terminal. It explains what installing means, asks before doing anything (the
+# default answer is No), then hands over to the root wrapper
+# `sudo t715-claude-install` (docs/DEPLOY.md 11.10) and shows how to sign in.
+#
+# It runs as the desktop user: nothing here needs root, and the one command
+# that does is run through sudo, with its own password prompt.
+set -u
+
+INSTALLER=/usr/share/t715-claude-code/installer
+MAX_VERSION_FILE=$INSTALLER/MAX_VERSION
+CLAUDE=/usr/local/bin/claude
+
+wait_enter() {
+  printf 'Press Enter to close this window… '
+  IFS= read -r _
+}
+
+max_version() { [ -r "$MAX_VERSION_FILE" ] && head -1 "$MAX_VERSION_FILE" | tr -d '[:space:]'; }
+MAX="$(max_version)"; MAX="${MAX:-2.1.270}"
+
+cat <<BANNER
+
+  Claude Code — installer for this tablet (SM-T715)
+
+  This is NOT the official Claude Code app, and nothing of Anthropic's is
+  preinstalled. The image carries an unofficial installer that:
+
+    - downloads about 250 MB from Anthropic (the official linux-arm64
+      release), checks Anthropic's signed manifest, then rebuilds the
+      program to run under Node 22 on this 32-bit ARM tablet;
+    - installs it under Anthropic's terms — a Claude account is needed
+      to use it (a Pro or Max subscription, or an API key), and you sign
+      in yourself, on the tablet, afterwards;
+    - caps the version at $MAX: newer releases need a native component
+      this tablet cannot run.
+
+BANNER
+
+if [ -x "$CLAUDE" ]; then
+  ver="$(timeout 60 "$CLAUDE" --version 2>/dev/null | head -1)"
+  printf 'Claude Code is installed: %s\n\n' "${ver:-$CLAUDE (version unknown)}"
+  printf 'Run the installer again? It re-downloads and rebuilds (reinstall/repair).\n'
+else
+  printf 'Claude Code is not installed yet.\n'
+fi
+
+printf '\nInstall (or reinstall) now? [y/N] '
+read -r answer
+case "$answer" in
+  y|Y|yes|YES|Yes) ;;
+  *) printf '\nNothing was installed or changed. Bye.\n'
+     wait_enter; exit 0 ;;
+esac
+
+printf '\nStarting the installer (it asks for the sudo password)…\n\n'
+# t715-claude-install explains what it does; its output is the installer's.
+rc=0
+sudo t715-claude-install || rc=$?
+if [ "$rc" -eq 0 ]; then
+  printf '\nThe installer finished.\n\n'
+else
+  printf '\nThe installer FAILED (exit %s). Nothing was changed beyond what\n' "$rc"
+  printf 'the messages above say; re-running this guide tries again.\n\n'
+fi
+
+cat <<'SIGNIN'
+To sign in, in a terminal (as your user, not root):
+
+    claude                then /login at its prompt, or
+
+    claude setup-token    prints a URL: open it on another device,
+                          sign in with your Claude Pro or Max account
+    claude-token-save     paste the printed token at its prompt
+                          (not as an argument: it would stay in the
+                          shell's history)
+
+SIGNIN
+
+wait_enter

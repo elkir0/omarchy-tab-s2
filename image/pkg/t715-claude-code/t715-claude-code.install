@@ -2,11 +2,17 @@
 post_install() {
   cat <<'EOF'
 t715-claude-code: the installer is in, not Claude Code itself (Anthropic's
-licence). To install it, as root:
+licence). Nothing is preinstalled; the app drawer's "Claude Code installer"
+opens a guided, opt-in install in a terminal (about 250 MB downloaded from
+Anthropic, signature-verified against its release key).
+
+    Claude Code installer      (drawer entry, or: t715-claude-guide)
+
+which asks before doing anything, then runs the root wrapper itself:
 
     sudo t715-claude-install
 
-then sign in as your user:
+After it succeeds, sign in as your user:
 
     claude setup-token
     claude-token-save     # paste the token at its prompt, not as an argument

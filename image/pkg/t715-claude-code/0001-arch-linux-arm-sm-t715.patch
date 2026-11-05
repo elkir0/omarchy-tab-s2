@@ -1,6 +1,31 @@
 --- a/install.sh
 +++ b/install.sh
-@@ -137,16 +137,10 @@
+@@ -49,6 +49,8 @@ fail() { printf '\033[1;31m[claude-smartpi]\033[0m %s\n' "$*" >&2; exit 1; }
+ [ "$(uname -m)" = "armv7l" ] || fail "This script targets armv7l (detected: $(uname -m)). On 64-bit, use the official installer."
+ command -v curl >/dev/null || fail "curl is required"
+ command -v python3 >/dev/null || fail "python3 is required"
++# SM-T715: gpg checks Anthropic's manifest signature (lib/manifest-verify.sh below).
++command -v gpg >/dev/null || fail "gpg is required (gnupg: the manifest signature check)"
+ 
+ # --- Privilege model. Root → no sudo. Non-root owning $PREFIX (the gateway
+ #     service user doing an OTA update) → plain writes, NO sudo at all. Anything
+@@ -92,6 +94,15 @@ rl="$(fetch_tmp lib/claude-release.sh)" || fail "cannot fetch lib/claude-release
+ # shellcheck source=lib/claude-release.sh
+ . "$rl"; rm -f "$rl"
+ 
++# SM-T715: the manifest signature check (lib/manifest-verify.sh, shipped next to
++# this script — not fetchable: the keyring and the pinned fingerprint must be
++# the ones the image installed, not whatever a re-run finds online).
++mvlib="$HERE/lib/manifest-verify.sh"
++[ -f "$mvlib" ] || fail "no $mvlib (the t715-claude-code package installs it)"
++CLAUDE_SIGNING_KEY_DIR="$HERE"   # anth-release-key.gpg, next to install.sh
++# shellcheck source=lib/manifest-verify.sh
++. "$mvlib"
++
+ # Write $2 (a temp file) to $1 only when the content differs — routine updates
+ # never touch $BINDIR (root-owned), so the unprivileged OTA path stays clean.
+ # Returns non-zero (does NOT abort) when the write is impossible: the caller
+@@ -137,16 +148,10 @@ NODE_VERSION="${CLAUDE_NODE_VERSION:-v22.22.0}"    # pinned armv7l build satisfy
  # image ships without it; nodejs.org's armv7l node links libatomic.so.1, which the pad
  # images only carry as a glib dependency (a bare Debian armhf has none: node won't start).
  # These packages are only ever missing on the first (root) install.
@@ -21,25 +46,111 @@
  
  node_ok() {   # does the resolved `node` satisfy Claude Code's engine guard?
    node -e 'const[a,b]=process.versions.node.split(".").map(Number);process.exit(((a===22&&b>=17)||(a>=24&&(a>24||b>=2)))?0:1)' 2>/dev/null
-@@ -202,6 +196,12 @@
+@@ -202,6 +207,25 @@ binf="$DL_CACHE/claude-$VER-$(printf '%s' "$DL_PLATFORM" | tr / -).bin"
  find "$DL_CACHE" -name 'claude-*.bin' ! -name "$(basename "$binf")" -delete 2>/dev/null || true
  fetch_resumable "$CLAUDE_REL/$VER/$DL_PLATFORM/claude" "$binf" \
    || fail "download failed ($CLAUDE_REL/$VER/$DL_PLATFORM/claude)"
-+# SM-T715: the binary against the sha256 of Anthropic's manifest for this version.
-+want="$(curl -fsSL --max-time 30 "$CLAUDE_REL/$VER/manifest.json" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["platforms"][sys.argv[1]]["checksum"])' "$DL_PLATFORM")" \
-+  || fail "cannot read $CLAUDE_REL/$VER/manifest.json"
++# SM-T715: the manifest is only trusted once Anthropic has signed it. Downloaded
++# to files (not a pipe) so the very bytes checked for the sha256 are the ones
++# whose signature was verified: a missing .sig, a bad signature or a signing key
++# other than the pinned one aborts the install before the manifest is parsed.
++mjs="$work/manifest.json"
++mss="$work/manifest.json.sig"
++curl -fsSL --max-time 30 -o "$mjs" "$CLAUDE_REL/$VER/manifest.json" \
++  || fail "cannot download $CLAUDE_REL/$VER/manifest.json"
++curl -fsSL --max-time 30 -o "$mss" "$CLAUDE_REL/$VER/manifest.json.sig" \
++  || fail "cannot download $CLAUDE_REL/$VER/manifest.json.sig (no signature published for this release — refusing to install unverified)"
++verify_manifest_signature "$mjs" "$mss" \
++  || { rm -f "$binf"; fail "manifest signature check FAILED for $VER (missing or bad manifest.json.sig, or signed by a key other than Anthropic's release key $CLAUDE_SIGNING_KEY_FP) — refusing to install"; }
++log "manifest.json signature verified against Anthropic's release key ($CLAUDE_SIGNING_KEY_FP)"
++# SM-T715: the binary against the sha256 of Anthropic's (now verified) manifest.
++want="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[2]))["platforms"][sys.argv[1]]["checksum"])' "$DL_PLATFORM" "$mjs")" \
++  || fail "cannot read the checksum for $DL_PLATFORM in the verified manifest"
 +have="$(sha256sum "$binf" | cut -d' ' -f1)"
 +[ "$have" = "$want" ] || { rm -f "$binf"; fail "sha256 mismatch for the official binary (have $have, manifest $want)"; }
 +log "sha256 matches Anthropic's manifest ($want)"
  
  # 4. Extract the JavaScript on-device. The extractor reads Bun's module table (no full
  #    scan any more: seconds on a laptop, a few minutes at most on an H3 — the old carve
-@@ -320,7 +320,7 @@
+@@ -225,12 +249,28 @@ manifest="$work/extracted/claude-${VER}.manifest.json"
+ # 5. Rebundle the chunk graph into one CJS file, lower `using` (Node 20 can't parse it)
+ #    and gather the runtime deps Bun provides but Node doesn't. esbuild ships a
+ #    linux-arm (armv7) binary.
+-log "Building the Node bundle (esbuild) + runtime deps…"
++# SM-T715: the bundle tools are PINNED, not resolved live. The package ships a
++# package-lock.json (every tarball URL + sha512 integrity) and esbuild's armv7
++# binary package; `npm ci` installs exactly that into a directory of this run
++# (--ignore-scripts: nothing from npm runs code at install time), never
++# globally and never as root beyond what this script already is. A fresh
++# `npm install esbuild` would instead resolve whatever is newest today.
++log "Building the Node bundle (esbuild, pinned) + runtime deps…"
+ mkdir -p "$work/build"
+-( cd "$work/build"
+-  printf '{"name":"b","private":true}\n' > package.json
+-  npm install --no-audit --no-fund --silent esbuild ws undici js-yaml >/dev/null 2>&1
+-) || fail "npm install (esbuild + deps) failed"
++npm_build="$HERE/npm-tools"
++[ -f "$npm_build/package-lock.json" ] || fail "no $npm_build/package-lock.json (the t715-claude-code package installs it)"
++( cd "$work/build" \
++  && cp "$npm_build/package-lock.json" package-lock.json \
++  && printf '{"name":"claude-bundle-tools","private":true,"dependencies":{"esbuild":"0.28.2","js-yaml":"5.5.0","undici":"8.12.4","ws":"8.22.1"}}\n' > package.json \
++  && npm ci --ignore-scripts --no-audit --no-fund --omit=optional --silent \
++  && npm install --ignore-scripts --no-audit --no-fund --silent --no-save \
++       --force @esbuild/linux-arm@0.28.2 \
++) || fail "npm ci (pinned esbuild + deps) failed — see $npm_build/package-lock.json"
++# --omit=optional + the explicit pinned @esbuild/linux-arm: npm would otherwise
++# pick the binary package for the machine npm thinks it is on; the board is
++# armv7l, so the arm one is installed by name, integrity-checked against the
++# lockfile like every other package (no postinstall: esbuild's own install
++# script is skipped; the launcher exports ESBUILD_BINARY_PATH below).
+ # CJS (not ESM): the launcher runs the bundle through vm.Script to reuse a persisted V8
+ # bytecode cache, and --format=cjs also lowers the `import.meta` the bundle uses (the reason
+ # the old ESM wrapper existed). bundle-bunfs.mjs handles both the monolith (<= 2.1.241) and
+@@ -241,7 +281,11 @@ bb="$(fetch_tmp shim/bundle-bunfs.mjs)" || fail "cannot fetch shim/bundle-bunfs.
+ # the Go heap target stops the *garbage* from spilling into swap too — measured on the pad
+ # with 2.1.261: swap peak 563 MB → 191 MB and ~7 % faster at 512 MiB; tighter caps only
+ # cost time. Output is byte-identical either way.
+-GOMEMLIMIT="${CLAUDE_ESBUILD_GOMEMLIMIT:-512MiB}" node "$bb" --extracted "$work/extracted" \
++# SM-T715: ESBUILD_BINARY_PATH points at the pinned @esbuild/linux-arm binary —
++# esbuild's postinstall (skipped above) is what would normally link it.
++GOMEMLIMIT="${CLAUDE_ESBUILD_GOMEMLIMIT:-512MiB}" \
++ESBUILD_BINARY_PATH="$work/build/node_modules/@esbuild/linux-arm/bin/esbuild" \
++  node "$bb" --extracted "$work/extracted" \
+   --out "$work/bundle.cjs" --esbuild-dir "$work/build" --target node20 || fail "esbuild failed"
+ rm -f "$bb"
+ 
+@@ -320,7 +364,10 @@ if [ "\${CLAUDE_DAEMON:-0}" = "1" ]; then
    for a in "\$@"; do case "\$a" in -p|--print) headless=1;; esac; done
    [ "\$headless" = "1" ] && exec node "$LIB/claude-client.mjs" "\$@"
  fi
 -exec taskset -c "\${CLAUDE_CPUS:-0,1,2,3}" nice -n 5 node "$LIB/claude.mjs" "\$@"
-+exec taskset -c "\${CLAUDE_CPUS:-0-7}" nice -n 5 node "$LIB/claude.mjs" "\$@"
++# SM-T715: no self-update of any kind — the payload is a Node rebuild of the
++# official binary; `claude update` would replace it with a binary this board
++# cannot run (mirrors settings.json env.DISABLE_UPDATES).
++DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 exec taskset -c "\${CLAUDE_CPUS:-0-7}" nice -n 5 node "$LIB/claude.mjs" "\$@"
  EOF
  if [ -L "$BINDIR/claude" ]; then $SUDO rm -f "$BINDIR/claude" || true; fi
  if ! put_if_changed "$BINDIR/claude" "$wrap" 755; then
+@@ -343,6 +390,9 @@ s = json.load(open(p)) if os.path.exists(p) else {}
+ env = s.setdefault('env', {})
+ env.setdefault('USE_BUILTIN_RIPGREP', '0')   # no arm-linux ripgrep vendored → system rg
+ env['DISABLE_AUTOUPDATER'] = '1'             # updates go through install.sh
++env['DISABLE_UPDATES'] = '1'                 # SM-T715: blocks `claude update`/`claude install` too —
++                                             # a rebuilt bundle must never self-replace with an
++                                             # official binary the board cannot run
+ s['autoUpdates'] = False
+ json.dump(s, open(p, 'w'), indent=2)
+ print('~/.claude/settings.json pinned:', ', '.join(sorted(env)))
+
+--- a/shim/claude.mjs
++++ b/shim/claude.mjs
+@@ -28,6 +28,9 @@ import { installBunShim, BUNFS_ROOT, requireBunfs } from './bun-shim.mjs';
+ const __dirname = path.dirname(fileURLToPath(import.meta.url));
+ 
+ process.env.DISABLE_AUTOUPDATER ??= '1';
++// SM-T715: `claude update`/`claude install` are blocked too — a self-update would
++// replace the Node rebuild with an official binary the board cannot run.
++process.env.DISABLE_UPDATES ??= '1';
+ 
+ installBunShim();
+ 

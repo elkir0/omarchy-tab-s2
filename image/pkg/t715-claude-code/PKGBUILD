@@ -6,11 +6,42 @@
 # (https://github.com/Yumi-Lab/claude-code-smartpi), pinned at commit
 # a9cac19982b922745c1ba33a4a3fe9ea2a94719b plus 0001-arch-linux-arm-sm-t715.patch
 # (no apt: pacman; the downloaded binary checked against Anthropic's
-# manifest.json sha256; all eight cores). On the tablet the owner runs
-# `sudo t715-claude-install` (docs/DEPLOY.md 11.10): that downloads Anthropic's
-# official binary, verifies it, extracts its JavaScript, rebundles it under
-# Node 22 and installs it to /opt/claude-code with /usr/local/bin/claude.
+# manifest.json; all eight cores; and, since pkgrel=2, the pieces below).
+# On the tablet the owner installs Claude Code either from the app drawer —
+# "Claude Code installer" (t715-claude-code.desktop → t715-claude-guide), a
+# guided, opt-in install in a terminal that asks a y/N question (default No)
+# before running `sudo t715-claude-install` — or directly with that root
+# command (docs/DEPLOY.md 11.10). It downloads Anthropic's official binary,
+# verifies it, extracts its JavaScript, rebundles it under Node 22 and
+# installs it to /opt/claude-code with /usr/local/bin/claude.
 # Nothing of Anthropic's is in this package or in the image.
+#
+# Fail closed on Anthropic's manifest signature (pkgrel=2): since 2.1.89 every
+# release publishes manifest.json.sig next to manifest.json, made with
+# Anthropic's release key
+#   31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE
+# published at https://downloads.claude.ai/keys/claude-code.asc (documented:
+# code.claude.com/docs/en/setup, "Binary integrity and code signing"). The
+# package ships that key (anth-release-key.gpg, dearmored — a .asc source
+# is read by makepkg as a detached signature for a source that does not exist;
+# checked by test-manifest-signature.sh) and manifest-verify.sh, the check
+# itself: a throwaway keyring holding only the shipped key, gpg --verify of
+# the detached signature, then the imported key's primary fingerprint compared
+# to the pinned one. The patched installer calls it before ANY use of the
+# manifest — before the sha256 the binary is checked against — and aborts on a
+# missing .sig, a bad signature or a different key.
+#
+# The npm build tools are pinned (pkgrel=2): the rebundle step (esbuild and
+# the runtime deps ws, undici, js-yaml it gathers) installs from
+# npm-tools-package-lock.json — every tarball URL and sha512 integrity frozen
+# — with `npm ci --ignore-scripts` into a directory of the install run, never
+# globally, never as root beyond the installer itself. esbuild's armv7 binary
+# package (@esbuild/linux-arm) is part of the same lockfile, installed by name
+# (--force: npm sees a darwin/arm64 builder under qemu), and the bundle step
+# points esbuild at it with ESBUILD_BINARY_PATH (its postinstall, skipped by
+# --ignore-scripts, is what would normally link it). Claude Code's self-update
+# is off: DISABLE_AUTOUPDATER and DISABLE_UPDATES in ~/.claude/settings.json
+# env, the launcher and the shim.
 #
 # Sign-in is the owner's, on the tablet: `claude setup-token` then
 # `claude-token-save` (~/.claude/.oauth_token, settings.json
@@ -20,7 +51,7 @@
 
 pkgname=t715-claude-code
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Claude Code on the SM-T715: Yumi Lab's installer (MIT), patched for Arch Linux ARM"
 arch=(any)
 url="https://github.com/Yumi-Lab/claude-code-smartpi"
@@ -29,8 +60,9 @@ license=('MIT')
 # wrapper call on the tablet:
 #   bash curl python3 xz rg npm node  the installer itself (its shebang is bash,
 #     and the patch adds `curl … manifest.json | python3 -I -`, `sha256sum`)
+#   gpg   manifest-verify.sh: gpg --import/--verify of manifest.json.sig
 #   node  >= 22.17 (Claude Code's engine guard): nodejs-lts-jod, Node 22
-#   npm   the bundle step installs esbuild, ws, undici, js-yaml with npm
+#   npm   the bundle step installs the pinned esbuild, ws, undici, js-yaml
 #   taskset nice  the launcher the installer writes (util-linux, coreutils)
 #   tar cpio install cmp sha256sum head stat mkdir rm find  coreutils, tar,
 #     diffutils, findutils (pacman's base, but listed where not obvious)
@@ -38,12 +70,13 @@ license=('MIT')
 install=t715-claude-code.install
 depends=(bash
          nodejs-lts-jod   # Node 22 (>= 22.17): what Claude Code's engine guard allows
-         npm              # installs esbuild + ws undici js-yaml for the Node bundle
+         npm              # installs the pinned esbuild + ws undici js-yaml for the Node bundle
+         gnupg            # gpg: manifest-verify.sh checks Anthropic's manifest.json.sig
          ripgrep          # rg: the app shells out to it; USE_BUILTIN_RIPGREP=0
          xz               # unpacks nodejs.org's armv7l tarball when Node must be installed
          python           # python3: the JS extractor (shim/extract-bun-js.py) and the
                           # manifest check our patch adds
-         curl             # Anthropic's binary and manifest.json, nodejs.org
+         curl             # Anthropic's binary and manifest.json(.sig), nodejs.org
          util-linux       # taskset in the launcher the installer writes
          coreutils        # sha256sum, install, stat, head, nice, ...
          gcc-libs         # libatomic.so.1 for Node
@@ -54,10 +87,20 @@ depends=(bash
 makedepends=(git)
 source=("git+https://github.com/Yumi-Lab/claude-code-smartpi.git#commit=a9cac19982b922745c1ba33a4a3fe9ea2a94719b"
         0001-arch-linux-arm-sm-t715.patch
-        t715-claude-install)
+        anth-release-key.gpg
+        manifest-verify.sh
+        npm-tools-package-lock.json
+        t715-claude-install
+        t715-claude-guide
+        t715-claude-code.desktop)
 sha256sums=('SKIP'
-            '17dda0d18343ff6c57d8bb9f418e93a010af247978ea1b07968be4795c826bbf'
-            'SKIP')
+            'be40452dabdb307453c6b36096f943d35991f9be6aa99d6850d23e389ba91ef7'
+            '0e122272125dd4bed96be0034cd95c84e9db07b4cf9bcddbe7c3ae01f3580646'
+            '1f30e293393ebaef8cbdded8266d01b4aede06769624a1cdf0ff8398e0334319'
+            '954b990f1b4e6df345da93620e7289d921b31eaeb49ff1070f68752d7aa32fef'
+            'ffc32c376fcf3a397bdc277882babd74560172ac8a8abc116aaf5c135193a08f'
+            '761f9b09b35ac6e98b8e337c4230f14dcb07e216b9cbbf7e90d57eeb158d3b5a'
+            '72b31acfbd2aecfd8f8e39af3669fbbd52ac427c2bda9b716238d4be718c857f')
 
 prepare() {
   cd claude-code-smartpi
@@ -83,7 +126,21 @@ package() {
   find "$dst/bin" -type f -exec chmod 755 {} +
   find "$dst/lib" -type f -exec chmod 755 {} +
   chmod 755 "$dst/shim/extract-bun-js.py"
-  # The licence where Arch looks for it, and the wrapper the owner runs.
+  # The manifest signature check and the key it verifies against, next to the
+  # installer: install.sh sources $HERE/lib/manifest-verify.sh and exports
+  # CLAUDE_SIGNING_KEY_DIR=$HERE for it to find anth-release-key.gpg there.
+  install -Dm755 "$srcdir/manifest-verify.sh" "$dst/lib/manifest-verify.sh"
+  install -Dm644 "$srcdir/anth-release-key.gpg" "$dst/anth-release-key.gpg"
+  # The pinned npm tools the rebundle step installs with npm ci.
+  install -dm755 "$dst/npm-tools"
+  install -Dm644 "$srcdir/npm-tools-package-lock.json" "$dst/npm-tools/package-lock.json"
+  # The licence where Arch looks for it, the wrapper the owner runs, the guide
+  # the drawer opens and the drawer entry itself (a terminal app, like
+  # t715-position: Terminal=true; the generic utilities-terminal icon, no
+  # Anthropic branding — the image ships none of theirs).
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm755 "$srcdir/t715-claude-install" "$pkgdir/usr/bin/t715-claude-install"
+  install -Dm755 "$srcdir/t715-claude-guide" "$pkgdir/usr/bin/t715-claude-guide"
+  install -Dm644 "$srcdir/t715-claude-code.desktop" \
+    "$pkgdir/usr/share/applications/t715-claude-code.desktop"
 }

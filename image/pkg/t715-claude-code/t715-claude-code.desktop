@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Claude Code installer
+Name[fr]=Installateur Claude Code
+Comment=Unofficial, opt-in: install Claude Code on this tablet (nothing is preinstalled)
+Comment[fr]=Non officiel, sur demande : installer Claude Code sur cette tablette (rien n'est préinstallé)
+Exec=t715-claude-guide
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;
