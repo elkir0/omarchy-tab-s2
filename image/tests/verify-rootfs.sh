@@ -919,7 +919,7 @@ while IFS=$'\t' read -r f mode; do
         sh -c '[ "$1" = "0${2#100} 0:0" ]' _ "$(fmode "/$f") $(fuid "/$f"):$(fgid "/$f")" "$mode"
 done < /modes/MODES
 check "  all of the Wi-Fi overlay files compared ($(wc -l < /modes/MODES): $WIFI_FILES)" \
-    test "$(wc -l < /modes/MODES)" = 3
+    test "$(wc -l < /modes/MODES)" = "$(printf '%s\n' $WIFI_FILES | grep -c .)"
 check "build records: install-wifi.sh installed the firmware and the NVRAM" \
     sh -c 'grep -Eq "^  firmware: brcm/brcmfmac4358-pcie.bin +ok" "$1" && grep -Eq "^  nvram: brcm/samsung-gts28/nvram_net.txt +ok" "$1"' _ "$W/manifest"
 for p in networkmanager wpa_supplicant; do
