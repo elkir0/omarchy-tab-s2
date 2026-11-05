@@ -625,6 +625,62 @@ check "browsers: Chromium's daily update enabled" \
 get /home/alarm/.config/mimeapps.list; cp "$W/f" "$W/mimeapps"
 check "browsers: Chromium is alarm's default for http, https and text/html" \
     sh -c 'grep -q "^x-scheme-handler/http=chromium.desktop" "$1" && grep -q "^x-scheme-handler/https=chromium.desktop" "$1" && grep -q "^text/html=chromium.desktop" "$1"' _ "$W/mimeapps"
+
+echo "== camera: the software ISP stack (docs/hardware/CAMERA.md) =="
+for p in t715-camera libcamera libcamera-ipa omacam; do
+    check "$p installed ($(pkg_ver "$p"))" has_pkg "$p"
+done
+cam_missing=""
+for f in /usr/bin/t715-photo /usr/bin/t715-camera /usr/share/applications/t715-camera-rear.desktop \
+         /usr/share/applications/t715-camera-front.desktop /usr/lib/udev/rules.d/71-t715-dma-heap.rules \
+         /etc/libcamera/configuration.yaml /etc/omacam/lenses.toml /usr/bin/omacam \
+         /usr/share/applications/omacam.desktop /usr/share/icons/hicolor/scalable/apps/omacam.svg; do
+    exists "$f" || cam_missing="$cam_missing $f"
+done
+check "both camera apps: commands, drawer entries, icon, dma-heap rule, libcamera and lens configuration${cam_missing:+; missing:$cam_missing}" test -z "$cam_missing"
+check "libcamera ships its library (usr/lib/libcamera.so* in the package's files)" \
+    sh -c 'grep -q "^usr/lib/libcamera\.so" "$1"' _ \
+    "$(get "/var/lib/pacman/local/libcamera-$(pkg_ver libcamera)/files"; cp "$W/f" "$W/lc-lib-files"; echo "$W/lc-lib-files")"
+check "/etc/libcamera/configuration.yaml is pkg/t715-camera's: the software ISP on the CPU (mode: cpu)" \
+    sh -c 'cmp -s "$1" /our-pkg/t715-camera/libcamera-configuration.yaml && grep -qx "  software_isp:" "$1" && grep -qx "    mode: cpu" "$1"' _ \
+    "$(get /etc/libcamera/configuration.yaml; cp "$W/f" "$W/lccfg"; echo "$W/lccfg")"
+check "  the dma-heap udev rule in place, pkg's byte for byte: dma_heap system|reserved to group video, 0660" \
+    sh -c 'cmp -s "$1" /our-pkg/t715-camera/71-t715-dma-heap.rules &&
+           grep -q "^SUBSYSTEM==\"dma_heap\", KERNEL==\"system|reserved\", GROUP=\"video\", MODE=\"0660\"$" "$1"' _ \
+    "$(get /usr/lib/udev/rules.d/71-t715-dma-heap.rules; cp "$W/f" "$W/dma.rules"; echo "$W/dma.rules")"
+check "  omacam's lens table is pkg's, for this tablet (gts28ltexx, rear + front, 15 fps preview, 2-thread merge)" \
+    sh -c 'cmp -s "$1" /our-pkg/t715-camera/omacam-lenses.toml && grep -qx "device = \"gts28ltexx\"" "$1" &&
+           grep -qF "id = \"/base/i2c-cam-rear/camera-sensor@37\"" "$1" && grep -qF "id = \"/base/i2c-cam-front/camera-sensor@35\"" "$1" &&
+           grep -qx "preview_fps = 15" "$1" && grep -qx "merge_threads = 2" "$1"' _ \
+    "$(get /etc/omacam/lenses.toml; cp "$W/f" "$W/lenses"; echo "$W/lenses")"
+check "libcamera holds the two cameras' tuning files (s5k4h5, s5k6b2, in its or libcamera-ipa's files)" \
+    sh -c 'grep -hq "s5k4h5\.yaml" "$1" "$2" && grep -hq "s5k6b2\.yaml" "$1" "$2"' _ \
+    "$W/lc-lib-files" \
+    "$(get "/var/lib/pacman/local/libcamera-ipa-$(pkg_ver libcamera-ipa)/files"; cp "$W/f" "$W/lc-ipa-files"; echo "$W/lc-ipa-files")"
+seqs="$(dfs "ls -p /usr/lib/firmware/t715" | awk -F/ '$6 ~ /\.seq$/ {print $6}' | tr '\n' ' ')"
+check "no sensor .seq table in /usr/lib/firmware/t715 (Samsung's, made on the tablet)${seqs:+: found$seqs}" \
+    sh -c '[ -z "$1" ]' _ "$seqs"
+
+echo "== Pi: the terminal coding agent (pkg/pi-coding-agent) =="
+check "pi-coding-agent installed ($(pkg_ver pi-coding-agent))" has_pkg pi-coding-agent
+check "/usr/bin/pi exists and is pkg's wrapper (mode 0755)" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" /our-pkg/pi-coding-agent/pi' _ \
+    "$(fmode /usr/bin/pi)" \
+    "$(get /usr/bin/pi; cp "$W/f" "$W/pi"; echo "$W/pi")"
+check "  it runs /opt/pi's cli.js, telemetry and update checks off (defaults the owner can override)" \
+    sh -c 'grep -q ": \"\${PI_TELEMETRY:=0}\"" "$1" && grep -q ": \"\${PI_SKIP_VERSION_CHECK:=1}\"" "$1" &&
+           grep -qx "exec /usr/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js \"\$@\"" "$1"' _ "$W/pi"
+check "  that cli.js is in the image" \
+    exists /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+mkdir -p "$W/pitree"
+dfs "rdump /opt/pi $W/pitree" >/dev/null 2>&1 || true
+check "  the drawer entry is pkg's pi.desktop (Exec=pi, a terminal app)" \
+    sh -c 'cmp -s "$1" /our-pkg/pi-coding-agent/pi.desktop && grep -qx "Exec=pi" "$1" && grep -qx "Terminal=true" "$1"' _ \
+    "$(get /usr/share/applications/pi.desktop; cp "$W/f" "$W/pi.desktop"; echo "$W/pi.desktop")"
+check "  the licence where Arch looks for it (/usr/share/licenses/pi-coding-agent/LICENSE)" \
+    exists /usr/share/licenses/pi-coding-agent/LICENSE
+check "  no prebuilt .node helper under /opt/pi (none is 32-bit ARM; Pi reads the clipboard through wl-clipboard)" \
+    sh -c '[ -d "$1/pi/node_modules" ] && [ -z "$(find "$1/pi" -name "*.node" -print -quit)" ]' _ "$W/pitree"
 gps_missing=""
 for f in /usr/bin/omamobile-gnss /usr/bin/t715-gps-capture /usr/lib/t715-gps/t715-gps-prepare /usr/lib/t715-gps/t715-gps-power \
          /usr/lib/systemd/system/t715-gpsd.service /usr/lib/systemd/system/t715-gps-nmea.socket /usr/lib/systemd/system/t715-gps-nmea@.service \
@@ -677,6 +733,40 @@ check "no OAuth token value (sk-ant-…) in /etc, /home, /root, /opt, /usr/share
     test -z "$tok"
 envtok="$(grep -rlE 'CLAUDE_CODE_OAUTH_TOKEN' "$W/cc/etc" "$W/cc/home" "$W/cc/root" 2>/dev/null | sed "s|^$W/cc||" | tr '\n' ' ')"
 check "no CLAUDE_CODE_OAUTH_TOKEN under /etc, /home, /root${envtok:+: found in $envtok}" test -z "$envtok"
+# pkgrel=2's pieces: the guide the drawer opens, the drawer entry, and the
+# manifest signature check with the release key it verifies against
+# (pkg/t715-claude-code/PKGBUILD, docs/image/PACKAGES.md).
+cc2_missing=""
+for f in /usr/bin/t715-claude-guide /usr/share/applications/t715-claude-code.desktop \
+         /usr/share/t715-claude-code/installer/lib/manifest-verify.sh \
+         /usr/share/t715-claude-code/installer/anth-release-key.gpg; do
+    exists "$f" || cc2_missing="$cc2_missing $f"
+done
+check "the guide, the drawer entry, the manifest check and the release key${cc2_missing:+; missing:$cc2_missing}" test -z "$cc2_missing"
+check "/usr/bin/t715-claude-guide executable (mode 0755)" test "$(fmode /usr/bin/t715-claude-guide)" = 0755
+check "t715-claude-install and t715-claude-guide are pkg's, byte for byte" \
+    sh -c 'cmp -s "$1" /our-pkg/t715-claude-code/t715-claude-install && cmp -s "$2" /our-pkg/t715-claude-code/t715-claude-guide' _ \
+    "$(get /usr/bin/t715-claude-install; cp "$W/f" "$W/cc-install"; echo "$W/cc-install")" \
+    "$(get /usr/bin/t715-claude-guide; cp "$W/f" "$W/cc-guide"; echo "$W/cc-guide")"
+get /usr/share/applications/t715-claude-code.desktop
+check "t715-claude-code.desktop is pkg's (the drawer entry opens t715-claude-guide)" \
+    cmp -s "$W/f" /our-pkg/t715-claude-code/t715-claude-code.desktop
+check "manifest-verify.sh mode 0755, pkg's byte for byte (the check install.sh sources)" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" /our-pkg/t715-claude-code/manifest-verify.sh' _ \
+    "$(fmode /usr/share/t715-claude-code/installer/lib/manifest-verify.sh)" \
+    "$(get /usr/share/t715-claude-code/installer/lib/manifest-verify.sh; cp "$W/f" "$W/mv.sh"; echo "$W/mv.sh")"
+check "anth-release-key.gpg is pkg's, a dearmored OpenPGP key (0x99 0x02), not a detached signature" \
+    sh -c 'cmp -s "$1" /our-pkg/t715-claude-code/anth-release-key.gpg && [ "$(od -An -tx1 -N2 "$1" | tr -d " \n")" = "9902" ]' _ \
+    "$(get /usr/share/t715-claude-code/installer/anth-release-key.gpg; cp "$W/f" "$W/cc-key"; echo "$W/cc-key")"
+
+echo "== no credential in the image (the owner signs in on the tablet) =="
+# The dump above already holds /etc, /home, /root, /opt and the installer's
+# tree: look for the credential stores in it, for root and every home.
+cred="$(find "$W/cc/etc" "$W/cc/home" "$W/cc/root" \( -path '*/.pi/agent/auth.json' -o -path '*/.claude/.credentials.json' -o -path '*/.claude/.oauth_token' \) -print 2>/dev/null | sed "s|^$W/cc||" | tr '\n' ' ')"
+check "no Pi or Claude credential store in /etc, /root or a home: .pi/agent/auth.json, .claude/.credentials.json, .claude/.oauth_token${cred:+: found$cred}" \
+    sh -c '[ -d "$1/home" ] && [ -d "$1/root" ] && [ -z "$2" ]' _ "$W/cc" "$cred"
+clset="$(find "$W/cc/etc" "$W/cc/home" "$W/cc/root" -path '*/.claude/settings.json' -exec grep -lE 'CLAUDE_CODE_OAUTH_TOKEN' {} + 2>/dev/null | sed "s|^$W/cc||" | tr '\n' ' ')"
+check "no settings.json under .claude/ holds CLAUDE_CODE_OAUTH_TOKEN${clset:+: found$clset}" test -z "$clset"
 
 check "telephony: no NV copy and no APN in the image" \
     sh -c '! debugfs -R "stat /var/lib/shannon/nv" /img/rootfs.img 2>/dev/null | grep -q "^Inode:" && ! debugfs -R "stat /etc/shannond.env" /img/rootfs.img 2>/dev/null | grep -q "^Inode:"'
