@@ -52,6 +52,7 @@ iio-sensor-proxy        # the accelerometer's orientation, for t715-rotate
 # any window. The Google Maps web app takes its place.
 gnome-calculator
 gnome-clocks
+loupe                   # image viewer: screenshots, omacam's gallery
 geoclue                 # location service
 
 # --- Tiles and audio clients ---

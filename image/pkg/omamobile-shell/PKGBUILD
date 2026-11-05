@@ -14,7 +14,11 @@
 #
 # Kept as upstream ships them: the seven plugins above, bin/omamobile-setup-user,
 # -launch, -osk-watch (keyboard visibility for the launcher), -bt-agent
-# (quick settings' Bluetooth panel), -screenrecord and -widget, branding/,
+# (quick settings' Bluetooth panel), -screenrecord and -widget, -screenshot-open
+# and -screenshot-edit with environment.d/30-omamobile-screenshot.conf (the
+# screenshot toast's tap opens the screenshot in Loupe, which Arch Linux ARM
+# carries for armv7h and the image installs; without it the helper falls back
+# to -screenshot-edit, whose tensaku-edit is not installable here), branding/,
 # the widget guides and examples, the polkit admin rule,
 # omamobile-setup-user.service (the image masks it: docs/image/ROOTFS.md).
 # Changed for the tablet:
@@ -79,10 +83,6 @@
 #   - bin/omamobile-voice, -voice-preview (Voxtype), -weather (and its
 #     service and timer: the lock glance's weather, whose GeoClue path names
 #     omamobile-gnss's socket and agent, which t715-gps does not provide);
-#   - bin/omamobile-screenshot-open, -screenshot-edit and
-#     environment.d/30-omamobile-screenshot.conf (the screenshot toast's
-#     viewer is Loupe, from omamobile-apps, not installable on armv7h; the
-#     environment file that would point Omarchy at them is not shipped);
 #   - hypr/phone.lua (rootfs/t715-tablet.lua replaces it), the OSK pieces P1
 #     already has (environment.d/20-omamobile-osk.conf, the fcitx5 drop-in,
 #     squeekboard's layouts and squeekboard/generate) and
@@ -105,7 +105,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.94
-pkgrel=2
+pkgrel=3
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -114,6 +114,7 @@ depends=(omarchy 'omamobile-omarchy>=0.1.11' bash python python-dbus python-gobj
          qt6-declarative squeekboard jq inotify-tools bluez bluez-utils
          networkmanager iw brightnessctl curl pipewire wireplumber 'omatel-agent>=0.2.1')
 optdepends=('wf-recorder: the Screen record tile'
+            'loupe: what a screenshot toast opens (omamobile-screenshot-open); Arch Linux ARM carries it'
             'khal: the home screen calendar'
             'playerctl: media keys for the home screen media widget')
 checkdepends=(python)
@@ -155,7 +156,7 @@ _plugins=(omamobile.bar omamobile.quicksettings omamobile.call omamobile.launche
           omamobile.home omamobile.keyboard omamobile.back)
 _bins=(omamobile-setup-user omamobile-launch omamobile-osk-watch omamobile-bt-agent
        omamobile-screenrecord omamobile-widget omamobile-call-watch omamobile-cell-watch
-       omamobile-set-pin)
+       omamobile-set-pin omamobile-screenshot-open omamobile-screenshot-edit)
 
 prepare() {
   bsdtar -xf "$srcdir/$_tarball" "$_dir"
@@ -288,6 +289,8 @@ package() {
     install -Dm644 "$f" "$share/widget-${f#widgets/}"
   done < <(find widgets/template widgets/examples -type f -print0)
   install -Dm644 systemd/user/omamobile-setup-user.service "$pkgdir/usr/lib/systemd/user/omamobile-setup-user.service"
+  install -Dm644 environment.d/30-omamobile-screenshot.conf \
+    "$pkgdir/usr/lib/environment.d/30-omamobile-screenshot.conf"
   install -d "$pkgdir/usr/lib/systemd/user/graphical-session-pre.target.wants"
   ln -sfn ../omamobile-setup-user.service \
     "$pkgdir/usr/lib/systemd/user/graphical-session-pre.target.wants/omamobile-setup-user.service"
