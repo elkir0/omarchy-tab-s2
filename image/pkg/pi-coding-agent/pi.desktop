@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pi
+Comment=Terminal coding agent
+Exec=pi
+Icon=utilities-terminal
+Categories=Development;
+Terminal=true

@@ -16,3 +16,4 @@ libcamera-ipa           # its software ISP IPA and the two cameras' tuning files
 omacam                  # Camera: preview, tap to focus, photos and video on libcamera (pkg/omacam, omarchy-mobile's app)
 t715-gps                # Location: gpsd from SYSTEM, offline and on demand, as GeoClue's only source (pkg/t715-gps)
 t715-claude-code        # Claude Code's installer, patched for this tablet: no Anthropic binary in the image (pkg/t715-claude-code)
+pi-coding-agent         # Pi, the terminal coding agent, as a pinned npm tree for 32-bit ARM (pkg/pi-coding-agent)

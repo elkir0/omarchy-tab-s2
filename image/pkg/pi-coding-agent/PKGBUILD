@@ -1,0 +1,138 @@
+# SM-T715 (armv7h): Pi, the terminal coding agent (earendil-works/pi,
+# @earendil-works/pi-coding-agent on npm; Mario Zechner, MIT).
+#
+# Why a pinned npm tree: upstream publishes no armv7 build and its own
+# installer would download x64/arm64 binaries. The npm packages it installs
+# are JavaScript and WebAssembly only, so `npm ci` from the release's
+# lockfile (pi-coding-agent-install-package{,-lock}.json, what pi.dev's
+# installer uses) gives a tree that runs on 32-bit ARM under Node 22. Two
+# things do not: pi-tui's prebuilt clipboard helpers (x64/arm64, macOS,
+# Windows .node files — deleted here; Pi falls back to wl-paste/wl-copy)
+# and Pi's fd/ripgrep downloader (x64/arm64 releases only — fd and ripgrep
+# come from the system instead).
+#
+# The lockfile ships without integrity for the eight first-party
+# @earendil-works/* packages; prepare() writes them in, from
+# `npm view @earendil-works/<name>@1.5.0 dist.integrity`.
+#
+# No credential is ever in this package or in the image: the owner signs in
+# on the tablet (`/login`, or a provider API key), and Pi keeps it in
+# ~/.pi/agent/auth.json. A Claude Pro or Max subscription must not be used
+# in Pi: Anthropic's terms forbid its credentials in third-party apps.
+#
+# Build: tools/build-pkg pi-coding-agent. Notes: docs/image/PACKAGES.md.
+
+pkgname=pi-coding-agent
+pkgver=1.5.0
+pkgrel=1
+pkgdesc="Pi, the terminal coding agent, as a pinned npm tree for 32-bit ARM"
+arch=(any)
+url="https://github.com/earendil-works/pi"
+license=('MIT')
+# No ELF file to strip (JavaScript and WebAssembly only): makepkg's strip
+# pass would file(1)-probe every one of the ~9000 files under qemu, for
+# nothing. build-pkg still checks the package holds no ELF.
+options=(!strip)
+depends=(nodejs-lts-jod   # Node 22 (>= 22.19): Pi's engine requirement
+         fd               # Pi's find tool: its downloader has no armv7 release
+         ripgrep)         # rg, same: Pi shells out to it, downloads none here
+optdepends=('wl-clipboard: clipboard over Wayland (wl-paste/wl-copy), the fallback after the prebuilt helpers were removed'
+            'npm: pi install / pi update for extension packages'
+            'git: git-backed extension packages and repository tooling')
+makedepends=(nodejs-lts-jod npm jq)
+source=("pi-coding-agent-install-package.json::https://github.com/earendil-works/pi/releases/download/v1.5.0/pi-coding-agent-install-package.json"
+        "pi-coding-agent-install-package-lock.json::https://github.com/earendil-works/pi/releases/download/v1.5.0/pi-coding-agent-install-package-lock.json"
+        "LICENSE::https://raw.githubusercontent.com/earendil-works/pi/v1.5.0/LICENSE"
+        pi
+        pi.desktop)
+sha256sums=('2c0524e9556a475c087ea43c5b4ef6af232b180dfac5724a33dfe3e309349472'
+            'd3d2abb9ed4e078b7978ecd0f6316cc4357cb8d7777d344020acfa23190e24b4'
+            '0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48'
+            '2c468cdfdafb30de54568e7f7b1cd9d0e5a614c1c81f24e81bb4b2d7f2d0b966'
+            '1f29aabc028c7209b1bce0ad0b105041817d40ffdca0e87319d72fd4a11c3b96')
+
+# The eight first-party packages the release lockfile lists without
+# integrity (it is written by pi.dev's installer, which knows them
+# differently); each value from `npm view @earendil-works/<name>@1.5.0
+# dist.integrity`, fetched 2026-11.
+_pi_integrity_pi_agent_core='sha512-FOj+jXj48DbzMycR/ghNa2KcsqWmvOln24e0FnQOVgnd8vn5H79g335WdHaZUVdRo+zCeogb40/qPPlCWFuvmA=='
+_pi_integrity_pi_ai='sha512-VeWxNqTHSqRCf8AcY/6kvNwh+neRL6MPxZPePVztIQy6qqK9MR/YoCSN/ZgDnIyCD3pqEXgRyQbzk4KV4uvjbg=='
+_pi_integrity_pi_codemode='sha512-PLBJZ17AEWGzOlAAcFuOkw3PxkOti0JlFuZQyeF2GRTqbpuYo4k9t8YqUV2uOQVzrUnKdxahwaFUqc1eNS1WAg=='
+_pi_integrity_pi_coding_agent='sha512-xNDZ5kqowO6Z03FS2gwAkPEGk1ssxVcYKQ6qZId84mFEvwACvvyc2l0vAMOS+c5zvxLRMLBE9r4y44IGYkMJaQ=='
+_pi_integrity_pi_mcp='sha512-DURw3IwHCTMHV8CzUJWVp9css27NowsCWfXt4xg2r09IZ+P1O/Uq58hp0hb9WJO0dbkaKGXKBIkV4LVXcu2nlg=='
+_pi_integrity_pi_schema='sha512-RW0MbT2tR65OY6xMsgB/yVBb7m/RTNwA+9hurSN1vVXfHZRVmVnXbruBPrx/PzbrQnW5yLVlMRWxErGDQtF1Hg=='
+_pi_integrity_pi_telemetry='sha512-VW3tcVdnNfl/Vk8wHPTzZdKkxcsCOM12ppiO4DXnd9wMxUCmOfLt/wvUnWeKWbTVlVSRg0uqKtnnhE2UCsG2Bw=='
+_pi_integrity_pi_tui='sha512-56KqrDVeLF18k+syppVbT35Ai1opbM44ot+sL7O3K40CaWwXCiwOpqEFugDBAILtAhseZh6uYIuYxPPOJHLFAA=='
+
+prepare() {
+  cd "$srcdir"
+  # npm ci refuses a lockfile whose entries lack integrity: write the eight
+  # first-party values in (jq keeps the rest byte-for-byte what npm wrote).
+  local lock=pi-coding-agent-install-package-lock.json
+  jq \
+    --arg pi_agent_core   "$_pi_integrity_pi_agent_core" \
+    --arg pi_ai           "$_pi_integrity_pi_ai" \
+    --arg pi_codemode     "$_pi_integrity_pi_codemode" \
+    --arg pi_coding_agent "$_pi_integrity_pi_coding_agent" \
+    --arg pi_mcp          "$_pi_integrity_pi_mcp" \
+    --arg pi_schema       "$_pi_integrity_pi_schema" \
+    --arg pi_telemetry    "$_pi_integrity_pi_telemetry" \
+    --arg pi_tui          "$_pi_integrity_pi_tui" \
+    '.packages["node_modules/@earendil-works/pi-agent-core"].integrity = $pi_agent_core
+     | .packages["node_modules/@earendil-works/pi-ai"].integrity = $pi_ai
+     | .packages["node_modules/@earendil-works/pi-codemode"].integrity = $pi_codemode
+     | .packages["node_modules/@earendil-works/pi-coding-agent"].integrity = $pi_coding_agent
+     | .packages["node_modules/@earendil-works/pi-mcp"].integrity = $pi_mcp
+     | .packages["node_modules/@earendil-works/pi-schema"].integrity = $pi_schema
+     | .packages["node_modules/@earendil-works/pi-telemetry"].integrity = $pi_telemetry
+     | .packages["node_modules/@earendil-works/pi-tui"].integrity = $pi_tui' \
+    "$lock" > "$lock.new"
+  mv "$lock.new" "$lock"
+  # npm ci needs them side by side under these names.
+  cp pi-coding-agent-install-package.json package.json
+  cp "$lock" package-lock.json
+}
+
+build() {
+  cd "$srcdir"
+  # The cache inside $srcdir: nothing outside the build tree, and the
+  # container's builder user has no home to put it in.
+  npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    --cache "$srcdir/npm-cache"
+  # pi-tui ships prebuilt clipboard helpers for x64/arm64 Linux, macOS and
+  # Windows; none is 32-bit ARM, and an arch=(any) package must hold no ELF
+  # file. Without them Pi reads the clipboard through wl-paste (the
+  # headers and README of native/ stay: they are text).
+  find node_modules -type f -name '*.node' -delete
+}
+
+check() {
+  cd "$srcdir"
+  # The real entry point, with the wrapper's environment: telemetry off,
+  # update checks off, offline so nothing reaches pi.dev from the build.
+  # Prints "1.5.0".
+  local out
+  out="$(PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 PI_OFFLINE=1 \
+    node node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --version)" \
+    || { printf 'pi --version failed: %s\n' "$out" >&2; return 1; }
+  printf 'pi --version: %s\n' "$out"
+  [ "$out" = "1.5.0" ] || { printf 'pi --version printed %s, expected 1.5.0\n' "$out" >&2; return 1; }
+  # No ELF file may be left: an arch=(any) package must hold none.
+  [ -z "$(find node_modules -type f -name '*.node')" ] \
+    || { find node_modules -type f -name '*.node' -print >&2; return 1; }
+}
+
+package() {
+  cd "$srcdir"
+  # The whole tree under /opt/pi: Pi resolves its first-party packages from
+  # node_modules, and extensions under ~/.pi expect that layout. npm left
+  # every file 644 (dirs 755) except what carries a shebang; cp -a keeps
+  # the modes and the eight relative .bin symlinks.
+  install -dm755 "$pkgdir/opt/pi"
+  cp -a node_modules "$pkgdir/opt/pi/"
+  # The wrapper (telemetry off, pacman for updates) and the drawer entry.
+  install -Dm755 "$srcdir/pi" "$pkgdir/usr/bin/pi"
+  install -Dm644 "$srcdir/pi.desktop" "$pkgdir/usr/share/applications/pi.desktop"
+  # The licence (the npm tarballs ship none) where Arch looks for it.
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# pi — run Pi, the terminal coding agent, from the image's /opt/pi tree.
+# Telemetry off, update checks off (updates come from pacman), and
+# `pi update` told to use pacman: each can be overridden by the user
+# (`PI_TELEMETRY=1 pi`, ...).
+: "${PI_TELEMETRY:=0}"
+: "${PI_SKIP_VERSION_CHECK:=1}"
+: "${PI_SELF_UPDATE_COMMAND:=sudo pacman -Syu pi-coding-agent}"
+export PI_TELEMETRY PI_SKIP_VERSION_CHECK PI_SELF_UPDATE_COMMAND
+exec /usr/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"
