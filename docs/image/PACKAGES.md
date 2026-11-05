@@ -342,13 +342,101 @@ chromium.desktop` as the user, and `chromium` added to `~/.config/omamobile/home
   the same rules as its notification, plus Do Not Disturb. `omaphone` carries
   `0001-t715-no-speaker-button.patch`: the tablet has no earpiece.
 
-## t715-camera
+## The cameras: libcamera, omacam, t715-camera
 
-`t715-photo`, a C program with no library but libm, and `t715-camera`, its front end for
-the drawer entries Photo and Selfie: `docs/hardware/CAMERA.md`. It needs `t715-camera.ko` from
-the daily kernel and the sensor tables in `/usr/lib/firmware/t715/`, which are not packaged:
-they are Samsung's, and `research/parity/camera/t715-cam-seq.py` makes them from the owner's own
-firmware. In `image/rootfs/packages.mobile`.
+The tablet's cameras have no ISP: the `t715-camera` kernel driver captures raw
+Bayer through CSIS and FIMC-LITE straight to memory, and three packages turn that
+into pictures (`docs/hardware/CAMERA.md` for the hardware):
+
+| Package | Role |
+|---|---|
+| `libcamera` 0.7.2-4.2 (with `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera`, `python-libcamera`) | libcamera with the software ISP that knows this tablet's receiver and its two sensors |
+| `omacam` 0.3.3-2 | omarchy-mobile's **Camera** app: preview, tap to focus, photos and video, lens switching by zoom |
+| `t715-camera` 0.2.3 | the drawer's Photo and Selfie: one shot at a time, raw Bayer developed in software |
+
+### libcamera 0.7.2-4.2
+
+Arch's `0.7.2-4` (which ALARM builds unchanged for armv7h) rebuilt on
+[omarchy-mobile](https://github.com/derekross/omarchy-mobile)'s software-ISP patch
+series plus three patches of our own; `pkgrel=4.2` sorts above ALARM's `0.7.2-4` in
+`[t715-omarchy]`, which the image declares before `[core]` (`image/pkg/libcamera/`,
+its `README.md` for the whole series).
+
+- **0001-0056, unchanged from omarchy-mobile** at commit
+  `0f43776a2662272cf8569559fc91ec356dfa97dd` (2026-11-03, MIT): written for a Pixel
+  7 Pro's `gs201-csis` receiver, they give the software ISP, on GLES 2/3 through
+  EGL, contrast autofocus with a lens, lens shading, denoise, sharpening and
+  defective-pixel correction, a better AGC/AWB, and manual controls.
+- **0057** adds this tablet's receiver to the simple pipeline handler's
+  `supportedDevices` table (`{ "t715-camera", {}, true }`) — stock libcamera ignores
+  it, because the handler matches only a fixed table of media-device driver names.
+  Ours: the driver is this repository's own, so the patch will not be sent upstream.
+- **0058** adds the two sensors, the rear Samsung S5K4H5 and the front S5K6B2, as
+  omarchy-mobile adds its Samsung ones: sensor helpers (black level 64 at 10 bits,
+  linear gain `AnalogueGainLinear{ 1, 0, 0, 32 }` — both measured on the tablet and
+  declared by the sensors' SMIA limit registers) and sensor properties.
+- **0059** their tuning files (`s5k4h5.yaml`, `s5k6b2.yaml`): a contrast 1.2 default
+  and omarchy-mobile's `Detail` values. No colour matrix and no saturation default:
+  the tablet runs the software ISP on the CPU, where a matrix, even the identity,
+  sends the debayer down its per-pixel path (60 frames at 1640x1228: 5.0 s of CPU
+  with one, 3.1 s without). The rear's `Af` scans only the DW9807 focus motor's
+  useful travel, `range: [ 400, 700 ]` of its 0-1023; the front is fixed focus.
+- **Differences from omarchy-mobile's aarch64 build**: `arch=(armv7h)`, `pkgrel=4.2`
+  (theirs is aarch64, 4.22); no `libpisp` anywhere (the trimmed build builds no rpi
+  pipeline that links it); `sdl2` resolved through `sdl2-compat`'s `Provides: sdl2`;
+  same trimmed build otherwise — pipelines `simple,uvcvideo`, IPA `simple`,
+  `softisp-gpu=enabled`, no docs, no tests, `werror=false`, plus Arch's own
+  `libcamera-fix-python3.14-macro-redefinition.patch`.
+- An hour or two under qemu; rebase 0057-0059 on each new ALARM libcamera release,
+  and drop omarchy-mobile's patches they have absorbed.
+
+### omacam 0.3.3-2
+
+[omacam](https://github.com/derekross/omacam) 0.3.3, Omarchy Mobile's camera app,
+shown as **Camera** (Rust, GTK 4 and libadwaita, on libcamera directly through
+libcamera-rs): a full-screen viewfinder, tap to focus, full-resolution photos,
+video with sound, lens switching by zoom. Upstream's PKGBUILD kept as is
+(`image/pkg/omacam/`, its `README.md`), with:
+
+- **`arch=(armv7h)`** instead of `aarch64`: everything it needs builds for it in
+  ALARM (rust, gtk4, libadwaita, clang, libcamera 0.7.2). The sources carry no
+  32-bit assumption: casts only widen, no `AtomicU64`, no pointer-width `repr`,
+  and libcamera-rs's C API is `size_t`-based with `static_assert` layout checks.
+- **One patch, `0001-tablet-lens-table.patch`** (pkgrel 2), which teaches omacam
+  three things this tablet needs: a system-wide lens table read from
+  `/etc/omacam/lenses.toml` (after `--lens-table` and the user's own
+  `~/.config/omacam/lenses.toml`, before the built-in Pixel 7 Pro table), an
+  optional per-lens `preview_fps` that caps the preview's frame rate, and an
+  optional table-level `merge_threads` that caps the Night/HDR burst merge's
+  thread pool. The tablet debayers on the CPU: at the default 30 fps a preview
+  took 3.4 cores and 83 °C in a minute and a half, and a 7-thread merge took it
+  from 62 to 82 °C in 17 s. `t715-camera`'s lens table sets `preview_fps = 15` and
+  `merge_threads = 2`; without the keys the behaviour is exactly upstream's. The
+  two keys need the patched omacam, so `t715-camera` carries
+  `conflicts=('omacam<0.3.3-2')`: an older omacam would reject the table.
+- Hours under qemu (171 crates, gtk4-rs included; the whole dependency
+  closure); `check()` runs `omacam-core`'s tests, the camera logic, under qemu
+  too. The version constraint (`libcamera>=0.7`, `<0.8`) is satisfied by ALARM's
+  official 0.7.2-4; this repository's own libcamera, once built into
+  `[t715-omarchy]`, takes precedence for it too.
+
+### t715-camera 0.2.3
+
+`t715-photo`, a C program with no library but libm, and `t715-camera`, its front end
+for the drawer entries Photo and Selfie: `docs/hardware/CAMERA.md`. It needs
+`t715-camera.ko` from the daily kernel and the sensor tables in
+`/usr/lib/firmware/t715/`, which are not packaged: they are Samsung's, and
+`research/parity/camera/t715-cam-seq.py` makes them from the owner's own firmware.
+Since the media-controller kernel it also carries the system-wide camera
+configuration: `/etc/libcamera/configuration.yaml` puts libcamera's software ISP on
+the CPU for every application (the Mali-T760 runs at a fixed 266 MHz: measured on
+the front camera, the GPU path gives 3 to 6 frames per second, the CPU path 30;
+`LIBCAMERA_SOFTISP_MODE=gpu` overrides it), the udev rule `71-t715-dma-heap.rules`
+opens the dma-buf heaps the software ISP allocates from to the video group, and
+`/etc/omacam/lenses.toml` is omacam's lens table for this tablet: the rear's 2x2
+binned preview, the sensors' rotations (measured, until the device tree carries
+them), `preview_fps = 15` and `merge_threads = 2`. In
+`image/rootfs/packages.mobile`.
 
 ## t715-gps
 
@@ -360,6 +448,48 @@ GeoClue connecting, `t715-gpsd.service`, with no network, no capability and its 
 `omamobile-gnss on|off|status|forget` is the switch, under the name the shell's tile calls;
 `t715-position` is the drawer's Position; `t715-gps-capture` records one trip outside. Needs
 `CONFIG_GPIO_SYSFS` (`kernel/patches/t715-gps`). In `image/rootfs/packages.mobile`.
+
+## pi-coding-agent 1.5.0
+
+**Pi, the terminal coding agent, preinstalled** — the image's other coding agent
+beside the Claude Code installer. Upstream is
+[earendil-works/pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`
+on npm, MIT): the package holds a **pinned npm tree**, because upstream publishes no armv7
+build and its own installer would download x64/arm64 binaries. The npm packages it installs
+are JavaScript and WebAssembly only, so `npm ci` from the release's own lockfile
+(`pi-coding-agent-install-package{,-lock}.json`, what pi.dev's installer uses) gives a tree
+that runs on 32-bit ARM under Node 22.
+
+- **The lockfile's eight gaps**: upstream's lockfile ships without integrity for the eight
+  first-party `@earendil-works/*` packages (it is written by pi.dev's installer, which knows
+  them differently); `prepare()` writes those integrities in, each from
+  `npm view @earendil-works/<name>@1.5.0 dist.integrity`, with jq keeping the rest
+  byte-for-byte what npm wrote — `npm ci` refuses a lockfile whose entries lack integrity.
+- **Two things do not run on armv7, both removed**: pi-tui's prebuilt clipboard helpers
+  (`.node` files for x64/arm64 Linux, macOS and Windows — deleted; Pi falls back to
+  `wl-paste`/`wl-copy`, the optional `wl-clipboard` package) and Pi's fd/ripgrep downloader
+  (x64/arm64 releases only — `fd` and `ripgrep` are runtime depends instead).
+- **What is installed**: the whole tree under `/opt/pi` (Pi resolves its first-party
+  packages from `node_modules`, and extensions under `~/.pi` expect that layout;
+  `cp -a` keeps npm's modes and the eight relative `.bin` symlinks), the wrapper
+  `/usr/bin/pi` and the drawer entry `pi.desktop` (a terminal app, "Pi"). `arch = any`,
+  `options=(!strip)`: no ELF file to strip, and makepkg's strip pass would `file(1)`-probe
+  every one of the ~9000 files under qemu for nothing (`build-pkg` still checks the
+  package holds no ELF).
+- **The wrapper** turns telemetry off (`PI_TELEMETRY=0`) and update checks off
+  (`PI_SKIP_VERSION_CHECK=1`), and points `pi update` at pacman
+  (`PI_SELF_UPDATE_COMMAND=sudo pacman -Syu pi-coding-agent`); each can be overridden by
+  the user (`PI_TELEMETRY=1 pi`, ...).
+- **`check()`** runs the real entry point in the container with those same variables plus
+  `PI_OFFLINE=1`, expects `pi --version` to print `1.5.0`, and fails if any `.node` file
+  survived.
+- **No credential, ever**: the owner signs in on the tablet (`/login`, or a provider API
+  key), and Pi keeps it in `~/.pi/agent/auth.json`. A Claude Pro or Max subscription must
+  not be used in Pi: Anthropic's terms forbid its credentials in third-party apps.
+- **Depends**: `nodejs-lts-jod` (Node 22, ≥ 22.19: Pi's engine requirement), `fd`,
+  `ripgrep`. Optional: `wl-clipboard`, `npm` (`pi install`/`pi update` for extension
+  packages), `git` (git-backed extensions and repository tooling). In
+  `image/rootfs/packages.mobile`.
 
 ## t715-claude-code
 
@@ -374,10 +504,39 @@ pacman beforehand (`rg`, `xz`, `npm`; Node 22 is `nodejs-lts-jod`); the download
 checked against the sha256 of Anthropic's `manifest.json` for that version; the launcher
 `taskset`s all eight cores instead of a pad's four.
 
+Since 0.1.0-2 the install starts from the app drawer: **"Claude Code installer"**
+(`t715-claude-code.desktop`, a terminal entry like `t715-position`, the generic
+utilities-terminal icon, no Anthropic branding) opens `t715-claude-guide`, which explains
+what installing means (an unofficial build for 32-bit ARM, about 250 MB downloaded from
+Anthropic, capped at `MAX_VERSION`, the owner's own sign-in), asks a y/N question whose
+default is No, then runs `sudo t715-claude-install` itself and shows the sign-in steps. It
+runs as the desktop user; the one root command goes through sudo with its own password
+prompt.
+
 - **What is installed**: `/usr/share/t715-claude-code/installer/` (the patched upstream
   tree, minus `bench/`) and `/usr/bin/t715-claude-install`, the wrapper the owner runs as
   root (`sudo t715-claude-install [VERSION]`, `docs/DEPLOY.md` 11.10). Nothing else: the
   package owns no file under `/opt`, `/usr/local` or `/home`, holds no ELF, and `arch = any`.
+- **The manifest signature check** (0.1.0-2, fail closed): since 2.1.89 every Anthropic
+  release publishes `manifest.json.sig` next to `manifest.json`, made with the release key
+  `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`
+  (`https://downloads.claude.ai/keys/claude-code.asc`, documented at
+  code.claude.com/docs/en/setup). The package ships that key (`anth-release-key.gpg`,
+  dearmored) and `lib/manifest-verify.sh`: a throwaway keyring holding only the shipped key,
+  `gpg --verify` of the detached signature, then the imported key's **primary fingerprint**
+  (gpg's `VALIDSIG` line) compared to the pinned constant — never read from the
+  environment. The patched installer calls it before any use of the manifest, the sha256
+  comparison included, and aborts on a missing `.sig`, a bad signature or a different key.
+  `test-manifest-signature.sh` in the package directory exercises it with throwaway keys:
+  a good signature passes; a tampered manifest, a foreign key, a missing signature and an
+  environment substitution are all refused.
+- **The npm tools are pinned** (0.1.0-2): the rebundle step (esbuild and the runtime deps
+  ws, undici, js-yaml it gathers) installs from `npm-tools-package-lock.json` — every
+  tarball URL and sha512 integrity frozen — with `npm ci --ignore-scripts` into a directory
+  of the install run, never globally. esbuild's armv7 binary package (`@esbuild/linux-arm`)
+  is part of the same lockfile, installed by name (`--force`: npm sees a darwin/arm64
+  builder under qemu), and the bundle step points esbuild at it with `ESBUILD_BINARY_PATH`.
+  Claude Code's self-update is off (`DISABLE_AUTOUPDATER`, `DISABLE_UPDATES`).
 - **The wrapper**: root-only, runs the installer with `HOME` set to the target user's home
   (`$SUDO_USER`, `alarm` without sudo — never root), from a `mktemp -d` under `/var/tmp`
   removed on exit, then gives that user `~/.claude` and `settings.json` (600). The version
@@ -390,7 +549,7 @@ checked against the sha256 of Anthropic's `manifest.json` for that version; the 
   `/usr/local/bin` at first run). No token in the package, the image or this repository;
   `image/tests/verify-rootfs.sh` checks the image for one.
 - **Depends**: `bash`, `nodejs-lts-jod` (Node 22, the engine Claude Code's guard allows),
-  `npm` (esbuild, ws, undici, js-yaml for the bundle), `ripgrep`, `xz`, `python`
-  (the JavaScript extractor and the manifest check), `curl`, `util-linux` (`taskset`),
-  `coreutils`, `gcc-libs` (`libatomic.so.1` for Node), `tar`, `diffutils`, `findutils`,
-  `grep`. In `image/rootfs/packages.mobile`.
+  `npm` (esbuild, ws, undici, js-yaml for the bundle), `gnupg` (`gpg`: the manifest
+  signature check), `ripgrep`, `xz`, `python` (the JavaScript extractor and the manifest
+  check), `curl`, `util-linux` (`taskset`), `coreutils`, `gcc-libs` (`libatomic.so.1` for
+  Node), `tar`, `diffutils`, `findutils`, `grep`. In `image/rootfs/packages.mobile`.

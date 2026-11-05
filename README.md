@@ -47,7 +47,8 @@ models are not covered.
 
 ## Install Omarchy
 
-Two ways: flash the prebuilt ROM, or build everything from source.
+Two ways: flash the prebuilt ROM ([the install guide](docs/INSTALL.md)), or build
+everything from source.
 
 > **Read this first.**
 > - Both blow the tablet's Knox warranty bit for good.

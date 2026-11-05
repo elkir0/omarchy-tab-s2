@@ -436,8 +436,15 @@ line is nearly full (sboot's line takes about 986 of 1023 bytes), so
 knobs go here. The daily image has no `returnafter` and no `autotest`.
 Since commit `435265c` the initramfs also carries a static e2fsck and can
 boot a persistent root (11.6); the same image boots read-only images as
-before. Host-side tests, which never touch the tablet:
-`bash boot/tests/test_initramfs.sh`.
+before. Since 2026-11-05 the root telnet shell is **off by default**
+(`t715.telnet=0`: the USB link and its DHCP still come up, nothing
+listens on port 23 — the default for a tablet handed to an end user);
+development images add `t715.telnet=1` to `--knobs` to get it back.
+`t715.failreboot=0` replaces the post-failure reboot with an on-screen
+wait (hold Power + Volume down to restart), and `say ()` puts first-boot
+progress and every failure on the screen whatever `t715.quiet` says
+(`boot/README.md`, "On-screen messages"). Host-side tests, which never
+touch the tablet: `bash boot/tests/test_initramfs.sh`.
 
 ### 7.3 RECOVERY image
 
@@ -527,6 +534,48 @@ time zone UTC, US QWERTY first on the on-screen keyboard, French AZERTY second.
 No build option changes them; they are set in
 `image/rootfs/configure-system.sh` and `image/rootfs/omarchy-user-setup.sh` and
 asserted by `image/rootfs/smoke-check.sh` and `image/tests/verify-rootfs.sh`.
+
+### 8.1 Building a release
+
+`image/tools/make-release` gathers the built images into a checksummed
+release directory, what end users flash (`docs/INSTALL.md`):
+
+```bash
+image/tools/make-release --version 1.0 \
+    --boot out/boot-omarchy/boot.img \
+    --recovery out/recovery-rescue/recovery.img \
+    --rootfs image/out/rootfs-omarchy.img \
+    --out out/release
+```
+
+It creates `out/release/omarchy-tab-s2-1.0/` (refused when it exists) with:
+
+| File | What |
+|---|---|
+| `boot.img`, `recovery.img` | the partition images, copied |
+| `rootfs-omarchy.img.xz` | the root image, xz-compressed (`--xz-level`, default 6; `--no-xz` copies it raw) |
+| `omarchy-tab-s2-1.0-AP.tar.md5` | the Odin package, boot + recovery (`image/tools/pack-odin`) |
+| `omarchy-tab-s2-1.0-boot.tar.md5` | the Odin package, boot only, for users who keep TWRP in RECOVERY |
+| `SHA256SUMS` | every file, plus the raw image under its uncompressed name `rootfs-omarchy.img` |
+| `RELEASE.md` | a stub: fill in the changes and the install steps before publishing |
+
+Everything that can refuse the release runs before anything is created, and
+nothing half-made is left behind. The checks: the boot image's `ANDROID!`
+magic and the 14336 KiB limit of BOOT (p9), the recovery image's magic and the
+16384 KiB limit of RECOVERY (p10), the root image's ext4 superblock (magic
+`0xEF53` at offset 1080), and the version's shape (digits, letters, `.`, `_`,
+`-`). An input under a `dumps/` or `sm-t715-private/` directory is refused:
+nothing private ever enters a release.
+
+`image/tools/pack-odin`, which `make-release` calls, writes the Odin package:
+a ustar tar of the images under their partition flash file names (no
+directories, owner 0:0, mode 0644, a fixed mtime, so the same inputs give the
+same package), with one trailer line — `<md5 of the tar bytes>  <name>.tar` —
+so `tar -tf` still lists the images and the md5 of every byte before the
+trailer equals the trailer's hash (Odin's own check). The images are packed
+byte for byte: they already carry their `SEANDROIDENFORCE` footer.
+
+Off-device tests for both: `image/tests/test_release_tools.sh`.
 
 ## 9. First deployment
 
@@ -651,7 +700,8 @@ bash device/flash-boot.sh out/test-recovery-slot/recovery.img
 ```
 
 The other knobs (`t715.shell`, `t715.rootwait`, `t715.modules`,
-`t715.modblacklist`, `t715.wdtguard`, `t715.autotest`, `t715.rootimg`) are
+`t715.modblacklist`, `t715.wdtguard`, `t715.autotest`, `t715.rootimg`,
+`t715.telnet`, `t715.failreboot`, `t715.quiet`, `t715.persist`) are
 listed in the header of `boot/initramfs/init` and in
 `boot/README.md`.
 
@@ -785,7 +835,14 @@ of 3; phases 2 (Linux in BOOT) and 3 (removing Android's data) are in
    `00021` from `out/mainline-daily-00021/`, knobs
    `t715.usbfn=ecm t715.failwait=300`.
 2. The image pushed as in 9.3. Free space on USERDATA must hold its use
-   (3.2 GiB for Omarchy) plus 512 MiB: the seed checks it.
+   (3.2 GiB for Omarchy) plus 512 MiB: the seed checks it. Put the
+   checksum sidecar `rootfs-omarchy.img.sha256` (one `sha256sum`-format
+   line naming the image's own file name; `build-rootfs` writes it next
+   to the image) next to the image too: the first boot verifies the copy
+   while USERDATA is still read-only ("Checking the image..." on screen),
+   and a mismatch or a malformed sidecar refuses the seed without
+   touching anything, falling back to image mode. Without a sidecar the
+   seed runs unchecked, as before.
 3. From Android, add the second line to `rootfs.select`, then sync:
 
    ```bash
@@ -794,10 +851,12 @@ of 3; phases 2 (Linux in BOOT) and 3 (removing Android's data) are in
    adb -s "$S" reboot recovery
    ```
 
-4. The first boot copies the image into `USERDATA/omarchy` with a dark
-   screen: 150 s on the reference tablet (3200 MiB, 2026-10-29), then
-   Omarchy starts as usual. The log says `USERDATA/omarchy seeded in
-   150s` and `persistent root on /newroot`.
+4. The first boot copies the image into `USERDATA/omarchy`: 150 s on the
+   reference tablet (3200 MiB, 2026-10-29). Since 2026-11-05 the screen
+   shows the work ("Setting up Omarchy (first boot)", a percentage about
+   every 10 s, then "Setup finished. Starting Omarchy.") even under
+   `t715.quiet=1`; before, the screen stayed dark. The log says
+   `USERDATA/omarchy seeded in 150s` and `persistent root on /newroot`.
 5. Check: `findmnt /` shows `/dev/mmcblk0p22[/omarchy] ext4 rw`, and
    `/.t715-persist` names the seed image.
 
@@ -976,16 +1035,34 @@ with `image/tests/ondevice/t715-gps.sh`, as root on the tablet, Wi-Fi or LTE con
 The image ships no Claude Code binary: Anthropic's licence does not allow
 redistributing it, and there is no armv7 build anyway. What it ships is the
 installer (`t715-claude-code`: Yumi Lab's `claude-code-smartpi`, patched for
-this tablet — `docs/image/PACKAGES.md`). One root command, Wi-Fi connected,
-about 250 MB downloaded:
+this tablet — `docs/image/PACKAGES.md`).
+
+Since 0.1.0-2 the install starts from the **app drawer**: the entry
+"Claude Code installer" (`t715-claude-code.desktop`) opens `t715-claude-guide`
+in a terminal, a guided, opt-in install that explains what installing means
+(unofficial build for 32-bit ARM, about 250 MB from Anthropic, capped at
+`MAX_VERSION`, the owner's own sign-in), asks a y/N question whose default is
+No, then runs the root command itself and shows the sign-in steps. It runs as
+the desktop user; the one root command goes through sudo.
+
+Directly, the root command is still there (Wi-Fi connected, about 250 MB
+downloaded):
 
 ```
 sudo t715-claude-install
 ```
 
-That downloads Anthropic's official binary, checks it against Anthropic's
-manifest, extracts its JavaScript, rebuilds it under Node 22 and installs it
-to `/opt/claude-code` with `claude` in `/usr/local/bin`. Then sign in, **as
+That downloads Anthropic's official binary, checks it, extracts its
+JavaScript, rebuilds it under Node 22 and installs it
+to `/opt/claude-code` with `claude` in `/usr/local/bin`. The check is
+**fail closed on Anthropic's manifest signature** (0.1.0-2): since 2.1.89
+every release publishes `manifest.json.sig` next to `manifest.json`, and the
+installer verifies it with a throwaway keyring holding only the release key
+shipped in the package — then compares the signing key's primary fingerprint
+to the pinned one — *before* any use of the manifest, the sha256 the binary
+is checked against included. A missing `.sig`, a bad signature or a different
+key aborts the install (`manifest-verify.sh`; `test-manifest-signature.sh`
+in the package directory covers each case). Then sign in, **as
 the user** (not root), with a Claude Pro or Max account — no API key, no local
 browser: run `claude setup-token` on the tablet, open the URL it prints on
 another device, and paste the printed token at the second command's prompt
@@ -1009,6 +1086,28 @@ anything above the cap unless `--force`. To move to another version, pinned:
 ```
 sudo t715-claude-install 2.1.269
 ```
+
+### 11.11 Pi
+
+Pi, the terminal coding agent, is **preinstalled** (`pi-coding-agent` 1.5.0,
+a pinned npm tree under `/opt/pi` — `docs/image/PACKAGES.md`): the drawer's
+"Pi" entry starts it in a terminal, and `pi` is on the command line. Nothing
+to install and nothing downloaded at build time beyond the npm tarballs the
+lockfile pins.
+
+Sign in on the tablet, as the user, once:
+
+```
+pi
+/login
+```
+
+or use a provider API key. **Never a Claude Pro or Max subscription**:
+Anthropic's terms forbid its credentials in third-party apps, and Pi is one.
+
+The wrapper `/usr/bin/pi` turns telemetry off and update checks off; updates
+come from pacman (`sudo pacman -Syu pi-coding-agent`). No credential is in the
+image: Pi keeps its own in `~/.pi/agent/auth.json`, on the tablet only.
 
 ## 12. Known limitations
 
