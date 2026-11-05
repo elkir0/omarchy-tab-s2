@@ -57,9 +57,11 @@ case-insensitive and loses ownership).
 ## Running it
 
 ```bash
-image/tools/repack-omarchy                 # download, verify, retag, index
+image/tools/repack-omarchy                 # download the pinned files, verify, retag, index
 image/tools/repack-omarchy --force         # re-download and rebuild everything
 image/tools/repack-omarchy --list FILE     # another package list
+image/tools/repack-omarchy --update-pins   # rewrite repack.pins from the channel (see below)
+image/tools/repack-omarchy --follow-channel  # old behaviour, pins ignored (warned)
 image/tests/test_repack.sh                 # pacman checks in an armv7h container
 column -t -s $'\t' image/out/repo/armv7h/MANIFEST.tsv
 ```
@@ -67,17 +69,45 @@ column -t -s $'\t' image/out/repo/armv7h/MANIFEST.tsv
 Downloads land in `image/cache/omarchy-upstream/<channel>/aarch64/`, retagged
 packages in `image/cache/repacked/<channel>/`, the repository in
 `image/out/repo/armv7h/` (`t715-omarchy.db`, packages, `MANIFEST.tsv`; stale
-versions are removed). Packages built from `image/pkg/` by `image/tools/build-pkg`
+versions of unpinned packages are removed — a pin keeps its file even when the
+channel has moved on). Packages built from `image/pkg/` by `image/tools/build-pkg`
 (listed in `MANIFEST-built.tsv`) are kept and indexed, never removed: see
 `docs/image/PACKAGES.md`. The tool is idempotent: without `--force` and without
-upstream changes it downloads nothing (`omarchy.db` re-check uses
-If-Modified-Since) and leaves the repository byte-identical.
+pin or upstream changes it downloads nothing (`omarchy.db` re-check uses
+If-Modified-Since; a pinned package ignores channel moves) and leaves the
+repository byte-identical.
 
 ## Refreshing when Omarchy releases
 
-Just run `image/tools/repack-omarchy` again: it re-checks the channel's `omarchy.db`
-(304 → nothing to do; 200 → new versions are downloaded, verified, retagged
-and re-indexed, and the old package files are dropped from `image/out/repo/armv7h/`).
+The repack does **not** follow the channel: every package of
+`image/tools/repack.list` is pinned in `image/tools/repack.pins` (TSV: name,
+upstream filename, sha256), and a plain `image/tools/repack-omarchy` fetches
+exactly those files — never the versions the channel's `omarchy.db` lists
+today. The signature and `omarchy-trusted.fpr` checks still apply; the pinned
+sha256 replaces the database's. A pinned file no longer served upstream is
+served by the local cache (`image/cache/omarchy-upstream/`); missing in both
+places, the run dies naming the file. A pinned package's output is never
+dropped from `image/out/repo/armv7h/` because the channel moved on.
+
+Why: **Omarchy 4.5.0** (stable channel since 2026-11-05) breaks
+**omarchy-mobile's touch patches**, which target **Omarchy 4.0.6**. The image
+stays on 4.0.6 on purpose.
+
+Moving to a newer Omarchy is therefore a deliberate, separate choice:
+
+```bash
+image/tools/repack-omarchy --update-pins   # rewrite repack.pins from the channel's
+                                           # current omarchy.db (prints old -> new),
+                                           # then review the diff
+image/tools/repack-omarchy                 # download, verify, retag, index the new pins
+image/tests/test_repack.sh                 # then test the touch layer on a real image
+```
+
+For a one-off look at what the channel carries today, `--follow-channel` runs
+the old behaviour for every package (the database's current versions) with a
+loud warning — the pins are ignored, and the next plain run brings the
+repository back to the pins.
+
 If a package upstream gains compiled code, the ELF check aborts the run and
 that package moves to the rebuild track (`image/pkg/`). When Omarchy rotates its
 signing key, the run stops with `UNPINNED KEY`: check the new key's

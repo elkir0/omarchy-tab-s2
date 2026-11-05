@@ -1,0 +1,22 @@
+# tools/repack.pins — exact upstream files (channel aarch64) this image uses,
+# one package per line: name<TAB>upstream_filename<TAB>sha256. The default run
+# of tools/repack-omarchy downloads exactly these files and never follows the
+# channel's omarchy.db for them; the signature and omarchy-trusted.fpr checks
+# still apply, the sha256 column replaces the database's.
+#
+# Why pins: Omarchy 4.5.0 (stable channel since 2026-11-05) breaks
+# omarchy-mobile's touch patches, which target Omarchy 4.0.6. Staying on 4.0.6
+# is a deliberate choice; to move on, run tools/repack-omarchy --update-pins,
+# review the new versions, and test (see docs/image/REPACK.md).
+#
+# name	upstream_filename	sha256
+omarchy	omarchy-4.0.6-1-aarch64.pkg.tar.zst	27cd6d88fda0be6c269c14dd65dad6a014384fedc3ea4eb5c742b2b972b10494
+omarchy-settings	omarchy-settings-4.0.6-1-aarch64.pkg.tar.zst	f653d97a7832eaa6b71dae1a6ce0480cb2631d6ca9a3350534a579cb08c6b309
+omarchy-keyring	omarchy-keyring-20251027-1-any.pkg.tar.zst	cce48c07cfc2b97e198df1bc81705db2921685032fe39f18b4ddfd84264b5967
+omarchy-themes-intros	omarchy-themes-intros-2026.10.14-1-any.pkg.tar.zst	d748591bc725de043f6ce1895b1015af3085037ab4e5f1af58f039305e1d5d9a
+omarchy-nvim	omarchy-nvim-2026.9.21-5-any.pkg.tar.zst	b46d41973cacfcf2d8be371351336a3f689e2eb7b9bacdb7ca81939354cbcbc9
+ttf-ia-writer	ttf-ia-writer-20261002.r63-3-any.pkg.tar.zst	2070c61511f92f0753800125bd7b9c8e6f472e9d14efe640d10f1a9dd15519cc
+ttf-jetbrains-mono-nerd-basic	ttf-jetbrains-mono-nerd-basic-3.5.1-2-any.pkg.tar.zst	c574e6266139fd24f668301d39d9faab386d7041ad3952b3012a2480e09cff0c
+yaru-icon-theme	yaru-icon-theme-26.10.3-3-any.pkg.tar.zst	3efc53db41713dd7a660a6ecb0ff5fc130ff9b88feb1251b7bcc35aa54288b0a
+tobi-try	tobi-try-1.10.1-3-any.pkg.tar.zst	bcaf19d1a6b271ac262e8ea794e2b49dcadb087516045a16f7bf7caf48a7568e
+ufw-docker	ufw-docker-251123-2-any.pkg.tar.zst	e6f73e00d8dbccfbfd9e6f0bf49331b878e3632e1c17ce7ad88e9a79f7e8c9e7
