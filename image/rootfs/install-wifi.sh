@@ -6,7 +6,9 @@
 #     linux-firmware build for the 4358 A3 ROM). pacman downloads the package
 #     into its cache mount and checks its signature; the package itself is not
 #     installed (the image ships no firmware package). Pinned by sha256: the
-#     build stops on any other file.
+#     build stops on any other file. Its licence, LICENCE.broadcom_bcm43xx,
+#     which redistribution requires, comes from the same package, at the same
+#     path as the package's (/usr/share/licenses/linux-firmware-broadcom/).
 #   - brcm/samsung-gts28/nvram_net.txt: the tablet's NVRAM (its MAC address
 #     and radio calibration), staged read-only by tools/build-rootfs from the
 #     Phosh session's dumps (never in git, never printed), with the name
@@ -47,6 +49,14 @@ mv -f "$BRCM/$FW_NAME.t715" "$BRCM/$FW_NAME"
 chmod 0644 "$BRCM/$FW_NAME"
 printf 'firmware: brcm/%s\tok\tfrom %s/%s %s (signed; the package is not installed), sha256 %s\n' \
     "$FW_NAME" "$repo" "$FW_PKG" "$ver" "$sha" > "$B/wifi.tsv"
+
+# --- its licence, from the same package ---------------------------------------------
+LIC="usr/share/licenses/$FW_PKG/LICENCE.broadcom_bcm43xx"
+install -d -m 0755 "/${LIC%/*}"
+bsdtar -xOf "$CACHE/$file" "$LIC" > "/$LIC" || die "no $LIC in $file"
+[ -s "/$LIC" ] || die "$LIC is empty in $file"
+chmod 0644 "/$LIC"
+printf 'licence: /%s\tok\tfrom %s %s\n' "$LIC" "$FW_PKG" "$ver" >> "$B/wifi.tsv"
 
 # --- NVRAM ------------------------------------------------------------------------
 install -d -m 0755 "$BRCM/samsung-gts28"

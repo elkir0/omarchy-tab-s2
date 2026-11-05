@@ -29,7 +29,9 @@ from the tablet's own SYSTEM partition at boot (`image/tools/build-rootfs --publ
 The released images hold free software from Arch Linux ARM, Omarchy, omarchy-mobile, Debian (Chromium)
 and this repository. Their sources are at those projects. The kernel is `v6.12.114` plus the patches
 in `kernel/patches/` (`t715-bringup`, `t715-modem`, `t715-parity`, `t715-gps`, `t715-charger`,
-`t715-camera-af`, `t715-cpufreq`, `t715-power`), built with `gts28ltexx_cpufreq.config`.
+`t715-camera-af`, `t715-cpufreq`, `t715-power`, `t715-camera-mc`), built with `gts28ltexx_cpufreq.config`.
+The Broadcom Wi-Fi firmware, `brcmfmac4358-pcie.bin`, comes from Arch Linux ARM's
+`linux-firmware-broadcom`, with its licence in `/usr/share/licenses/linux-firmware-broadcom/`.
 
 The notes in `research/` and `docs/hardware/` describe what we observed, for interoperability, by
 reading public sources and by static analysis of Samsung's binaries, decompilation included:
