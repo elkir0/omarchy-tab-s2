@@ -47,7 +47,7 @@ index 9adaf52d2..4413384dc 100644
  
  source "drivers/media/platform/samsung/exynos-gsc/Kconfig"
 diff --git a/drivers/media/platform/samsung/t715-camera.c b/drivers/media/platform/samsung/t715-camera.c
-index ceabe846c..436e3fdb4 100644
+index 1a9f8e186..436e3fdb4 100644
 --- a/drivers/media/platform/samsung/t715-camera.c
 +++ b/drivers/media/platform/samsung/t715-camera.c
 @@ -1,41 +1,42 @@
@@ -66,7 +66,7 @@ index ceabe846c..436e3fdb4 100644
 - * CSIS and FIMC-LITE programming from fimc-is-hw-csi.c and fimc-is-device-flite.c
 - * (GPL-2.0).  The sensors' register tables are not here: they are read at stream on
 - * from request_firmware(), a list of records { le16 reg; le16 width; le32 value },
-- * which the owner extracts from his own copy of the ISP firmware.
+- * which the owner extracts from a personal copy of the ISP firmware.
 + * The sensors, their power, MCLK, mode tables and the rear focus motor moved
 + * to the t715-sensor driver (VIDEO_T715_SENSOR).  What stayed here is the
 + * CSIS, FIMC-LITE and PHY programming that was proven on the device, from

@@ -13,7 +13,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 5 insertions(+)
 
 diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
-index 15155793a..8bea54e67 100644
+index 42c88c8aa..87a5107a5 100644
 --- a/arch/arm/configs/gts28ltexx_defconfig
 +++ b/arch/arm/configs/gts28ltexx_defconfig
 @@ -97,6 +97,7 @@ CONFIG_MEDIA_PLATFORM_SUPPORT=y
