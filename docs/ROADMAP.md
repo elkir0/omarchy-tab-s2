@@ -4,43 +4,37 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
-## State on 2026-11-03
+## State at 1.0 Beta 1 (2026-11-05)
 
-In the daily kernel and the image since 0.9.3, tested on one tablet:
+Since 0.9.3, tested on one tablet (`CHANGELOG.md` has the release's own test notes):
 
-- **CPU frequency**: the A53s scale from 400 MHz to 1.2 GHz under schedutil, at this chip's own
-  voltages, with stock's thermal thresholds; the A57s stay at the 1.2 GHz they always ran
-  (`docs/hardware/CPUFREQ.md` section 9, `kernel/patches/t715-cpufreq`). A 2-hour soak with the
-  modem online and four clean reboots passed before it went daily.
-- **Power with the screen off**: 2.26 W down to 1.48 W, from the lock screen's blanking and Wi-Fi
-  power saving (`docs/hardware/BATTERY.md` section 9). The gain from the A53 levels at idle is
-  small, 60-90 mW.
-- **Rear camera focus**: the DW9807 focus motor (`kernel/patches/t715-camera-af`), driven by
-  `t715-photo`.
-- **Shell**: omamobile-shell 0.2.94 with the tablet's patches rebased; hyprgraphics 0.6.0 for
-  Hyprland 0.57 (`docs/image/PACKAGES.md`).
-- **Auto-rotation** on from the first boot; the Rotation tile still turns it off
-  (`docs/image/ROTATION.md`).
-- **Claude Code**: `t715-claude-code`, an installer for it, patched for this tablet. The image
-  carries no Anthropic binary and no token; the owner of the tablet installs and signs in
-  (`docs/DEPLOY.md` 11.10).
-- **Shutdown diagnostics**: a system-shutdown hook lists the processes that outlive the last
-  SIGKILL, and `t715-pstore-shutdown` keeps that list from pstore at the next boot, to catch
-  NetworkManager's rare slow stop (once in 40 reboots).
-- **Build options**: the image's language, time zone and first keyboard layout
-  (`tools/build-rootfs --locale --timezone --keyboard`; en_US.UTF-8, UTC and US QWERTY by
-  default).
+- **Install for other people**: `docs/INSTALL.md`, Odin packages next to `boot.img` and
+  `recovery.img` (`image/tools/make-release`, `image/tools/pack-odin`), a first boot that shows its
+  progress and its errors on screen and checks the image against its `.sha256`, and no root shell
+  on the USB cable by default.
+- **Power with the screen off**: 754 mW, about 20 hours (`docs/hardware/BATTERY.md` sections 9-11):
+  the A57 cores offline with the screen (`kernel/patches/t715-power`), the GPU's power domain off
+  while it idles, the Wi-Fi link in ASPM L1.2 with a 100 ms power save timeout, the lock screen's
+  blanking. The A53s scale from 400 MHz to 1.2 GHz under schedutil (`t715-cpufreq`).
+- **Modem switch**: the Modem tile and Réseau mobile turn the CP off now and at boot, or only
+  while the screen is off; a powered CP costs 155 mW of the standby draw
+  (`docs/hardware/MODEM.md` 5.4, `docs/hardware/BATTERY.md` section 12).
+- **Cameras**: libcamera's software ISP on the CPU and omarchy-mobile's Camera app on both
+  cameras (`kernel/patches/t715-camera-mc`, `docs/image/PACKAGES.md`); the sensors' tables are
+  made at the first boot from the tablet's own firmware.
+- **Coding agents**: Pi preinstalled; Claude Code as an opt-in installer with a signed manifest.
+- **Omarchy 4.0.6, pinned** (`docs/image/REPACK.md`): 4.5.0 breaks omarchy-mobile's touch patches.
 
 ## Next
 
-1. **Suspend.** Every sleep target is masked and the kernel offers s2idle only, so the tablet
-   cannot sleep while the modem runs. The next levers on the screen-off draw, from the study in
-   `research/cpuidle/FINDINGS.md`: take the A57 cluster offline while the screen is off, then
-   give the A57s stock's body bias and EMA (decision D7 in `docs/hardware/CPUFREQ.md`), which
-   would also give them levels to fall back to when hot. They have none today: a full load on
-   all eight cores reaches 99 °C in 90 s.
-2. **GPU frequency scaling**, after the CPU (`docs/hardware/GPU.md`).
-3. **Cameras**: a live preview and a photo app on libcamera's software ISP, in progress.
-4. **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
-
-The modem stack does not change for now: the test tablet has no SIM.
+1. **Suspend.** The 5433 sleep entry passes every `pm_test` level and a dry run in a test kernel,
+   and a real suspend-to-idle wakes on the RTC (`docs/hardware/BATTERY.md` section 11); the Wi-Fi
+   chip's D3 and the modem still stand in the way, and the real `SMC_CMD_SLEEP` was never sent.
+2. **A modem that sleeps**: the CP-led link power management of stock (decision D2's fallback F2,
+   `research/modem/research/SYNTHESIS.md`), so that a modem kept on stops costing 155 mW.
+3. **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
+   never run end to end; a first-boot wizard; a TWRP zip; a USB link Windows can use (RNDIS or
+   NCM) and a USB vendor ID of our own instead of the one the gadget borrows.
+4. **GPU frequency scaling** (`docs/hardware/GPU.md`).
+5. **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
+6. **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
