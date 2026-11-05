@@ -21,6 +21,32 @@ rebuild the kernel:
 | `patches/t715-camera-mc/` (4 patches) | `t715-power` (`630bec1c7`) | the cameras through the media controller, for libcamera: `t715-sensor.ko`, the S5K4H5 and S5K6B2 as V4L2 subdevices (their rails, reset, MCLK, the `<firmware-name>-m<N>.seq` mode tables, exposure, gain, blanking, flips and orientation, the DW9807 as a lens subdevice); `t715-camera.ko` reduced to the capture side, one media device per camera with the sensor found through the device tree graph; the board's sensor nodes and endpoints; `VIDEO_T715_SENSOR` and the dma-buf heaps of libcamera's software ISP. Tested on the device over `t715-cpufreq` (`out/boot-camera-mc`); over `t715-power` it is `#7`, built but not booted yet. Built with `--fragment gts28ltexx_cpufreq.config` |
 | `patches/t715-camtest/` | `t715-parity` at `7d34675d8`, before the cameras | test only, in RECOVERY: the debugfs bring-up modules `t715-cam-probe` and `t715-cam-capture`, each camera step by hand; its copy of `t715-camera.c` is older than `t715-parity`'s. Built with `--fragment gts28ltexx_camtest.config` |
 
+## The release kernel
+
+The 1.0 releases run `v6.12.114` plus nine series in this order, built with the cpufreq
+fragment and a fixed identity, so that anyone can rebuild the release's kernel from this
+repository:
+
+```bash
+git clone --branch v6.12.114 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git src/linux-6.12
+```
+
+```bash
+git -C src/linux-6.12 switch -c t715-camera-mc
+```
+
+```bash
+for s in bringup modem parity gps charger camera-af cpufreq power camera-mc; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
+```
+
+```bash
+KBUILD_SKIP_ARM64=1 KBUILD_BUILD_TIMESTAMP="Thu Nov  5 12:00:00 UTC 2026" KBUILD_BUILD_USER=omarchy-tab-s2 KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 bash kernel/kbuild-mainline.sh --fragment gts28ltexx_cpufreq.config
+```
+
+For 1.0 Beta 1 this gives a zImage with sha256 `f6156169f13c98a3...`, the DTB `13aaf64b7e1c8b2c...`
+and the same 96 module files as the release: two builds, one from these patches and one from
+the development tree, were identical byte for byte.
+
 Recreate the tree (the `t715-bringup` branch is what `kernel/kbuild-mainline.sh`
 builds):
 
