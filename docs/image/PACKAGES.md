@@ -352,7 +352,7 @@ into pictures (`docs/hardware/CAMERA.md` for the hardware):
 |---|---|
 | `libcamera` 0.7.2-4.2 (with `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera`, `python-libcamera`) | libcamera with the software ISP that knows this tablet's receiver and its two sensors |
 | `omacam` 0.3.3-2 | omarchy-mobile's **Camera** app: preview, tap to focus, photos and video, lens switching by zoom |
-| `t715-camera` 0.2.3 | the drawer's Photo and Selfie: one shot at a time, raw Bayer developed in software |
+| `t715-camera` 0.2.3-2 | the sensors' mode tables, made at the first boot from the tablet's own firmware; the system-wide camera settings; the drawer's Photo and Selfie: one shot at a time, raw Bayer developed in software |
 
 ### libcamera 0.7.2-4.2
 
@@ -420,13 +420,23 @@ video with sound, lens switching by zoom. Upstream's PKGBUILD kept as is
   official 0.7.2-4; this repository's own libcamera, once built into
   `[t715-omarchy]`, takes precedence for it too.
 
-### t715-camera 0.2.3
+### t715-camera 0.2.3-2
 
 `t715-photo`, a C program with no library but libm, and `t715-camera`, its front end
 for the drawer entries Photo and Selfie: `docs/hardware/CAMERA.md`. It needs
 `t715-camera.ko` from the daily kernel and the sensor tables in
-`/usr/lib/firmware/t715/`, which are not packaged: they are Samsung's, and
-`research/parity/camera/t715-cam-seq.py` makes them from the owner's own firmware.
+`/usr/lib/firmware/t715/`, which are not packaged: they are Samsung's.
+
+Since 0.2.3-2 the tablet makes them itself. `t715-camera-tables.service` runs at boot while
+`s5k4h5-m0.seq` or `s5k6b2-m0.seq` is missing (the install hook enables it):
+`t715-camera-tables` mounts the SYSTEM partition read-only without replaying its journal,
+reads `vendor/firmware/fimc_is_fw2_4h5.bin`, accepts it only if its sha256 is firmware
+`T715XXU2CRH1`'s, writes the rear modes 0-3, 6 and 7 and the front mode 0, then binds the
+sensors so that the cameras appear without a reboot. The script holds offsets only: where the
+rear S5K4H5's mode array sits in that file, and the instructions whose immediates are the
+front S5K6B2's register writes (`research/parity/camera/ex6b2b.py` found them). It never
+rewrites an existing table; `--force` does, and `--fw FILE --out DIR` works on a copy.
+On the reference tablet's firmware it reproduces the seven tables in use there, byte for byte.
 Since the media-controller kernel it also carries the system-wide camera
 configuration: `/etc/libcamera/configuration.yaml` puts libcamera's software ISP on
 the CPU for every application (the Mali-T760 runs at a fixed 266 MHz: measured on
