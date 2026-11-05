@@ -1,0 +1,446 @@
+# SM-T715 (armv7h) rebuild of Arch's libcamera 0.7.2-4 for the Galaxy Tab
+# S2's cameras, on omarchy-mobile's software-ISP patch series.
+#
+# Why: the tablet's cameras have no ISP. The t715-camera kernel driver
+# (kernel/patches/t715-parity, kernel/patches/t715-camera-af) captures raw
+# Bayer through CSIS and FIMC-LITE straight to memory, which the simple
+# pipeline handler with the software ISP turns into pictures: stock
+# libcamera ignores the receiver, because the simple handler matches only
+# a fixed table of media-device driver names. omarchy-mobile
+# (https://github.com/derekross/omarchy-mobile, packages/libcamera, MIT)
+# builds the same 0.7.2-4 for a Pixel 7 Pro with a 56-patch series that
+# gives the software ISP contrast autofocus with a lens, lens shading,
+# denoise, sharpening and defective-pixel correction on the GPU, a better
+# AGC/AWB and manual controls: 0001-0056 here are that series, unchanged.
+# 0057 adds this tablet's receiver to the table, 0058 its two sensors
+# (S5K4H5 rear, S5K6B2 front: black level 64, gain code/32, both measured
+# on the tablet), 0059 their tuning files (the rear's Af
+# scans the DW9807's useful travel, 400 to 700; no colour matrix, which
+# makes the CPU debayer 60% dearer). Package notes:
+# docs/image/PACKAGES.md; the cameras: docs/hardware/CAMERA.md.
+#
+# Base: https://gitlab.archlinux.org/archlinux/packaging/packages/libcamera
+# tag 0.7.2-4, which ALARM builds unchanged for armv7h. Changes from
+# omarchy-mobile's aarch64 build: pkgrel 4.x (ours sorts above ALARM's
+# 0.7.2-4; theirs is 4.22), arch armv7h, no libpisp (the trimmed build
+# builds no rpi pipeline that links it), sdl2 resolved through
+# sdl2-compat's provide, and the tablet's patches after theirs. The git
+# source is pinned by the sha256 of "git archive v0.7.2", as makepkg
+# computes it (omarchy-mobile pins the same tree by its sha512).
+# Build: tools/build-pkg libcamera (an hour or two under qemu).
+
+# SPDX-License-Identifier: 0BSD
+#
+# Omarchy Mobile build of libcamera for the Pixel 7 Pro (gs201 CSIS receiver).
+#
+# Derived from Arch Linux's libcamera PKGBUILD, tag 0.7.2-4
+# (https://gitlab.archlinux.org/archlinux/packaging/packages/libcamera, 0BSD),
+# which Arch Linux ARM builds unchanged for aarch64. Omarchy Mobile changes:
+#  - aarch64 only. Pipelines simple and uvcvideo (USB cameras through
+#    USB-C), IPA simple only: none of the other aarch64 pipelines (rkisp1,
+#    rpi/*, imx8-isi, mali-c55) can match on this phone, and a smaller
+#    native build.
+#  - softisp-gpu forced on, so a missing EGL fails the build instead of
+#    silently leaving the GPU debayer out. At runtime the GPU path is
+#    tried first and falls back to the CPU; LIBCAMERA_SOFTISP_MODE=cpu
+#    forces the CPU path.
+#  - No documentation (no libcamera-docs split, no Doxygen, Sphinx or
+#    TeX Live in the build) and no test suite (test=false, no check()).
+#  - werror=false: GCC 16's -Warray-bounds flags libstdc++'s own std::mutex
+#    construction in camera_manager.cpp and log.cpp (a false positive in the
+#    library headers), which -Werror turned into a failed build.
+#  - The 0001-0056 patches, each described in the header of the one before:
+#    the gs201 receiver, sensors, contrast autofocus, GPU debayer passes,
+#    AGC/AWB, manual controls and tuning. See README.md.
+#
+# Maintainers of the original: David Runge, Carl Smedstad.
+
+pkgbase=libcamera
+pkgname=(
+  libcamera
+  libcamera-ipa
+  libcamera-tools
+  gst-plugin-libcamera
+  python-libcamera
+)
+pkgver=0.7.2
+pkgrel=4.2
+pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (SM-T715: t715-camera, software ISP)"
+arch=(armv7h)
+url="https://libcamera.org/"
+_url=https://git.libcamera.org/libcamera/libcamera.git
+makedepends=(
+  cmake
+  git
+  glib2
+  gst-plugins-base
+  gtest
+  libdrm
+  libgcc
+  libglvnd
+  libjpeg-turbo
+  libstdc++
+  libtiff
+  libyaml
+  libyuv
+  meson
+  pkgconf
+  pybind11
+  python-jinja
+  python-ply
+  python-pyyaml
+  qt6-base
+  qt6-tools
+  sdl2
+  systemd
+)
+source=(
+  "git+$_url#tag=v$pkgver"
+  "$pkgbase-fix-python3.14-macro-redefinition.patch"
+  0001-pipeline-simple-Add-the-Google-gs201-CSIS-receiver.patch
+  0002-libcamera-Add-the-Sony-IMX386-sensor.patch
+  0003-ipa-simple-agc-Step-faster-when-far-from-the-target-.patch
+  0004-libcamera-Add-the-Samsung-S5KGN1-sensor.patch
+  0005-libcamera-software_isp-add-contrast-autofocus.patch
+  0006-software_isp-Focus-on-the-frame-centre-with-statisti.patch
+  0007-software_isp-Steadier-contrast-autofocus.patch
+  0008-software_isp-Keep-exposure-white-balance-and-focus-a.patch
+  0009-software_isp-Take-contrast-and-saturation-defaults-f.patch
+  0010-software_isp-Gather-GPU-statistics-over-the-visible-.patch
+  0011-ipa-simple-agc-Add-digital-gain-past-the-sensor-s-li.patch
+  0012-ipa-simple-Tune-the-Pixel-7-Pro-s-ultrawide-and-main.patch
+  0013-libcamera-Add-the-Samsung-S5K3J1-and-S5KGM5-sensors.patch
+  0014-pipeline-simple-Accept-a-sensor-configuration-within.patch
+  0015-ipa-simple-agc-Step-out-of-a-pinned-histogram-quickl.patch
+  0016-software_isp-debayer_egl-Destroy-the-EGL-context-whe.patch
+  0017-ipa-simple-agc-Judge-only-frames-taken-with-the-last.patch
+  0018-ipa-simple-Carry-the-exposure-over-to-another-mode-o.patch
+  0019-ipa-simple-agc-Report-the-AE-state.patch
+  0020-ipa-simple-agc-Add-exposure-compensation.patch
+  0021-ipa-simple-Take-the-sensor-mode-s-timings-at-configu.patch
+  0022-ipa-simple-agc-Support-manual-exposure-time-and-anal.patch
+  0023-ipa-simple-awb-Support-manual-white-balance.patch
+  0024-software_isp-Gather-focus-statistics-over-a-window-t.patch
+  0025-ipa-simple-Focus-and-meter-on-the-application-s-wind.patch
+  0026-ipa-simple-af-Support-pausing-continuous-autofocus.patch
+  0027-ipa-simple-Support-FrameDurationLimits.patch
+  0028-software_isp-Correct-lens-shading-with-a-radial-mode.patch
+  0029-software_isp-debayer_egl-Add-a-noise-reduction-and-s.patch
+  0030-ipa-simple-Add-noise-reduction-and-sharpening.patch
+  0031-software_isp-Gather-grey-candidates-for-white-balanc.patch
+  0032-ipa-simple-awb-Use-the-grey-candidates-and-smooth-th.patch
+  0033-ipa-simple-agc-Protect-the-highlights.patch
+  0034-software_isp-debayer_egl-Clip-highlights-to-neutral.patch
+  0035-ipa-simple-af-Scan-less.patch
+  0036-ipa-simple-agc-Aim-the-mean-luminance-at-20.patch
+  0037-ipa-simple-agc-Count-highlights-as-they-come-out.patch
+  0038-ipa-simple-agc-Take-a-mode-change-gently.patch
+  0039-ipa-simple-Hand-tune-the-Pixel-7-Pro-s-Samsung-senso.patch
+  0040-ipa-simple-af-Settle-less-for-fine-steps.patch
+  0041-ipa-simple-agc-Don-t-climb-back-into-the-clipping.patch
+  0042-ipa-simple-Start-a-new-configuration-at-the-carried-.patch
+  0043-software_isp-debayer_egl-Roll-highlights-off-and-kee.patch
+  0044-ipa-simple-agc-Count-clipping-through-the-highlight-.patch
+  0045-ipa-simple-Soften-the-Samsung-sensors-hand-tuned-col.patch
+  0046-software_isp-Count-the-samples-the-sensor-saturated.patch
+  0047-ipa-simple-agc-Mind-what-the-sensor-saturates-and-th.patch
+  0048-software_isp-debayer_egl-Fade-sensor-clipped-highlig.patch
+  0049-software_isp-Gather-a-histogram-of-each-sample-s-bri.patch
+  0050-ipa-simple-agc-Choose-the-exposure-on-the-predicted-.patch
+  0051-software_isp-debayer_egl-Add-hue-vibrance-and-a-tone.patch
+  0052-ipa-simple-Add-the-Look-algorithm-and-tune-it-on-the.patch
+  0053-software_isp-debayer_egl-Smooth-the-chroma.patch
+  0054-pipeline-simple-Pass-the-start-controls-to-the-softw.patch
+  0055-software_isp-debayer_egl-Correct-defective-pixels-be.patch
+  0056-libcamera-Add-the-Samsung-S5KGN8-sensor.patch
+  0057-pipeline-simple-Add-the-Galaxy-Tab-S2-camera-receive.patch
+  0058-libcamera-Add-the-Samsung-S5K4H5-and-S5K6B2-sensors.patch
+  0059-ipa-simple-Tuning-files-for-the-S5K4H5-and-S5K6B2.patch
+)
+sha256sums=('9a69690566abf41304b7a48c5279971a4d00f9ac930479ee8ef56345d8d2cc07'
+            '2eb9407d11ea073e3c392bbb584b75803ce1b2a3d73afaefda5c1fa799c151ad'
+            '801b243119f423134a53bc9e7f97fdde358d843759d78b846151fa0f2643a995'
+            '710b7698eaf1b8cb804fc9ea4266f480ef668651395a3e1d085903f7e512ebc4'
+            'b1c2980e12dcddb77eab31a4811b829893f9b79ab2b50f7b9763dd49fb198d09'
+            'b2649fa61159a8175d2a4765884cf6754caacdd87973d21ea8be52cbaa225503'
+            '02c87a845d794ac19f2b8816443b95a26a54d4e49c9c39f7e8851fa0e4e2ae82'
+            '6359941238cffb3d5206c09c853605e08a75446aacc31e570d09909603442f6f'
+            '79e8a6984fb797e56440af21f0d07660a11e1b5551375f7b0722b93d2126ac33'
+            '5b7a1771ac7f2b08f5d9db3a97e9bc1eba3dac3aac73b60bc3d8ba3ad424737c'
+            '24cd9230e2360a0bb3580440955eeeac5dd0addd0969763552ff30636691673c'
+            'af09913f1e0f65f493e53fd9c45a314f5f8f215f6580109d8876030909104f7f'
+            'f412010ea87f9b4e7cf864d4086d76681f2ebdd5cd83b10069110ca5f904da07'
+            '9475f0197f6f8a53d69292ad7523b5a5d660692ba4f920666e0489fb3dfa1281'
+            '4353f75c66dea5df8d8c1f900264776102b3bc0081a8f0f1680c69bfdb45cb1a'
+            '5ffaf1895e758a0a1288c4de70018bf23793f88422056f8dc2dcf5bc6f43402f'
+            '0fe450331717a75c8fd148a463c92a167e62e2e288405d00e19403e6c6776e5d'
+            '19fbfc654e66beaaeafa64d10de1cce6cc6b0f67d03a0243c1dc6b0c4854565e'
+            '87ab2d596c8bd175cf3726e1d07e32f7ee91b2b39502893818d921c8c4b3d5d5'
+            '11155e3362957e99adcded798417c3b810249721bfe1591fbe609037915f76c2'
+            'ad02e2bcfbe52cadc4ad6a7416e5da715dd6a3b11973e7a1b11e293dcfd2d4fe'
+            '3cbc50b2b01c3aa1d2311560a1faba14c31a537d7fbfc68c1a16c9e6816eea68'
+            '929380483af97f516a11c1c82e4e4e4643b4d7480d56cfb573625e8999096746'
+            'af31e5a93defbb7e5c0e9f7a035f744dabf6011978f2d6200ce5771797417a15'
+            '7b3f8e738d840d375315103250ed969cb1df745f4c00306e1020f0ad0d31eec4'
+            'bde26dec711d39ff56d335a6fcaadcb727bdc7e8fbec0076d3d5502a74a3da8d'
+            '60a79c93247e15a54300898063b3d61a80273df655ab4515f0a6507cf062f1d2'
+            'a9ea1fb6dba794d10952f0e52ddc82dcd94a165fe6a2f5270b010fa2ef52579d'
+            '206c14a23e4ddf8e2f0ed0a1c7da2c64ea3175cc35d26c16cf58554cfed3dd05'
+            '3a160d5150e51900d2bc37a0335b9761e00c0206a80f39795c2c8f77f25d5467'
+            '2095a1ed2e6ba7349e2baf5bd831f599eb70f013f2d9fd5951d8010439c766d5'
+            '589575e566fdb00cac12c6ce60c45f2df966a7607cc3fb7c3883cd9a27c35f3d'
+            '25e9124ebc0c830436cc7ab96db58ddc7627731cb74cb2b8c84fa6d1f0e93a67'
+            'c8554cd96f0ef9d22b56b3e34621ef0b0b24458d00cedfd475ad88ce51090715'
+            '079409e59239969950f3947e623555fcec1ecdbdd29e3d49c67d17f412b5e1ab'
+            '4606bed8cf8f05980c8a2fca8bbed77a09ef8de247811f03601e4779266e3142'
+            '0867e0cd92b1139d4f87a1a845bc9466eb7f47e02059c6944b53cb38bbe037bd'
+            '87890c9c80c4fec539c3bf4abfb7b44e0aefc9cbfc578a8719dba9a1784500eb'
+            'c37f42d410bcde06e00c816a32dbd99627668e90352538004abfead120ffea7c'
+            'b10bd113994b0aa60982ace102f39b53d1b6e6a243b2581d3665a9a3e3568297'
+            '879d20301a854d5b7b9b769a3dbbb410b0fd071539d6e0c817f9d4bae8f21701'
+            'b622693388f2fc22d36f26ba3e4efba75d84986c9b52dcc62e4eb1054bb105f3'
+            '82f24dbb8d06d93160432249493d0d1f873619b281e544f34f81848479a9a32b'
+            '55b9b8fed813d2e347ba810a0d00c93c9962457e4450fab9aa3c5f1dee20e884'
+            'daba6cb11c770eb711d228e5d05615a6ac463ac955d1db2312087d1fe38cae75'
+            'ab04c6515d4906f6334fdfdccd4dcd1c0bb2a11c38c4af6472001cc82e7009d6'
+            'f2d52eb9166b1e767b5bd825d96dab45cf313006907ad59c69352e66cfacc048'
+            '8a54f2e7ba682ef8b035ab7df1165aaedb410be82b384d27739d35ac432ee3af'
+            '973e7e15ef5fb6b864cfb9d7b6f72e101498edcdfc092381cf2a22624a5cdef9'
+            'b67f0c3f175a182298dcfc7ea8968034c8e3912d8db3d6eaec038c0be9d6bfba'
+            '754146b226ba1fb23e88b8ce1bcf3a20622fb4e688de3ac5c8d8848cba06f8e3'
+            'f717fa39ebd7f9a46efa50e5de808f8479870052977d78c26d84c5f759f0832a'
+            'fa803a612887a78946f8d011a92c8964a94231cf5e81b3b17cd1bad85bc575e0'
+            'ede92c145141b304be2083aa45318cf54860679b63f7a17b96a54b7048f91016'
+            '27682c66d8ff6b1ad8165e7c0629c7d84033018569106d46b0af18cbcd83004c'
+            '83444f969d98cc4992d635f6916281a851750cd3fc3e8bbbc330bcf06e06a1da'
+            '3c578fc53137e49466ffb2f96bead25eaa0a731bfbf0a21a4479613f7bddf94b'
+            '8ac42d6ca9017b629b54bb6eb56e428f97d42037547479c1b6e347a10e700bcc'
+            'fe2b927a609ce15dae1f165bb252b1df3e116a9a16055a234e49d7c62f574a4a'
+            '7a18ff0f49805f469aef2bcc529eccf8590fd4a8613745c2b81195664cf3e217'
+            'c48e02782d6f9e3c500477e6b38ad06b1f2d9c593bc182aa90ccab1adad20617')
+
+_pick() {
+  local p="$1" f d; shift
+  for f; do
+    d="$srcdir/$p/${f#$pkgdir/}"
+    mkdir -p "$(dirname "$d")"
+    mv "$f" "$d"
+    rmdir -p --ignore-fail-on-non-empty "$(dirname "$f")"
+  done
+}
+
+prepare() {
+  cd $pkgbase
+  patch -Np1 < ../$pkgbase-fix-python3.14-macro-redefinition.patch
+  patch -Np1 < ../0001-pipeline-simple-Add-the-Google-gs201-CSIS-receiver.patch
+  patch -Np1 < ../0002-libcamera-Add-the-Sony-IMX386-sensor.patch
+  patch -Np1 < ../0003-ipa-simple-agc-Step-faster-when-far-from-the-target-.patch
+  patch -Np1 < ../0004-libcamera-Add-the-Samsung-S5KGN1-sensor.patch
+  patch -Np1 < ../0005-libcamera-software_isp-add-contrast-autofocus.patch
+  patch -Np1 < ../0006-software_isp-Focus-on-the-frame-centre-with-statisti.patch
+  patch -Np1 < ../0007-software_isp-Steadier-contrast-autofocus.patch
+  patch -Np1 < ../0008-software_isp-Keep-exposure-white-balance-and-focus-a.patch
+  patch -Np1 < ../0009-software_isp-Take-contrast-and-saturation-defaults-f.patch
+  patch -Np1 < ../0010-software_isp-Gather-GPU-statistics-over-the-visible-.patch
+  patch -Np1 < ../0011-ipa-simple-agc-Add-digital-gain-past-the-sensor-s-li.patch
+  patch -Np1 < ../0012-ipa-simple-Tune-the-Pixel-7-Pro-s-ultrawide-and-main.patch
+  patch -Np1 < ../0013-libcamera-Add-the-Samsung-S5K3J1-and-S5KGM5-sensors.patch
+  patch -Np1 < ../0014-pipeline-simple-Accept-a-sensor-configuration-within.patch
+  patch -Np1 < ../0015-ipa-simple-agc-Step-out-of-a-pinned-histogram-quickl.patch
+  patch -Np1 < ../0016-software_isp-debayer_egl-Destroy-the-EGL-context-whe.patch
+  patch -Np1 < ../0017-ipa-simple-agc-Judge-only-frames-taken-with-the-last.patch
+  patch -Np1 < ../0018-ipa-simple-Carry-the-exposure-over-to-another-mode-o.patch
+  patch -Np1 < ../0019-ipa-simple-agc-Report-the-AE-state.patch
+  patch -Np1 < ../0020-ipa-simple-agc-Add-exposure-compensation.patch
+  patch -Np1 < ../0021-ipa-simple-Take-the-sensor-mode-s-timings-at-configu.patch
+  patch -Np1 < ../0022-ipa-simple-agc-Support-manual-exposure-time-and-anal.patch
+  patch -Np1 < ../0023-ipa-simple-awb-Support-manual-white-balance.patch
+  patch -Np1 < ../0024-software_isp-Gather-focus-statistics-over-a-window-t.patch
+  patch -Np1 < ../0025-ipa-simple-Focus-and-meter-on-the-application-s-wind.patch
+  patch -Np1 < ../0026-ipa-simple-af-Support-pausing-continuous-autofocus.patch
+  patch -Np1 < ../0027-ipa-simple-Support-FrameDurationLimits.patch
+  patch -Np1 < ../0028-software_isp-Correct-lens-shading-with-a-radial-mode.patch
+  patch -Np1 < ../0029-software_isp-debayer_egl-Add-a-noise-reduction-and-s.patch
+  patch -Np1 < ../0030-ipa-simple-Add-noise-reduction-and-sharpening.patch
+  patch -Np1 < ../0031-software_isp-Gather-grey-candidates-for-white-balanc.patch
+  patch -Np1 < ../0032-ipa-simple-awb-Use-the-grey-candidates-and-smooth-th.patch
+  patch -Np1 < ../0033-ipa-simple-agc-Protect-the-highlights.patch
+  patch -Np1 < ../0034-software_isp-debayer_egl-Clip-highlights-to-neutral.patch
+  patch -Np1 < ../0035-ipa-simple-af-Scan-less.patch
+  patch -Np1 < ../0036-ipa-simple-agc-Aim-the-mean-luminance-at-20.patch
+  patch -Np1 < ../0037-ipa-simple-agc-Count-highlights-as-they-come-out.patch
+  patch -Np1 < ../0038-ipa-simple-agc-Take-a-mode-change-gently.patch
+  patch -Np1 < ../0039-ipa-simple-Hand-tune-the-Pixel-7-Pro-s-Samsung-senso.patch
+  patch -Np1 < ../0040-ipa-simple-af-Settle-less-for-fine-steps.patch
+  patch -Np1 < ../0041-ipa-simple-agc-Don-t-climb-back-into-the-clipping.patch
+  patch -Np1 < ../0042-ipa-simple-Start-a-new-configuration-at-the-carried-.patch
+  patch -Np1 < ../0043-software_isp-debayer_egl-Roll-highlights-off-and-kee.patch
+  patch -Np1 < ../0044-ipa-simple-agc-Count-clipping-through-the-highlight-.patch
+  patch -Np1 < ../0045-ipa-simple-Soften-the-Samsung-sensors-hand-tuned-col.patch
+  patch -Np1 < ../0046-software_isp-Count-the-samples-the-sensor-saturated.patch
+  patch -Np1 < ../0047-ipa-simple-agc-Mind-what-the-sensor-saturates-and-th.patch
+  patch -Np1 < ../0048-software_isp-debayer_egl-Fade-sensor-clipped-highlig.patch
+  patch -Np1 < ../0049-software_isp-Gather-a-histogram-of-each-sample-s-bri.patch
+  patch -Np1 < ../0050-ipa-simple-agc-Choose-the-exposure-on-the-predicted-.patch
+  patch -Np1 < ../0051-software_isp-debayer_egl-Add-hue-vibrance-and-a-tone.patch
+  patch -Np1 < ../0052-ipa-simple-Add-the-Look-algorithm-and-tune-it-on-the.patch
+  patch -Np1 < ../0053-software_isp-debayer_egl-Smooth-the-chroma.patch
+  patch -Np1 < ../0054-pipeline-simple-Pass-the-start-controls-to-the-softw.patch
+  patch -Np1 < ../0055-software_isp-debayer_egl-Correct-defective-pixels-be.patch
+  patch -Np1 < ../0056-libcamera-Add-the-Samsung-S5KGN8-sensor.patch
+  patch -Np1 < ../0057-pipeline-simple-Add-the-Galaxy-Tab-S2-camera-receive.patch
+  patch -Np1 < ../0058-libcamera-Add-the-Samsung-S5K4H5-and-S5K6B2-sensors.patch
+  patch -Np1 < ../0059-ipa-simple-Tuning-files-for-the-S5K4H5-and-S5K6B2.patch
+
+  # add version, so that utils/gen-version.sh may rely on it
+  printf "%s\n" "$pkgver" > .tarball-version
+}
+
+build() {
+  local meson_options=(
+    -D pipelines=simple,uvcvideo
+    -D ipas=simple
+    -D softisp-gpu=enabled
+    -D documentation=disabled
+    -D v4l2=enabled
+    -D tracing=disabled
+    -D test=false
+    -D werror=false
+  )
+
+  arch-meson $pkgbase build "${meson_options[@]}"
+  meson compile -C build
+}
+
+package_libcamera() {
+  license=(
+    Apache-2.0
+    CC0-1.0
+    'GPL-2.0-only WITH Linux-syscall-note'
+    GPL-2.0-or-later
+    LGPL-2.1-or-later
+    'GPL-2.0-or-later WITH Linux-syscall-note OR BSD-3-Clause'
+    'GPL-2.0-or-later WITH Linux-syscall-note OR MIT'
+  )
+  depends=(
+    glibc
+    gnutls
+    libcamera-ipa
+    libelf
+    libgcc
+    libglvnd
+    'libstdc++'
+    libunwind
+    libyaml
+    libyuv
+    sh
+    systemd-libs libudev.so
+  )
+  optdepends=(
+    'gst-plugin-libcamera: GStreamer plugin'
+    'libcamera-tools: for applications'
+  )
+  provides=(libcamera.so libcamera-base.so)
+
+  meson install -C build --destdir "$pkgdir"
+  install -vDm 644 $pkgbase/LICENSES/{BSD-3-Clause,Linux-syscall-note,MIT}.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+
+  (
+    cd "$pkgdir"
+    _pick $pkgbase-ipa usr/lib/libcamera/
+    _pick $pkgbase-tools usr/bin/{cam,libcamera-bug-report,lc-compliance,qcam}
+    _pick gst-plugin-$pkgbase usr/lib/gstreamer-*
+    _pick python-$pkgbase usr/lib/python*
+  )
+}
+
+package_libcamera-ipa() {
+  pkgdesc+=" - signed IPA"
+  license=(
+    BSD-2-Clause
+    CC-BY-SA-4.0
+    CC0-1.0
+    GPL-2.0-or-later
+    LGPL-2.1-or-later
+  )
+  depends=(
+    glibc
+    libcamera libcamera.so libcamera-base.so
+    libgcc
+    'libstdc++'
+  )
+  # stripping requires re-signing of IPA libs, so we do it manually
+  options=(!strip)
+
+  strip $pkgname/usr/lib/libcamera/*{.so,proxy}
+  for _lib in $pkgname/usr/lib/libcamera/*.so; do
+    $pkgbase/src/ipa/ipa-sign.sh "$(find build -type f -iname "*ipa-priv-key.pem")" "$_lib" "$_lib.sign"
+  done
+  mv -v $pkgname/* "$pkgdir"
+  install -vDm 644 $pkgbase/LICENSES/BSD-2-Clause.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+}
+
+package_libcamera-tools() {
+  pkgdesc+=" - tools"
+  license=(
+    BSD-2-Clause
+    CC0-1.0
+    GPL-2.0-or-later
+    LGPL-2.1-or-later
+  )
+  depends=(
+    glibc
+    gtest
+    libcamera libcamera.so libcamera-base.so
+    libdrm
+    libevent libevent-2.1.so libevent_pthreads-2.1.so
+    libgcc
+    libjpeg-turbo libjpeg.so
+    'libstdc++'
+    libtiff libtiff.so
+    libyaml
+    qt6-base
+    sdl2
+  )
+  conflicts=("$pkgbase-tests<0.0.1-2")
+  replaces=("$pkgbase-tests<0.0.1-2")
+
+  mv -v $pkgname/* "$pkgdir"
+  install -vDm 644 $pkgbase/LICENSES/BSD-2-Clause.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+}
+
+package_gst-plugin-libcamera() {
+  pkgdesc="Multimedia graph framework - libcamera plugin"
+  license=(
+    CC0-1.0
+    LGPL-2.1-or-later
+  )
+  depends=(
+    glib2 libg{lib,object}-2.0.so
+    glibc
+    gst-plugins-base-libs
+    gstreamer
+    libcamera libcamera.so libcamera-base.so
+    libgcc
+    'libstdc++'
+  )
+
+  mv -v $pkgname/* "$pkgdir"
+}
+
+package_python-libcamera() {
+  pkgdesc+=" - Python integration"
+  license=(
+    CC0-1.0
+    LGPL-2.1-or-later
+  )
+  depends=(
+    glibc
+    libcamera
+    libgcc
+    'libstdc++'
+    python
+  )
+
+  mv -v $pkgname/* "$pkgdir"
+}

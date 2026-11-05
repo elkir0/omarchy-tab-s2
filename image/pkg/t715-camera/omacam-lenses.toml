@@ -1,0 +1,48 @@
+# Lens table for the Samsung Galaxy Tab S2 9.7 (SM-T715, gts28ltexx), for omacam
+# (pkg/omacam), installed as /etc/omacam/lenses.toml. Cameras are matched by their
+# libcamera id, the sensor's device tree path that `cam -l` prints.
+#
+# preview: the rear sensor's 2x2 binned mode. Without a table omacam previews
+# at the full 3280x2458 mode: four 32 MB frames drain the 256 MB CMA pool and
+# the CPU debayer holds three cores.
+# still: the full mode. libcamera's software ISP may trim a few columns; the
+# app uses what it gets.
+# preview_fps (pkg/omacam's patch): the software ISP debayers on the CPU, so the
+# preview's cost follows its frame rate. omacam asks 30 fps by default; at 30 the
+# front preview took 3.4 cores and 83 C in a minute and a half.
+# merge_threads (same patch): an HDR burst merged on 7 threads took the tablet from
+# 62 to 82 C in 17 s.
+# rotation: libcamera's Rotation for each sensor, until the device tree carries it (the
+# sensors' nodes have none, so libcamera reports 0). Measured with the tablet
+# held right-up: back 90 and front 270 turned both photos upside down, so back 270 and
+# front 90, which a portrait-held test confirmed. omacam draws its preview for a screen
+# that stays in portrait, as a phone's does: t715-rotate holds the screen in portrait
+# while omacam has the focus.
+# f_number, focal lengths, base_iso: not measured, left out (base_iso 50).
+
+device = "gts28ltexx"
+max_zoom = 4.0
+merge_threads = 2
+
+[[lens]]
+role = "main"
+name = "Back"
+id = "/base/i2c-cam-rear/camera-sensor@37" # Samsung S5K4H5, DW9807 focus motor
+zoom = 1.0
+rotation = 270
+preview = [1640, 1228]
+preview_fps = 15
+still = [3280, 2458]
+autofocus = true
+
+[[lens]]
+role = "front"
+name = "Front"
+id = "/base/i2c-cam-front/camera-sensor@35" # Samsung S5K6B2, fixed focus
+zoom = 1.0
+rotation = 90
+preview = [1936, 1090]
+preview_fps = 15
+still = [1936, 1090]
+autofocus = false
+mirror = true

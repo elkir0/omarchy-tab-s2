@@ -21,6 +21,13 @@ pipewire-audio          # PipeWire's BlueZ SPA plugin (spa-0.2/bluez5): Bluetoot
 pipewire-pulse          # the PulseAudio server on PipeWire: Firefox (libpulse) had no sound without it (2026-10-29)
 rtkit                   # realtime priority for PipeWire (its RTKit calls failed: ServiceUnknown)
 
+# --- Camera (omacam, pkg/omacam: video recording and its sound) ---
+gstreamer               # omacam's video pipeline
+gst-plugins-base        # omacam: app sources, video conversion
+gst-plugins-good        # omacam: mp4mux, videocrop, vp8enc
+gst-plugins-ugly        # omacam: x264enc
+gst-plugin-pipewire     # omacam: the microphone through PipeWire
+
 # --- Wireless tools (the Wi-Fi firmware comes from rootfs/install-wifi.sh) ---
 iw
 wireless-regdb

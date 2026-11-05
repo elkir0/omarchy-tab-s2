@@ -6,6 +6,8 @@
     t715-rotate [--dry-run] [--session]   the daemon, omamobile-autorotate.service
     t715-rotate set 0|1|2|3               one transform, and lock the rotation
     t715-rotate turn                      a quarter turn clockwise, and lock
+    T715_ROTATE_PORTRAIT_CLASSES=omacam   focused classes held in portrait;
+                                          empty disables the hold
 
 The daemon is a client of iio-sensor-proxy: it claims the accelerometer and
 applies an orientation that has held for HOLD_MS. While
@@ -13,6 +15,8 @@ applies an orientation that has held for HOLD_MS. While
 no claim, so nothing turns under a closed cover. Screen and touch change in one
 eval, or they would disagree, and on a touch-only tablet only SSH recovers from
 that. A reload resets both, so the daemon applies the transform again after one.
+While the focused window's class is one of T715_ROTATE_PORTRAIT_CLASSES (the
+camera, which turns its own preview), the screen stays at transform 0.
 """
 import argparse
 import json
@@ -33,6 +37,25 @@ HOLD_MS = 700
 TRANSFORMS = {'normal': 0, 'left-up': 1, 'bottom-up': 2, 'right-up': 3}
 if os.environ.get('T715_ROTATE_UPSIDE_DOWN') == '0':
     del TRANSFORMS['bottom-up']
+# Classes the daemon holds in portrait (transform 0) while one of their
+# windows has focus: omacam turns its own preview from the accelerometer.
+_classes = os.environ.get('T715_ROTATE_PORTRAIT_CLASSES', 'omacam')
+PORTRAIT_CLASSES = frozenset(c.strip() for c in _classes.split(',') if c.strip())
+
+
+def active_class(line):
+    """The focused window's class from an activewindow>> event line, or None."""
+    if line.startswith('activewindow>>'):
+        return line.split('>>', 1)[1].split(',', 1)[0] or None
+    return None
+
+
+def focused_class():
+    """The focused window's class from hyprctl, or None."""
+    try:
+        return json.loads(hyprctl('-j', 'activewindow').stdout or '{}').get('class')
+    except json.JSONDecodeError:
+        return None
 
 
 def log(msg):
@@ -94,6 +117,9 @@ class Rotator:
         self.current = None
         self.pending = None
         self.timer = 0
+        self.held_class = False
+        self.held_transform = None
+        self.held_orientation = None
         mon = None if args.dry_run else monitor()
         if mon is not None:
             self.current = mon.get('transform', 0)
@@ -106,6 +132,8 @@ class Rotator:
             m = Gio.File.new_for_path(path).monitor_file(Gio.FileMonitorFlags.NONE, None)
             m.connect('changed', lambda *a: self._update_claim())
             self.monitors.append(m)
+        if PORTRAIT_CLASSES and not args.dry_run:
+            self._check_focus(focused_class())
         if not args.dry_run:
             self._watch_reloads()
 
@@ -122,9 +150,40 @@ class Rotator:
         if line is None:
             log('Hyprland went away')
             return
+        self.on_event_line(line)
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self._event)
+
+    def on_event_line(self, line):
         if line.startswith('configreloaded') and self.current:
             apply(self.current)
-        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self._event)
+        elif PORTRAIT_CLASSES and line.startswith('activewindow>>'):
+            self._check_focus(active_class(line))
+
+    def _check_focus(self, focused):
+        """Hold the panel in portrait while a camera-class window has focus."""
+        hold = focused in PORTRAIT_CLASSES
+        if hold == self.held_class:
+            return
+        if hold:
+            self.held_class = True
+            self.held_transform = self.current
+            self.held_orientation = None  # a previous hold's would be stale
+            self._cancel()
+            if self.current != 0:
+                self._apply(0)  # the camera turns its own preview
+            return
+        self.held_class = False
+        if self.claimed:
+            self._apply(TRANSFORMS.get(self.held_orientation or self._prop('AccelerometerOrientation')))
+        elif self.held_transform is not None and self.held_transform != self.current:
+            self._apply(self.held_transform)
+        self.held_transform = None
+
+    def _apply(self, transform):
+        if transform is None:
+            return
+        if apply(transform, self.args.dry_run):
+            self.current = transform
 
     def _call(self, method):
         try:
@@ -174,6 +233,9 @@ class Rotator:
             self.timer = 0
 
     def _orientation(self, orientation):
+        if self.held_class:
+            self.held_orientation = orientation  # for the focus that ends the hold
+            return
         self._cancel()
         self.pending = TRANSFORMS.get(orientation)
         if self.pending is not None and self.pending != self.current:
@@ -181,8 +243,7 @@ class Rotator:
 
     def _held(self):
         self.timer = 0
-        if apply(self.pending, self.args.dry_run):
-            self.current = self.pending
+        self._apply(self.pending)
         return False
 
 

@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH] ipa: simple: Tuning files for the S5K4H5 and S5K6B2
+
+Add uncalibrated tuning files for the Galaxy Tab S2's two cameras, after
+omarchy-mobile's Samsung ones: a contrast 1.2 default and the same Detail
+(noise reduction and sharpening) settings. No colour matrix and no
+saturation default: the tablet runs the software ISP on the CPU, where a
+matrix makes the debayer 60% dearer.
+
+The rear camera's Af scans only the DW9807's useful travel, positions
+400 to 700 of its 0-1023 range, with the main camera's step counts. The
+front camera is fixed focus: no Af entry.
+---
+ src/ipa/simple/data/meson.build |  2 ++
+ src/ipa/simple/data/s5k4h5.yaml | 37 +++++++++++++++++++++++++++++++++++++
+ src/ipa/simple/data/s5k6b2.yaml | 27 +++++++++++++++++++++++++++
+ 3 files changed, 66 insertions(+)
+ create mode 100644 src/ipa/simple/data/s5k4h5.yaml
+ create mode 100644 src/ipa/simple/data/s5k6b2.yaml
+
+diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
+index eaef79f..13d1efe 100644
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -3,6 +3,8 @@
+ conf_files = files([
+     'imx386.yaml',
+     's5k3j1.yaml',
++    's5k4h5.yaml',
++    's5k6b2.yaml',
+     's5kgm5.yaml',
+     's5kgn1.yaml',
+     's5kgn8.yaml',
+diff --git a/src/ipa/simple/data/s5k4h5.yaml b/src/ipa/simple/data/s5k4h5.yaml
+new file mode 100644
+index 0000000..dc823d7
+--- /dev/null
++++ b/src/ipa/simple/data/s5k4h5.yaml
+@@ -0,0 +1,37 @@
++# SPDX-License-Identifier: CC0-1.0
++#
++# Samsung S5K4H5 (the Galaxy Tab S2's rear camera), not calibrated yet. The
++# black level comes from the sensor's helper.
++#
++# No colour matrix: on this tablet the software ISP runs on the CPU
++# (/etc/libcamera/configuration.yaml), where a matrix sends the debayer
++# down its per-pixel path, 60% dearer (60 frames at 1640x1228: 5.0 s of
++# CPU with an identity matrix and saturation 1.1, 3.1 s without). An
++# identity matrix would only carry the saturation default, so neither is
++# set; the contrast default goes through the gamma table at no cost.
++#
++# Autofocus scans the DW9807 lens's useful travel only, positions 400 to
++# 700 of its 0-1023 range (measured on the tablet: about 480 to 496
++# sharp on a far room, 620 to 632 at 10 cm, and below 300 the lens does
++# not move), in 8 coarse steps, then around the sharpest one in steps of
++# 1/32 of the range.
++%YAML 1.1
++---
++version: 1
++algorithms:
++  - BlackLevel:
++  - Awb:
++  # Default for applications that do not set the control.
++  - Adjust:
++      contrast: 1.2
++  # Luma and chroma noise reduction and sharpening, scaled with the gain
++  - Detail:
++      sharpen: 0.6
++      denoise: 0.015
++      chromaDenoise: 0.03
++  - Agc:
++  - Af:
++      coarseSteps: 8
++      fineSteps: 32
++      range: [ 400, 700 ]
++...
+diff --git a/src/ipa/simple/data/s5k6b2.yaml b/src/ipa/simple/data/s5k6b2.yaml
+new file mode 100644
+index 0000000..8dbcccf
+--- /dev/null
++++ b/src/ipa/simple/data/s5k6b2.yaml
+@@ -0,0 +1,27 @@
++# SPDX-License-Identifier: CC0-1.0
++#
++# Samsung S5K6B2 (the Galaxy Tab S2's front camera), not calibrated yet.
++# The black level comes from the sensor's helper. Fixed focus: no Af.
++#
++# No colour matrix: on this tablet the software ISP runs on the CPU
++# (/etc/libcamera/configuration.yaml), where a matrix sends the debayer
++# down its per-pixel path, 60% dearer (60 frames at 1640x1228: 5.0 s of
++# CPU with an identity matrix and saturation 1.1, 3.1 s without). An
++# identity matrix would only carry the saturation default, so neither is
++# set; the contrast default goes through the gamma table at no cost.
++%YAML 1.1
++---
++version: 1
++algorithms:
++  - BlackLevel:
++  - Awb:
++  # Default for applications that do not set the control.
++  - Adjust:
++      contrast: 1.2
++  # Luma and chroma noise reduction and sharpening, scaled with the gain
++  - Detail:
++      sharpen: 0.6
++      denoise: 0.015
++      chromaDenoise: 0.03
++  - Agc:
++...
+-- 
+2.52.0
+

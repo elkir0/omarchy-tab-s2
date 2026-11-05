@@ -1,0 +1,10 @@
+%YAML 1.1
+---
+# SM-T715: libcamera's software ISP on the CPU.  The Mali-T760 runs at a fixed
+# 266 MHz with no GPU frequency scaling: measured on the front camera
+# (1936x1090), the GPU path gives 3 to 6 frames per second, the CPU path 30.
+# LIBCAMERA_SOFTISP_MODE=gpu overrides it.
+version: 1
+configuration:
+  software_isp:
+    mode: cpu

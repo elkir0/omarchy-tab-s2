@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH] pipeline: simple: Add the Galaxy Tab S2 camera receiver
+
+The Samsung Galaxy Tab S2 (SM-T715) captures raw Bayer frames from its
+Exynos 5433 MIPI CSI-2 receivers through FIMC-LITE straight to memory,
+with no ISP in between: the t715-camera driver registers one media
+device per camera, with the sensor and the capture video node the
+simple pipeline handler expects, so frames have to be debayered in
+software.
+
+Add "t715-camera" to the list of supported devices with the software
+ISP enabled. It is this repository's own kernel driver
+(kernel/patches/t715-parity, kernel/patches/t715-camera-af), so it will
+not be sent upstream.
+---
+ src/libcamera/pipeline/simple/simple.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index bfadaf9..46af46f 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -267,6 +267,7 @@ static const SimplePipelineInfo supportedDevices[] = {
+ 	{ "mxc-isi", {}, false },
+ 	{ "qcom-camss", {}, true },
+ 	{ "sun6i-csi", {}, false },
++	{ "t715-camera", {}, true },
+ };
+ 
+ bool isRaw(const StreamConfiguration &cfg)
+-- 
+2.52.0
+

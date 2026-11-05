@@ -3,17 +3,27 @@
 # contrast search on the rear camera, steers the exposure and develops the raw frames,
 # as there is no ISP; t715-camera names a file and tells the owner. The sensors' tables
 # are not here, they are Samsung's: research/parity/camera/t715-cam-seq.py makes them
-# from the owner's own ISP firmware, for /usr/lib/firmware/t715/.
+# from the owner's own ISP firmware, for /usr/lib/firmware/t715/. Since the media
+# controller kernel it also sets libcamera's software ISP on the CPU for every
+# application (/etc/libcamera/configuration.yaml): the GPU path is 5 to 10 times slower here.
+# A udev rule opens the dma-buf heaps to the video group, as the software ISP needs them.
+# omacam's lens table for this tablet goes to /etc/omacam/lenses.toml: the binned preview,
+# the sensors' rotations, a 15 fps preview and a 2-thread merge. Its preview_fps and
+# merge_threads keys need omacam's patched build (pkg/omacam, 0.3.3-2): an older omacam
+# would reject the table.
 pkgname=t715-camera
-pkgver=0.2.0
+pkgver=0.2.3
 pkgrel=1
 pkgdesc="Photographs from the SM-T715's two cameras, raw Bayer developed in software"
 arch=(armv7h)
 license=('GPL-2.0-or-later')
 depends=(glibc)
 optdepends=('imv: open the picture from the notification')
-source=(t715-photo.c t715-camera t715-camera-rear.desktop t715-camera-front.desktop)
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+conflicts=('omacam<0.3.3-2')
+source=(t715-photo.c t715-camera t715-camera-rear.desktop t715-camera-front.desktop
+        libcamera-configuration.yaml 71-t715-dma-heap.rules omacam-lenses.toml)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+backup=(etc/libcamera/configuration.yaml etc/omacam/lenses.toml)
 
 build() {
   gcc $CFLAGS $LDFLAGS -Wall -o t715-photo t715-photo.c -lm
@@ -23,4 +33,7 @@ package() {
   install -Dm755 t715-photo "$pkgdir/usr/bin/t715-photo"
   install -Dm755 t715-camera "$pkgdir/usr/bin/t715-camera"
   install -Dm644 -t "$pkgdir/usr/share/applications" t715-camera-rear.desktop t715-camera-front.desktop
+  install -Dm644 libcamera-configuration.yaml "$pkgdir/etc/libcamera/configuration.yaml"
+  install -Dm644 71-t715-dma-heap.rules "$pkgdir/usr/lib/udev/rules.d/71-t715-dma-heap.rules"
+  install -Dm644 omacam-lenses.toml "$pkgdir/etc/omacam/lenses.toml"
 }

@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH] libcamera: Add the Samsung S5K4H5 and S5K6B2 sensors
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The S5K4H5 and S5K6B2 are the rear and front cameras of the Samsung
+Galaxy Tab S2 (SM-T715), captured through the t715-camera receiver and
+the simple pipeline handler with the software ISP.
+
+Add their camera sensor helpers: a black level of 64 at 10 bits and the
+linear analogue gain of Samsung's sensors, code / 32 (0x20 is 1x, 0x200
+is 16x) — both measured on the tablet and declared by the sensors' own
+SMIA limit registers.
+
+Add their sensor properties: the S5K4H5's 1.12 um unit cell from
+Samsung's public specification, an estimated 1.4 um for the S5K6B2
+(Samsung publishes none), the test pattern modes the sensors' SMIA
+test pattern selector offers, and two-frame control delays.
+
+The test pattern numbering follows the SMIA CCS register the t715-camera
+driver exposes: 0 off, 1 solid colour, 2 colour bars, 3 colour bars
+fading to gray, 4 PN9.
+---
+ src/ipa/libipa/camera_sensor_helper.cpp       | 26 +++++++++++++++
+ .../sensor/camera_sensor_properties.cpp       | 33 +++++++++++++++++++
+ 2 files changed, 59 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index aab98a1..81f884d 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -896,6 +896,32 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("s5kgn8", CameraSensorHelperS5kgn8)
+ 
++class CameraSensorHelperS5k4h5 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k4h5()
++	{
++		/* 64 at 10 bits, measured on the tablet. */
++		blackLevel_ = 4096;
++		/* Code / 32, as the sensor's SMIA registers declare (32 to 512). */
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k4h5", CameraSensorHelperS5k4h5)
++
++class CameraSensorHelperS5k6b2 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k6b2()
++	{
++		/* 64 at 10 bits, as the S5K4H5. */
++		blackLevel_ = 4096;
++		/* Code / 32, as the sensor's SMIA registers declare (32 to 512). */
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k6b2", CameraSensorHelperS5k6b2)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index a2502a2..d4ab7fc 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -559,6 +559,39 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 				.hblankDelay = 2
+ 			},
+ 		} },
++		{ "s5k4h5", {
++			.unitCellSize = { 1120, 1120 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
++		{ "s5k6b2", {
++			/* Estimate: Samsung publishes no unit cell size for it. */
++			.unitCellSize = { 1400, 1400 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {
+-- 
+2.52.0
+

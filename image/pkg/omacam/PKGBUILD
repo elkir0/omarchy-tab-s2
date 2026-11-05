@@ -1,0 +1,97 @@
+# SM-T715 (armv7h) package of omarchy-mobile's omacam (packages/omacam, MIT):
+# the arch is armv7h for this tablet instead of upstream's aarch64 (ALARM's
+# rust, gtk4, libadwaita and libcamera 0.7.2 all build for it; the sources
+# carry no 32-bit assumption: no AtomicU64, no u64/usize truncation,
+# libcamera-rs's C API is size_t-based with static_assert layouts), plus one
+# patch, 0001-tablet-lens-table.patch: a system-wide lens table from
+# /etc/omacam/lenses.toml (the tablet's cameras, which the built-in Pixel 7
+# Pro table doesn't know), an optional per-lens preview_fps that caps the
+# preview's frame rate, and an optional table-level merge_threads that caps
+# the Night/HDR merge's thread pool. The tablet debayers on the CPU: a
+# 30 fps preview and a 7-thread merge overheat it (see README.md).
+# The finger-friendly camera app of the image (preview, tap to focus, photos,
+# video), next to t715-camera's one-shot Photo and Selfie: it reads the
+# cameras through libcamera directly. ALARM's libcamera 0.7.2 satisfies the
+# version constraint; this repository's own libcamera package for the Tab S2
+# sensors, once built, takes precedence in [t715-omarchy]. Build:
+# tools/build-pkg omacam (hours under qemu; see README.md).
+
+# SPDX-License-Identifier: MIT
+# Maintainer: Derek Ross <derekross@gmail.com>
+#
+# omacam, Omarchy Mobile's camera app ("Camera"): photos and video; Rust, GTK 4 and
+# libadwaita on libcamera directly (docs/CAMERA-APP-PLAN.md). Its own
+# repository carries the same PKGBUILD for building from a checkout
+# (pkgbuild/PKGBUILD); this one builds a pinned release.
+#
+# Source: the release tag's tarball from GitHub, pinned by its sha256.
+#
+# Build: cargo fetches the crates (Cargo.lock pinned) in prepare() and
+# builds offline. Under qemu-user in tools/build-packages it takes about
+# 18 minutes on the laptop (measured 2026-10-14, 0.1.6): slow, but fine for
+# a package that changes with releases, so it builds like the others. A
+# developer iterating on omacam cross-compiles instead (omacam's
+# bin/cross, about 3 minutes cold, seconds after).
+pkgname=omacam
+pkgver=0.3.3
+pkgrel=2
+pkgdesc="Camera: a phone camera with lens switching by zoom, on libcamera"
+# armv7h: the tablet's arch; upstream builds aarch64 (and x86_64 from a
+# checkout), the sources need no change for 32-bit.
+arch=(armv7h)
+url="https://github.com/derekross/omacam"
+license=('GPL-3.0-or-later' 'MIT')
+depends=(
+  gcc-libs
+  glib2
+  glibc
+  gst-plugin-pipewire   # video: the microphone
+  gst-plugins-base
+  gst-plugins-good      # video: mp4mux, videocrop, vp8enc
+  gst-plugins-ugly      # video: x264enc
+  gstreamer
+  'gtk4>=4.14'
+  hicolor-icon-theme
+  'libadwaita>=1.5'
+  'libcamera>=0.7'
+  'libcamera<0.8'
+  libcamera-ipa
+  libjpeg-turbo
+)
+makedepends=(cargo clang pkgconf)
+optdepends=('loupe: open the last photo from the gallery button'
+            'geoclue: location tags')
+options=('!debug' '!lto')
+source=("omacam-$pkgver.tar.gz::https://github.com/derekross/omacam/archive/refs/tags/v$pkgver.tar.gz"
+        "0001-tablet-lens-table.patch")
+sha256sums=('76d7ac24adbf13b502d4b4ee174c4b48e7b937f036b45561bf4abdd9118f9ff8'
+            '5b0449e5ea767ebaeb696cd857a86d57a700402cfba2291a5c8005c3e49938bd')
+
+prepare() {
+  cd "omacam-$pkgver"
+  patch -Np1 -i "$srcdir/0001-tablet-lens-table.patch"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "omacam-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p omacam --features libcamera
+}
+
+check() {
+  cd "omacam-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen -p omacam-core
+}
+
+package() {
+  cd "omacam-$pkgver"
+  install -Dm755 target/release/omacam "$pkgdir/usr/bin/omacam"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  install -Dm644 pkgbuild/omacam.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omacam.svg"
+  install -Dm644 pkgbuild/omacam.desktop "$pkgdir/usr/share/applications/omacam.desktop"
+  install -Dm644 data/geoclue/omacam.conf "$pkgdir/etc/geoclue/conf.d/91-omacam.conf"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

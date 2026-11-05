@@ -4,14 +4,16 @@
 # picture at a time (docs/hardware/CAMERA.md).
 #
 # Usage: t715-camera [front|rear]
+# The video nodes are "t715-camera rear|front" since the media controller kernel,
+# "S5K4H5 rear" and "S5K6B2 front" before it.
 case ${1:-rear} in
-  front) name=S5K6B2 ;;
-  rear) name=S5K4H5 ;;
+  front) name='S5K6B2|t715-camera front' ;;
+  rear) name='S5K4H5|t715-camera rear' ;;
   *) echo "usage: t715-camera [front|rear]" >&2; exit 2 ;;
 esac
 dev=
 for f in /sys/class/video4linux/video*/name; do
-  grep -q "$name" "$f" 2>/dev/null && dev=/dev/$(basename "$(dirname "$f")")
+  grep -q -E "$name" "$f" 2>/dev/null && dev=/dev/$(basename "$(dirname "$f")")
 done
 if [ -z "$dev" ]; then
   omarchy-notification-send -g 󰄀 "Camera" "No $name: is t715-camera.ko loaded?"

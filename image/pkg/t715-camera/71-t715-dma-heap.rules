@@ -1,0 +1,5 @@
+# SM-T715: libcamera's software ISP allocates its buffers from a dma-buf heap, which the
+# kernel makes root-only.  Without access, a camera app run as the user gets the raw
+# Bayer stream only (omacam: "unsupported pixel format").  The video group already owns
+# the camera nodes.
+SUBSYSTEM=="dma_heap", KERNEL=="system|reserved", GROUP="video", MODE="0660"

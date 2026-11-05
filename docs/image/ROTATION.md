@@ -88,6 +88,15 @@ upstream:
   lock hook instead.
 - **Manual**: `t715-rotate set 0|1|2|3`, or `turn` for a quarter turn
   clockwise. Both create the lock file first.
+- **Camera hold**: omacam is written for a phone whose screen never turns:
+  it rotates its preview and its photos itself from the accelerometer, so a
+  screen that turns under it makes both wrong. While a window of the focused
+  classes (`T715_ROTATE_PORTRAIT_CLASSES`, `omacam` by default, empty to
+  disable) has focus — `activewindow>>` on the event socket, read once at
+  start too — the daemon holds the panel at transform 0 and only remembers
+  sensor changes. When focus leaves, the sensor's latest orientation comes
+  back at once (no debounce) with a claim, or the transform in use when the
+  hold began without one (lock, screen off, no sensor).
 - **Fullscreen video**: no exception. Landscape is the point, and the lock
   covers watching while lying down.
 

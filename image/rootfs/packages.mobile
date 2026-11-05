@@ -10,6 +10,9 @@ omaphone                # Phone app: dialpad, call log, contacts, in-call screen
 omamessages             # Messages app: SMS conversations (pkg/omamessages)
 t715-modem              # the SS333 stack: loader, shannond, ModemManager facade, NV provisioning, units (pkg/t715-modem)
 t715-chromium           # the default browser: launcher and update tool for Debian's Chromium, in its own root (Dockerfile, step 3b)
-t715-camera             # Photo and Selfie: one picture at a time from the two cameras, raw Bayer developed in software
+t715-camera             # Photo and Selfie: one picture at a time from the two cameras, raw Bayer developed in software; libcamera's software ISP on the CPU
+libcamera               # 0.7.2 with omarchy-mobile's software ISP patches and the S5K4H5/S5K6B2 (pkg/libcamera), over ALARM's
+libcamera-ipa           # its software ISP IPA and the two cameras' tuning files (pkg/libcamera)
+omacam                  # Camera: preview, tap to focus, photos and video on libcamera (pkg/omacam, omarchy-mobile's app)
 t715-gps                # Location: gpsd from SYSTEM, offline and on demand, as GeoClue's only source (pkg/t715-gps)
 t715-claude-code        # Claude Code's installer, patched for this tablet: no Anthropic binary in the image (pkg/t715-claude-code)

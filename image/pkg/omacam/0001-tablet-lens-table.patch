@@ -1,0 +1,358 @@
+diff --git a/README.md b/README.md
+index 68f9c36..7f22e04 100644
+--- a/README.md
++++ b/README.md
+@@ -105,8 +105,8 @@ lens and the lens switch time over the picture.
+ 
+ A lens table describes the cameras of a phone: which is which, how much
+ each one zooms, and which modes to use. omacam has the Pixel 7 Pro's built
+-in (`data/cheetah.toml`); `~/.config/omacam/lenses.toml` or
+-`--lens-table FILE` replaces it.
++in (`data/cheetah.toml`); `--lens-table FILE`, `~/.config/omacam/lenses.toml`
++or the system-wide `/etc/omacam/lenses.toml` replaces it.
+ 
+ ## Picture quality
+ 
+diff --git a/crates/omacam-core/src/controller.rs b/crates/omacam-core/src/controller.rs
+index 39fc0c8..1823ac0 100644
+--- a/crates/omacam-core/src/controller.rs
++++ b/crates/omacam-core/src/controller.rs
+@@ -391,7 +391,8 @@ impl Controller {
+ 
+     /// The frame duration to ask of a stream of `camera`, microseconds:
+     /// 60 fps in video mode when asked for and its mode allows it, else
+-    /// nothing (the camera's default, 30 fps).
++    /// nothing (the camera's default, 30 fps). A lens with `preview_fps`
++    /// caps its own preview in photo mode.
+     fn frame_duration_for(&self, camera: &str, purpose: Purpose) -> Option<i64> {
+         // Only on a camera whose mode reported its frame durations (it
+         // takes FrameDurationLimits); elsewhere the camera keeps its own.
+@@ -400,7 +401,19 @@ impl Controller {
+             && purpose == Purpose::Preview
+             && self.opts.video_fps >= 60
+             && max >= 59.0;
+-        Some(if fast { 16_667 } else { 33_333 })
++        if fast {
++            return Some(16_667);
++        }
++        if purpose == Purpose::Preview && self.mode != Mode::Video {
++            let capped = self
++                .table
++                .index_of(camera)
++                .and_then(|i| self.table.get(i).preview_fps);
++            if let Some(fps) = capped {
++                return Some((1_000_000.0 / fps).round() as i64);
++            }
++        }
++        Some(33_333)
+     }
+ 
+     /// Slider position (0..1) for the current zoom.
+@@ -1821,6 +1834,37 @@ mirror = true
+         assert_eq!(duration(&c.set_mode(Mode::Photo)), Some(33_333));
+     }
+ 
++    #[test]
++    fn preview_fps_caps_only_the_photo_mode_preview() {
++        let now = Instant::now();
++        let spec = TableSpec::parse(
++            "[[lens]]\nrole = \"main\"\nid = \"main\"\nzoom = 1.0\npreview_fps = 15\n",
++        )
++        .unwrap();
++        let mut c = Controller::new(&spec, &cameras(), Options::default());
++        let (g, _, _) = start_of(&c.resume(now));
++        // Photo mode's preview: the cap's own duration.
++        let mut e = started(g, "main");
++        if let Event::Started { max_fps, .. } = &mut e {
++            *max_fps = Some(30.0);
++        }
++        c.on_event(e, now);
++        c.on_event(frame(g, "main", 10_000), now);
++        assert_eq!(c.frame_duration_for("main", Purpose::Preview), Some(66_667));
++        // Video mode ignores the cap, and still captures keep the camera's
++        // default.
++        c.set_mode(Mode::Video);
++        assert_eq!(c.frame_duration_for("main", Purpose::Preview), Some(33_333));
++        assert_eq!(c.frame_duration_for("main", Purpose::Still), Some(33_333));
++        // A lens without the key keeps 30 fps.
++        c.set_mode(Mode::Photo);
++        c.max_fps.insert("uw".into(), 30.0);
++        assert_eq!(c.frame_duration_for("uw", Purpose::Preview), Some(33_333));
++        // No frame rate reported: nothing asked.
++        c.max_fps.clear();
++        assert_eq!(c.frame_duration_for("main", Purpose::Preview), None);
++    }
++
+     #[test]
+     fn a_video_tap_moves_continuous_af_to_the_window() {
+         let now = Instant::now();
+diff --git a/crates/omacam-core/src/lens.rs b/crates/omacam-core/src/lens.rs
+index 20387da..f0f534d 100644
+--- a/crates/omacam-core/src/lens.rs
++++ b/crates/omacam-core/src/lens.rs
+@@ -73,6 +73,10 @@ pub struct Lens {
+     /// than the lens's other modes and the other lenses: see
+     /// [`Lens::shown_coverage`].
+     pub true_framing: bool,
++    /// The preview's frame rate cap from the table (`preview_fps`), for a
++    /// camera whose debayering costs more CPU than 30 fps is worth. Off,
++    /// the preview runs at the camera's own rate.
++    pub preview_fps: Option<f64>,
+ }
+ 
+ /// The share of a still mode's field of view that a preview mode shows,
+@@ -130,6 +134,8 @@ struct TableFile {
+     #[allow(dead_code)]
+     device: Option<String>,
+     max_zoom: Option<f64>,
++    /// The thread pool size asked of a burst's merge (`merge_threads`).
++    merge_threads: Option<usize>,
+     #[serde(default, rename = "lens")]
+     lenses: Vec<LensEntry>,
+ }
+@@ -159,6 +165,9 @@ struct LensEntry {
+     axis: Option<[f64; 2]>,
+     #[serde(default)]
+     true_framing: bool,
++    /// The preview's frame rate cap, frames per second: the camera is asked
++    /// for no more than this in photo mode.
++    preview_fps: Option<f64>,
+ }
+ 
+ #[derive(Debug, thiserror::Error)]
+@@ -178,6 +187,7 @@ pub enum TableError {
+ #[derive(Debug, Clone)]
+ pub struct TableSpec {
+     max_zoom: f64,
++    merge_threads: Option<usize>,
+     entries: Vec<LensEntry>,
+ }
+ 
+@@ -224,13 +234,25 @@ impl TableSpec {
+                     )));
+                 }
+             }
++            if let Some(fps) = e.preview_fps {
++                if !(fps.is_finite() && fps > 0.0 && fps <= 120.0) {
++                    return Err(TableError::Invalid(format!(
++                        "{}: preview_fps must be in (0, 120]",
++                        e.id
++                    )));
++                }
++            }
+         }
+         let max_zoom = file.max_zoom.unwrap_or(DEFAULT_MAX_ZOOM);
+         if !(max_zoom.is_finite() && max_zoom >= 1.0) {
+             return Err(TableError::Invalid("max_zoom must be >= 1".into()));
+         }
++        if file.merge_threads.is_some_and(|t| t == 0) {
++            return Err(TableError::Invalid("merge_threads must be >= 1".into()));
++        }
+         Ok(TableSpec {
+             max_zoom,
++            merge_threads: file.merge_threads,
+             entries: file.lenses,
+         })
+     }
+@@ -251,6 +273,7 @@ impl TableSpec {
+     pub fn empty() -> TableSpec {
+         TableSpec {
+             max_zoom: DEFAULT_MAX_ZOOM,
++            merge_threads: None,
+             entries: Vec::new(),
+         }
+     }
+@@ -285,6 +308,7 @@ impl TableSpec {
+                     }),
+                     axis: e.axis.map(|[a, b]| (a, b)).unwrap_or((0.5, 0.5)),
+                     true_framing: e.true_framing,
++                    preview_fps: e.preview_fps,
+                 });
+             }
+         }
+@@ -320,11 +344,13 @@ impl TableSpec {
+                 coverage: (1.0, 1.0),
+                 axis: (0.5, 0.5),
+                 true_framing: false,
++                preview_fps: None,
+             });
+         }
+         LensTable {
+             lenses,
+             max_zoom: self.max_zoom,
++            merge_threads: self.merge_threads,
+         }
+     }
+ }
+@@ -334,6 +360,7 @@ impl TableSpec {
+ pub struct LensTable {
+     lenses: Vec<Lens>,
+     max_zoom: f64,
++    merge_threads: Option<usize>,
+ }
+ 
+ /// Which way the app looks.
+@@ -380,6 +407,12 @@ impl LensTable {
+             Facing::Front => FRONT_MAX_ZOOM,
+         }
+     }
++
++    /// The merge's thread count the table asks for, if it does: a device
++    /// whose debayering leaves little CPU for a merge caps it.
++    pub fn merge_threads(&self) -> Option<usize> {
++        self.merge_threads
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -565,4 +598,38 @@ mod tests {
+         .is_err());
+         assert!(TableSpec::parse("[[lens]]\nrole = \"side\"\nid = \"a\"\nzoom = 1\n").is_err());
+     }
++
++    #[test]
++    fn preview_fps_and_merge_threads_parse_and_reach_the_table() {
++        let base = "[[lens]]\nrole = \"main\"\nid = \"a\"\nzoom = 1.0\n";
++        let cams = vec![CameraInfo {
++            id: "a".into(),
++            ..CameraInfo::default()
++        }];
++        let t = TableSpec::parse(&format!("merge_threads = 2\n{base}preview_fps = 15.0\n"))
++            .unwrap()
++            .resolve(&cams);
++        assert_eq!(t.get(0).preview_fps, Some(15.0));
++        assert_eq!(t.merge_threads(), Some(2));
++        // Absent, both stay off.
++        let plain = TableSpec::parse(base).unwrap().resolve(&cams);
++        assert_eq!(plain.get(0).preview_fps, None);
++        assert_eq!(plain.merge_threads(), None);
++        // A camera the table doesn't know gets no cap.
++        let other = TableSpec::parse("merge_threads = 4\n")
++            .unwrap()
++            .resolve(&cams);
++        assert_eq!(other.get(0).preview_fps, None);
++        assert_eq!(other.merge_threads(), Some(4));
++    }
++
++    #[test]
++    fn preview_fps_and_merge_threads_are_validated() {
++        let base = "[[lens]]\nrole = \"main\"\nid = \"a\"\nzoom = 1.0\n";
++        assert!(TableSpec::parse(&format!("{base}preview_fps = 0\n")).is_err());
++        assert!(TableSpec::parse(&format!("{base}preview_fps = -5\n")).is_err());
++        assert!(TableSpec::parse(&format!("{base}preview_fps = 120.1\n")).is_err());
++        assert!(TableSpec::parse("merge_threads = 0\n").is_err());
++        assert!(TableSpec::parse(&format!("{base}answer = 42\n")).is_err());
++    }
+ }
+diff --git a/crates/omacam/src/app.rs b/crates/omacam/src/app.rs
+index 177889e..2c524b6 100644
+--- a/crates/omacam/src/app.rs
++++ b/crates/omacam/src/app.rs
+@@ -1415,10 +1415,15 @@ impl App {
+         // The burst was taken in the mode still selected: the mode switch
+         // is off while the camera takes it.
+         let hdr = !self.mode_night.is_active();
++        let threads = self
++            .controller
++            .borrow()
++            .as_ref()
++            .and_then(|c| c.table().merge_threads());
+         self.merging.set(Some(frames.len()));
+         let tx = self.tx.clone();
+         std::thread::spawn(move || {
+-            let result = photo::merge_burst(frames, hdr)
++            let result = photo::merge_burst(frames, hdr, threads)
+                 .map(Box::new)
+                 .map_err(|e| format!("{e:#}"));
+             let _ = tx.send_blocking(Msg::Merged(result));
+diff --git a/crates/omacam/src/main.rs b/crates/omacam/src/main.rs
+index f73cd04..3e8906e 100644
+--- a/crates/omacam/src/main.rs
++++ b/crates/omacam/src/main.rs
+@@ -44,6 +44,10 @@ pub enum CaptureMode {
+     Hdr,
+ }
+ 
++/// The system-wide lens table, for a device whose cameras no user file
++/// describes (this image's tablet).
++const SYSTEM_LENS_TABLE: &str = "/etc/omacam/lenses.toml";
++
+ #[derive(Debug, Clone, Parser)]
+ #[command(name = "omacam", version, about = "Camera for Omarchy Mobile")]
+ pub struct Cli {
+@@ -59,7 +63,7 @@ pub struct Cli {
+     #[arg(long, value_enum, env = "OMACAM_CAPTURE", default_value = "full")]
+     capture: CaptureMode,
+     /// A lens table to use instead of the built-in one (also read from
+-    /// ~/.config/omacam/lenses.toml).
++    /// ~/.config/omacam/lenses.toml, then /etc/omacam/lenses.toml).
+     #[arg(long)]
+     lens_table: Option<PathBuf>,
+     /// Pass the old camera's exposure to the new one at a lens switch.
+@@ -99,12 +103,17 @@ pub struct Cli {
+ }
+ 
+ impl Cli {
++    /// The lens table: `--lens-table`, else the user's, else the system's,
++    /// else the built-in one. A table that exists but doesn't load falls
++    /// back to the built-in one.
+     pub fn lens_table(&self) -> TableSpec {
+         let user = gtk::glib::user_config_dir().join("omacam/lenses.toml");
++        let system = std::path::Path::new(SYSTEM_LENS_TABLE);
+         let path = self
+             .lens_table
+             .clone()
+-            .or_else(|| user.exists().then_some(user));
++            .or_else(|| user.exists().then_some(user))
++            .or_else(|| system.exists().then(|| system.to_path_buf()));
+         match path {
+             Some(p) => match TableSpec::load(&p) {
+                 Ok(t) => {
+diff --git a/crates/omacam/src/photo.rs b/crates/omacam/src/photo.rs
+index e4a984f..d31c3fd 100644
+--- a/crates/omacam/src/photo.rs
++++ b/crates/omacam/src/photo.rs
+@@ -249,11 +249,12 @@ pub fn to_rgb(raw: &Raw<'_>) -> omacam_merge::RgbImage {
+ }
+ 
+ /// The merge's threads: one core left free and a lower priority, so the
+-/// viewfinder keeps moving while a burst merges.
+-fn merge_pool() -> Result<rayon::ThreadPool> {
++/// viewfinder keeps moving while a burst merges. A table's `merge_threads`
++/// caps the pool on a device whose CPU can't afford the default.
++fn merge_pool(threads: Option<usize>) -> Result<rayon::ThreadPool> {
+     let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+     rayon::ThreadPoolBuilder::new()
+-        .num_threads(cores.saturating_sub(1).max(1))
++        .num_threads(threads.unwrap_or(cores - 1).clamp(1, cores))
+         .thread_name(|i| format!("omacam-merge-{i}"))
+         .start_handler(|_| {
+             // SAFETY: setpriority takes no pointers; on Linux, who = 0
+@@ -271,8 +272,9 @@ fn merge_pool() -> Result<rayon::ThreadPool> {
+ pub fn merge_burst(
+     frames: Vec<omacam_core::controller::Picture>,
+     hdr: bool,
++    threads: Option<usize>,
+ ) -> Result<omacam_core::controller::Picture> {
+-    merge_pool()?.install(|| merge_burst_in_pool(frames, hdr))
++    merge_pool(threads)?.install(|| merge_burst_in_pool(frames, hdr))
+ }
+ 
+ /// Where libcamera's simple pipeline looks for a sensor's tuning file, in
+diff --git a/data/cheetah.toml b/data/cheetah.toml
+index f48583e..437c14c 100644
+--- a/data/cheetah.toml
++++ b/data/cheetah.toml
+@@ -33,6 +33,12 @@
+ # focal_length_mm: the real focal length, for EXIF, from the sensor
+ #   diagonal (Google's pixel size x the full pixel array) and the field of
+ #   view: f = diagonal / (2 tan(FOV/2)). Derived, not measured.
++# preview_fps (per lens): the frame rate cap of the preview in photo mode,
++#   for a camera whose debayering costs more CPU than 30 fps is worth.
++#   Left out, the preview runs at the camera's own rate.
++# merge_threads: the thread pool size of a burst's merge (Night, HDR), for
++#   a device whose CPU can't spare one core per thread. Left out, the merge
++#   uses every core but one.
+ 
+ device = "cheetah"
+ max_zoom = 15.0
