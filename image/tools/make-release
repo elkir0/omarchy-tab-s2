@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# make-release — gather the built images into a checksummed release directory
+# for the SM-T715 (the ROM end users flash, as the 0.9.1 to 0.9.3 releases:
+# boot.img, recovery.img, rootfs-omarchy.img.xz, SHA256SUMS).
+#
+# Usage:
+#   make-release --version V --boot FILE --recovery FILE --rootfs FILE
+#                --out DIR [--xz-level N] [--no-xz]
+#
+#     --version V     the release version (a name like 0.9.4); names the
+#                     release directory and the Odin packages
+#     --boot FILE     boot.img, the BOOT image (checked: ANDROID! magic,
+#                     14336 KiB limit of mmcblk0p9)
+#     --recovery FILE recovery.img, the RECOVERY image (ANDROID! magic,
+#                     16384 KiB limit of mmcblk0p10)
+#     --rootfs FILE   the root file system image, raw ext4 (the ext4
+#                     superblock magic 0xEF53 at offset 1080 is checked)
+#     --out DIR       the release directory: created as DIR/omarchy-tab-s2-V,
+#                     refused when it already exists
+#     --xz-level N    the xz compression level, 0 to 9 (default 6)
+#     --no-xz         copy the root image uncompressed, as rootfs-omarchy.img
+#
+# The release directory holds:
+#   boot.img, recovery.img                  the partition images
+#   rootfs-omarchy.img.xz                   the root image (or .img with --no-xz)
+#   omarchy-tab-s2-V-AP.tar.md5             Odin package, boot + recovery (tools/pack-odin)
+#   omarchy-tab-s2-V-boot.tar.md5           Odin package, boot only (users who keep TWRP)
+#   SHA256SUMS                              every file, plus the raw image under its
+#                                           uncompressed name rootfs-omarchy.img
+#   RELEASE.md                              a stub: fill in the changes and the
+#                                           install steps before publishing
+#
+# Nothing private ever enters a release: an input under a dumps/ or
+# sm-t715-private/ directory is refused, and the generated files carry bare
+# file names only, never a host path.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die()   { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 2; }
+log()   { printf '\033[1;34m[release]\033[0m %s\n' "$*" >&2; }
+usage() { sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+
+size_of() { wc -c < "$1" | tr -d ' '; }   # portable: stat -f/-c differ per OS
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else die "neither sha256sum nor shasum found"; fi
+}
+hex_at() { # hex_at FILE OFFSET LENGTH: those bytes, as hex
+    dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -tx1 | tr -d ' \n'
+}
+refuse_private() { # refuse_private WHAT PATH: nothing from the tablet's dumps
+    local abs=""
+    if [ -d "$2" ]; then abs="$(cd -- "$2" && pwd)"
+    elif [ -d "$(dirname -- "$2")" ]; then
+        abs="$(cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")"
+    fi
+    case "/${abs:-$2}/" in
+        */dumps/*|*/sm-t715-private/*)
+            die "$1: under a dumps/ or sm-t715-private/ directory (private data)" ;;
+    esac
+}
+mib_of() { echo $(( ($1 + 1048575) / 1048576 )); }
+
+VERSION=""
+BOOT=""
+RECOVERY=""
+ROOTFS=""
+OUT_DIR=""
+XZ_LEVEL=6
+NO_XZ=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --version)   VERSION="${2:?--version needs a value}"; shift 2 ;;
+        --version=*) VERSION="${1#--version=}"; shift ;;
+        --boot)      BOOT="${2:?--boot needs a file}"; shift 2 ;;
+        --boot=*)    BOOT="${1#--boot=}"; shift ;;
+        --recovery)  RECOVERY="${2:?--recovery needs a file}"; shift 2 ;;
+        --recovery=*) RECOVERY="${1#--recovery=}"; shift ;;
+        --rootfs)    ROOTFS="${2:?--rootfs needs a file}"; shift 2 ;;
+        --rootfs=*)  ROOTFS="${1#--rootfs=}"; shift ;;
+        --out)       OUT_DIR="${2:?--out needs a directory}"; shift 2 ;;
+        --out=*)     OUT_DIR="${1#--out=}"; shift ;;
+        --xz-level)  XZ_LEVEL="${2:?--xz-level needs 0 to 9}"; shift 2 ;;
+        --xz-level=*) XZ_LEVEL="${1#--xz-level=}"; shift ;;
+        --no-xz)     NO_XZ=1; shift ;;
+        -h|--help)   usage 0 ;;
+        -*)          die "unknown option: $1 (see --help)" ;;
+        *)           die "unexpected argument: $1 (see --help)" ;;
+    esac
+done
+[ -n "$VERSION" ]   || usage
+[ -n "$BOOT" ]      || die "missing --boot (see --help)"
+[ -n "$RECOVERY" ]  || die "missing --recovery (see --help)"
+[ -n "$ROOTFS" ]    || die "missing --rootfs (see --help)"
+[ -n "$OUT_DIR" ]   || die "missing --out (see --help)"
+[[ "$VERSION" =~ ^[0-9][0-9A-Za-z._-]*$ ]] \
+    || die "--version $VERSION: expected a name like 0.9.4 (digits, letters, . _ -)"
+[[ "$XZ_LEVEL" =~ ^[0-9]$ ]] || die "--xz-level $XZ_LEVEL: expected 0 to 9"
+
+for f in "$BOOT" "$RECOVERY" "$ROOTFS"; do
+    [ -f "$f" ] || die "no such file: $f"
+    refuse_private "$f" "$f"
+done
+command -v xz >/dev/null 2>&1 || die "xz not found"
+[ "$(hex_at "$ROOTFS" 1080 2)" = "53ef" ] \
+    || die "$ROOTFS: no ext4 superblock at offset 1080 (magic 0xEF53): not a raw ext4 image"
+RELEASE_DATE="$(date -u +%Y-%m-%d)"
+
+# Every check that can refuse the release runs before anything is created.
+REL="$OUT_DIR/omarchy-tab-s2-$VERSION"
+[ ! -e "$REL" ] || die "$REL already exists"
+mkdir -p -- "$OUT_DIR"
+mkdir -- "$REL" 2>/dev/null || die "cannot create $REL (it exists?)"
+REL="$(cd -- "$REL" && pwd)"
+COMPLETE=0
+release_cleanup() { [ "$COMPLETE" = 1 ] || rm -rf -- "$REL"; }   # no half-releases
+trap release_cleanup EXIT
+
+log "release $VERSION into $REL"
+
+# ------------------------------------------------------- the images
+# pack-odin checks both images (ANDROID! magic, partition limits) and is
+# quick: run it before the long compression, not after.
+cp -- "$BOOT" "$REL/boot.img"
+cp -- "$RECOVERY" "$REL/recovery.img"
+"$SCRIPT_DIR/pack-odin" --out "$REL/omarchy-tab-s2-$VERSION-AP.tar.md5" \
+    "$REL/boot.img" "$REL/recovery.img" >&2
+"$SCRIPT_DIR/pack-odin" --out "$REL/omarchy-tab-s2-$VERSION-boot.tar.md5" \
+    "$REL/boot.img" >&2
+
+# ------------------------------------------------------- the root image
+if [ "$NO_XZ" = 1 ]; then
+    log "copying the root image uncompressed"
+    cp -- "$ROOTFS" "$REL/rootfs-omarchy.img"
+else
+    log "compressing the root image with xz -$XZ_LEVEL (a 4 GiB image takes a while)"
+    xz -T0 -"$XZ_LEVEL" -c -- "$ROOTFS" > "$REL/rootfs-omarchy.img.xz.part" \
+        || die "xz failed on $ROOTFS"
+    mv -f -- "$REL/rootfs-omarchy.img.xz.part" "$REL/rootfs-omarchy.img.xz"
+fi
+
+# ------------------------------------------------------- RELEASE.md
+log "writing RELEASE.md (a stub: fill in the changes and the install steps)"
+art_line() { # art_line FILE WHAT-FOR: the artifact's size line for RELEASE.md
+    # shellcheck disable=SC2016  # the backticks are for RELEASE.md
+    printf -- '- `%s` — %s bytes (%s MiB): %s\n' \
+        "$(basename -- "$1")" "$(size_of "$1")" "$(mib_of "$(size_of "$1")")" "$2"
+}
+{
+    echo "# Omarchy on the Samsung Galaxy Tab S2 — release $VERSION"
+    echo
+    echo "Version $VERSION, $RELEASE_DATE (UTC). Omarchy (Hyprland and the Omarchy"
+    echo "shell) for the SM-T715 (\`gts28ltexx\`) on a mainline kernel. An unofficial"
+    echo "port; see the repository's README for what works and the warnings."
+    echo
+    echo "## Files"
+    echo
+    art_line "$REL/boot.img" "the BOOT image (mmcblk0p9): flash with \`heimdall flash --BOOT\`"
+    art_line "$REL/recovery.img" "the RECOVERY image (mmcblk0p10), the rescue system: flash with \`heimdall flash --RECOVERY\`"
+    if [ "$NO_XZ" = 1 ]; then
+        art_line "$REL/rootfs-omarchy.img" "the Omarchy root file system, raw ext4"
+    else
+        art_line "$REL/rootfs-omarchy.img.xz" "the Omarchy root file system, raw ext4, xz-compressed: \`xz -dk\` it before use"
+    fi
+    art_line "$REL/omarchy-tab-s2-$VERSION-AP.tar.md5" "an Odin package with boot and recovery, for Samsung's Odin in Download mode"
+    art_line "$REL/omarchy-tab-s2-$VERSION-boot.tar.md5" "an Odin package with the boot image only, for users who keep TWRP in RECOVERY"
+    echo
+    echo "Check every file with \`shasum -a 256 -c SHA256SUMS\` (the \`rootfs-omarchy.img\`"
+    echo "line is for the image after \`xz -dk\`)."
+    echo
+    echo "## Changes"
+    echo
+    echo "<!-- TODO: what changed since the previous release (CHANGELOG.md). -->"
+    echo "- TODO"
+    echo
+    echo "## Install"
+    echo
+    echo "<!-- TODO: the install steps, or a link to the repository's guide. -->"
+    echo "1. TODO"
+} > "$REL/RELEASE.md.tmp"
+mv -f -- "$REL/RELEASE.md.tmp" "$REL/RELEASE.md"
+
+# ------------------------------------------------------- SHA256SUMS
+# Every file of the release, plus the raw image under its uncompressed name
+# when the .xz ships: a user who ran `xz -dk` checks that line too.
+RAW_SHA="$(sha256_of "$ROOTFS")"
+{
+    if [ "$NO_XZ" = 0 ]; then
+        echo "# SHA256SUMS also lists the root image under its uncompressed name"
+        echo "# rootfs-omarchy.img: check that line once \`xz -dk rootfs-omarchy.img.xz\`"
+        echo "# has produced it, and skip it until then."
+    fi
+    while IFS= read -r f; do
+        printf '%s  %s\n' "$(sha256_of "$REL/$f")" "$f"
+    done < <(cd -- "$REL" && find . -type f ! -name SHA256SUMS ! -name '*.part' \
+                 ! -name '*.tmp' | sed 's|^\./||' | LC_ALL=C sort)
+    [ "$NO_XZ" = 1 ] || printf '%s  %s\n' "$RAW_SHA" "rootfs-omarchy.img"
+} > "$REL/SHA256SUMS.tmp"
+mv -f -- "$REL/SHA256SUMS.tmp" "$REL/SHA256SUMS"
+
+# ------------------------------------------------------- summary
+COMPLETE=1
+trap - EXIT
+log "release $VERSION ready"
+total=0
+while IFS= read -r f; do
+    b="$(size_of "$REL/$f")"; total=$((total + b))
+    printf '  %-32s %10s bytes\n' "$f" "$b"
+done < <(cd -- "$REL" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+printf '  %-32s %10s bytes\n' "total" "$total"
+printf '%s\n' "$REL"

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# pack-odin — an Odin-flashable .tar.md5 package from the release's boot and
+# recovery images: what Samsung's Odin (or Heimdall) flashes in Download mode.
+#
+# The package is a ustar (POSIX) tar of the images under their partition
+# flash file names — no directories, owner 0:0, mode 0644, a fixed mtime —
+# with one trailer line appended after the tar bytes:
+#
+#     <md5 of the tar bytes>  <name>.tar
+#
+# So `tar -tf FILE.tar.md5` still lists the images, and the md5 of every
+# byte before the trailer equals the trailer's hash (Odin's own check).
+# The images are packed byte for byte: ours already carry their
+# SEANDROIDENFORCE footer inside the file (boot/pack-test-recovery.sh,
+# --seandroid), and this tool neither adds nor removes anything.
+#
+# Usage:
+#   pack-odin --out FILE.tar.md5 IMAGE...
+#
+#     --out FILE.tar.md5  the package to write; the trailer names FILE.tar,
+#                         the file without its .md5. Its parent directory
+#                         must exist.
+#     IMAGE               boot.img or recovery.img, the partition flash file
+#                         names; any other name, or the same name twice, is
+#                         refused. Every image is checked for the ANDROID!
+#                         magic and against its partition's size: BOOT (p9)
+#                         14336 KiB, RECOVERY (p10) 16384 KiB
+#                         (boot/pack-test-recovery.sh, dumps/partitions.txt).
+#
+# An image under a dumps/ or sm-t715-private/ directory is refused: those
+# hold the tablet's private dumps, which never enter a release.
+
+set -euo pipefail
+
+die()   { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 2; }
+usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+
+size_of() { wc -c < "$1" | tr -d ' '; }   # portable: stat -f/-c differ per OS
+md5_of() {
+    if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | awk '{print $1}'
+    elif command -v md5 >/dev/null 2>&1; then md5 -q "$1"
+    else die "neither md5sum nor md5 found"; fi
+}
+hex_at() { # hex_at FILE OFFSET LENGTH: those bytes, as hex
+    dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -tx1 | tr -d ' \n'
+}
+refuse_private() { # refuse_private WHAT PATH: nothing from the tablet's dumps
+    local abs=""
+    if [ -d "$2" ]; then abs="$(cd -- "$2" && pwd)"
+    elif [ -d "$(dirname -- "$2")" ]; then
+        abs="$(cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")"
+    fi
+    case "/${abs:-$2}/" in
+        */dumps/*|*/sm-t715-private/*)
+            die "$1: under a dumps/ or sm-t715-private/ directory (private data)" ;;
+    esac
+}
+
+# Partition sizes, as boot/pack-test-recovery.sh reads them from
+# dumps/partitions.txt: BOOT is mmcblk0p9 (14 MiB), RECOVERY mmcblk0p10
+# (16 MiB).
+BOOT_MAX_BYTES=$((14336 * 1024))
+RECOVERY_MAX_BYTES=$((16384 * 1024))
+ANDROID_MAGIC=414e44524f494421   # "ANDROID!"
+FIXED_STAMP=200001010000         # 2000-01-01 00:00:00 UTC: fixed, so the
+                                 # same inputs give the same package
+
+OUT=""
+IMAGES=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)     OUT="${2:?--out needs a file}"; shift 2 ;;
+        --out=*)   OUT="${1#--out=}"; shift ;;
+        -h|--help) usage 0 ;;
+        -*)        die "unknown option: $1 (see --help)" ;;
+        *)         IMAGES+=("$1"); shift ;;
+    esac
+done
+[ -n "$OUT" ] || usage
+[ "${#IMAGES[@]}" -gt 0 ] || die "no IMAGE (see --help)"
+[ ! -d "$OUT" ] || die "$OUT is a directory"
+OUT_DIR="$(dirname -- "$OUT")"
+[ -d "$OUT_DIR" ] || die "no output directory: $OUT_DIR"
+
+# ---------------------------------------------------------------- checks
+names=()
+for img in "${IMAGES[@]}"; do
+    [ -f "$img" ] || die "no such image: $img"
+    name="$(basename -- "$img")"
+    case "$name" in
+        boot.img)     max=$BOOT_MAX_BYTES ;;
+        recovery.img) max=$RECOVERY_MAX_BYTES ;;
+        *) die "$name: not a partition flash file name (boot.img or recovery.img)" ;;
+    esac
+    for n in ${names[@]+"${names[@]}"}; do
+        [ "$n" != "$name" ] || die "$name: given twice"
+    done
+    refuse_private "$img" "$img"
+    [ "$(hex_at "$img" 0 8)" = "$ANDROID_MAGIC" ] || die "$img: no ANDROID! boot image magic"
+    bytes="$(size_of "$img")"
+    [ "$bytes" -le "$max" ] \
+        || die "$img: $bytes bytes, over the ${name%.img} limit of $max bytes"
+    names+=("$name")
+done
+
+# ---------------------------------------------------------------- package
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/pack-odin.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+mkdir "$WORK/stage"
+for img in "${IMAGES[@]}"; do
+    name="$(basename -- "$img")"
+    cp -- "$img" "$WORK/stage/$name"
+    chmod 0644 "$WORK/stage/$name"
+    TZ=UTC touch -t "$FIXED_STAMP" "$WORK/stage/$name"
+done
+# From inside the stage: the members land at the archive root, and the tar
+# itself never holds a host path. --owner/--group work on both bsdtar
+# (macOS) and GNU tar; the fixed mtime comes from the staged copies.
+( cd "$WORK/stage" && tar --format=ustar --owner=0 --group=0 -cf "$WORK/pkg.tar" -- "${names[@]}" )
+
+TAR_NAME="$(basename -- "$OUT")"
+TAR_NAME="${TAR_NAME%.md5}"
+printf '%s  %s\n' "$(md5_of "$WORK/pkg.tar")" "$TAR_NAME" >> "$WORK/pkg.tar"
+mv -f -- "$WORK/pkg.tar" "$OUT"
+printf '%s (%s bytes)\n' "$OUT" "$(size_of "$OUT")"
