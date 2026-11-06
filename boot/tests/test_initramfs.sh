@@ -23,8 +23,11 @@
 #     seed, state kept), rescue (t715.persist=0: image mode), a directory
 #     without the marker (refused, image mode), a good rootfs-alt.img.sha256
 #     sidecar (checked, seed runs), a bad one (refused: no seed directory,
-#     USERDATA untouched), a too-small USERDATA (fallback to image mode
-#     with the "Not enough free space" line).  Also the end-user defaults:
+#     USERDATA untouched), the same again as written on Windows (CR LF, a
+#     UTF-8 byte order mark, an upper-case hash: accepted; a wrong CR LF
+#     hash: refused) and with two lines (refused as malformed), a too-small
+#     USERDATA (fallback to image mode with the "Not enough free space"
+#     line).  Also the end-user defaults:
 #     no telnet on the default boot (port closed, log says so), and
 #     t715.failreboot=0 turning a failure into exit 97 with the on-screen
 #     failure line.  USERDATA must stay fsck-clean.
@@ -442,16 +445,34 @@ with_userdata() {
 }
 select_persist() { printf 'rootfs-alt.img\npersist=omarchy\n' >"$W/ud/media/0/linux/rootfs.select"; }
 plant_partial_seed() { mkdir -p "$W/ud/.omarchy.t715-seed/half" && echo partial >"$W/ud/.omarchy.t715-seed/half/file"; }
-# plant_sidecar [bad]: a one-line sha256sum sidecar for the selected image
-# (rootfs-alt.img); with "bad", a syntactically valid but wrong hash.
+# plant_sidecar KIND: a sha256sum sidecar for the selected image
+# (rootfs-alt.img), written in one of the ways a host writes it.
+#   good      sha256sum output: the right hash, two spaces, LF
+#   bad       the same but a syntactically valid wrong hash
+#   crlf      the right hash, two spaces, CR LF line ending
+#   windows   Notepad plus Get-FileHash: a UTF-8 BOM, the right hash in
+#             upper case, two spaces, CR LF, then one more empty CR LF line
+#   crlf-bad  crlf with a wrong hash
+#   two-lines the image's correct line, then a second valid-looking line
+#             naming another file, LF endings (a whole SHA256SUMS in short)
 plant_sidecar() {
-  local h zeros
+  local kind=$1 h zeros
   h=$(sha256sum "$W/ud/media/0/linux/rootfs-alt.img" | cut -d' ' -f1)
-  if [[ "${1:-}" == bad ]]; then
+  case "$kind" in
+  bad | crlf-bad)
     zeros=$(printf '%063d' 0)
     h="${zeros}${h: -1}"
-  fi
-  printf '%s  rootfs-alt.img\n' "$h" >"$W/ud/media/0/linux/rootfs-alt.img.sha256"
+    ;;
+  esac
+  case "$kind" in
+  good) printf '%s  rootfs-alt.img\n' "$h" ;;
+  bad) printf '%s  rootfs-alt.img\n' "$h" ;;
+  crlf) printf '%s  rootfs-alt.img\r\n' "$h" ;;
+  crlf-bad) printf '%s  rootfs-alt.img\r\n' "$h" ;;
+  windows) printf '\xef\xbb\xbf%s  rootfs-alt.img\r\n\r\n' "${h^^}" ;;
+  two-lines) printf '%s  rootfs-alt.img\n%s  other.img\n' "$h" "$h" ;;
+  *) echo "plant_sidecar: unknown kind $kind" >&2; return 1 ;;
+  esac >"$W/ud/media/0/linux/rootfs-alt.img.sha256"
 }
 # fill_userdata: eat USERDATA's free space until the seed's check (the
 # image's use, about 1.4 MiB, + the test's 1 MiB margin) fails: one file
@@ -552,50 +573,69 @@ scenario_persist_foreign() {
   ip link del usb0 2>/dev/null || true
 }
 
-# scenario_persist_sidecar GOOD|BAD: the .sha256 sidecar next to the
-# selected image, verified before the seed.  Runs after scenario_persist_
-# seed/again/rescue/foreign, whose omarchy root must be removed first
-# (that is the machine's state at the factory: image present, no root).
+# scenario_persist_sidecar KIND: the .sha256 sidecar next to the selected
+# image, verified before the seed.  good and crlf/windows are accepted
+# (the seed runs); bad, crlf-bad and two-lines are refused (image mode,
+# USERDATA untouched).  Runs after scenario_persist_seed/again/rescue/
+# foreign, whose omarchy root must be removed first (that is the machine's
+# state at the factory: image present, no root).
 scenario_persist_sidecar() {
-  local good=$1
-  echo "--- scenario: persistent root, first boot, $good .sha256 sidecar"
-  if ! with_userdata select_persist || ! with_userdata plant_sidecar "$good" ||
+  local kind=$1
+  echo "--- scenario: persistent root, first boot, $kind .sha256 sidecar"
+  if ! with_userdata select_persist || ! with_userdata plant_sidecar "$kind" ||
     ! with_userdata rm -rf "$W/ud/omarchy"; then
     ko "rootfs.select line 2 and the sidecar written"; return
   fi
-  # USERDATA's content checksum before the boot: a bad sidecar must leave
-  # the partition byte-identical (the check runs while it is read-only).
+  # USERDATA's content checksum before the boot: a refused sidecar must
+  # leave the partition byte-identical (the check runs while it is
+  # read-only).
   local sum_before
   sum_before=$(with_userdata userdata_sum)
-  prepare_boot "pside-$good"
+  prepare_boot "pside-$kind"
   local rc=0
-  run_init "pside-$good" "$PERSIST_KNOBS" || rc=$?
+  run_init "pside-$kind" "$PERSIST_KNOBS" || rc=$?
   # An image-mode fallback leaves the image's loop attached (the namespace
   # dies at the hand-over): detach it before mounting USERDATA again, or
   # the loop's open file keeps the mount busy.
   detach_inner_loops
-  if [[ "$good" == good ]]; then
+  case "$kind" in
+  good | crlf | windows)
     check "switch_root reached the seeded /sbin/init (exit $rc)" test "$rc" -eq 0
-    check "checksum verified" log_has "pside-$good" "image checksum verified"
-    check "Checking-the-image said on screen" log_has "pside-$good" "t715-say: Checking the image..."
-    check "persistent root checks pass" log_has "pside-$good" "T715TEST RESULT: PASS"
+    check "checksum verified" log_has "pside-$kind" "image checksum verified"
+    check "Checking-the-image said on screen" log_has "pside-$kind" "t715-say: Checking the image..."
+    check "persistent root checks pass" log_has "pside-$kind" "T715TEST RESULT: PASS"
     local st
     st=$(with_userdata persist_state)
     check "seed did run (marker present)" grep -qx "marker=persistent root omarchy, seeded from media/0/linux/rootfs-alt.img" <<<"$st"
-  else
+    ;;
+  bad | crlf-bad)
     check "fell back to image mode (exit $rc)" test "$rc" -eq 0
-    check "image mode checks pass" log_has "pside-$good" "T715TEST RESULT: PASS"
-    check "mode image" log_has "pside-$good" "T715TEST mode=image"
-    check "checksum refused" log_has "pside-$good" "ERROR: image checksum check failed: checksum mismatch"
-    check "damage said on screen" log_has "pside-$good" "t715-say: The image file is damaged (bad checksum). Copy it to the tablet again."
-    check "no seed directory created" sh -c "! grep -q 'seeding USERDATA' '$W/pside-$good.log'"
+    check "image mode checks pass" log_has "pside-$kind" "T715TEST RESULT: PASS"
+    check "mode image" log_has "pside-$kind" "T715TEST mode=image"
+    check "checksum refused" log_has "pside-$kind" "ERROR: image checksum check failed: checksum mismatch"
+    check "damage said on screen" log_has "pside-$kind" "t715-say: The image file is damaged (bad checksum). Copy it to the tablet again."
+    check "no seed directory created" sh -c "! grep -q 'seeding USERDATA' '$W/pside-$kind.log'"
     local st
     st=$(with_userdata persist_state)
     check "no persistent root created" grep -qx "marker=" <<<"$st"
     check "no seed directory left" grep -qx "leftover=0" <<<"$st"
     check "USERDATA's files untouched (checksum unchanged)" test "$sum_before" = "$(with_userdata userdata_sum)"
-  fi
-  [[ $rc -eq 0 ]] || show_log "pside-$good"
+    ;;
+  two-lines)
+    check "fell back to image mode (exit $rc)" test "$rc" -eq 0
+    check "image mode checks pass" log_has "pside-$kind" "T715TEST RESULT: PASS"
+    check "mode image" log_has "pside-$kind" "T715TEST mode=image"
+    check "sidecar refused as malformed" log_has "pside-$kind" "ERROR: malformed checksum file"
+    check "damage said on screen" log_has "pside-$kind" "t715-say: The image file is damaged (bad checksum). Copy it to the tablet again."
+    check "no seed directory created" sh -c "! grep -q 'seeding USERDATA' '$W/pside-$kind.log'"
+    local st
+    st=$(with_userdata persist_state)
+    check "no persistent root created" grep -qx "marker=" <<<"$st"
+    check "no seed directory left" grep -qx "leftover=0" <<<"$st"
+    check "USERDATA's files untouched (checksum unchanged)" test "$sum_before" = "$(with_userdata userdata_sum)"
+    ;;
+  esac
+  [[ $rc -eq 0 ]] || show_log "pside-$kind"
   detach_inner_loops
   ip link del usb0 2>/dev/null || true
 }
@@ -672,6 +712,10 @@ in_container() {
   scenario_persist_foreign
   scenario_persist_sidecar good
   scenario_persist_sidecar bad
+  scenario_persist_sidecar crlf
+  scenario_persist_sidecar windows
+  scenario_persist_sidecar crlf-bad
+  scenario_persist_sidecar two-lines
   scenario_persist_space
   detach_inner_loops
   detach_disk

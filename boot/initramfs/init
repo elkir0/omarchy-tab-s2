@@ -88,7 +88,9 @@
 # directory NAME at its top is bind-mounted on /newroot; changes survive
 # reboots.  On the first boot NAME does not exist: a checksum sidecar
 # <image>.sha256 (sha256sum format) next to the selected image, when one
-# is there, is verified first ("Checking the image..." on screen); then
+# is there, is verified first ("Checking the image..." on screen); a
+# sidecar written on Windows (CR LF line endings, a UTF-8 byte order
+# mark, an upper-case hash) reads the same and is accepted; then
 # the image is attached read-only and its tree copied into
 # USERDATA/.NAME.t715-seed by the image's own cp (GNU cp -a keeps owners,
 # modes, hard links, xattrs and file capabilities) while the screen shows
@@ -1229,7 +1231,10 @@ seed_persist() {
 # existing persistent root never verifies anything), if the selected image
 # has a checksum sidecar next to it, <image>.sha256 (sha256sum format, one
 # line naming the image's own file name), verify the image with sha256sum
-# -c.  USERDATA is still mounted read-only here: a mismatch (a truncated
+# -c.  Its text is normalized first, so that a sidecar written on Windows
+# passes: the CR bytes and one leading UTF-8 byte order mark are dropped
+# and the hash is lower-cased; the sidecar itself is never rewritten.
+# USERDATA is still mounted read-only here: a mismatch (a truncated
 # copy on the tablet) or a malformed sidecar then leaves the tablet byte-
 # identical, and the boot falls back to image mode.  A sidecar naming
 # anything but the image's own file name is malformed: the sidecar travels
@@ -1249,13 +1254,21 @@ check_image_sum() {
     *) _cs_dir=$UD_MNT ;;
     esac
     _cs_name=${ROOTIMG##*/}
+    # Strip before parsing, never writing anything back: every CR (an
+    # editor's CR LF pair) and one leading UTF-8 byte order mark, so the
+    # same sidecar written on Linux or on Windows reads the same.
+    _cs_txt=$(tr -d '\r' <"$_cs_sum" 2>/dev/null)
+    _cs_bom=$(printf '\357\273\277')
+    case $_cs_txt in
+    "$_cs_bom"*) _cs_txt=${_cs_txt#"$_cs_bom"} ;;
+    esac
     # One line: the hash, whitespace, the image's own file name.  Strict
     # on purpose: the sidecar travels with the image (same push, same
     # rename), so anything else is a copy/paste mistake, and a whole
     # SHA256SUMS pasted next to an image must not pass as this image's
     # checksum.
-    _cs_nlines=$(grep -c . "$_cs_sum" 2>/dev/null)
-    _cs_line=$(head -n 1 "$_cs_sum" 2>/dev/null)
+    _cs_nlines=$(printf '%s\n' "$_cs_txt" | grep -c .)
+    _cs_line=$(printf '%s\n' "$_cs_txt" | head -n 1)
     _cs_hash=${_cs_line%%[!0-9a-fA-F]*}
     _cs_rest=${_cs_line#"$_cs_hash"}
     case ${_cs_rest} in
@@ -1274,8 +1287,11 @@ check_image_sum() {
     fi
     # sha256sum -c runs in the image's directory: sidecars written by
     # sha256sum NAME (GNU or busybox) carry the file name as given, and
-    # busybox does not accept absolute paths in the check file.
-    _cs_out=$(cd "$_cs_dir" && sha256sum -c "$_cs_sum" 2>&1)
+    # busybox does not accept absolute paths in the check file.  It reads
+    # the normalized line on stdin, never the sidecar's raw bytes: the
+    # hash goes lower case, as sha256sum itself prints it.
+    _cs_line=$(printf '%s  %s\n' "$(printf '%s' "$_cs_hash" | tr 'A-F' 'a-f')" "$_cs_name")
+    _cs_out=$(cd "$_cs_dir" && printf '%s\n' "$_cs_line" | sha256sum -c - 2>&1)
     _cs_rc=$?
     if [ "$_cs_rc" -eq 0 ]; then
         log "image checksum verified ($ROOTIMG.sha256)"

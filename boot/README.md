@@ -127,7 +127,10 @@ Wi-Fi networks, pairings, settings, installed packages.
 On the first boot `NAME` does not exist yet. If a checksum sidecar
 `<image>.sha256` (one `sha256sum`-format line naming the image's own file
 name) sits next to the selected image, it is verified first ("Checking
-the image..." on screen); a mismatch or a malformed sidecar refuses the
+the image..." on screen). A sidecar written on Windows is accepted:
+`sha256sum`-format text with CR LF line endings, a leading UTF-8 byte
+order mark (Notepad) or an upper-case hash (PowerShell's `Get-FileHash`)
+reads the same. A mismatch or a malformed sidecar refuses the
 seed without touching USERDATA (still read-only at that point) and falls
 back to image mode. Without a sidecar the seed runs unchecked, as before.
 
