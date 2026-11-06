@@ -11,7 +11,7 @@ Android or TWRP has never been run end to end: see [the install guide](docs/INST
 
 An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
-![Home, the app drawer, Chromium and recent apps on the tablet](assets/demo.gif)
+![The 1.0 Beta 1 on the tablet: home screen, app drawer, quick settings, the Omarchy menu, Chromium, fastfetch, Phone and Messages side by side, btop, recent apps, then nine Omarchy themes](assets/demo.gif)
 
 | Home | Apps | Chromium |
 |---|---|---|
