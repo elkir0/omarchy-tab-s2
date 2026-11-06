@@ -25,10 +25,12 @@
 #   rootfs-omarchy.img.xz                   the root image (or .img with --no-xz)
 #   omarchy-tab-s2-V-AP.tar.md5             Odin package, boot + recovery (tools/pack-odin)
 #   omarchy-tab-s2-V-boot.tar.md5           Odin package, boot only (users who keep TWRP)
-#   SHA256SUMS                              every file, plus the raw image under its
-#                                           uncompressed name rootfs-omarchy.img
+#   SHA256SUMS                              every file to publish, plus the raw image
+#                                           under its uncompressed name rootfs-omarchy.img
 #   RELEASE.md                              a stub: fill in the changes and the
-#                                           install steps before publishing
+#                                           install steps before publishing; it is the
+#                                           release page's text, not a file to publish,
+#                                           so SHA256SUMS leaves it out
 #
 # Nothing private ever enters a release: an input under a dumps/ or
 # sm-t715-private/ directory is refused, and the generated files carry bare
@@ -184,8 +186,9 @@ art_line() { # art_line FILE WHAT-FOR: the artifact's size line for RELEASE.md
 mv -f -- "$REL/RELEASE.md.tmp" "$REL/RELEASE.md"
 
 # ------------------------------------------------------- SHA256SUMS
-# Every file of the release, plus the raw image under its uncompressed name
-# when the .xz ships: a user who ran `xz -dk` checks that line too.
+# Every file to publish, plus the raw image under its uncompressed name when
+# the .xz ships: a user who ran `xz -dk` checks that line too. RELEASE.md is
+# left out: it is edited into the release page after this runs.
 RAW_SHA="$(sha256_of "$ROOTFS")"
 {
     if [ "$NO_XZ" = 0 ]; then
@@ -195,8 +198,8 @@ RAW_SHA="$(sha256_of "$ROOTFS")"
     fi
     while IFS= read -r f; do
         printf '%s  %s\n' "$(sha256_of "$REL/$f")" "$f"
-    done < <(cd -- "$REL" && find . -type f ! -name SHA256SUMS ! -name '*.part' \
-                 ! -name '*.tmp' | sed 's|^\./||' | LC_ALL=C sort)
+    done < <(cd -- "$REL" && find . -type f ! -name SHA256SUMS ! -name RELEASE.md \
+                 ! -name '*.part' ! -name '*.tmp' | sed 's|^\./||' | LC_ALL=C sort)
     [ "$NO_XZ" = 1 ] || printf '%s  %s\n' "$RAW_SHA" "rootfs-omarchy.img"
 } > "$REL/SHA256SUMS.tmp"
 mv -f -- "$REL/SHA256SUMS.tmp" "$REL/SHA256SUMS"

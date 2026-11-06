@@ -151,6 +151,8 @@ grep -q '^# SHA256SUMS also lists the root image' "$REL/SHA256SUMS" \
     || fail "SHA256SUMS carries the comment about the raw-image line"
 grep -q '  rootfs-omarchy\.img$' "$REL/SHA256SUMS" \
     || fail "SHA256SUMS lists the raw image as rootfs-omarchy.img"
+! grep -q '  RELEASE\.md$' "$REL/SHA256SUMS" \
+    || fail "SHA256SUMS leaves RELEASE.md out (it is edited after the sums)"
 ( cd "$REL" && sha256_check SHA256SUMS >/dev/null 2>&1 ) \
     || fail "sha256 -c passes on SHA256SUMS for the files present"
 # And the raw line matches the root image we fed in.
