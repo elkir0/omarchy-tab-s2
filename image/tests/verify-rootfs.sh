@@ -490,8 +490,8 @@ get $PS/state.json; cp "$W/f" "$W/pstate"
 dfs "ls -p /usr/share/omamobile/omarchy/patches" | awk -F/ '$6 ~ /\.patch$/ {print $6}' | sort > "$W/series"
 # The JSON the applier writes (indent 2, sorted keys): a list's items one per line.
 jlist() { awk -v k="\"$2\": [" 'index($0, k) { if (index($0, "]")) exit; f = 1; next } f && index($0, "]") { exit } f { gsub(/[ ",]/, ""); print }' "$1"; }
-check "the series: upstream's 24 patches and ours, 0014 for the lock, without 0012, 0016 (phone-only)" \
-    sh -c '[ "$(wc -l < "$1")" = 27 ] && grep -qx t715-update-without-kernel-package.patch "$1" && grep -qx t715-pacman-keeps-alarm.patch "$1" && grep -qx t715-lock-blank-through-keys.patch "$1" && grep -Eq "^0014-" "$1" && ! grep -Eq "^(0012|0016)-" "$1"' _ "$W/series"
+check "the series: upstream's 25 patches and ours, 0014 for the lock, 0028's narrow logo, without 0012, 0016 (phone-only)" \
+    sh -c '[ "$(wc -l < "$1")" = 28 ] && grep -Eq "^0028-" "$1" && grep -qx t715-update-without-kernel-package.patch "$1" && grep -qx t715-pacman-keeps-alarm.patch "$1" && grep -qx t715-lock-blank-through-keys.patch "$1" && grep -Eq "^0014-" "$1" && ! grep -Eq "^(0012|0016)-" "$1"' _ "$W/series"
 check "  bridge-4.0.4-menu-first-frame.patch kept (it targets 4.0.6)" grep -qx 'bridge-4.0.4-menu-first-frame.patch' "$W/series"
 check "applier status: result ok, nothing failed" \
     sh -c 'grep -q "\"result\": \"ok\"" "$1" && grep -q "\"failed\": null" "$1"' _ "$W/pstatus"
