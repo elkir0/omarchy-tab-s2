@@ -23,6 +23,7 @@ operating summary.
 | Starts by itself | **works** on the persistent root: CP ONLINE 22.8 s after the kernel started, no command typed | §5.1 |
 | From the desktop | **works** as the desktop user in the graphical session: `nmcli` data, SMS to the own line, voicemail call | §5.1 |
 | Switch and standby (2026-11-05) | **works**: `t715-modem-power` off (`MODEM_OFF`, the CP off at boot) and on (ONLINE about 11 s later) through polkit from the desktop user's manager, refused from a remote session; with the standby set off, the CP goes off a minute after `t715-keys` darkens the screen and is ONLINE again within 15 s of the wake. The Modem tile is built (`omamobile-shell` 0.2.94-2), not yet on the tablet | §5.4, `image/tests/ondevice/modem-switch.sh` |
+| Link PM, `pm_mode=fsm` (2026-11-05) | **works without a SIM, optional**: with the stock state machine (`kernel/patches/t715-linkpm`, not in the 1.0 Beta 1 kernel) the CP releases the MIPI-LLI link and sleeps, all four lines low at rest; 20 of 20 AP wakes, 30 min of soak, 10 power-offs, no failure. Saving not measured, calls and SMS untested | §5.5, `research/modem/LINK-PM.md` |
 
 > **Emergency calls: do not rely on this tablet.** Emergency numbers were
 > never dialled during the bring-up (it is forbidden for tests), `shannond`
@@ -311,6 +312,32 @@ closed. The minute's wait keeps a short dark screen from booting the CP again,
 so the standby setting costs at most one CP boot per screen-off of a minute or
 more.
 
+### 5.5 Letting the CP sleep: `pm_mode=fsm` (optional)
+
+The port keeps the MIPI-LLI link up for as long as the CP runs (locked-on, D2),
+which is why a powered CP costs 155 mW. `kernel/patches/t715-linkpm` brings
+back the 3.10 link power management, the stock state machine, behind a
+parameter of `sec_modem_v1`:
+
+- `pm_mode=lockon`, the default, is the port's behaviour, unchanged;
+- `pm_mode=fsm` lets the CP release the link when it wants to sleep, and wakes
+  it from the AP side when there is something to send.
+
+The series is not in the 1.0 Beta 1 kernel. Built on it with the release's
+fixed identity (`kernel/README.md`), it gives the release's zImage and DTB
+byte for byte and changes only `sec_modem_v1.ko` and `exynos5433-mipi-lli.ko`
+(same vermagic). Then load the module with
+`options sec_modem_v1 pm_mode=fsm` in `/etc/modprobe.d/`, or write the
+parameter while the CP is off (`image/tests/ondevice/linkpm.sh mode fsm`).
+A boot always starts in `lockon` unless the module option asks for `fsm`.
+
+Validated on the reference tablet without a SIM (`research/modem/LINK-PM.md`
+§9): the CP unmounts the link by itself and remounts it on its own wakes, all
+four lines low at rest; 20 of 20 sends woke an unmounted link from the AP side;
+30 minutes of soak and 10 CP power-offs in different states ran without a
+watchdog or a failure. The power saved is not measured yet (100 to 135 mW is
+the inference), and calls, SMS and data with a SIM are not tested.
+
 ## 6. Results on the device
 
 ### 6.1 Cold boots
@@ -506,9 +533,9 @@ cycle.
 - The CP never sleeps: the port holds the LLI link up while the CP runs
   (locked-on, SYNTHESIS decision D2), where stock lets the CP release it every
   few seconds. A powered CP costs 155 mW with the screen off, radio on or off
-  (`docs/hardware/BATTERY.md` §12). D2's fallback F2, the stock state machine
-  with `pm_enable = 1`, is the way to a cheap modem kept on; until then
-  `t715-modem-power` (§5.4) switches it off.
+  (`docs/hardware/BATTERY.md` §12). D2's fallback F2, the stock state machine,
+  is the optional `pm_mode=fsm` of §5.5, validated without a SIM; until it is
+  measured and tested with one, `t715-modem-power` (§5.4) switches the CP off.
 - `shannond`: no USSD.
 - Two `NET_REGIST` reads sent together are sometimes both answered with the
   second one's `aseq`: the first one then times out after 10 s ("no answer" in

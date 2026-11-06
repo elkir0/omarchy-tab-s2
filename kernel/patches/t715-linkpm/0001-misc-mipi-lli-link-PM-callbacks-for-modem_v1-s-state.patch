@@ -1,0 +1,326 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/2] misc: mipi-lli: link PM callbacks for modem_v1's state
+ machine
+
+The 6.12 port dropped the 3.10 link PM service (pm_svc): modem_v1's
+locked-on PM had no use for it.  Bring back struct link_pm_svc and
+mipi_lli_get_pm_svc(), with 3.10's lock_link and unlock_link, and call the
+owner's callbacks where 3.10 did: reset at SW_RESET_DONE, after the remap
+check; mount in the mount thread, after the DL credits and the AFC save;
+unmount at UNMOUNT_DONE, where the link is then left for the owner to
+remount instead of being re-armed.
+
+Only while the owner's state machine runs (pm_svc->active, modem_v1's
+pm_mode=fsm).  Otherwise nothing changes: an unmount re-arms the link as
+before.  While it runs, the routine reset, mount, unmount and remap lines
+are debug messages, since they come every few seconds; a refused remap is
+still an error.  mnt_ok is now incremented outside its message, which a
+compiled-out pr_debug would have dropped.
+
+Passed on the tablet on 2026-11-05 with the next commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/mipi-lli/exynos-mipi-lli.c | 86 +++++++++++++++++++------
+ drivers/misc/mipi-lli/mipi-lli.c        | 31 +++++++++
+ include/linux/mipi-lli.h                | 38 ++++++++++-
+ 3 files changed, 133 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/misc/mipi-lli/exynos-mipi-lli.c b/drivers/misc/mipi-lli/exynos-mipi-lli.c
+index 6a53d8b4c..99e47791d 100644
+--- a/drivers/misc/mipi-lli/exynos-mipi-lli.c
++++ b/drivers/misc/mipi-lli/exynos-mipi-lli.c
+@@ -16,14 +16,30 @@
+  *    clearing and IRQ enabling happen in hw_init, which needs the allow_hw
+  *    module parameter (mipi-lli.c) at 1;
+  *  - the soft reset on RESET_ON_ERROR_SENT is rate limited;
+- *  - no link PM FSM (pm_svc callbacks), no loopback test, no register
+- *    dump work, no panic or BUG call, no remove.
++ *  - the link PM callbacks (pm_svc: reset, mount, unmount) are called
++ *    only while modem_v1's state machine runs (pm_mode=fsm, research/
++ *    modem/LINK-PM.md), after the gates and interlocks below; with the
++ *    locked-on PM an unmount re-arms the link as before;
++ *  - no loopback test, no register dump work, no panic or BUG call, no
++ *    remove.
+  * The "lli: " kernel messages keep their 3.10 texts so bring-up logs can
+  * be compared with the stock ones.
+  */
+ 
+ #define pr_fmt(fmt) "lli: " fmt
+ 
++/*
++ * The link's reset/mount/unmount messages: info as before, debug while the
++ * link PM state machine runs, when they come every few seconds.
++ */
++#define lli_link_info(fmt, ...)						\
++	do {								\
++		if (pm_svc_active(mipi_lli_get_pm_svc()))		\
++			pr_debug(fmt, ##__VA_ARGS__);			\
++		else							\
++			pr_info(fmt, ##__VA_ARGS__);			\
++	} while (0)
++
+ #include <linux/bitops.h>
+ #include <linux/build_bug.h>
+ #include <linux/clk.h>
+@@ -421,8 +437,13 @@ static void exynos_lli_check_remap(struct mipi_lli *lli, bool settings_ok)
+ 
+ 	WRITE_ONCE(lli->remap_ok, ok);
+ 
+-	pr_info("remap LL_INIT 0x%08x BE_INIT 0x%08x (expected 0x%08x), LLI_PHY_CON 0x%x: remap_ok=%d\n",
+-		lli->remap_ll_rb, lli->remap_be_rb, lli->remap_addr, pmu, ok);
++	/* a refused interlock always shows; a good one is a remount's routine */
++	if (ok)
++		lli_link_info("remap LL_INIT 0x%08x BE_INIT 0x%08x (expected 0x%08x), LLI_PHY_CON 0x%x: remap_ok=%d\n",
++			      lli->remap_ll_rb, lli->remap_be_rb, lli->remap_addr, pmu, ok);
++	else
++		pr_err("remap LL_INIT 0x%08x BE_INIT 0x%08x (expected 0x%08x), LLI_PHY_CON 0x%x: remap_ok=%d\n",
++		       lli->remap_ll_rb, lli->remap_be_rb, lli->remap_addr, pmu, ok);
+ }
+ 
+ static int exynos_lli_set_master(struct mipi_lli *lli, bool is_master)
+@@ -725,6 +746,7 @@ static irqreturn_t exynos_mipi_lli_threaded_irq(int irq, void *_lli)
+ {
+ 	struct mipi_lli *lli = _lli;
+ 	struct exynos_mphy *phy = lli->mphy;
++	struct link_pm_svc *pm_svc = mipi_lli_get_pm_svc();
+ 	int credit = 0;
+ 	int rx_fsm_state, tx_fsm_state, afc_val, csa_status;
+ 
+@@ -737,8 +759,8 @@ static irqreturn_t exynos_mipi_lli_threaded_irq(int irq, void *_lli)
+ 	afc_val = readl(phy->loc_regs + (0x27*4));
+ 	writel(0x0, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
+ 
+-	pr_info("rx=%x, tx=%x, afc=%x, status=%x, pa_err=%x\n",
+-		rx_fsm_state, tx_fsm_state, afc_val, csa_status, lli->pa_err_cnt);
++	lli_link_info("rx=%x, tx=%x, afc=%x, status=%x, pa_err=%x\n",
++		      rx_fsm_state, tx_fsm_state, afc_val, csa_status, lli->pa_err_cnt);
+ 
+ 	if (!credit) {
+ 		u32 delay = 0;
+@@ -750,9 +772,9 @@ static irqreturn_t exynos_mipi_lli_threaded_irq(int irq, void *_lli)
+ 			if (credit)
+ 				break;
+ 		}
+-		pr_info("waiting %ums for CREDITS: rx=%x, tx=%x\n", delay,
+-			readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
+-			readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
++		lli_link_info("waiting %ums for CREDITS: rx=%x, tx=%x\n", delay,
++			      readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
++			      readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
+ 
+ 		if (!credit) {
+ 			pr_err("ERR: Mount failed : %d\n", ++lli->mnt_fail);
+@@ -774,8 +796,14 @@ static irqreturn_t exynos_mipi_lli_threaded_irq(int irq, void *_lli)
+ 
+ 	atomic_set(&lli->state, LLI_MOUNTED);
+ 	atomic_inc(&lli->mnt_cnt);
+-	pr_info("Mount (ok:%d fail:%d roe:%d pa_err:%d)\n",
+-		++lli->mnt_ok, lli->mnt_fail, lli->roe_cnt, lli->pa_err_cnt);
++	/* outside the message: pr_debug may compile its arguments out */
++	lli->mnt_ok++;
++	lli_link_info("Mount (ok:%d fail:%d roe:%d pa_err:%d)\n",
++		      lli->mnt_ok, lli->mnt_fail, lli->roe_cnt, lli->pa_err_cnt);
++
++	/* link PM state machine: MOUNTING -> ACTIVE (3.10) */
++	if (pm_svc_active(pm_svc) && pm_svc->mount_cb)
++		pm_svc->mount_cb(pm_svc->owner);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -791,6 +819,7 @@ static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
+ {
+ 	struct mipi_lli *lli = _lli;
+ 	struct exynos_mphy *phy = lli->mphy;
++	struct link_pm_svc *pm_svc = mipi_lli_get_pm_svc();
+ 	bool hw_ok;
+ 	u32 status;
+ 
+@@ -822,7 +851,7 @@ static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
+ 	if (status & INTR_SW_RESET_DONE) {
+ 		int ret = -EPERM;
+ 
+-		pr_info("SW_RESET_DONE ++\n");
++		lli_link_info("SW_RESET_DONE ++\n");
+ 		if (hw_ok)
+ 			ret = exynos_lli_setting(lli);
+ 		else
+@@ -841,12 +870,20 @@ static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
+ 		/* Pairs with smp_load_acquire() in mipi_lli_wait_reset_done(). */
+ 		smp_store_release(&lli->reset_done, true);
+ 		wake_up_all(&lli->reset_wq);
++
++		/*
++		 * Link PM state machine: RESETTING -> MOUNTING (3.10).  After
++		 * the remap check: a mount it refuses below ends the session
++		 * through the state machine's MOUNTING watchdog.
++		 */
++		if (pm_svc_active(pm_svc) && pm_svc->reset_cb)
++			pm_svc->reset_cb(pm_svc->owner);
+ 	}
+ 
+ 	if (status & INTR_MPHY_HIBERN8_EXIT_DONE) {
+-		pr_info("HIBERN8_EXIT_DONE: rx=%x, tx=%x\n",
+-			readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
+-			readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
++		lli_link_info("HIBERN8_EXIT_DONE: rx=%x, tx=%x\n",
++			      readl(phy->loc_regs + PHY_RX_FSM_STATE(0)),
++			      readl(phy->loc_regs + PHY_TX_FSM_STATE(0)));
+ 		if (!READ_ONCE(lli->remap_ok)) {
+ 			/* no mount without a verified remap (CP accesses to AP memory) */
+ 			pr_err("mount refused (remap %08x/%08x)\n",
+@@ -859,7 +896,7 @@ static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
+ 	}
+ 
+ 	if (status & INTR_MPHY_HIBERN8_ENTER_DONE)
+-		pr_info("HIBERN8_ENTER_DONE\n");
++		lli_link_info("HIBERN8_ENTER_DONE\n");
+ 
+ 	if (status & INTR_PA_PLU_DETECTED)
+ 		pr_info("PLU_DETECT\n");
+@@ -912,22 +949,31 @@ static irqreturn_t exynos_mipi_lli_irq(int irq, void *_lli)
+ 
+ 	if (status & INTR_LLI_MOUNT_DONE) {
+ 		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
+-		pr_info("Mount intr\n");
++		lli_link_info("Mount intr\n");
+ 
+ 		return IRQ_WAKE_THREAD;
+ 	}
+ 
+ 	if (status & INTR_LLI_UNMOUNT_DONE) {
++		bool fsm = pm_svc_active(pm_svc) && pm_svc->unmount_cb;
++
+ 		atomic_set(&lli->state, LLI_UNMOUNTED);
+ 		writel(status, lli->regs + EXYNOS_DME_LLI_INTR_STATUS);
+-		/* no link PM FSM: always re-arm (3.10: when no unmount_cb) */
+-		if (hw_ok)
++		/*
++		 * Re-arm, unless the link PM state machine owns the remount
++		 * (3.10: re-arm when no unmount_cb is registered).
++		 */
++		if (hw_ok && !fsm)
+ 			exynos_lli_init(lli);
+ 
+-		pr_info("Unmount\n");
++		lli_link_info("Unmount\n");
+ 
+ 		lli->is_debug_possible = false;
+ 
++		/* link PM state machine: UNMOUNTING -> UNMOUNTED (3.10) */
++		if (fsm)
++			pm_svc->unmount_cb(pm_svc->owner);
++
+ 		return IRQ_HANDLED;
+ 	}
+ 
+diff --git a/drivers/misc/mipi-lli/mipi-lli.c b/drivers/misc/mipi-lli/mipi-lli.c
+index ec11f7b89..64282c767 100644
+--- a/drivers/misc/mipi-lli/mipi-lli.c
++++ b/drivers/misc/mipi-lli/mipi-lli.c
+@@ -427,6 +427,37 @@ void mipi_lli_reload(void)
+ }
+ EXPORT_SYMBOL(mipi_lli_reload);
+ 
++/*
++ * Link PM service for modem_v1's state machine (3.10 mipi-lli.c:379-399):
++ * lock_link marks an unmounted link as waiting for a mount while the state
++ * machine brings it up, unlock_link takes the mark off.  Atomic context.
++ */
++static void mipi_lli_lock_link(void *owner)
++{
++	if (mipi_lli_get_link_status() == LLI_UNMOUNTED)
++		mipi_lli_set_link_status(LLI_WAITFORMOUNT);
++}
++
++static void mipi_lli_unlock_link(void *owner)
++{
++	if (mipi_lli_get_link_status() & LLI_WAITFORMOUNT)
++		mipi_lli_set_link_status(LLI_UNMOUNTED);
++}
++
++static struct link_pm_svc mipi_lli_pm_svc = {
++	.lock_link = mipi_lli_lock_link,
++	.unlock_link = mipi_lli_unlock_link,
++};
++
++/**
++ * mipi_lli_get_pm_svc - the link PM service (callbacks run only while active)
++ */
++struct link_pm_svc *mipi_lli_get_pm_svc(void)
++{
++	return &mipi_lli_pm_svc;
++}
++EXPORT_SYMBOL(mipi_lli_get_pm_svc);
++
+ static ssize_t lli_control_show(struct device *dev,
+ 				struct device_attribute *attr, char *buf)
+ {
+diff --git a/include/linux/mipi-lli.h b/include/linux/mipi-lli.h
+index 7521d1ff2..8bf50abb2 100644
+--- a/include/linux/mipi-lli.h
++++ b/include/linux/mipi-lli.h
+@@ -7,8 +7,9 @@
+  *
+  * Port to Linux 6.12 for the Exynos5433 / SS333 modem link of the SM-T715
+  * (32-bit LPAE kernel): the exported API keeps the 3.10 prototypes used by
+- * modem_v1; mipi_lli_get_pm_svc() is gone (no link PM FSM in this port)
+- * and mipi_lli_hw_allowed() is new.
++ * modem_v1; mipi_lli_hw_allowed() is new, and mipi_lli_get_pm_svc() serves
++ * modem_v1's link PM state machine (pm_mode=fsm, omarchy-tab-s2
++ * research/modem/LINK-PM.md).
+  */
+ 
+ #ifndef __MIPI_LLI_H
+@@ -30,6 +31,38 @@ enum mipi_lli_link_status {
+ 	LLI_WAITFORMOUNT,
+ };
+ 
++/*
++ * Link PM service (3.10 include/linux/platform_data/link_pm.h).  modem_v1's
++ * link PM state machine (link_device_pm.c) registers its callbacks; the
++ * MIPI-LLI driver calls them after a link reset (SW_RESET_DONE), a mount and
++ * an unmount, only while @active.  With modem_v1's locked-on PM (pm_mode=
++ * lockon, the default) @active stays false: nothing is called and an unmount
++ * re-arms the link as before.
++ */
++struct link_pm_svc {
++	void *owner;
++
++	/* the owner's spin-lock (3.10: mandatory) */
++	spinlock_t *lock;
++
++	/* the owner's state machine runs: call the callbacks below */
++	bool active;
++
++	/* Call-back functions registered by a modem interface driver */
++	void (*reset_cb)(void *owner);
++	void (*mount_cb)(void *owner);
++	void (*unmount_cb)(void *owner);
++
++	/* Service functions provided by the MIPI-LLI driver */
++	void (*lock_link)(void *owner);
++	void (*unlock_link)(void *owner);
++};
++
++static inline bool pm_svc_active(const struct link_pm_svc *svc)
++{
++	return svc && READ_ONCE(svc->active);
++}
++
+ struct attribute_group;
+ struct clk_bulk_data;
+ struct dentry;
+@@ -212,6 +245,7 @@ extern void mipi_lli_disable_irq(void);
+ extern void mipi_lli_enable_irq(void);
+ 
+ extern bool mipi_lli_hw_allowed(void);
++extern struct link_pm_svc *mipi_lli_get_pm_svc(void);
+ extern bool mipi_lli_remap_ok(void);
+ extern int mipi_lli_wait_reset_done(unsigned int timeout_ms);
+ 
+-- 
+2.52.0
+
