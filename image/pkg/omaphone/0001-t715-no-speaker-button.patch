@@ -1,6 +1,6 @@
 SM-T715: no Speaker button in the call screen. The tablet has no earpiece, so the
 button had nothing to switch: it read "off" while the sound came from the speaker.
-Against omaphone 0.2.2.
+Against omaphone 0.2.3.
 
 diff -ruN a/src/app.rs b/src/app.rs
 --- a/src/app.rs

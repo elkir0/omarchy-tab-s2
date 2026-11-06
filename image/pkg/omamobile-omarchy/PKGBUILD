@@ -1,5 +1,5 @@
 # SM-T715 (armv7h) package of omarchy-mobile's omamobile-omarchy at commit
-# 3624ef3, trimmed for an 8" tablet without an [omamobile] repository.
+# b746f5a, trimmed for an 8" tablet without an [omamobile] repository.
 #
 # What it is: omarchy-mobile's touch patches to Omarchy 4.0.6 (lock, idle,
 # polkit, notifications, menu, image picker, screensaver, app icons) and the tool that
@@ -28,6 +28,10 @@
 # lock, fingerprint only when a finger is enrolled (0022: no fprintd here, so
 # never), the display off before a suspend (0021: suspend is masked here), the
 # largest app icon (0024) and no launch toast for shell surfaces (0025).
+# 0.1.32 (from 0.1.27): 0020 now words the screenshot notification "Tap to
+# view" (upstream renamed it from "Tap to edit"), and 0028 shows a stacked
+# logo (logo-narrow.txt) in a terminal too narrow for the wide one, and none
+# at all below that: harmless here, the width is read from the terminal.
 # Kept on purpose: bridge-4.0.4-menu-first-frame.patch. Despite its name it
 # targets 4.0.6 (its header: "4.0.6's menu is still a plain PanelWindow";
 # upstream's test/patches.py applies it to the real 4.0.6 package after
@@ -39,7 +43,7 @@
 # second, 67 mW measured). The blank now signals t715-keys, whose touch-off
 # flag releases the accelerometer, with Omarchy's own blank as the fallback.
 #
-# Source: the GitHub tarball of derekross/omarchy-mobile at 3624ef3 (MIT),
+# Source: the GitHub tarball of derekross/omarchy-mobile at b746f5a (MIT),
 # checked by sha256; only packages/omamobile-omarchy is extracted.
 # Build: tools/build-pkg omamobile-omarchy. Image: rootfs/install-mobile.sh
 # (packages.mobile), checked by tests/verify-rootfs.sh.
@@ -47,7 +51,7 @@
 # Maintainer (upstream): Derek Ross <derekross@gmail.com>
 
 pkgname=omamobile-omarchy
-pkgver=0.1.27
+pkgver=0.1.32
 pkgrel=1.2
 pkgdesc="Omarchy Mobile's touch patches to Omarchy, re-applied after every Omarchy upgrade (SM-T715 tablet build)"
 arch=(any)
@@ -58,14 +62,14 @@ license=(MIT)
 depends=('omarchy>=4.0.6' bash python patch libarchive util-linux)
 checkdepends=(python patch diffutils)
 install=omamobile-omarchy.install
-_commit=3624ef3237b71abbe5c232f635208f564869f441
+_commit=b746f5ac7b854abbb2e6a39eb72b3dd3b8d33526
 _tarball=omarchy-mobile-${_commit:0:7}.tar.gz
 _dir=omarchy-mobile-$_commit/packages/omamobile-omarchy
 source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit.tar.gz"
         t715-update-without-kernel-package.patch
         t715-pacman-keeps-alarm.patch
         t715-lock-blank-through-keys.patch)
-sha256sums=('254ba88ec74d278681b63651a7c01f63af2cbb97f6bce4c968e5ac174ab75c60'
+sha256sums=('25f6371bba74c00e2e29f923bcc1aa8b69dad9f065b3b1d88acf5d054f6baa0a'
             '17b2558e4114e9ee9d81d9c5842dd69f1dea77dd4317b69025050338c45c0738'
             'e4800d17937dbddb1c80b4866ba681b56904548cce03a6d3f531cd14389985bd'
             '7e294b9e8c9db2a1e58f263fa435bbb6a744fc3f75a1285f2345ccd498d0f6ea')
@@ -105,7 +109,7 @@ check() {
   # omarchy 4.0.6 package (rootfs/install-mobile.sh).
   env -u OMARCHY_PKG HOME="$srcdir/home" python3 -B test/patches.py
   bash test/lock-pam.sh
-  [[ $(ls patches/*.patch | wc -l) == 24 ]] || { echo "expected 24 patches" >&2; return 1; }
+  [[ $(ls patches/*.patch | wc -l) == 25 ]] || { echo "expected 25 patches" >&2; return 1; }
 }
 
 package() {
