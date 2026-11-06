@@ -1,6 +1,6 @@
 # Installing Omarchy on the Samsung Galaxy Tab S2
 
-The install guide for the 1.0 release. It takes a Samsung Galaxy Tab S2 8.0
+The install guide for the 1.0 releases (1.0 Beta 1 first). It takes a Samsung Galaxy Tab S2 8.0
 LTE (SM-T715) from stock Android, or from a tablet that already runs TWRP, to
 Omarchy: Hyprland and the Omarchy shell with the omarchy-mobile touch layer,
 on a mainline Linux 6.12 kernel, with LTE, calls and SMS. Android stops
@@ -24,6 +24,10 @@ developer guide, [DEPLOY.md](DEPLOY.md).
   IMEI, and the modem's boot code programs eFuses.
 - Back up whatever you care about on the Android side. This comes with no
   warranty: you can lose your data and your tablet.
+- **Android's own data stays on the tablet**, and the desktop user can read the
+  parts that belonged to Android's system user: both have the UID 1000. If that
+  matters, wipe Android's data before you copy the image (TWRP: Wipe → Format
+  Data, which also empties the internal storage).
 - Leave Linux through its own restart (`systemctl reboot` in a terminal), never
   by holding hardware keys down to force one: a forced reset can leave the
   tablet booting the rescue instead of Omarchy.
@@ -35,7 +39,7 @@ developer guide, [DEPLOY.md](DEPLOY.md).
 | A Samsung Galaxy Tab S2 8.0 LTE, model SM-T715, hardware revision 9 or later | the only tablet tested (revision 9); the release's board data covers revisions 9 and up. Other Tab S2 models are not covered |
 | Firmware `T715XXU2CRH1` (Android 7.0) | the modem accepts only that exact RADIO image, and the first boot reads the Wi-Fi and Bluetooth files from the tablet's own SYSTEM partition. On any other firmware, flash the stock `T715XXU2CRH1` with Odin first |
 | USERDATA as plain ext4, not encrypted | the boot stops with "no ext4 superblock" on an encrypted tablet |
-| About 10.3 GB free on internal storage | the 5 GiB image file, plus the first boot's copy of the image's contents into the persistent root (its used space plus a 512 MiB margin) |
+| About 11 GB free on internal storage | the image file (5.3 GiB in 1.0 Beta 1), plus the first boot's copy of its contents into the persistent root (4.3 GiB used, plus a 512 MiB margin) |
 | A computer with Odin or Heimdall | flashing BOOT and RECOVERY in Download mode |
 | The release files, checked | below |
 
@@ -90,6 +94,10 @@ calls `/data/media/0/linux/rootfs-omarchy.img`.
 
 3. Check that the size of the image on the tablet matches your local file
    before going on.
+4. Optional: to log in over SSH later, also copy your public key as
+   `linux/authorized_keys` (for example `~/.ssh/id_ed25519.pub`). The image has
+   no key, so without one SSH stays closed; the first boot installs it for root
+   and for `alarm`.
 
 ## 3. Path A: from stock Android
 
@@ -137,10 +145,12 @@ work on this tablet.
 ## 5. The first boot
 
 - The screen shows **"Setting up Omarchy (first boot)"** and a percentage about
-  every ten seconds. This takes a few minutes: the tablet is copying the image
-  into a persistent root on the internal storage. Leave it alone.
+  every ten seconds. This takes a few minutes (3 min 17 s for 1.0 Beta 1 on the
+  reference tablet): the tablet is copying the image into a persistent root on
+  the internal storage. Leave it alone.
 - The same boot takes the Wi-Fi and Bluetooth files from the tablet's own
-  Android SYSTEM partition, read-only.
+  Android SYSTEM partition, read-only, and the system then makes the cameras'
+  tables from the tablet's own camera firmware, also on SYSTEM.
 - If something fails, the screen says why, in plain words, and either waits
   (hold Power + Volume down to restart) or reboots by itself.
 - Then Omarchy starts, and the session logs you in by itself as the user
@@ -211,7 +221,9 @@ Honesty about the testing, so you know where the surprises will be:
 - copying the image over MTP is not yet tested end to end;
 - one tablet ran this ROM, and nobody else has installed it yet.
 
-The ROM's own first boot, its copy to internal storage, Wi-Fi, Bluetooth and
-the modem were tested on that tablet. Everything here comes from the
+On that tablet, 1.0 Beta 1 was installed fresh from RECOVERY, with its own
+persistent root next to the owner's, and checked: the first boot and its copy,
+a second boot, the rescue, the session, both cameras, the modem's switch, Wi-Fi
+scanning, Bluetooth, Pi and the Claude Code installer (`CHANGELOG.md`). Everything here comes from the
 repository's own documentation; the developer guide ([DEPLOY.md](DEPLOY.md))
 has the full story, including building from source.

@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.0 Beta 1, pre-release
+
+The first release meant for someone other than its developer: everything since 0.9.3, and an
+install guide, [docs/INSTALL.md](docs/INSTALL.md).
+
+- **Install.** `docs/INSTALL.md` covers stock Android (Odin or Heimdall) and TWRP. The release
+  adds two Odin packages: `omarchy-tab-s2-1.0.0-beta.1-AP.tar.md5` (BOOT and RECOVERY) and
+  `omarchy-tab-s2-1.0.0-beta.1-boot.tar.md5` (BOOT only, to keep TWRP).
+- **First boot.** The screen shows the progress while the system copies itself into internal
+  storage, and says why if something fails instead of rebooting. The copy is checked first
+  against `rootfs-omarchy.img.sha256` when it sits next to the image. No root shell on the USB
+  cable any more (`t715.telnet=1` brings it back for development).
+- **Power.** 754 mW with the screen off, about 20 hours, from 2.26 W in 0.9.3: the A57 cores go
+  offline with the screen, the GPU's power domain turns off while it idles, the Wi-Fi link sleeps
+  (ASPM L1.2, a 100 ms power save timeout). The A53 cores scale from 400 MHz to 1.2 GHz. There is
+  still no suspend.
+- **Modem.** A Modem tile and a switch in Réseau mobile turn the modem off, now and at boot, or
+  only while the screen is off. A powered modem costs 155 mW of the standby draw, SIM or not:
+  without a SIM, turn it off.
+- **Cameras.** omarchy-mobile's Camera app (omacam) on both cameras, through libcamera's software
+  ISP on the CPU: preview, tap to focus, photos and video. The first boot makes the sensors' mode
+  tables from your tablet's own camera firmware (`t715-camera-tables`): they are Samsung's, so the
+  image cannot carry them. Loupe opens photos and screenshots.
+- **Coding agents.** Pi 1.5.0 is preinstalled: sign in with `/login` or an API key, never a Claude
+  subscription. Claude Code is an opt-in installer in the app drawer: it downloads Anthropic's
+  build only after you say yes, refuses a manifest whose signature does not verify, and stops at
+  2.1.270: from 2.1.271 its interface stays blank without Anthropic's own runtime.
+- **omarchy-mobile**: shell 0.2.94, omaphone 0.2.3, omamessages 0.2.2, omamobile-omarchy 0.1.32.
+  **Omarchy** stays on 4.0.6, pinned file by file: 4.5.0 breaks omarchy-mobile's touch patches.
+- **Kernel.** Linux 6.12.114 with three new series, `t715-cpufreq`, `t715-power` and
+  `t715-camera-mc`. Built from the published patches with a fixed date, user and host, it is
+  byte for byte the release's kernel (`kernel/README.md`).
+- **Build.** Fixes for a fresh build: glibc 2.43's `locale.gen`, and local packages never taken
+  from the shared pacman cache. The Wi-Fi firmware's licence ships in the image.
+
+Tested on one tablet, the reference one, booted from RECOVERY next to its owner's system, with a
+test boot image carrying the release's kernel and initramfs (the release's `boot.img` differs
+only by the knobs that name the image and the root). A first build of the root image, which had
+omaphone 0.2.2, omamessages 0.2.1, omamobile-omarchy 0.1.27 and an earlier build of the same
+libcamera, got its own persistent root: the first boot checked the image against its `.sha256`,
+copied it in 3 min 17 s, took the Wi-Fi and Bluetooth files from SYSTEM, made the cameras' seven
+tables and bound the sensors, and Omarchy's session came up by itself. A second boot kept the
+data and copied nothing, the cameras present from the start; the rescue booted the image
+read-only. On that build: both cameras through `t715-photo`, the Camera app opening them with its
+software ISP at about two cores, Pi, the Claude Code installer answering No and changing nothing,
+Wi-Fi scanning, Bluetooth, the speaker and microphone devices, the A57 cores offline and ASPM L1.2
+with the screen off, and the modem's switch (22 checks: off, on, the standby cut and polkit's
+refusal from SSH). The final image, this release's, booted read-only from the rescue's boot image
+(which carries no modem module) and was checked again: the cameras' tables and both cameras,
+Chromium, Phone, Messages, Réseau mobile and the terminal starting, Pi, the Claude Code installer,
+Wi-Fi scanning, Bluetooth and the sound devices. `image/tests/verify-rootfs.sh` passes its 340 checks
+on it.
+
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), joining a Wi-Fi network, the
+GPS, the screen-off power draw on this build (its kernel is `#6` plus the cameras, measured in
+`docs/hardware/BATTERY.md`), the Camera app's preview by eye (the test ran at night, in the
+dark), the on-screen progress by eye, and the Odin, Heimdall and TWRP installs.
+
+Known issues:
+- `panfrost: js fault ... DATA_INVALID_FAULT` in the kernel log, once or twice a boot, when a new
+  window appears (the session's start, Chromium, a terminal). Nothing visible came of it. The
+  owner's daily system, on Hyprland 0.57.0, shows none in 13 boots; this image has 0.57.1.
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped contiguously`
+  per boot: the display rejects GPU buffers for direct scanout and the compositor draws them
+  instead. The daily system logs them too.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive.
+
 ## 0.9.3, pre-release
 
 Charging.

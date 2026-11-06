@@ -5,7 +5,9 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 0.9.3, pre-release.** It runs daily on one tablet. Nobody else has installed it yet.
+**Version 1.0 Beta 1.** It runs daily on one tablet, and this release was installed fresh on that
+tablet and tested before publication. Nobody else has installed it yet, and the install from stock
+Android or TWRP has never been run end to end: see [the install guide](docs/INSTALL.md).
 
 An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
@@ -26,19 +28,21 @@ An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
 | Area | State |
 |---|---|
-| Boot | Omarchy at power-on, with the Omarchy splash and a read-write root; a read-only rescue in RECOVERY |
+| Boot | Omarchy at power-on, with the Omarchy splash and a read-write root; the first boot sets itself up with its progress on screen; a read-only rescue in RECOVERY |
 | Desktop | Hyprland 0.57 and the Omarchy shell at scale 2 on the 1536x2048 panel; status bar, quick settings, app drawer, recents, home screens, back swipe, on-screen keyboard |
 | Keys | Power, Home, cover, and the Back and Recent touch keys |
-| Modem | LTE, calls, SMS, mobile data, airplane mode, Wi-Fi hotspot over LTE |
+| Modem | LTE, calls, SMS, mobile data, airplane mode, Wi-Fi hotspot over LTE; a Modem tile and a switch to turn it off, now and at boot, or only while the screen is off |
 | Wi-Fi, Bluetooth | WPA2 (the firmware has no WPA3); pairing from quick settings |
 | Sound | speaker and microphone through PipeWire; vibration motor |
-| Cameras | both, through V4L2 with no ISP: photos developed in software, no preview, no autofocus |
+| Cameras | both, through libcamera's software ISP on the CPU: the Camera app with a preview, tap to focus, photos and video; Photo and Selfie in the drawer; the sensors' tables made at the first boot from your tablet's own firmware |
 | GPS | position from the satellites through GeoClue, offline, the receiver on only while an app asks; a cold fix in about a minute under a clear sky, none indoors; a Location tile, off by default |
 | Charging | stock Android's currents: about 1 A into the battery on a fast charger, 450 mA from a computer's port; stock's thermal rules on the battery thermistor |
+| Power | 754 mW with the screen off, about 20 hours: the A57 cores offline, the GPU's power domain off while it idles, the Wi-Fi link asleep; the A53 cores scale from 400 MHz to 1.2 GHz |
 | Security | ufw on, only SSH and DHCP on the USB cable come in; a screen lock you turn on by choosing a password |
 | Browsers | Chromium on the GPU by default, Firefox beside it |
+| Coding agents | Pi preinstalled; Claude Code through an opt-in installer in the app drawer (unofficial, 2.1.270 at most on 32-bit ARM) |
 
-Not yet: suspend, hardware video decoding, GPU and CPU frequency scaling (266 MHz and 1.2 GHz),
+Not yet: suspend, hardware video decoding, GPU frequency scaling (the GPU runs at 266 MHz),
 headphone detection, the fingerprint reader. The tablet runs a 32-bit userland: its bootloader
 starts the CPU in AArch32.
 
@@ -60,85 +64,59 @@ everything from source.
 
 ### Flash the ROM
 
-**Status:** the ROM's first boot, its copy to internal storage, Wi-Fi, Bluetooth and the modem were
-tested on the reference tablet, booted from RECOVERY. That tablet has no Android left, so the Android
-steps below and the Heimdall flash of this ROM were never run. You would be the first: expect rough
-edges, and report them.
+**Status:** this release was installed fresh on the reference tablet, booted from RECOVERY: its
+first boot, its copy to internal storage, the session, both cameras, the modem's switch, Wi-Fi and
+Bluetooth were checked there (`CHANGELOG.md` has what was tested). That tablet has no Android left,
+so the Odin, Heimdall and TWRP steps were never run against a stock tablet. You would be the first:
+expect rough edges, and report them.
 
-You need an SM-T715 on Android 7.0, firmware `T715XXU2CRH1`, hardware revision 9, not encrypted, with
-9 GB free. Another firmware may boot, but the modem only accepts this exact RADIO image. You also
-need `adb`, [Heimdall](https://git.sr.ht/~grimler/Heimdall), `xz` and a USB cable.
+[**The install guide**](docs/INSTALL.md) has every step. In short:
 
-1. On the tablet, turn on Developer options, USB debugging and OEM unlocking, and connect it to the
-   same Wi-Fi network as your computer. Back up what you care about, ideally with a TWRP backup of
-   EFS ([docs/DEPLOY.md, 5.3](docs/DEPLOY.md#53-the-stock-boot-image-twrp)).
-2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download `boot.img`,
-   `recovery.img`, `rootfs-omarchy.img.xz` and `SHA256SUMS`, then unpack and check them:
+1. You need an SM-T715 on firmware `T715XXU2CRH1`, hardware revision 9 or later, not encrypted, with
+   about 11 GB free on its internal storage, and a computer with Odin or
+   [Heimdall](https://git.sr.ht/~grimler/Heimdall). Another firmware may boot, but the modem only
+   accepts this exact RADIO image.
+2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download the files
+   and check them:
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+3. Unpack the image and make its checksum file, which the first boot checks the copy against:
 
    ```bash
    xz -dk rootfs-omarchy.img.xz
    ```
 
    ```bash
-   shasum -a 256 -c SHA256SUMS
+   grep '  rootfs-omarchy.img$' SHA256SUMS > rootfs-omarchy.img.sha256
    ```
 
-3. Copy the image over Wi-Fi: Android 7 drops big files over USB.
-
-   ```bash
-   adb tcpip 5555
-   ```
-
-   ```bash
-   adb connect <tablet-ip>:5555
-   ```
-
-   ```bash
-   adb -s <tablet-ip>:5555 shell mkdir -p /sdcard/linux
-   ```
-
-   ```bash
-   adb -s <tablet-ip>:5555 push rootfs-omarchy.img /sdcard/linux/rootfs-omarchy.img
-   ```
-
-   To log in over SSH later, also copy your public key. The image has none, so without it SSH stays
-   closed:
-
-   ```bash
-   adb -s <tablet-ip>:5555 push ~/.ssh/id_ed25519.pub /sdcard/linux/authorized_keys
-   ```
-
-   Let Android finish writing:
-
-   ```bash
-   adb -s <tablet-ip>:5555 shell 'sync; sleep 45; sync'
-   ```
-
-4. Check that the size matches your local file, then flash:
-
-   ```bash
-   adb -s <tablet-ip>:5555 shell ls -l /sdcard/linux/rootfs-omarchy.img
-   ```
-
-   ```bash
-   adb reboot download
-   ```
+   Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
+   public key as `linux/authorized_keys` if you want to log in over SSH: the image has none.
+4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.0-beta.1-AP.tar.md5`, or Heimdall:
 
    ```bash
    heimdall flash --BOOT boot.img --RECOVERY recovery.img
    ```
 
-5. The tablet restarts. **The screen stays dark for 3 to 4 minutes on the first boot** while the
-   system copies itself to internal storage: leave it alone. It also takes the Wi-Fi and Bluetooth
-   files from your tablet's own Android system partition, then Omarchy starts.
+   From TWRP, flash `boot.img` to Boot and keep TWRP in RECOVERY.
+5. The first boot copies the system into internal storage, about 4 minutes, with its progress on
+   screen. It also takes the Wi-Fi and Bluetooth files from your tablet's own Android system
+   partition, and the cameras' tables from its firmware. Then Omarchy starts.
 
 Then:
 - **Wi-Fi:** quick settings, Wi-Fi tile.
 - **Mobile data and LTE:** open `Réseau mobile` in the app drawer and set your operator's APN.
-- **Password:** hold Power, then the PIN row. The default password is `alarm`. Choosing yours turns
-  on the screen lock, and `sudo` asks for it from then on.
+  Without a SIM, turn the modem off with the Modem tile: it saves a fifth of the standby draw.
+- **Password:** hold Power, then the PIN row. The default password is `alarm`, and `sudo` asks for
+  nothing until you choose yours: choosing it turns on the screen lock, and `sudo` asks for it from
+  then on.
 - **Touch:** tap or pull down the top bar for quick settings. Swipe up from the home pill for home,
   swipe in from a side edge for back. Power: screen off and on.
+- **Coding agents:** Pi is in the drawer; sign in with `/login` or an API key, never a Claude
+  subscription. The drawer's Claude Code installer asks before it downloads anything.
 
 To go back to Android, flash the stock firmware for your tablet.
 
@@ -191,11 +169,11 @@ git clone --branch v6.12.114 --depth 1 https://git.kernel.org/pub/scm/linux/kern
 ```
 
 ```bash
-git -C src/linux-6.12 switch -c t715-parity
+git -C src/linux-6.12 switch -c t715-camera-mc
 ```
 
 ```bash
-for s in bringup modem parity; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
+for s in bringup modem parity gps charger camera-af cpufreq power camera-mc; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
 ```
 
 Then build Heimdall into `src/heimdall`, as in
@@ -231,21 +209,24 @@ src/heimdall/build/bin/heimdall flash --BOOT out/stock-patched/boot.img
 
 #### 5. Build everything
 
-The kernel, first without the modem:
+The kernel, the release's configuration ([kernel/README.md](kernel/README.md) also gives its fixed
+build identity):
 
 ```bash
-KBUILD_SKIP_ARM64=1 bash kernel/kbuild-mainline.sh
+KBUILD_SKIP_ARM64=1 bash kernel/kbuild-mainline.sh --fragment gts28ltexx_cpufreq.config
 ```
 
 The initramfs and the RECOVERY image:
 
 ```bash
-bash boot/build-initramfs.sh --out out/initramfs-daily --knobs "t715.usbfn=ecm t715.failwait=300" --modules out/mainline/modules.tar.xz
+bash boot/build-initramfs.sh --out out/initramfs-daily --knobs "t715.usbfn=ecm t715.failwait=300 t715.telnet=1" --modules out/mainline-cpufreq/modules.tar.xz
 ```
 
 ```bash
-bash boot/pack-test-recovery.sh --initramfs out/initramfs-daily/initramfs.cpio.gz --out out/test-recovery-daily
+bash boot/pack-test-recovery.sh --initramfs out/initramfs-daily/initramfs.cpio.gz --out out/test-recovery-daily out/mainline-cpufreq
 ```
+
+`t715.telnet=1` gives a development image the root shell on the USB link; releases leave it off.
 
 The packages and the root image. The image takes your SSH key, and the two vendor files of step 3:
 
@@ -254,7 +235,7 @@ image/tools/repack-omarchy
 ```
 
 ```bash
-for p in hyprgraphics omamobile-omarchy omatel-agent omaphone omamessages omamobile-shell t715-camera t715-chromium; do image/tools/build-pkg $p; done
+for p in hyprgraphics omamobile-omarchy omatel-agent omaphone omamessages omamobile-shell libcamera omacam t715-camera t715-chromium t715-gps t715-claude-code pi-coding-agent; do image/tools/build-pkg $p; done
 ```
 
 ```bash
@@ -323,9 +304,8 @@ undone:
    Wi-Fi networks survive reboots.
 2. [Linux in BOOT, a rescue in RECOVERY](docs/DEPLOY.md#117-without-android-linux-in-boot-androids-data-removed):
    Omarchy starts at power-on.
-3. [The modem](docs/DEPLOY.md#118-with-the-modem): LTE, calls and SMS, on a kernel built with
-   `gts28ltexx_modem.config`. The first boot reads your NV data from EFS, read-only. It stays on
-   the tablet.
+3. [The modem](docs/DEPLOY.md#118-with-the-modem): LTE, calls and SMS (the kernel above has the
+   modem series). The first boot reads your NV data from EFS, read-only. It stays on the tablet.
 
 Then set a password from the system menu's PIN row: it turns on the screen lock, and `sudo` asks
 for it from then on. The default user is `alarm`, password `alarm`.
