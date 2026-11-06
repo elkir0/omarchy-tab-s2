@@ -72,6 +72,18 @@ calls `/data/media/0/linux/rootfs-omarchy.img`.
    checks its own copy of the image against it before setting itself up, and a
    damaged copy is refused without changing anything.
 
+   On Linux, `sha256sum -c SHA256SUMS` checks the files the same way. On
+   Windows, where Odin runs:
+
+   - unpack the image with 7-Zip;
+   - check each file against its line in `SHA256SUMS`: in PowerShell,
+     `Get-FileHash <file>` prints its SHA-256;
+   - make the sidecar with the `grep` line above in WSL or Git Bash, never in
+     Notepad: the first boot refuses a sidecar with Windows line endings, and
+     says "The image file is damaged (bad checksum)". The sidecar is optional:
+     without it, the first boot copies the image without a check, so compare
+     the sizes instead (3.).
+
 2. Copy **both** files, `rootfs-omarchy.img` and `rootfs-omarchy.img.sha256`,
    into `linux/` on the internal storage, in any of these ways:
 
@@ -203,8 +215,9 @@ Knox warranty bit stays tripped either way.
   reboot` there goes back to BOOT). From a running tablet,
   `sudo t715-reboot-to recovery` goes there on purpose.
 - **A failed first boot** says why on the screen. "The image file is damaged
-  (bad checksum)" means the copy onto the tablet went wrong: copy both files
-  again (2.). "Not enough free space" means what it says: free about the
+  (bad checksum)" means the copy onto the tablet went wrong, or that the
+  sidecar has Windows line endings: copy both files again, the sidecar made as
+  in 2. "Not enough free space" means what it says: free about the
   amount it names and restart. Until then the tablet runs from the image, and
   changes are lost at each reboot.
 - **A frozen tablet:** hold Power + Volume down for about ten seconds to force
@@ -221,9 +234,11 @@ Honesty about the testing, so you know where the surprises will be:
 - copying the image over MTP is not yet tested end to end;
 - one tablet ran this ROM, and nobody else has installed it yet.
 
-On that tablet, 1.0 Beta 1 was installed fresh from RECOVERY, with its own
-persistent root next to the owner's, and checked: the first boot and its copy,
-a second boot, the rescue, the session, both cameras, the modem's switch, Wi-Fi
-scanning, Bluetooth, Pi and the Claude Code installer (`CHANGELOG.md`). Everything here comes from the
-repository's own documentation; the developer guide ([DEPLOY.md](DEPLOY.md))
+On that tablet, a first build of 1.0 Beta 1 was installed fresh from RECOVERY,
+with its own persistent root next to the owner's, and checked: the first boot
+and its copy, a second boot, the rescue, the session, both cameras, the
+modem's switch, Wi-Fi scanning, Bluetooth, Pi and the Claude Code installer.
+The published image was then booted read-only and checked again
+(`CHANGELOG.md`). Everything here comes from the repository's own
+documentation; the developer guide ([DEPLOY.md](DEPLOY.md))
 has the full story, including building from source.

@@ -5,9 +5,10 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 1.0 Beta 1.** It runs daily on one tablet, and this release was installed fresh on that
-tablet and tested before publication. Nobody else has installed it yet, and the install from stock
-Android or TWRP has never been run end to end: see [the install guide](docs/INSTALL.md).
+**Version 1.0 Beta 1.** It runs daily on one tablet. A first build of this release was installed
+fresh on that tablet, and the published image was booted and checked again before publication.
+Nobody else has installed it yet, and the install from stock Android or TWRP has never been run end
+to end: see [the install guide](docs/INSTALL.md).
 
 An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 
@@ -64,9 +65,10 @@ everything from source.
 
 ### Flash the ROM
 
-**Status:** this release was installed fresh on the reference tablet, booted from RECOVERY: its
-first boot, its copy to internal storage, the session, both cameras, the modem's switch, Wi-Fi and
-Bluetooth were checked there (`CHANGELOG.md` has what was tested). That tablet has no Android left,
+**Status:** a first build of this release was installed fresh on the reference tablet, booted from
+RECOVERY: its first boot, its copy to internal storage, the session, both cameras and the modem's
+switch were checked there. The published image was then booted read-only and checked again, Wi-Fi
+and Bluetooth included (`CHANGELOG.md` has what was tested). That tablet has no Android left,
 so the Odin, Heimdall and TWRP steps were never run against a stock tablet. You would be the first:
 expect rough edges, and report them.
 
@@ -76,14 +78,9 @@ expect rough edges, and report them.
    about 11 GB free on its internal storage, and a computer with Odin or
    [Heimdall](https://git.sr.ht/~grimler/Heimdall). Another firmware may boot, but the modem only
    accepts this exact RADIO image.
-2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download the files
-   and check them:
-
-   ```bash
-   shasum -a 256 -c SHA256SUMS
-   ```
-
-3. Unpack the image and make its checksum file, which the first boot checks the copy against:
+2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download the files.
+   Unpack the image, make its checksum file, which the first boot checks the copy against, then
+   check everything:
 
    ```bash
    xz -dk rootfs-omarchy.img.xz
@@ -93,7 +90,13 @@ expect rough edges, and report them.
    grep '  rootfs-omarchy.img$' SHA256SUMS > rootfs-omarchy.img.sha256
    ```
 
-   Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+   On Windows, follow [the install guide](docs/INSTALL.md#2-put-the-image-on-the-tablet) instead:
+   the first boot refuses a checksum file with Windows line endings.
+3. Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
    public key as `linux/authorized_keys` if you want to log in over SSH: the image has none.
 4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.0-beta.1-AP.tar.md5`, or Heimdall:
 
@@ -326,17 +329,18 @@ Everything we learned about this hardware is public, register addresses included
 
 ### Drivers
 
-All of them are in [kernel/patches/](kernel/patches/), 53 patches on `v6.12.114`:
+All of them are in [kernel/patches/](kernel/patches/): the release kernel is `v6.12.114` plus 66
+patches in nine series, listed in [kernel/README.md](kernel/README.md).
 
 | Part | Driver |
 |---|---|
-| Exynos 5433 in 32-bit mode | SoC support, clocks, watchdog |
+| Exynos 5433 in 32-bit mode | SoC support, clocks, watchdog, CPU frequency scaling, the A57 cores' hot-unplug |
 | Panel | `panel-samsung-s6e3ha2-tabs2` |
 | Audio | `gts28-wm1814` machine driver, WM8998 and baseband link changes |
 | Battery | `sm5703` fuel gauge, read-only, with the battery thermistor, and `sm5703` charger |
 | Modem | `exynos5433-mipi-lli`, and `modem_v1`, Samsung's 3.10 driver ported to 6.12 |
 | Touch keys, vibration | `tc300k`, `pwm-vibra` |
-| Cameras | `t715-camera`, raw capture with no ISP |
+| Cameras | `t715-sensor`, the S5K4H5 and S5K6B2 sensors and the DW9807 focus motor as V4L2 subdevices, and `t715-camera`, raw capture with one media device per camera, for libcamera's software ISP |
 
 The modem's userspace is in [modem/](modem/): `shannon-loader`, and `shannond`, which speaks
 Samsung's IPC to the modem and ModemManager's D-Bus API to the desktop.
