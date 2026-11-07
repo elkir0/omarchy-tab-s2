@@ -284,7 +284,10 @@ whose text rendering can deadlock Hyprland here.
   off with it (`hl.config({ input = { touchdevice = { enabled = false } } })`):
   Hyprland keeps delivering touches to apps while the panel is off, and touch
   never wakes it. While dark, t715-keys checks the screen every 5 s and
-  gives the touchscreen back if something else lit it.
+  gives the touchscreen back if something else lit it. The A57 cores follow
+  the screen — offline while it is dark, back before it lights — unless the
+  Battery saver's flag is there ("Battery saver"): then they stay offline
+  even on a lit screen, and t715-keys says so once per lit period.
 - Without input the same screen-off comes from `t715-idle.service` (hypridle
   with `/usr/share/t715-omarchy/hypridle.conf`): two minutes idle, then the
   same SIGUSR1 to t715-keys as a short Power press. Omarchy's stay-awake
@@ -827,6 +830,32 @@ is no position at all. A first fix takes one to three minutes under a clear sky.
 which reads a copy of pacman's databases and changes nothing. A notification says so
 once per set of updates and opens `omarchy-update` when tapped.
 
+## Battery saver
+
+The quick settings' **Battery saver** tile switches power-profiles-daemon
+between `balanced` and `power-saver` (`omarchy-powerprofiles-set`), whose
+placeholder driver does nothing on this kernel. `t715-power-profile`
+(`/usr/local/sbin/`, the overlay) applies the caps as root:
+`t715-power-profile.service` (`multi-user.target`, after and wanting PPD)
+runs `apply` once at boot, and `t715-power-profile.path`
+(`PathChanged=/var/lib/power-profiles-daemon/state.ini`) runs it again on
+every switch. Power-saver caps the A53 cluster at 1 GHz, takes the A57
+cluster offline, turns boost off and caps the GPU's devfreq; balanced
+puts every policy back on `schedutil` at its top frequency, boost and the
+GPU on, and brings the A57s back only while the panel's DPMS state is
+`On` (t715-keys keeps them offline with the screen). The flag
+`/run/t715-power/saver` bridges the two: t715-keys reads it and leaves the
+A57s offline even on a lit screen while it exists. `/etc/t715-power-profile.conf`
+can override the caps (`SAVER_LITTLE_MAX_KHZ`, `SAVER_BIG=offline|keep`,
+`SAVER_GPU_MAX_HZ`). The GPU part needs the GPU devfreq of the daily
+kernel #7, and the boost part a kernel with `cpufreq/boost`; each is
+skipped, with a log line, while its file is absent. The whole story is in
+`docs/hardware/BATTERY.md` §13.
+`configure-system.sh` enables both units;
+`image/tests/test_t715_power_profile.sh` runs the script off the device on
+a fake sysfs, `image/tests/test_t715_keys.sh` covers the flag, and
+`verify-rootfs.sh` checks the files, the modes and the two enabled units.
+
 ## Modem and telephony
 
 The Shannon SS333 modem (`docs/hardware/MODEM.md`) needs a kernel with
@@ -935,7 +964,9 @@ They come with `pacman -U` or a new image.
    generated address, "Wi-Fi"), systemd-resolved, avahi, bluetoothd (`hci0`
    with the patch RAM and its generated address, "Bluetooth"), power-profiles-daemon
    (no cpufreq: placeholder profile) and systemd-oomd start; no unit waits
-   for a network.
+   for a network. `t715-power-profile.service` then applies PPD's profile
+   to the hardware ("Battery saver"), and the `.path` unit keeps it
+   following every switch.
 4. SDDM logs alarm in without a greeter (`Relogin=true`: it logs in again
    if the session ends) into `omarchy.desktop`: `uwsm start ... Hyprland`
    runs Hyprland as a user unit on `card0` at scale 2, which loads
@@ -1004,6 +1035,7 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tools/build-rootfs` | the builder |
 | `image/tests/verify-rootfs.sh` | offline checks of the image |
 | `image/tests/test_t715_keys.sh` | off-device test of t715-keys' gestures (fake input, stand-ins) |
+| `image/tests/test_t715_power_profile.sh` | off-device test of t715-power-profile (fake sysfs, stand-ins) |
 | `image/tests/test_t715_idle.sh` | off-device test of t715-idle's hypridle.conf (the stay-awake hold) |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
@@ -1011,6 +1043,6 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/rootfs/mkimage.sh` | export to ext4, in the helper container |
 | `image/rootfs/packages.omarchy-skip`, `image/rootfs/packages.extra`, `image/rootfs/packages.mobile` | package lists (`packages.mobile`: touch layer P2, from `image/pkg/`) |
 | `image/pkg/omamobile-shell/`, `image/pkg/omamobile-omarchy/` | the touch shell and Omarchy's patches, built by `image/tools/build-pkg` (`docs/image/PACKAGES.md`); the tablet's `shell.json` and `home.json` |
-| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in) |
+| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units) |
 | `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance) and `hyprland.lua` (touch layers P1 and P2) |
 | `image/rootfs/shim/` | Hyprland's dmabuf-check shim (LD_PRELOAD) |

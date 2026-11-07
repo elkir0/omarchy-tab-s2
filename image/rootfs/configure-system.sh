@@ -105,6 +105,13 @@ log "units"
 systemctl enable usb-rndis.service sshd.service sddm.service t715-shutdown-log.service t715-pstore-shutdown.service
 systemctl set-default graphical.target
 
+# The Battery saver tile (quick settings) switches PPD between balanced
+# and power-saver; PPD's placeholder driver does nothing on this kernel,
+# so t715-power-profile applies the caps, at boot and on every switch
+# (the .path unit watches PPD's state file).
+[ -x /usr/local/sbin/t715-power-profile ] || die "no /usr/local/sbin/t715-power-profile"
+systemctl enable t715-power-profile.service t715-power-profile.path
+
 # Touch layer P1 (docs/image/ROOTFS.md): the Power and Home keys and the cover,
 # and the on-screen keyboard, for every user's graphical session
 # (/etc/systemd/user/t715-{keys,squeekboard}.service from the overlay).

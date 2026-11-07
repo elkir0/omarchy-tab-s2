@@ -175,7 +175,9 @@ work on this tablet.
   right edge is Back. Power, short: screen off and on. Power held: the system
   menu. Left alone, the screen goes off after two minutes; the **Stay awake**
   tile (under "Add tiles" in quick settings) holds that: on, the screen stays
-  on until Power or the cover turns it off.
+  on until Power or the cover turns it off. The **Battery saver** tile keeps
+  the four fast cores (the A57s) off and caps the CPU clock — and the GPU's,
+  on kernels that scale it — until the tile goes back off.
 - **Set a PIN at once.** Until then the user `alarm` has the password `alarm`
   and `sudo` asks for nothing: anyone with the tablet has full control. Hold
   Power for the system menu, choose the PIN row, give the current password

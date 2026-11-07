@@ -685,3 +685,55 @@ The measurement powered the CP off and on three times: each stop ended with
 session 4 of that boot). The 40 to 50 `NOSPC in RAW_TXQ` lines of the
 kernel's modem driver during each power-on are the boot channel's flow
 control while MAIN streams; the tablet's first boot that day had as many.
+
+## 13. Battery saver (the quick settings tile, 2026-11-07)
+
+The **Battery saver** tile in quick settings switches power-profiles-daemon
+(PPD) between `balanced` and `power-saver` through Omarchy's
+`omarchy-powerprofiles-set`. On this kernel PPD has only its `placeholder`
+driver — no platform driver, no cpufreq integration — so the switch changed
+nothing. `t715-power-profile` (`/usr/local/sbin/`, run as root by
+`t715-power-profile.service` at boot and by `t715-power-profile.path`
+whenever PPD rewrites `/var/lib/power-profiles-daemon/state.ini`, which it
+does on every switch) applies real caps instead:
+
+- **power-saver**: the A53 cluster (the lowest `cpu_capacity`) capped at
+  1 GHz (`SAVER_LITTLE_MAX_KHZ`), the A57 cluster offline — section 10
+  measured 169 ± 4 mW for that alone — `cpufreq/boost` off, and the GPU's
+  devfreq `max_freq` at 266 MHz (`SAVER_GPU_MAX_HZ`), which the operating
+  points of the daily kernel #7 (100, 133, 200 and 400 MHz, `GPU.md`) turn
+  into 200 MHz. The flag
+  `/run/t715-power/saver` is left behind: `t715-keys` reads it and keeps
+  the A57s offline even when the screen lights (one log line per lit
+  period), so a wake cannot undo the saver until the tile goes back to
+  balanced.
+- **balanced**: every cpufreq policy on `schedutil` at its
+  `cpuinfo_max_freq`, `boost` on, the GPU on `simple_ondemand` at its top
+  frequency, the flag removed and the A57s back online — but only when the
+  panel's DPMS state is `On`: `t715-keys` keeps them offline while the
+  screen is dark, and waking them there would be undone at the next
+  screen-off.
+
+The clusters are told apart by the cpus' `cpufreq` links, never by cpu
+numbers: an offline cpu keeps its link but loses its `cpu_capacity`, and
+the A57s are offline whenever the screen is dark or the saver is on. Only
+the big cluster is ever taken offline (cpu0 has no `online` file).
+`/etc/t715-power-profile.conf`, sourced when present, overrides
+`SAVER_LITTLE_MAX_KHZ` (1000000), `SAVER_BIG` (`offline`, or `keep` to
+leave the A57s as they are) and `SAVER_GPU_MAX_HZ` (266666667). The GPU
+part needs the GPU devfreq of the daily kernel #7; `cpufreq/boost` does not
+exist on this kernel, and that part is skipped with a log line. The savings
+are not measured yet; the A57 figure above is section 10's, with the
+screen off.
+
+Checked on the tablet on 2026-11-07, kernel #7: the tile on gave
+power-saver at 10:31:47 (A57s offline, A53s at 1 GHz at most, GPU at
+200 MHz at most), and the tile off gave balanced three seconds after the
+switch, at 10:36:10 (cpus 0-7 online, both clusters at 1.2 GHz at most,
+GPU at 400 MHz at most, the flag gone).
+
+Off the device: `image/tests/test_t715_power_profile.sh` runs the script
+on a fake sysfs (both profiles, the orders, the clamping, the config file,
+the profile sources, the usage), and `image/tests/test_t715_keys.sh` has a
+group for the flag. `image/tests/verify-rootfs.sh` checks the files and
+the two enabled units in the built image.

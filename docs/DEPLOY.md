@@ -522,7 +522,7 @@ md5 -q image/out/rootfs-omarchy.img          # needed by the push script
   rebuilt.
 - Optional off-device tests: `image/tests/test_repack.sh`,
   `image/tests/test_hyprgraphics.sh`, `image/tests/test_t715_keys.sh`,
-  `image/tests/test_t715_idle.sh`.
+  `image/tests/test_t715_power_profile.sh`, `image/tests/test_t715_idle.sh`.
 
 The build needs network access (ALARM mirrors, `os.archlinuxarm.org`,
 `pkgs.omarchy.org`, the PKGBUILDs' sources). Docker objects it leaves:

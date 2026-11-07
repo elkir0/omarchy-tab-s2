@@ -1,0 +1,15 @@
+# SM-T715: apply PPD's profile as real caps on the CPU clusters, the GPU
+# and boost, which PPD's placeholder driver cannot do on this kernel.
+# Runs once PPD is up at boot; t715-power-profile.path starts it again
+# whenever PPD rewrites its state file, that is on every profile switch.
+[Unit]
+Description=Apply the power profile to the SM-T715's CPU and GPU (PPD)
+After=power-profiles-daemon.service
+Wants=power-profiles-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t715-power-profile apply
+
+[Install]
+WantedBy=multi-user.target

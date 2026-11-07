@@ -1,0 +1,13 @@
+# SM-T715: watch PPD's state file, which PPD rewrites on every profile
+# switch, and run t715-power-profile.service so the switch reaches the
+# hardware (the quick settings' Battery saver tile switches PPD through
+# omarchy-powerprofiles-set).
+[Unit]
+Description=Run t715-power-profile when power-profiles-daemon's state changes
+
+[Path]
+PathChanged=/var/lib/power-profiles-daemon/state.ini
+Unit=t715-power-profile.service
+
+[Install]
+WantedBy=multi-user.target

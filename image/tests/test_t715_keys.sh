@@ -260,6 +260,41 @@ mv "$t/hyprctl.real" "$t/bin/hyprctl"
 rm -f "$t"/cpu?-online
 echo "ok - power, short: the A57s come back before the screen lights"
 
+# --- the power saver holds the A57s offline (t715-power-profile) -----------------------
+# Its flag (/run/t715-power/saver, T715_KEYS_SAVER here) says the Battery
+# saver tile is on: lighting the screen writes no 1 then, once per lit
+# period; taking them offline is unchanged, and without the flag they
+# come back as before.
+for n in 4 5 6 7; do echo 1 > "$t/cpu$n-online"; done
+mkdir -p "$t/saver"; : > "$t/saver/saver"
+start T715_KEYS_SAVER="$t/saver/saver"
+lit; reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "saver: the screen goes off"
+[ "$(cores)" = 0000 ] || fail "saver: cpu4-7 offline with the screen, flag or not (got $(cores))"
+reset; tap $K_POWER
+eventually "$DPMS_ON" || fail "saver: the screen comes back"
+[ "$(cores)" = 0000 ] || fail "saver: the A57s stay offline through a wake (got $(cores))"
+saver_said() { grep -c 'the A57s stay offline' "$t/daemon.log" || true; }
+[ "$(saver_said)" = 1 ] || fail "saver: one line for the lit period (got $(saver_said))"
+reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "saver: dark again"
+reset; sleep 0.2
+[ "$(saver_said)" = 1 ] || fail "saver: still one line while it stays dark (got $(saver_said))"
+# A wake by glance (a message, SIGUSR2) is a lit period of its own.
+reset; kill -USR2 "$pid"; sleep 0.4
+has "$DPMS_ON" || fail "saver: a message lights the screen"
+[ "$(cores)" = 0000 ] || fail "saver: the A57s stay offline through a glance (got $(cores))"
+[ "$(saver_said)" = 2 ] || fail "saver: a second lit period gets its line (got $(saver_said))"
+# The flag goes (balanced again): the next wake brings the cores back.
+kill -0 "$pid" 2>/dev/null || fail "saver: t715-keys survives the glance"
+lit; rm -f "$t/saver/saver"; reset; tap $K_POWER
+eventually "$DPMS_OFF" || fail "saver: dark once the flag is gone"
+reset; tap $K_POWER
+eventually "$DPMS_ON" || fail "saver: the screen comes back once the flag is gone"
+[ "$(cores)" = 1111 ] || fail "saver: cpu4-7 online again without the flag (got $(cores))"
+rm -f "$t"/cpu?-online
+echo "ok - power saver: the A57s stay offline while its flag exists, one line a lit period, back without it"
+
 # A saved brightness of 0 would wake to the panel's dimmest level.
 dark; echo 0 > "$t/brightness"; reset; tap $K_POWER
 has "brightnessctl -q -d s6e3ha2_tabs2 set 40%" || fail "dark, brightness 0: the wake sets 40 %"

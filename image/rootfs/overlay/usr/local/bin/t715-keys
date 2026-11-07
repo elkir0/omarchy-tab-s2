@@ -74,6 +74,10 @@
 #   T715_KEYS_RESYNC      seconds between screen checks while dark (default
 #                         5): if something else lit the screen, the
 #                         touchscreen comes back on
+#   T715_KEYS_SAVER       t715-power-profile's power-saver flag (default
+#                         /run/t715-power/saver): while it exists the A57
+#                         cores stay offline even on a lit screen, as the
+#                         Battery saver tile asks (for tests)
 #   T715_KEYS_MODEM_STANDBY, T715_KEYS_MODEM_CUT
 #                         t715-modem-power's standby setting and the file that
 #                         says the standby powered the CP off (for tests)
@@ -134,8 +138,13 @@ TOUCH = "hl.config({ input = { touchdevice = { enabled = %s } } })"
 # dark, as the vendor kernel's dynamic hotplug did on display hibernation
 # (docs/hardware/BATTERY.md section 10).  60-t715-big-cores.rules makes the
 # files writable for wheel; a kernel without the hot-unplug has none.
+# The Battery saver tile keeps them offline even on a lit screen, while
+# t715-power-profile's flag exists (SAVER below): lighting the screen
+# writes nothing then, and says so once per lit period.
 BIG_CORES = os.environ.get("T715_KEYS_BIG_CORES", "/sys/devices/system/cpu/cpu%d/online")
 BIG_CORE_IDS = (7, 6, 5, 4)
+# t715-power-profile's power-saver flag (T715_KEYS_SAVER for tests).
+SAVER = os.environ.get("T715_KEYS_SAVER", "/run/t715-power/saver")
 # The panel's DPMS state as DRM keeps it: read without a hyprctl process,
 # which the resync would otherwise start every T715_KEYS_RESYNC seconds while
 # the screen is dark.
@@ -281,6 +290,7 @@ class Screen:
         self.saved_flag = os.path.join(state_dir, "saved-brightness")
         self._device = None
         self.big_cores_failed = False
+        self.saver_said = False
 
     def device(self):
         if self._device is None:
@@ -324,6 +334,16 @@ class Screen:
         return os.path.exists(self.touch_flag)
 
     def big_cores(self, online):
+        # The power saver holds the A57s offline (t715-power-profile):
+        # they come back only with the balanced profile, which removes the
+        # flag.  One line per lit period, not one per wake.
+        if online and os.path.exists(SAVER):
+            if not self.saver_said:
+                log("power saver: the A57s stay offline")
+                self.saver_said = True
+            return
+        if not online:
+            self.saver_said = False
         ids = reversed(BIG_CORE_IDS) if online else BIG_CORE_IDS
         for n in ids:
             try:

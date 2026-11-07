@@ -1012,6 +1012,30 @@ check "journald: persistent, 64M caps" grep -qx 'Storage=persistent' <(cat_ /etc
 check "journald: no volatile drop-in left" absent /etc/systemd/journald.conf.d/10-t715-volatile.conf
 check "t715-reboot-to present, mode 0755 (RECOVERY or Download mode without Android)" test "$(fmode /usr/local/sbin/t715-reboot-to)" = 0755
 check "t715-reboot-to byte for byte" cmp -s <(cat_ /usr/local/sbin/t715-reboot-to) /our-overlay/usr/local/sbin/t715-reboot-to
+echo "== Battery saver (docs/image/ROOTFS.md, docs/hardware/BATTERY.md) =="
+PP=/usr/local/sbin/t715-power-profile
+for f in usr/local/sbin/t715-power-profile etc/systemd/system/t715-power-profile.service etc/systemd/system/t715-power-profile.path; do
+    get "/$f"
+    check "/$f identical to rootfs/overlay" cmp -s "$W/f" "/our-overlay/$f"
+done
+check "$PP mode 0755" test "$(fmode $PP)" = 0755
+t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-power-profile.service || true)"
+check "t715-power-profile.service enabled (multi-user.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-power-profile.service
+t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-power-profile.path || true)"
+check "t715-power-profile.path enabled (multi-user.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-power-profile.path
+get /etc/systemd/system/t715-power-profile.service; cp "$W/f" "$W/pp.service"
+check "t715-power-profile.service: oneshot, runs apply, after and wanting PPD" \
+    sh -c 'grep -qx "Type=oneshot" "$1" && grep -qx "ExecStart=/usr/local/sbin/t715-power-profile apply" "$1" &&
+           grep -qx "After=power-profiles-daemon.service" "$1" && grep -qx "Wants=power-profiles-daemon.service" "$1"' _ "$W/pp.service"
+get /etc/systemd/system/t715-power-profile.path; cp "$W/f" "$W/pp.path"
+check "t715-power-profile.path: watches PPD's state.ini and runs the service" \
+    sh -c 'grep -qx "PathChanged=/var/lib/power-profiles-daemon/state.ini" "$1" &&
+           grep -qx "Unit=t715-power-profile.service" "$1"' _ "$W/pp.path"
+get $PP; cp "$W/f" "$W/pp"
+check "t715-power-profile: the clusters by cpu_capacity, never a hardcoded cpu number" \
+    sh -c 'grep -q "cpu_capacity" "$1" && ! grep -Eq "cpu[4-7]" "$1"' _ "$W/pp"
 check "t715-shutdown-log.service enabled (shutdown steps kept in pstore)" test "$(linkto /etc/systemd/system/sysinit.target.wants/t715-shutdown-log.service)" = /etc/systemd/system/t715-shutdown-log.service
 check "t715-stuck-procs: a system-shutdown hook, mode 0755, byte for byte" \
     sh -c '[ "$1" = 0755 ] && cmp -s "$2" "$3"' _ "$(fmode /usr/lib/systemd/system-shutdown/t715-stuck-procs)" \

@@ -1,0 +1,483 @@
+#!/bin/bash
+# t715-power-profile: give the quick settings' Battery saver tile a real
+# effect on the SM-T715.
+#
+# power-profiles-daemon (PPD) has only its placeholder driver on this
+# kernel, so the tile's switch between balanced and power-saver (through
+# omarchy-powerprofiles-set) changed nothing.  This script applies the caps
+# itself, as root: t715-power-profile.service runs it once PPD is up at
+# boot, and t715-power-profile.path runs it again whenever PPD rewrites its
+# state (/var/lib/power-profiles-daemon/state.ini), which it does on every
+# switch.
+#
+#   balanced     every cpufreq policy back on governor schedutil at its
+#                cpuinfo_max_freq, cpufreq/boost on, every GPU devfreq
+#                device on simple_ondemand at its top frequency, the saver
+#                flag removed, and the big cluster (the highest
+#                cpu_capacity) online again -- but only when the panel's
+#                DPMS is On, since t715-keys keeps those cores offline
+#                while the screen is dark.
+#   power-saver  the flag /run/t715-power/saver created for t715-keys, the
+#                little cluster (the lowest cpu_capacity) capped at
+#                SAVER_LITTLE_MAX_KHZ, the big cluster offline, boost off,
+#                and the GPU capped at SAVER_GPU_MAX_HZ (its min_freq
+#                lowered first where it sits above the new max, which the
+#                kernel would refuse).
+#
+# The clusters are told apart by the cpus' cpufreq links, which an offline
+# cpu keeps (cpu_capacity and related_cpus only on a kernel without them),
+# never by hardcoded cpu numbers, and only the big cluster is ever taken
+# offline (cpu0 has no online file on this kernel).  The GPU devfreq
+# device exists since the daily kernel #7; the boost file does not exist
+# on this kernel.  A part whose file is absent is skipped, with a log
+# line.  The savings are not measured yet (docs/hardware/BATTERY.md,
+# "Battery saver").
+#
+# Every path comes from the environment, for the off-device test
+# (tests/test_t715_power_profile.sh):
+#   T715_SYSFS       /sys
+#   T715_POWER_RUN   /run/t715-power, the saver flag's directory
+#   T715_PPD_STATE   /var/lib/power-profiles-daemon/state.ini
+#   T715_POWER_CONF  /etc/t715-power-profile.conf, sourced when present:
+#                    SAVER_LITTLE_MAX_KHZ (1000000), SAVER_BIG (offline,
+#                    or keep to leave the big cluster as it is) and
+#                    SAVER_GPU_MAX_HZ (266666667)
+#
+# Usage: t715-power-profile apply [balanced|power-saver]
+#        t715-power-profile status
+# "apply" without a profile reads it from powerprofilesctl get, then from
+# the state file's Profile= line, and takes balanced when neither answers.
+# Each apply logs one summary line (logger -t t715-power-profile, or
+# stderr where there is no logger); a missing file or a refused write is
+# logged and the rest still runs.  Exits 0 unless the usage is wrong (2).
+set -u
+
+SYSFS=${T715_SYSFS:-/sys}
+RUN_DIR=${T715_POWER_RUN:-/run/t715-power}
+PPD_STATE=${T715_PPD_STATE:-/var/lib/power-profiles-daemon/state.ini}
+CONF=${T715_POWER_CONF:-/etc/t715-power-profile.conf}
+
+CPUFREQ=$SYSFS/devices/system/cpu/cpufreq
+CPUS=$SYSFS/devices/system/cpu
+
+usage() {
+    printf 'usage: t715-power-profile apply [balanced|power-saver]\n' >&2
+    printf '       t715-power-profile status\n' >&2
+}
+
+# log TEXT: to the journal, or to stderr where there is no logger (the
+# test's stub collects what the script has to say).
+log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t t715-power-profile "$*"
+    else
+        printf 't715-power-profile: %s\n' "$*" >&2
+    fi
+}
+
+# The configuration file overrides the defaults; the test drives it
+# through T715_POWER_CONF.
+: "${SAVER_LITTLE_MAX_KHZ:=1000000}"
+: "${SAVER_BIG:=offline}"
+: "${SAVER_GPU_MAX_HZ:=266666667}"
+if [ -f "$CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF"
+fi
+case $SAVER_BIG in
+    offline|keep) ;;
+    *) log "SAVER_BIG=$SAVER_BIG is neither offline nor keep: using offline"
+       SAVER_BIG=offline ;;
+esac
+
+# read FILE: a sysfs value, empty when the file is missing or unreadable.
+read_val() { cat "$1" 2>/dev/null || true; }
+
+# write VALUE FILE: a sysfs write that must not stop the rest; a refused
+# write is logged with the path it was refused on.
+write_val() {
+    if printf '%s\n' "$1" > "$2" 2>/dev/null; then
+        return 0
+    fi
+    log "cannot write $1 to $2"
+}
+
+# cap_freq LIST MAX: the highest value of LIST that MAX still allows, or
+# LIST's lowest value when MAX allows none of it; an empty MAX allows all
+# of it (the top frequency).
+cap_freq() {
+    local list=$1 max=$2 f pick="" low=""
+    for f in $list; do
+        case $f in ""|*[!0-9]*) continue ;; esac
+        if [ -z "$low" ] || [ "$f" -lt "$low" ]; then
+            low=$f
+        fi
+        if [ -n "$max" ] && [ "$f" -gt "$max" ]; then
+            continue
+        fi
+        if [ -z "$pick" ] || [ "$f" -gt "$pick" ]; then
+            pick=$f
+        fi
+    done
+    printf '%s\n' "${pick:-$low}"
+}
+
+# policy_cpus POLICY: the policy's related_cpus (affected_cpus where the
+# kernel lists none), that is its cluster's cpu numbers.
+policy_cpus() {
+    local cpus
+    cpus=$(read_val "$1/related_cpus")
+    if [ -z "$cpus" ]; then
+        cpus=$(read_val "$1/affected_cpus")
+    fi
+    printf '%s\n' "$cpus"
+}
+
+# policy_capacity POLICY: the cpu_capacity of the policy's first cpu, the
+# number the scheduler rates the cluster by.
+policy_capacity() {
+    local first
+    first=$(policy_cpus "$1" | tr ' ' '\n' | sed -n '/^[0-9][0-9]*$/p' | head -n 1)
+    if [ -z "$first" ]; then
+        return 1
+    fi
+    read_val "$CPUS/cpu$first/cpu_capacity"
+}
+
+# cpus_in_order CPUS up|down: the cluster's cpu numbers in t715-keys'
+# order, onlined 4,5,6,7 and offlined 7,6,5,4.
+cpus_in_order() {
+    if [ "$2" = up ]; then
+        tr ' ' '\n' <<<"$1" | sort -n
+    else
+        tr ' ' '\n' <<<"$1" | sort -rn
+    fi
+}
+
+# set_governor GOVERNOR CONTROL AVAIL: write GOVERNOR to the CONTROL file
+# when the AVAIL list (available_governors) offers it.
+set_governor() {
+    local want=$1 control=$2 avail=$3 listed
+    listed=$(read_val "$avail" | tr '\n' ' ')
+    case " $listed " in
+        *" $want "*) write_val "$want" "$control" ;;
+    esac
+}
+
+# gpu_devs: every GPU devfreq device (14ac0000.gpu on the kernel that adds
+# it; none today, /sys/class/devfreq is empty).
+gpu_devs() {
+    local d
+    for d in "$SYSFS"/class/devfreq/*.gpu; do
+        [ -d "$d" ] || continue
+        printf '%s\n' "$d"
+    done
+}
+
+# panel_lit: the panel's DPMS state as DRM keeps it.  The first DSI dpms
+# file that answers decides, and a tree without one reads as lit, as
+# t715-keys reads a screen check that does not answer.
+panel_lit() {
+    local f state
+    for f in "$SYSFS"/class/drm/card*-DSI-*/dpms; do
+        [ -f "$f" ] || continue
+        state=$(read_val "$f")
+        if [ -n "$state" ]; then
+            if [ "$state" = On ]; then
+                return 0
+            fi
+            return 1
+        fi
+    done
+    return 0
+}
+
+# The clusters, found once per run: little_policy and big_policy hold the
+# policy directories of the lowest and the highest cpu_capacity, and
+# big_cpus the big cluster's cpu numbers.  A single-cluster kernel leaves
+# big_policy equal to little_policy, which has_big reports as no big
+# cluster (nothing may offline the little cluster).
+little_policy="" big_policy="" little_cap="" big_cap="" big_cpus=""
+
+find_clusters() {
+    local p cap c l little_name=""
+    # The cpus' cpufreq links first.  An offline cpu keeps its link, while
+    # an inactive policy answers EBUSY for related_cpus and an offline cpu
+    # has no cpu_capacity: capacities only tell the clusters apart while
+    # both are online, and the big one is offline whenever the screen is
+    # dark or the saver is on.  cpu0 cannot go offline (it has no online
+    # file), so its policy is the little cluster and any other the big one.
+    if l=$(readlink "$CPUS/cpu0/cpufreq" 2>/dev/null) && [ -n "$l" ]; then
+        little_name=${l##*/}
+        little_policy=$CPUFREQ/$little_name
+        for c in "$CPUS"/cpu[0-9]*; do
+            l=$(readlink "$c/cpufreq" 2>/dev/null) || continue
+            [ "${l##*/}" = "$little_name" ] && continue
+            big_policy=$CPUFREQ/${l##*/}
+            big_cpus="${big_cpus:+$big_cpus }${c##*/cpu}"
+        done
+        return 0
+    fi
+    # No cpufreq links (an older kernel, or a test tree without them): the
+    # policies' capacities.
+    for p in "$CPUFREQ"/policy*; do
+        [ -d "$p" ] || continue
+        cap=$(policy_capacity "$p")
+        [ -n "$cap" ] || continue
+        if [ -z "$little_cap" ] || [ "$cap" -lt "$little_cap" ]; then
+            little_cap=$cap
+            little_policy=$p
+        fi
+        if [ -z "$big_cap" ] || [ "$cap" -gt "$big_cap" ]; then
+            big_cap=$cap
+            big_policy=$p
+        fi
+    done
+    big_cpus=$(policy_cpus "$big_policy")
+}
+
+has_big() {
+    [ -n "$big_policy" ] && [ "$big_policy" != "$little_policy" ]
+}
+
+# big_cores up|down: online or offline the big cluster, one cpu at a time
+# in t715-keys' order.  A cpu without an online file is logged (a kernel
+# without the Exynos5433 hot-unplug has none at all); the little cluster
+# is never touched.
+big_cores() {
+    local up=$1 n
+    for n in $(cpus_in_order "$big_cpus" "$up"); do
+        case $n in ""|*[!0-9]*) continue ;; esac
+        if [ ! -e "$CPUS/cpu$n/online" ]; then
+            log "cpu$n has no online file"
+            continue
+        fi
+        if [ "$up" = up ]; then
+            write_val 1 "$CPUS/cpu$n/online"
+        else
+            write_val 0 "$CPUS/cpu$n/online"
+        fi
+    done
+}
+
+# active_profile: what PPD holds, from powerprofilesctl, or from its state
+# file, or balanced when neither answers (as before PPD starts at boot).
+active_profile() {
+    local p=""
+    if p=$(powerprofilesctl get 2>/dev/null); then
+        p=${p%%[[:space:]]*}
+    elif p=$(sed -n 's/^Profile=//p' "$PPD_STATE" 2>/dev/null); then
+        p=${p%%[[:space:]]*}
+    else
+        p=""
+    fi
+    if [ "$p" = power-saver ]; then
+        printf 'power-saver\n'
+    else
+        printf 'balanced\n'
+    fi
+}
+
+apply_power_saver() {
+    local avail="" want="" cur="" dev
+    # The flag first, so that a wake in between already sees the saver on.
+    # t715-keys reads it as user alarm, hence the modes.
+    if mkdir -p "$RUN_DIR" 2>/dev/null; then
+        chmod 0755 "$RUN_DIR" 2>/dev/null || true
+    fi
+    if : > "$RUN_DIR/saver" 2>/dev/null; then
+        chmod 0644 "$RUN_DIR/saver" 2>/dev/null || true
+    else
+        log "cannot create $RUN_DIR/saver"
+    fi
+    # The little cluster capped at the highest level the config allows.
+    note_little="-"
+    if [ -n "$little_policy" ]; then
+        avail=$(read_val "$little_policy/scaling_available_frequencies")
+        if [ -n "$avail" ]; then
+            want=$(cap_freq "$avail" "$SAVER_LITTLE_MAX_KHZ")
+            write_val "$want" "$little_policy/scaling_max_freq"
+            note_little=$want
+        else
+            log "${little_policy##*/}: no scaling_available_frequencies, its max stays"
+        fi
+    fi
+    # The big cluster offline, unless the configuration keeps it.
+    if [ "$SAVER_BIG" = keep ]; then
+        note_big="kept (SAVER_BIG=keep)"
+    elif has_big; then
+        big_cores down
+        note_big=offline
+    else
+        note_big="none (no big cluster)"
+    fi
+    # Boost off, wherever a kernel provides the file.
+    note_boost="-"
+    if [ -e "$CPUFREQ/boost" ]; then
+        write_val 0 "$CPUFREQ/boost"
+        note_boost=0
+    fi
+    # The GPU capped, its min brought down first where it sits above the
+    # new max: the kernel would refuse that max alone.
+    note_gpu="-"
+    for dev in $(gpu_devs); do
+        avail=$(read_val "$dev/available_frequencies")
+        if [ -z "$avail" ]; then
+            log "${dev##*/}: no available_frequencies, its max stays"
+            continue
+        fi
+        want=$(cap_freq "$avail" "$SAVER_GPU_MAX_HZ")
+        cur=$(read_val "$dev/min_freq")
+        if [ -n "$cur" ] && [ "$cur" -gt "$want" ]; then
+            write_val "$want" "$dev/min_freq"
+        fi
+        write_val "$want" "$dev/max_freq"
+        note_gpu="${dev##*/}=$want"
+    done
+}
+
+apply_balanced() {
+    local p avail="" want="" dev
+    # The flag goes before the cores come back, so that a wake in between
+    # already sees the saver off.
+    rm -f "$RUN_DIR/saver" 2>/dev/null || log "cannot remove $RUN_DIR/saver"
+    # t715-keys keeps the big cluster offline while the screen is dark:
+    # bring it back only when the panel is lit.  First, so that its policy
+    # is active again when the loop below sets it.
+    if has_big; then
+        if panel_lit; then
+            big_cores up
+            note_big=online
+        else
+            note_big="left offline (the panel is dark)"
+        fi
+    else
+        note_big="none (no big cluster)"
+    fi
+    # Every active policy back on schedutil at its top frequency.  A policy
+    # whose cpus are all offline answers EBUSY: it keeps its settings and
+    # gets them back with its cpus.
+    note_little="-"
+    for p in "$CPUFREQ"/policy*; do
+        [ -d "$p" ] || continue
+        [ -n "$(read_val "$p/scaling_governor")" ] || continue
+        set_governor schedutil "$p/scaling_governor" "$p/scaling_available_governors"
+        want=$(read_val "$p/cpuinfo_max_freq")
+        if [ -n "$want" ]; then
+            write_val "$want" "$p/scaling_max_freq"
+            if [ "$p" = "$little_policy" ]; then
+                note_little=$want
+            fi
+        else
+            log "${p##*/}: no cpuinfo_max_freq, its max stays"
+        fi
+    done
+    # Boost on, wherever a kernel provides the file.
+    note_boost="-"
+    if [ -e "$CPUFREQ/boost" ]; then
+        write_val 1 "$CPUFREQ/boost"
+        note_boost=1
+    fi
+    # The GPU back on simple_ondemand at its top frequency.
+    note_gpu="-"
+    for dev in $(gpu_devs); do
+        set_governor simple_ondemand "$dev/governor" "$dev/available_governors"
+        avail=$(read_val "$dev/available_frequencies")
+        if [ -n "$avail" ]; then
+            want=$(cap_freq "$avail" "")
+            write_val "$want" "$dev/max_freq"
+            note_gpu="${dev##*/}=$want"
+        else
+            log "${dev##*/}: no available_frequencies, its max stays"
+        fi
+    done
+}
+
+apply() {
+    local profile=${1:-}
+    if [ -z "$profile" ]; then
+        profile=$(active_profile)
+    fi
+    find_clusters
+    if [ -z "$little_policy" ]; then
+        log "no cpufreq policy under $CPUFREQ: only the flag and the GPU"
+    fi
+    if [ "$profile" = power-saver ]; then
+        apply_power_saver
+    else
+        apply_balanced
+    fi
+    log "$profile: little max ${note_little:-?}, big ${note_big:-?}, gpu ${note_gpu:-?}, boost ${note_boost:-?}"
+}
+
+status() {
+    local p dev n b v online gov
+    find_clusters
+    printf 'profile: %s\n' "$(active_profile)"
+    for p in "$CPUFREQ"/policy*; do
+        [ -d "$p" ] || continue
+        gov=$(read_val "$p/scaling_governor")
+        if [ -z "$gov" ]; then
+            # Every cpu of the policy offline: its files answer EBUSY.
+            printf '%s: inactive, its cpus offline' "${p##*/}"
+        else
+            printf '%s (cpus %s, capacity %s): governor %s, min %s, max %s kHz' \
+                "${p##*/}" "$(policy_cpus "$p")" "$(policy_capacity "$p" || true)" \
+                "$gov" "$(read_val "$p/scaling_min_freq")" \
+                "$(read_val "$p/scaling_max_freq")"
+        fi
+        if [ "$p" = "$big_policy" ] && has_big; then
+            online=""
+            for n in $(cpus_in_order "$big_cpus" up); do
+                case $n in ""|*[!0-9]*) continue ;; esac
+                v=$(read_val "$CPUS/cpu$n/online" | tr -d '[:space:]')
+                online="$online${v:-?}"
+            done
+            printf ', online %s' "$online"
+        fi
+        printf '\n'
+    done
+    if [ -n "$(gpu_devs)" ]; then
+        for dev in $(gpu_devs); do
+            printf 'gpu %s: governor %s, min %s, max %s Hz\n' "${dev##*/}" \
+                "$(read_val "$dev/governor")" "$(read_val "$dev/min_freq")" \
+                "$(read_val "$dev/max_freq")"
+        done
+    else
+        printf 'gpu: none\n'
+    fi
+    b=$(read_val "$CPUFREQ/boost")
+    printf 'boost: %s\n' "${b:-absent}"
+    if [ -e "$RUN_DIR/saver" ]; then
+        v=present
+    else
+        v=absent
+    fi
+    printf 'saver flag: %s (%s)\n' "$v" "$RUN_DIR/saver"
+}
+
+case ${1:-} in
+    apply)
+        if [ $# -gt 2 ]; then
+            usage
+            exit 2
+        fi
+        case ${2:-} in
+            ""|balanced|power-saver) ;;
+            *) usage; exit 2 ;;
+        esac
+        apply "${2:-}"
+        ;;
+    status)
+        if [ $# -ne 1 ]; then
+            usage
+            exit 2
+        fi
+        status
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+exit 0
