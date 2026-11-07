@@ -23,8 +23,9 @@
 # omamobile-setup-user.service (the image masks it: docs/image/ROOTFS.md).
 # Changed for the tablet:
 #   - profile/shell.json is tablet-shell.json (only the plugins shipped
-#     here; the drawer at 6 columns; Omarchy's idle values, kept off by its
-#     stay-awake toggle; Omarchy's 18 bar-widget-only plugins in
+#     here; the drawer at 6 columns; Omarchy's idle timers at 0 (off),
+#     because t715-idle turns the screen off and the stay-awake state is
+#     the Stay awake tile's; Omarchy's 18 bar-widget-only plugins in
 #     disabledPlugins, since omamobile.bar shows none of them and the shell
 #     would still compile each at every start) and profile/home.json is new
 #     (tablet-home.json: a 6x8 home grid with the image's apps), seeded by
@@ -105,7 +106,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.94
-pkgrel=3
+pkgrel=4
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -148,7 +149,7 @@ sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
             'a053230db73e583344b547c965b0a932dd849ed7a052c70a575f1df9dc13b8c2'
             '7f5a49ea2d46b0e7523f97cbc401e2af806c7cb3dffbe3f057d44ec3e5fe02ec'
             'dc8db0711566e1463938c5bc4ea725e08e05e2853100903447ff2eaa9c664cd1'
-            '1bb18754cd60203f28f5ad947c7dd9eddf52d66d3ddd6ee2e206b795a8126166'
+            '47b8da8ea8316c36222de6fdd9a7076d343a0e291506ac1de153589127dd5d66'
             '7643f6faa8ed82e31f01ecc3a0767684c68df009318c02d1ae1158f497ce1450')
 noextract=("$_tarball")
 

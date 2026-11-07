@@ -277,7 +277,8 @@ if [ -s "$W/links.cmd" ]; then
 fi
 check "Omarchy user setup done (~/.local/state/omarchy/done/finalize-user)" \
     exists /home/alarm/.local/state/omarchy/done/finalize-user
-check "Omarchy idle toggle: stay awake" exists /home/alarm/.local/state/omarchy/indicators/stay-awake
+check "Omarchy stay-awake state absent (the Stay awake tile starts off, so t715-idle's screen-off runs)" \
+    absent /home/alarm/.local/state/omarchy/indicators/stay-awake
 check "Omarchy toggle: suspend-off" exists /home/alarm/.local/state/omarchy/toggles/suspend-off
 check "sudoers: 10-wheel NOPASSWD, mode 0440" \
     sh -c 'grep -q "^%wheel ALL=(ALL:ALL) NOPASSWD: ALL" "$1" && [ "$2" = 0440 ]' _ "$(get /etc/sudoers.d/10-wheel; cp "$W/f" "$W/sudo"; echo "$W/sudo")" "$(fmode /etc/sudoers.d/10-wheel)"
@@ -531,6 +532,9 @@ check "alarm's shell.json is the tablet profile (pkg/omamobile-shell/tablet-shel
     sh -c 'cmp -s "$1" "$2" && cmp -s "$1" /our-pkg/omamobile-shell/tablet-shell.json' _ "$W/alarm-shell" "$W/profile-shell"
 check "  bar omamobile.bar, the drawer at 6 columns, the call card, no other phone plugin" \
     sh -c 'grep -q "\"id\": \"omamobile.bar\"" "$1" && grep -q "\"columns\": 6" "$1" && grep -q "omamobile\.call" "$1" && ! grep -Eq "omamobile\.(fingerprint|update|access)" "$1"' _ "$W/alarm-shell"
+check "  Omarchy's idle timers 0 (screensaver and lock off; t715-idle turns the screen off)" \
+    sh -c 'sed -n "/\"idle\": {/,/}/p" "$1" | grep -q "\"screensaver\": 0" &&
+           sed -n "/\"idle\": {/,/}/p" "$1" | grep -q "\"lock\": 0"' _ "$W/alarm-shell"
 sed -n '/"disabledPlugins": \[/,/\]/p' "$W/alarm-shell" > "$W/disabled"
 check "  Omarchy's 18 bar-widget-only plugins in disabledPlugins, not the menu, media or a service" \
     sh -c '[ "$(grep -c "^    \"omarchy\.[a-z-]*\",\{0,1\}$" "$1")" = 18 ] &&
@@ -883,8 +887,8 @@ t="$(resolve /etc/systemd/user/graphical-session.target.wants/t715-idle.service 
 check "t715-idle.service enabled for every user (-> ${t:-missing})" \
     sh -c 'case "$1" in */t715-idle.service) exit 0 ;; *) exit 1 ;; esac' _ "$t"
 get /usr/share/t715-omarchy/hypridle.conf; cp "$W/f" "$W/hypridle.conf"
-check "hypridle.conf: 120 s, then SIGUSR1 to t715-keys (screen off, touch first)" \
-    sh -c 'cmp -s "$1" /our-overlay/usr/share/t715-omarchy/hypridle.conf && grep -q "timeout = 120" "$1" && grep -q "SIGUSR1 t715-keys.service" "$1"' _ "$W/hypridle.conf"
+check "hypridle.conf: 120 s, then SIGUSR1 to t715-keys unless stay-awake holds it (screen off, touch first)" \
+    sh -c 'cmp -s "$1" /our-overlay/usr/share/t715-omarchy/hypridle.conf && grep -q "timeout = 120" "$1" && grep -q "SIGUSR1 t715-keys.service" "$1" && grep -q "test -e ~/.local/state/omarchy/indicators/stay-awake ||" "$1"' _ "$W/hypridle.conf"
 check "  /usr/lib/spa-0.2/bluez5/libspa-bluez5.so present (wireplumber's Bluetooth monitor)" \
     test "$(ftype /usr/lib/spa-0.2/bluez5/libspa-bluez5.so)" = regular
 

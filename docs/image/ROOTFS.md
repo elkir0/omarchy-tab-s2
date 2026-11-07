@@ -221,9 +221,12 @@ as mise does not exist for armv7h.
 **Tablet settings for alarm**: `~/.config/hypr/monitors.lua` has
 `local omarchy_monitor_scale = 2` (1536x2048 portrait panel, 768x1024
 logical; Omarchy's `GDK_SCALE=2` is unchanged); `~/.config/uwsm/env`
-exports `AQ_DRM_DEVICES`; Omarchy's documented toggles are set:
-`omarchy-toggle-idle stay-awake` (no idle screensaver, no idle lock) and
-`omarchy-toggle suspend-off on` (no Suspend in the system menu). The
+exports `AQ_DRM_DEVICES`; of Omarchy's documented toggles only
+`omarchy-toggle suspend-off on` is set (no Suspend in the system menu). The
+stay-awake state is left off, so the **Stay awake** tile starts off and
+`t715-idle`'s two-minute screen-off runs from the first boot; Omarchy's own
+idle cycle is off another way, through the tablet profile's zero timers
+("Touch layer P2"). The
 systemd sleep targets are masked as well: resume is untested on this
 kernel, and a hang that ends in a watchdog reset boot-loops the tablet
 into RECOVERY (`COORDINATION.md`). The touch layer's per-user settings
@@ -282,6 +285,18 @@ whose text rendering can deadlock Hyprland here.
   Hyprland keeps delivering touches to apps while the panel is off, and touch
   never wakes it. While dark, t715-keys checks the screen every 5 s and
   gives the touchscreen back if something else lit it.
+- Without input the same screen-off comes from `t715-idle.service` (hypridle
+  with `/usr/share/t715-omarchy/hypridle.conf`): two minutes idle, then the
+  same SIGUSR1 to t715-keys as a short Power press. Omarchy's stay-awake
+  state holds the timer — the `on-timeout` command tests for
+  `~/.local/state/omarchy/indicators/stay-awake` and does nothing while the
+  file exists — so the **Stay awake** tile (under "Add tiles"), `omarchy
+  toggle idle` and an Omarchy update all keep the screen on; a Wayland idle
+  inhibitor, such as Firefox playing a video, or logind's holds it too. The
+  tile starts off, the default: with it off the screen goes off after two
+  minutes, with it on only Power or the cover turns the screen off. Omarchy's
+  own idle cycle is not what turns the screen off here; its timers are 0 in
+  the tablet profile's `shell.json`.
 - A screen lit from outside, by a call or by SIGUSR2 for a new message, stays lit
   for a glance of 20 s (`T715_KEYS_GLANCE`) and goes off again unless a touch, a key or
   logind's idle inhibitor says otherwise: hypridle has already fired and sees no input,
@@ -344,7 +359,11 @@ generator for alarm (the Wayland input method wins) and verifies the Lua.
 (t715-keys, t715-squeekboard), that no Hyprland launch of squeekboard is
 left, the fcitx5 condition and an unmasked unit, the dconf entries, the
 layout links, the lid unbinds, the logind drop-in (and that it sorts last)
-and the build records.
+and the build records. `image/tests/test_t715_idle.sh` runs the idle
+screen-off's `on-timeout` command off the device, with a stub `systemctl`
+and a `HOME` whose path holds a space: it signals t715-keys without the
+stay-awake file, does nothing with it, and is armed again once the file is
+gone.
 
 **On the tablet** (a slot; over SSH as root, `A='sudo -u alarm env
 XDG_RUNTIME_DIR=/run/user/1000'`):
@@ -442,7 +461,7 @@ none found upstream.
 | 0001 | first run: no "Learn Keybindings" welcome once `welcome-keybindings-not-applicable` is marked (omamobile-setup-user does) |
 | 0003, 0011, 0014 | the lock's number pad, PIN-or-password input and emergency button (a warning, never a dialpad): off without the `lock-keypad` toggle |
 | 0005 | swipe through the image picker; hold the desktop for the Style menu |
-| 0006, 0007, 0013 | screensaver and idle on a touch device (keyboard off while it runs, lock on return): dormant with stay-awake |
+| 0006, 0007, 0013 | screensaver and idle on a touch device (keyboard off while it runs, lock on return): dormant, since the tablet profile's idle timers are 0 |
 | 0008 | panels with `bl_power` follow DPMS (only where the user may write it) |
 | 0009 | the lock's `wake` IPC for hardware keys |
 | 0010 | the polkit prompt usable with the on-screen keyboard |
@@ -481,14 +500,16 @@ it skips them (each recorded in the MANIFEST with its reason):
 | `omamobile-osk` | P1 starts squeekboard (`t715-squeekboard.service`) and sets its gsettings |
 | `omamobile-phone-rules` | `hypr/phone.lua` (maximize everything, no gaps, `omamobile-keys` bindings) is not shipped; `t715-tablet.lua` has the tablet's rules |
 | `omamobile-suspend-off` | the build sets Omarchy's suspend-off toggle already |
-| `omamobile-idle`, `omamobile-lock-keypad`, `omamobile-lock-after-screensaver`, `omamobile-credential-type`, `omamobile-menu-pin` | the phone's 60 s idle lock and PIN: `omamobile-set-pin` sets the toggles itself, the build adds the PIN row, t715-keys locks when the screen goes off, and stay-awake keeps Omarchy's idle off |
+| `omamobile-idle`, `omamobile-lock-keypad`, `omamobile-lock-after-screensaver`, `omamobile-credential-type`, `omamobile-menu-pin` | the phone's 60 s idle lock and PIN: `omamobile-set-pin` sets the toggles itself, the build adds the PIN row, t715-keys locks when the screen goes off, and Omarchy's idle cycle is off through the tablet profile's zero timers |
 | `omamobile-fingerprint-plugin`, `omamobile-menu-fingerprint`, `omamobile-call-plugin`, `omamobile-access-plugin`, `omamobile-update-plugin`, `omamobile-menu-update` | plugins and menu rows for what is not shipped |
 | `omamobile-chromium-*` (5) | the launcher, `pkg/t715-chromium`, sets Chromium's flags |
 
 The steps that run: plugin links in `~/.config/omarchy/plugins`, the tablet
 profile as `~/.config/omarchy/shell.json` (the package's
 `profile/shell.json`: the seven plugins, the drawer at 6 columns, Omarchy's
-idle values, Omarchy's bar widgets in `disabledPlugins`), the keyboard, home
+idle timers at 0 — screensaver and lock off, since `t715-idle` owns the
+screen-off and the stay-awake state belongs to the Stay awake tile —
+Omarchy's bar widgets in `disabledPlugins`), the keyboard, home
 and back plugins, no keybindings welcome,
 dev and duplicate apps hidden from the drawer (Qt tools, Disks, Evince,
 fcitx5's settings, foot's server and client entries), no pointer on screen
@@ -511,7 +532,7 @@ the persistent root a new package's steps do not run by themselves: run
 |---|---|---|
 | Power and Home keys | `t715-keys` (Home now opens the shell's home and recents) | `omamobile-keys` and phone.lua's bindings; no Power+Volume chord |
 | Sleep | none: the sleep targets are masked | `omamobile-sleepd` and its unit |
-| Keyboard start and gsettings | `t715-squeekboard.service`, the dconf values written at build time | setup-user's `omamobile-osk` step (autostart.lua), phone.lua's gsettings at login, `omamobile-osk-guard` and its unit (it repairs the setting after the screensaver, which stay-awake keeps off) |
+| Keyboard start and gsettings | `t715-squeekboard.service`, the dconf values written at build time | setup-user's `omamobile-osk` step (autostart.lua), phone.lua's gsettings at login, `omamobile-osk-guard` and its unit (it repairs the setting after the screensaver, which the tablet profile's zero idle timers keep off) |
 | Input-method environment | `/etc/environment.d/20-t715-osk.conf` | `/usr/lib/environment.d/20-omamobile-osk.conf` (also its portal file-picker variables) |
 | fcitx5 off | the `ConditionPathExists` drop-in in `/etc/systemd/user` | the package's own drop-in: two conditions would both have to hold, and touching P1's flag would no longer bring fcitx5 back |
 | Terminal layouts with Esc | `/usr/share/t715-omarchy/squeekboard/...` (US and French) and their links | the package's copy (US only) |
@@ -578,7 +599,10 @@ versions, the series and the applier's state against the files in the
 image, the markers, the seeded files, the masked unit, the telephony
 (tools, enabled units, no NV and no APN in the image), and that no other
 phone-only helper, unit or duplicate mechanism is there;
-`image/tests/test_t715_keys.sh` covers Home's new gestures. Upstream's own tests,
+`image/tests/test_t715_keys.sh` covers Home's new gestures, and
+`image/tests/test_t715_idle.sh` the stay-awake hold on the idle screen-off
+(the tablet profile's zero idle timers are a `verify-rootfs.sh` check).
+Upstream's own tests,
 run on the package in an aarch64 container: the switcher's and the shade's
 touch tests pass, as do the home, status, Wi-Fi, Bluetooth, notifications
 and back model tests and `tile-scripts.sh`; the tiles-model test fails where
@@ -925,8 +949,9 @@ They come with `pacman -U` or a new image.
    and shows its notifications (keybindings, "Set up Wi-Fi": `nm-online`
    finds no network until one is joined; the check runs in the background
    and blocks nothing).
-6. Nothing locks, blanks or suspends the screen by itself; Power turns it
-   off and on (t715-keys).
+6. Nothing locks or suspends the session. The screen goes off after two
+   minutes without input (`t715-idle`, as a short Power press) unless the
+   Stay awake tile is on; Power turns it off and on (t715-keys).
 
 Useful on the tablet (over SSH): `systemd-analyze`, `systemctl --failed`,
 `journalctl -b -u sddm`, `journalctl -b _UID=1000`,
@@ -979,6 +1004,7 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tools/build-rootfs` | the builder |
 | `image/tests/verify-rootfs.sh` | offline checks of the image |
 | `image/tests/test_t715_keys.sh` | off-device test of t715-keys' gestures (fake input, stand-ins) |
+| `image/tests/test_t715_idle.sh` | off-device test of t715-idle's hypridle.conf (the stay-awake hold) |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
 | `image/rootfs/smoke-check.sh` | binaries-load check (`/usr/lib/t715-omarchy/smoke-check` in the image) |

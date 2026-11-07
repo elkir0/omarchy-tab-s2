@@ -276,7 +276,9 @@ is what lets the widgets idle while the panel is off.
   standby setting; "Modem off" on the Mobile data tile meanwhile). Upstream
   now has what 0.2.32's 0003 (the light drawer), 0009 and 0010 (the bottom
   strip, app names in recents) did, so they are gone. `tablet-shell.json` as `profile/shell.json` (the eight
-  plugins, the watchers on, the drawer at 6 columns, Omarchy's idle values, and since 1.4
+  plugins, the watchers on, the drawer at 6 columns, Omarchy's idle timers at 0,
+  since t715-idle owns the screen-off and the stay-awake state is the Stay
+  awake tile's; and since 1.4
   Omarchy's 18 bar-widget-only plugins in `disabledPlugins`, so the shell
   stops compiling widgets no bar shows) and `tablet-home.json` as
   `profile/home.json` (a 6x8 home grid with the image's apps; a new file,

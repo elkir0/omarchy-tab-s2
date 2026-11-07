@@ -20,8 +20,9 @@
 # 4. Tablet settings: monitor scale 2 (1536x2048 -> 768x1024 logical),
 #    AQ_DRM_DEVICES in ~/.config/uwsm/env, the tablet block of
 #    ~/.config/hypr/looknfeel.lua (rootfs/t715-looknfeel.lua), Omarchy's
-#    "stay awake" idle toggle (no idle screensaver or lock) and
-#    "suspend-off" toggle (no Suspend entry in the system menu).
+#    "suspend-off" toggle (no Suspend entry in the system menu). Omarchy's
+#    idle cycle is off through the tablet profile's shell.json, and its
+#    stay-awake state starts off: the Stay awake tile is the owner's to set.
 #    Touch layer P1: the tablet block at the end of ~/.config/hypr/hyprland.lua
 #    (rootfs/t715-tablet.lua: keys, cover, on-screen keyboard layers, window
 #    sizes), the on-screen keyboard's gsettings (shown at all, the layout of
@@ -219,8 +220,6 @@ else
     record "looknfeel.lua: tablet block" failed "no $lnf from Omarchy's skel"
 fi
 
-step "toggle: stay awake" "omarchy-toggle-idle stay-awake: no idle screensaver, no idle lock" \
-    as_user omarchy-toggle-idle stay-awake
 step "toggle: suspend-off" "omarchy-toggle suspend-off on: no Suspend entry in the system menu" \
     as_user omarchy-toggle suspend-off on
 
@@ -327,9 +326,9 @@ premark=(
     "omamobile-osk|P1 has the on-screen keyboard: squeekboard started by t715-squeekboard.service, its gsettings set at build time"
     "omamobile-phone-rules|hypr/phone.lua (every window maximized, no gaps, omamobile-keys bindings) is not shipped; rootfs/t715-tablet.lua has the tablet's rules"
     "omamobile-suspend-off|the build set Omarchy's suspend-off toggle already (omarchy-toggle suspend-off on)"
-    "omamobile-idle|a phone's 60 s idle lock: t715-keys locks when the screen goes off, once a PIN is set; the stay-awake toggle keeps Omarchy's idle off"
+    "omamobile-idle|a phone's 60 s idle lock: t715-keys locks when the screen goes off, once a PIN is set; Omarchy's idle cycle is off through the tablet profile's zero timers"
     "omamobile-lock-keypad|omamobile-set-pin sets it with the PIN"
-    "omamobile-lock-after-screensaver|Omarchy's screensaver stays off with its stay-awake state"
+    "omamobile-lock-after-screensaver|Omarchy's screensaver never runs: its timer is 0 in the tablet profile's shell.json"
     "omamobile-credential-type|omamobile-set-pin writes it with the PIN"
     "omamobile-menu-pin|the block above adds the PIN row"
     "omamobile-fingerprint-plugin|no fingerprint sensor (omamobile.fingerprint is not shipped)"

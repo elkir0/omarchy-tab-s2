@@ -521,7 +521,8 @@ md5 -q image/out/rootfs-omarchy.img          # needed by the push script
   failure there after those files change means the image must be
   rebuilt.
 - Optional off-device tests: `image/tests/test_repack.sh`,
-  `image/tests/test_hyprgraphics.sh`, `image/tests/test_t715_keys.sh`.
+  `image/tests/test_hyprgraphics.sh`, `image/tests/test_t715_keys.sh`,
+  `image/tests/test_t715_idle.sh`.
 
 The build needs network access (ALARM mirrors, `os.archlinuxarm.org`,
 `pkgs.omarchy.org`, the PKGBUILDs' sources). Docker objects it leaves:
@@ -727,7 +728,10 @@ seconds after the shell starts (9.3 s for a cold shell restart).
    the last one. A "Setup Wi-Fi" notice opens quick settings and expires.
    On a persistent root (11.6) only the first boot is.
 5. Nothing locks or suspends; the screen goes off after two minutes idle
-   (`t715-idle.service`), and the power key wakes it.
+   (`t715-idle.service`), and the power key wakes it. The **Stay awake**
+   tile holds that timer: on, the screen no longer goes off by itself, and
+   only Power or the cover turns it off; off, the default, it goes off after
+   two minutes.
 
 On screen, with the BOOT image of 11.7 (kernel `00024`, `t715.quiet=1`):
 the Samsung logo, the Omarchy splash from about 11 to 14 s (Plymouth),

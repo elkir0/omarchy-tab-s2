@@ -1,8 +1,8 @@
 {
   "version": 1,
   "idle": {
-    "screensaver": 150,
-    "lock": 300
+    "screensaver": 0,
+    "lock": 0
   },
   "bar": {
     "id": "omamobile.bar",

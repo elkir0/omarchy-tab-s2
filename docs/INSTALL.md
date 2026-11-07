@@ -173,7 +173,9 @@ work on this tablet.
 - **Touch:** tap or pull down the top bar for quick settings; swipe up from the
   home pill for home, up and hold for recent apps; a swipe in from the left or
   right edge is Back. Power, short: screen off and on. Power held: the system
-  menu.
+  menu. Left alone, the screen goes off after two minutes; the **Stay awake**
+  tile (under "Add tiles" in quick settings) holds that: on, the screen stays
+  on until Power or the cover turns it off.
 - **Set a PIN at once.** Until then the user `alarm` has the password `alarm`
   and `sudo` asks for nothing: anyone with the tablet has full control. Hold
   Power for the system menu, choose the PIN row, give the current password
