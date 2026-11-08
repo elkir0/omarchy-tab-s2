@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/2] ARM: configs: gts28ltexx: FAT, exFAT and their code pages
+ for the microSD card
+
+Cards come formatted FAT32 (SDHC, up to 32 GB) or exFAT (SDXC); the
+board had neither file system.  Build in vfat (UTF-8 names by default)
+and exfat, with the code pages their mount options ask for: 437,
+vfat's default codepage, iso8859-1, its default iocharset, and utf8.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index e3adeca5d..ed177b8bd 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -129,6 +129,18 @@ CONFIG_AUTOFS_FS=y
+ CONFIG_OVERLAY_FS=y
+ CONFIG_TMPFS=y
+ CONFIG_TMPFS_POSIX_ACL=y
++
++# The microSD slot (mshc_2, the board DTS's section 7): cards come
++# formatted FAT32 (SDHC, up to 32 GB) or exFAT (SDXC), so both are built
++# in, with the code pages the mount options ask for (vfat's default
++# codepage 437, utf8 for the names) and iso8859-1, vfat's default
++# iocharset.
++CONFIG_VFAT_FS=y
++CONFIG_FAT_DEFAULT_UTF8=y
++CONFIG_EXFAT_FS=y
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_NLS_UTF8=y
+ CONFIG_PSTORE=y
+ CONFIG_PSTORE_CONSOLE=y
+ CONFIG_PSTORE_PMSG=y
+-- 
+2.52.0
+

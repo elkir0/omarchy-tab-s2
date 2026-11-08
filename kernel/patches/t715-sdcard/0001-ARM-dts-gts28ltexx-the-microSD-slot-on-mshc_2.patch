@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/2] ARM: dts: gts28ltexx: the microSD slot on mshc_2
+
+The SM-T715's microSD slot sits on mshc_2 (dwmmc2@15560000), which the
+board left disabled.  Enable it as the stock tree describes it
+(live_fdt.dts:1250-1300) and as the TM2 board runs the same SoC's slot
+in mainline: a 4-bit bus, the card detect on gpa2-4 (active low,
+200 ms), ciu-div 3, the stock sdr and ddr timings in mainline's
+<sample drive> form, fifo-depth 0x40, the card's VDD on LDO17 and its
+I/O on LDO2, the stock pads (drive FAST_SR3, no pull).  mmc1 is its
+alias, so the card is mmcblk1 and the eMMC stays mmcblk0.
+
+Two pins need setting: gpa2-4 keeps the pad's reset pull-down, which
+the stock tree removes (the board pulls the line up); gpf0-7, the
+stock's "vmmc-en-gpio", is held low as the stock driver leaves it.
+
+LDO17 and LDO2 were named "vmmc" and "vqmmc", as in the stock tree.
+When a device has no such supply in the tree, regulator_dev_lookup()
+falls back to a regulator of that name, so the eMMC's host took both,
+held LDO2 at 1.8 V for its HS200, and the card ran its I/O at 1.8 V in
+3.3 V mode: reads worked, every write failed.  Renamed, the two rails
+belong to the slot only (the stock dmesg shows dwmmc2 alone switching
+them), and the eMMC runs as the TM2's, with no vmmc or vqmmc.
+
+UHS-I up to SDR104, on the bootloader's 400 MHz sclk_mmc2: the bus runs
+at 100 MHz, the stock's own ceiling.  At 800 MHz every initialisation
+timed out.  On a 16 GB SDHC card: 34 MB/s read in SDR104, 18 MB/s in
+high speed, writes at the card's 8-9 MB/s, 256 MiB written and read
+back identical in both modes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx.dts     | 101 +++++++++++++++++-
+ 1 file changed, 98 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 1f53838ef..bd77dfe07 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -73,6 +73,7 @@ / {
+ 	 */
+ 	aliases {
+ 		mmc0 = &mshc_0;
++		mmc1 = &mshc_2;
+ 		pinctrl0 = &pinctrl_alive;
+ 		pinctrl1 = &pinctrl_aud;
+ 		pinctrl2 = &pinctrl_cpif;
+@@ -480,10 +481,16 @@ ldo11_reg: LDO11 {
+ 			/*
+ 			 * LDO17 and LDO2 are the SD slot rails (stock dmesg
+ 			 * "15560000.dwmmc2: vmmc on, vqmmc on"), not the
+-			 * eMMC's: see section 7.
++			 * eMMC's: see section 7.  Not named "vmmc" and "vqmmc"
++			 * as in the stock tree: when a device has no such
++			 * supply in the tree, the regulator core looks one up
++			 * by name (regulator_dev_lookup), so the eMMC's host
++			 * took both, held LDO2 at 1.8 V for its HS200, and the
++			 * SD card, its I/O stuck at 1.8 V in 3.3 V mode, failed
++			 * every write.
+ 			 */
+ 			ldo17_reg: LDO17 {
+-				regulator-name = "vmmc";
++				regulator-name = "VDD_SD_2.8V";
+ 				regulator-min-microvolt = <2800000>;
+ 				regulator-max-microvolt = <2800000>;
+ 			};
+@@ -504,7 +511,7 @@ ldo19_reg: LDO19 {
+ 			};
+ 
+ 			ldo2_reg: LDO2 {
+-				regulator-name = "vqmmc";
++				regulator-name = "VDDQ_SD";
+ 				regulator-min-microvolt = <1800000>;
+ 				regulator-max-microvolt = <3300000>;
+ 				regulator-boot-on;
+@@ -719,6 +726,94 @@ &sd0_bus8 {
+ 	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
+ };
+ 
++/*
++ * The microSD slot on mshc_2 (dwmmc2@15560000), as the stock tree
++ * describes it (live_fdt.dts:1250-1300): a 4-bit bus, the card detect on
++ * gpa2-4, active low, debounced 200 ms, ciu-div 3, sdr-timing <3 0 2 1>
++ * and ddr-timing <3 0 3 2> in the downstream 4-cell form, which the
++ * mainline 2-cell form <sample drive> writes <1 2> and <2 3> (DT_M2.md),
++ * fifo-depth 0x40, the card's VDD on LDO17 (2.8 V, "vmmc" in the stock
++ * tree) and its I/O on LDO2 (3.3 V, 1.8 V for UHS, "vqmmc"), which the
++ * stock driver turns on in that order ("15560000.dwmmc2: vmmc on, vqmmc
++ * on"), the VDD going off again when no card answers.  The node follows
++ * the TM2 board's (exynos5433-tm2-common.dtsi), which runs this slot of
++ * the same SoC in mainline with the same card detect pin.
++ *
++ * Two pins the bootloader leaves wrong for the slot:
++ *  - gpa2-4, the card detect, has the pad's reset pull-down on; the stock
++ *    tree sets no pull (dwmmc2_cd_ext_irq), the board pulls it up.
++ *  - gpf0-7 ("vmmc-en-gpio", flagged active low in the stock tree) is an
++ *    input with a pull-up; the stock driver drives it low at probe and
++ *    never again (dw_mci_exynos_set_etc_gpio, "vmmc_en is low"), so it is
++ *    held low here by pinctrl.
++ *
++ * UHS-I up to SDR104, which the stock tree lists too, on the bootloader's
++ * CIU clock: sclk_mmc2 at 400 MHz, 100 MHz after ciu-div, so SDR104 runs
++ * its bus at 100 MHz, the stock's own ceiling (its ciu_clkin table stops at
++ * 400 MHz).  Raising sclk_mmc2 to 800 MHz for a 200 MHz bus made every
++ * card initialisation time out (-110), at any identification rate.
++ * Measured on a 16 GB SDHC card: 34 MB/s read in SDR104 against 18 MB/s
++ * in high speed, writes at the card's own 8-9 MB/s.
++ */
++&mshc_2 {
++	status = "okay";
++	cap-sd-highspeed;
++	sd-uhs-sdr12;
++	sd-uhs-sdr25;
++	sd-uhs-sdr50;
++	sd-uhs-sdr104;
++	disable-wp;
++	cd-gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
++	card-detect-delay = <200>;
++	samsung,dw-mshc-ciu-div = <3>;
++	samsung,dw-mshc-sdr-timing = <1 2>;
++	samsung,dw-mshc-ddr-timing = <2 3>;
++	fifo-depth = <0x40>;
++	bus-width = <4>;
++	vmmc-supply = <&ldo17_reg>;
++	vqmmc-supply = <&ldo2_reg>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd_pin
++		     &sd2_vmmc_en_pin>;
++};
++
++/* The slot's pads as the stock tree sets them: drive FAST_SR3, no pull. */
++&sd2_clk {
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd2_cmd {
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd2_bus1 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&sd2_bus4 {
++	samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++	samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR3>;
++};
++
++&pinctrl_alive {
++	sd2_cd_pin: sd2-cd-gpio-pins {
++		samsung,pins = "gpa2-4";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR1>;
++	};
++};
++
++&pinctrl_imem {
++	sd2_vmmc_en_pin: sd2-vmmc-en-pins {
++		samsung,pins = "gpf0-7";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
++		samsung,pin-val = <0>;
++	};
++};
++
+ /* ==================================================================== */
+ /* 8. USB device port (DWC3, PHY clocks, SM5703 MUIC)                   */
+ /* ==================================================================== */
+-- 
+2.52.0
+

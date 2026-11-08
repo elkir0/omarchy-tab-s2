@@ -316,6 +316,8 @@ Rails: vmmc = LDO17 `vmmc` 2.8 V (l.2354-2357); vqmmc = LDO2 `vqmmc` 1.8-3.3 V (
 | ciu-div | present | l.1286 |
 | **bus-width** | `0x04` | l.1296 |
 
+Enabled on mainline: `docs/hardware/SDCARD.md`.
+
 ### PMIC (S2MPS13)
 
 * I2C bus `hsi2c@14E40000`, reg `0x14e40000 0x1000` l.2307; `clock-freq = <0x2625a0>` (2.5 MHz) l.2318.
