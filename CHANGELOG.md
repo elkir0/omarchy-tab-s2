@@ -1,5 +1,91 @@
 # Changelog
 
+## 1.0.1, pre-release
+
+Everything since 1.0 Beta 1: the GPU up to 700 MHz and the big cores up to 1.5 GHz, the Battery
+saver and Stay awake tiles at work, the animations back, and a first boot that accepts a
+checksum file written on Windows.
+
+- **GPU and big cores.** The GPU scales from 160 to 700 MHz (1.0 Beta 1: a fixed 266 MHz), at
+  the vendor's eight Mali levels on the G3D PLL; the A57 cores scale from 800 MHz to 1.5 GHz
+  (Beta 1: held at 1.2 GHz), with the vendor's body bias and EMA, and their own cooling maps.
+  The A53 cores still scale from 400 MHz to 1.2 GHz. Qualified on the reference tablet on
+  2026-11-07, including a 2-hour soak: [docs/hardware/CPUFREQ.md](docs/hardware/CPUFREQ.md)
+  section 9 and [docs/hardware/GPU.md](docs/hardware/GPU.md) section 10.14, where glmark2,
+  each level pinned, scores 781 at 700 MHz against 328 at 266 MHz.
+- **Battery saver.** The tile does something now: power-saver takes the A57 cores offline,
+  caps the A53 cores at 1 GHz and the GPU at 266 MHz, and turns Hyprland's animations off;
+  balanced gives everything back: the A57 cores online again while the screen is lit, the GPU
+  up to 700 MHz, the animations on. [docs/hardware/BATTERY.md](docs/hardware/BATTERY.md)
+  section 13.
+- **Heat and low battery.** Every 30 s, while balanced is active, a battery at 52.0 °C or
+  more (cleared at 49.0 °C), or at 20 % or less while no charger is connected, caps the A57
+  cores at 1.2 GHz and the GPU at 420 MHz, until neither holds.
+  [docs/hardware/BATTERY.md](docs/hardware/BATTERY.md) section 13.
+- **Stay awake.** The tile now keeps the screen on. It starts off: the screen goes off after
+  two minutes by default (omamobile-shell 0.2.94-4 sets Omarchy's own idle timers to 0; the
+  tablet's `t715-idle` turns the screen off).
+- **Animations.** On, where 1.0 Beta 1 had them off: with the GPU at a fixed 266 MHz the
+  desktop felt snappier without them. They go off under the Battery saver.
+- **First boot.** A `rootfs-omarchy.img.sha256` sidecar written on Windows is accepted:
+  Windows line endings, a byte order mark and an upper-case hash, as Notepad and PowerShell's
+  `Get-FileHash` write them. 1.0 Beta 1's images still refuse such a file.
+- **Kernel.** Linux 6.12.114 with two new series on top of 1.0 Beta 1's nine, `t715-power-gpu`
+  and `t715-turbo`, written on `t715-power` and applied unchanged after `t715-camera-mc`. Built
+  from the published patches with a fixed date, user and host
+  ([kernel/README.md](kernel/README.md)). The optional `t715-linkpm` series is still not in it.
+- **Software.** omamobile-shell 0.2.94-4, was 0.2.94-3. Omarchy stays on 4.0.6, pinned. The
+  main packages keep 1.0 Beta 1's versions: Hyprland 0.57.1, Mesa 26.2.6, Qt 6.12.0,
+  Quickshell 0.3.2, systemd 262.1, Firefox 157.0, Chromium 150.
+- **From 1.0 Beta 1.** There is no update path yet. The first boot copies the image only into a
+  persistent root that does not exist yet (`USERDATA/omarchy`), so flashing 1.0.1's `boot.img`
+  over a Beta 1 install gives that system the new kernel and its modules, but not the tiles, the
+  heat guard and the animations, which live in the root image.
+
+Tested on one tablet, the reference one, on 2026-11-08, booted from RECOVERY next to its owner's
+system with test boot images carrying the release's kernel and initramfs (the release's
+`boot.img` differs only by the knobs that name the image and the root). The published
+`rootfs-omarchy.img.xz` was unpacked on the tablet and checked against `SHA256SUMS`, then got a
+persistent root of its own: the first boot, the `.sha256` sidecar next to the image, copied it
+in 3 min 16 s, took the Wi-Fi and Bluetooth files from SYSTEM, made the cameras' seven tables
+and bound the sensors, and Omarchy's session came up by itself. On that boot: the release
+kernel (`#1`, 2026-11-08) with the GPU's eight levels from 160 to 700 MHz and the A57 cores from
+800 MHz to 1.5 GHz; the balanced profile applied at boot; the Battery saver switched through
+power-profiles-daemon, power-saver taking the A57 cores offline, the A53 cores to 1 GHz, the
+GPU to 266 MHz and the animations off within 3 s, balanced giving all of it back; the guard's
+timer running; the Stay awake tile off at first; both cameras through `t715-photo`, and the
+Camera app at about two cores; Chromium, Phone, Messages, Réseau mobile and the terminal
+starting; Pi; the Claude Code installer answering No and changing nothing; Wi-Fi scanning,
+Bluetooth, the speaker and microphone devices, ASPM L1.2; the modem's switch (22 checks). A
+second boot kept the data and copied nothing, the cameras present from the start, and the
+rescue's test image booted the image read-only. `image/tests/verify-rootfs.sh` passes its 358
+checks on the image, and two builds of the kernel from the published patches were identical
+byte for byte.
+
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), joining a Wi-Fi network, the
+GPS, the power draw on this build, the Stay awake tile by hand, the heat guard's caps on the
+tablet (the battery stayed under 52 °C and above 20 %), the on-screen progress by eye, and the
+Odin, Heimdall and TWRP installs.
+
+Known issues:
+- **The Camera app and the GPU.** While the Camera app runs, the kernel logs panfrost job faults
+  (`DATA_INVALID_FAULT`, `TILE_RANGE_FAULT`, `INSTR_TYPE_MISMATCH`, `JOB_BUS_FAULT`), GPU page
+  faults and now and then a `gpu sched timeout`, the GPU reset after a stuck job: from none to a
+  few dozen in a 45-second use, and once a burst of about 300. 1.0 Beta 1's kernel, its GPU
+  fixed at 266 MHz, does the same on this image (404 in one use, then 2, 0, 9 and 1), and so
+  does this kernel with the GPU pinned at 266 MHz: it comes with the Camera app's use of the
+  GPU, not with the new frequencies. The app and the session kept running.
+- Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
+  when a new window appears, as in 1.0 Beta 1.
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped contiguously`
+  per boot: the display rejects GPU buffers for direct scanout and the compositor draws them
+  instead.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive. Once, on the reference tablet, the USB link to a Mac stopped receiving until the cable
+  was plugged in again.
+
 ## 1.0 Beta 1, pre-release
 
 The first release meant for someone other than its developer: everything since 0.9.3, and an

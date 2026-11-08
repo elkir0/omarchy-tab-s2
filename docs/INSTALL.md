@@ -1,7 +1,8 @@
 # Installing Omarchy on the Samsung Galaxy Tab S2
 
-The install guide for the 1.0 releases (1.0 Beta 1 first). It takes a Samsung Galaxy Tab S2 8.0
-LTE (SM-T715) from stock Android, or from a tablet that already runs TWRP, to
+The install guide for the 1.0 releases, 1.0 Beta 1 then 1.0.1; the steps
+name 1.0.1's files. It takes a Samsung Galaxy Tab S2 8.0 LTE (SM-T715) from
+stock Android, or from a tablet that already runs TWRP, to
 Omarchy: Hyprland and the Omarchy shell with the omarchy-mobile touch layer,
 on a mainline Linux 6.12 kernel, with LTE, calls and SMS. Android stops
 booting; its own data stays on the tablet, unused. An unofficial port, not
@@ -39,7 +40,7 @@ developer guide, [DEPLOY.md](DEPLOY.md).
 | A Samsung Galaxy Tab S2 8.0 LTE, model SM-T715, hardware revision 9 or later | the only tablet tested (revision 9); the release's board data covers revisions 9 and up. Other Tab S2 models are not covered |
 | Firmware `T715XXU2CRH1` (Android 7.0) | the modem accepts only that exact RADIO image, and the first boot reads the Wi-Fi and Bluetooth files from the tablet's own SYSTEM partition. On any other firmware, flash the stock `T715XXU2CRH1` with Odin first |
 | USERDATA as plain ext4, not encrypted | the boot stops with "no ext4 superblock" on an encrypted tablet |
-| About 11 GB free on internal storage | the image file (5.3 GiB in 1.0 Beta 1), plus the first boot's copy of its contents into the persistent root (4.3 GiB used, plus a 512 MiB margin) |
+| About 11 GB free on internal storage | the image file (5.3 GiB in 1.0 Beta 1 and in 1.0.1), plus the first boot's copy of its contents into the persistent root (4.3 GiB used, plus a 512 MiB margin) |
 | A computer with Odin or Heimdall | flashing BOOT and RECOVERY in Download mode |
 | The release files, checked | below |
 
@@ -78,9 +79,14 @@ calls `/data/media/0/linux/rootfs-omarchy.img`.
    - unpack the image with 7-Zip;
    - check each file against its line in `SHA256SUMS`: in PowerShell,
      `Get-FileHash <file>` prints its SHA-256;
-   - make the sidecar with the `grep` line above in WSL or Git Bash, never in
-     Notepad: the first boot refuses a sidecar with Windows line endings, and
-     says "The image file is damaged (bad checksum)". The sidecar is optional:
+   - make the sidecar: copy the `rootfs-omarchy.img` line of `SHA256SUMS`
+     into a new file named `rootfs-omarchy.img.sha256` with Notepad (check
+     that it did not add `.txt`), or use the `grep` line above in WSL or Git
+     Bash. From 1.0.1 the first boot reads a sidecar written on Windows: CR LF
+     line endings, a byte order mark, the hash in upper case as `Get-FileHash`
+     prints it. 1.0 Beta 1's images refuse such a file and say "The image
+     file is damaged (bad checksum)": for Beta 1, make it in WSL or Git Bash.
+     The sidecar is optional:
      without it, the first boot copies the image without a check, so compare
      the sizes instead (3.).
 
@@ -157,8 +163,9 @@ work on this tablet.
 ## 5. The first boot
 
 - The screen shows **"Setting up Omarchy (first boot)"** and a percentage about
-  every ten seconds. This takes a few minutes (3 min 17 s for 1.0 Beta 1 on the
-  reference tablet): the tablet is copying the image into a persistent root on
+  every ten seconds. This takes a few minutes (3 min 17 s for 1.0 Beta 1,
+  3 min 16 s for 1.0.1, on the reference tablet): the tablet is copying
+  the image into a persistent root on
   the internal storage. Leave it alone.
 - The same boot takes the Wi-Fi and Bluetooth files from the tablet's own
   Android SYSTEM partition, read-only, and the system then makes the cameras'
@@ -219,9 +226,11 @@ Knox warranty bit stays tripped either way.
   reboot` there goes back to BOOT). From a running tablet,
   `sudo t715-reboot-to recovery` goes there on purpose.
 - **A failed first boot** says why on the screen. "The image file is damaged
-  (bad checksum)" means the copy onto the tablet went wrong, or that the
-  sidecar has Windows line endings: copy both files again, the sidecar made as
-  in 2. "Not enough free space" means what it says: free about the
+  (bad checksum)" means the copy onto the tablet went wrong: copy both files
+  again, the sidecar made as in 2. On 1.0 Beta 1's images it also means the
+  sidecar has Windows line endings, which those images refuse (2.); from
+  1.0.1 a sidecar written on Windows is accepted. "Not enough free space"
+  means what it says: free about the
   amount it names and restart. Until then the tablet runs from the image, and
   changes are lost at each reboot.
 - **A frozen tablet:** hold Power + Volume down for about ten seconds to force
@@ -236,9 +245,16 @@ Honesty about the testing, so you know where the surprises will be:
   end;
 - the TWRP path (B) is not yet tested end to end;
 - copying the image over MTP is not yet tested end to end;
-- one tablet ran this ROM, and nobody else has installed it yet.
+- one tablet ran this ROM, and no install by anyone else has been reported yet.
 
-On that tablet, a first build of 1.0 Beta 1 was installed fresh from RECOVERY,
+On that tablet, 1.0.1's published image was unpacked from its `.xz`, checked,
+and installed from RECOVERY with its own persistent root next to the owner's,
+then checked: the first boot and its copy, a second boot, the rescue, the
+session, both cameras and the Camera app, the Battery saver, the modem's
+switch, Wi-Fi scanning, Bluetooth, Pi and the Claude Code installer
+(`CHANGELOG.md`).
+
+For 1.0 Beta 1, a first build was installed fresh from RECOVERY on that tablet,
 with its own persistent root next to the owner's, and checked: the first boot
 and its copy, a second boot, the rescue, the session, both cameras, the
 modem's switch, Wi-Fi scanning, Bluetooth, Pi and the Claude Code installer.

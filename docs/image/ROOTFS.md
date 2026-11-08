@@ -849,8 +849,8 @@ GPU on, and brings the A57s back only while the panel's DPMS state is
 `/run/t715-power/saver` bridges the two: t715-keys reads it and leaves the
 A57s offline even on a lit screen while it exists. `/etc/t715-power-profile.conf`
 can override the caps (`SAVER_LITTLE_MAX_KHZ`, `SAVER_BIG=offline|keep`,
-`SAVER_GPU_MAX_HZ`). The GPU part needs the GPU devfreq of the daily
-kernel #7, and the boost part a kernel with `cpufreq/boost`; each is
+`SAVER_GPU_MAX_HZ`). The GPU part needs a kernel with GPU devfreq
+(#7, #8 and the 1.0.1 release kernel), and the boost part a kernel with `cpufreq/boost`; each is
 skipped, with a log line, while its file is absent. The whole story is in
 `docs/hardware/BATTERY.md` §13.
 `t715-power-guard.service` (run by `t715-power-guard.timer`, every 30 s)
