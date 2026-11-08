@@ -11,5 +11,10 @@ Wants=power-profiles-daemon.service
 Type=oneshot
 ExecStart=/usr/local/sbin/t715-power-profile apply
 
+# graphical.target, not multi-user.target: PPD 0.30's own unit starts
+# after multi-user.target (and the display manager), so a multi-user.target
+# want closed an ordering cycle that systemd broke by dropping this job at
+# every boot (seen on 2026-11-07): the profile chosen before a reboot was
+# not applied until the next switch.
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

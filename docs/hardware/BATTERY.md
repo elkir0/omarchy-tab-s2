@@ -734,6 +734,38 @@ GPU at 400 MHz at most, the flag gone).
 
 Off the device: `image/tests/test_t715_power_profile.sh` runs the script
 on a fake sysfs (both profiles, the orders, the clamping, the config file,
-the profile sources, the usage), and `image/tests/test_t715_keys.sh` has a
-group for the flag. `image/tests/verify-rootfs.sh` checks the files and
-the two enabled units in the built image.
+the profile sources, the guard, the usage), and
+`image/tests/test_t715_keys.sh` has a group for the flag.
+`image/tests/verify-rootfs.sh` checks the files and the units in the
+built image.
+
+The same script has a **battery heat and low-battery guard**, asked for by
+decision D6 of CPUFREQ.md (sections 5.4 and 11) before any cap above
+1.2 GHz is daily: `t715-power-profile guard`, run every 30 s by
+`t715-power-guard.timer` (the first run a minute after boot). While
+balanced is the active profile and the battery is hot or low, the A57
+cluster's `scaling_max_freq` sits at 1.2 GHz (`GUARD_BIG_MAX_KHZ`) and the
+GPU's devfreq `max_freq` at 420 MHz (`GUARD_GPU_MAX_HZ`); with neither
+flag, both get their balanced limits back. `apply balanced` writes the
+same caps while a flag exists, so a profile switch cannot slip past the
+guard. Hot uses hysteresis, because a fanless tablet hovers around a
+threshold: the flag is set at 52.0 °C (`GUARD_HOT_ON_DECIC`, tenths of a
+degree C) and cleared only at 49.0 °C (`GUARD_HOT_OFF_DECIC`); a reading
+in between keeps the previous state. These are CPUFREQ.md section 5.4's
+comfort numbers, 3 °C under the modem's prepare gate. Low is set at
+20 % (`GUARD_LOW_PCT`) or below, and only while no Mains or USB supply is
+online: plugged in, the tablet charges its way out of it. The flags live
+beside the saver's, as `/run/t715-power/hot` and `/run/t715-power/low`;
+power-saver caps both parts harder than the guard, so it only keeps the
+flags. One log line per flag change, none per steady run, and `GUARD=off`
+in the config removes both flags and disables all of it.
+
+External power is any `power_supply` of type `Mains` or `USB` with
+`online` = 1. The gauge's own `status` is never read: it says "Not
+charging" while the charger is online (checked on 2026-11-07: the gauge
+read `Not charging` at 96 % while `sm5703-charger` was online and
+`Charging`), so the charger's own files decide. The battery is the first
+`power_supply` of type `Battery` whose `temp` answers. The guard never
+onlines or offlines a cpu: an inactive big policy (its
+`scaling_governor` empty, the screen dark) is skipped, and the next run
+catches up once it is back.

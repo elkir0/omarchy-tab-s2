@@ -108,9 +108,10 @@ systemctl set-default graphical.target
 # The Battery saver tile (quick settings) switches PPD between balanced
 # and power-saver; PPD's placeholder driver does nothing on this kernel,
 # so t715-power-profile applies the caps, at boot and on every switch
-# (the .path unit watches PPD's state file).
+# (the .path unit watches PPD's state file).  The timer runs its battery
+# heat and low-battery guard every 30 s (docs/hardware/CPUFREQ.md D6).
 [ -x /usr/local/sbin/t715-power-profile ] || die "no /usr/local/sbin/t715-power-profile"
-systemctl enable t715-power-profile.service t715-power-profile.path
+systemctl enable t715-power-profile.service t715-power-profile.path t715-power-guard.timer
 
 # Touch layer P1 (docs/image/ROOTFS.md): the Power and Home keys and the cover,
 # and the on-screen keyboard, for every user's graphical session

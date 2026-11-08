@@ -1,0 +1,12 @@
+# SM-T715: run t715-power-profile guard often enough to follow the battery:
+# a minute after boot, then every 30 s, within 5 s.
+[Unit]
+Description=Run t715-power-profile guard every 30 s (SM-T715)
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

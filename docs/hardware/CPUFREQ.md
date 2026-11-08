@@ -1021,7 +1021,7 @@ threshold), stop there.** Stage 1 alone is still worth keeping, for throttling a
 | D3 | Margin above 1.2 GHz: stock + 37.5 mV, or plain stock | + 37.5 mV to qualify; revisit after soak |
 | D4 | The 115 °C trip test, which needs you at the tablet | yes, once, before stage 2a |
 | D5 | Target cap: stop at stage 1, 1.5 GHz, or attempt 1.7 GHz | 1.5 GHz, decided on the measured `c` |
-| D6 | The userspace gauge and low-battery cap (52/49 °C, 20 %) | yes, before any cap above 1.2 GHz is daily |
+| D6 | The userspace gauge and low-battery cap (52/49 °C, 20 %) | yes, before any cap above 1.2 GHz is daily; implemented as `t715-power-profile guard` (2026-11-07) |
 | D7 | P3 found A57 ABB in bypass and EMA 2, not stock's level 8 and EMA 3: accept a small kernel write that sets stock's values | needed for anything above 1.2 GHz, and advised before stage 1 |
 | D8 | Be within reach during stages 2 and up (power key) | yes: a 115 °C cut or a freeze needs a hand |
 

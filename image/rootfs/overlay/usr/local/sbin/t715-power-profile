@@ -8,7 +8,7 @@
 # itself, as root: t715-power-profile.service runs it once PPD is up at
 # boot, and t715-power-profile.path runs it again whenever PPD rewrites its
 # state (/var/lib/power-profiles-daemon/state.ini), which it does on every
-# switch.
+# switch.  t715-power-guard.timer runs guard, below, every 30 s.
 #
 #   balanced     every cpufreq policy back on governor schedutil at its
 #                cpuinfo_max_freq, cpufreq/boost on, every GPU devfreq
@@ -40,15 +40,38 @@
 #   T715_PPD_STATE   /var/lib/power-profiles-daemon/state.ini
 #   T715_POWER_CONF  /etc/t715-power-profile.conf, sourced when present:
 #                    SAVER_LITTLE_MAX_KHZ (1000000), SAVER_BIG (offline,
-#                    or keep to leave the big cluster as it is) and
-#                    SAVER_GPU_MAX_HZ (266666667)
+#                    or keep to leave the big cluster as it is),
+#                    SAVER_GPU_MAX_HZ (266666667), GUARD (on, or off to
+#                    leave the battery alone), GUARD_HOT_ON_DECIC (520),
+#                    GUARD_HOT_OFF_DECIC (490), GUARD_LOW_PCT (20),
+#                    GUARD_BIG_MAX_KHZ (1200000) and GUARD_GPU_MAX_HZ
+#                    (420000000)
+#
+#   guard        reads the battery and caps the big cluster and the GPU
+#                while the balanced profile is active, so that a hot or a
+#                low battery holds both below their top frequencies before
+#                any cap above 1.2 GHz is daily (docs/hardware/CPUFREQ.md,
+#                decision D6): the flag hot when the gauge reads
+#                GUARD_HOT_ON_DECIC tenths of a degree or more, back only
+#                at GUARD_HOT_OFF_DECIC or less (hysteresis: a reading in
+#                between keeps the previous state), the flag low when the
+#                capacity is GUARD_LOW_PCT per cent or less and no Mains
+#                or USB supply is online.  While either flag is there the
+#                big policy's scaling_max_freq sits at GUARD_BIG_MAX_KHZ
+#                and every GPU devfreq max_freq at GUARD_GPU_MAX_HZ;
+#                neither, the balanced limits.  Power-saver only keeps
+#                the flags (its own caps are lower); apply balanced
+#                writes the guard caps instead of the top frequencies
+#                while a flag is there.
 #
 # Usage: t715-power-profile apply [balanced|power-saver]
 #        t715-power-profile status
-# "apply" without a profile reads it from powerprofilesctl get, then from
-# the state file's Profile= line, and takes balanced when neither answers.
+#        t715-power-profile guard
+# "apply" without a profile asks PPD over D-Bus (busctl), then reads the
+# state file's Profile= line, and takes balanced when neither answers.
 # Each apply logs one summary line (logger -t t715-power-profile, or
-# stderr where there is no logger); a missing file or a refused write is
+# stderr where there is no logger); guard logs one line only when a flag
+# changes.  A missing file or a refused write is
 # logged and the rest still runs.  Exits 0 unless the usage is wrong (2).
 set -u
 
@@ -63,6 +86,7 @@ CPUS=$SYSFS/devices/system/cpu
 usage() {
     printf 'usage: t715-power-profile apply [balanced|power-saver]\n' >&2
     printf '       t715-power-profile status\n' >&2
+    printf '       t715-power-profile guard\n' >&2
 }
 
 # log TEXT: to the journal, or to stderr where there is no logger (the
@@ -80,6 +104,12 @@ log() {
 : "${SAVER_LITTLE_MAX_KHZ:=1000000}"
 : "${SAVER_BIG:=offline}"
 : "${SAVER_GPU_MAX_HZ:=266666667}"
+: "${GUARD:=on}"
+: "${GUARD_HOT_ON_DECIC:=520}"
+: "${GUARD_HOT_OFF_DECIC:=490}"
+: "${GUARD_LOW_PCT:=20}"
+: "${GUARD_BIG_MAX_KHZ:=1200000}"
+: "${GUARD_GPU_MAX_HZ:=420000000}"
 if [ -f "$CONF" ]; then
     # shellcheck disable=SC1090
     . "$CONF"
@@ -88,6 +118,11 @@ case $SAVER_BIG in
     offline|keep) ;;
     *) log "SAVER_BIG=$SAVER_BIG is neither offline nor keep: using offline"
        SAVER_BIG=offline ;;
+esac
+case $GUARD in
+    on|off) ;;
+    *) log "GUARD=$GUARD is neither on nor off: using on"
+       GUARD=on ;;
 esac
 
 # read FILE: a sysfs value, empty when the file is missing or unreadable.
@@ -192,6 +227,49 @@ panel_lit() {
     return 0
 }
 
+# find_battery: the first power_supply of type Battery whose temp answers,
+# printed for the caller; no such battery -> not found.  The gauge's own
+# status is never read: it says Not charging while the charger is online
+# (docs/hardware/BATTERY.md, section 5).
+find_battery() {
+    local d
+    for d in "$SYSFS"/class/power_supply/*; do
+        [ -d "$d" ] || continue
+        if [ "$(read_val "$d/type")" = Battery ] && [ -n "$(read_val "$d/temp")" ]; then
+            printf '%s\n' "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# external_power: yes when any Mains or USB supply is online -- not the
+# battery's own status, which is wrong on this tablet.
+external_power() {
+    local d t
+    for d in "$SYSFS"/class/power_supply/*; do
+        [ -d "$d" ] || continue
+        t=$(read_val "$d/type")
+        case $t in
+            Mains|USB) ;;
+            *) continue ;;
+        esac
+        if [ "$(read_val "$d/online")" = 1 ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# decic_to_c DECIC: tenths of a degree C as the log and status show them,
+# "371" becoming "37.1 C"; anything else is passed through as it is.
+decic_to_c() {
+    case $1 in
+        ""|*[!0-9]*) printf '%s\n' "$1" ;;
+        *) printf '%s.%s C\n' "$((10#$1 / 10))" "$((10#$1 % 10))" ;;
+    esac
+}
+
 # The clusters, found once per run: little_policy and big_policy hold the
 # policy directories of the lowest and the highest cpu_capacity, and
 # big_cpus the big cluster's cpu numbers.  A single-cluster kernel leaves
@@ -240,6 +318,41 @@ has_big() {
     [ -n "$big_policy" ] && [ "$big_policy" != "$little_policy" ]
 }
 
+# guard_capped: yes when the guard is on and one of its flags holds -- the
+# state apply balanced caps the big cluster and the GPU for.
+guard_capped() {
+    if [ "$GUARD" = off ]; then
+        return 1
+    fi
+    [ -e "$RUN_DIR/hot" ] || [ -e "$RUN_DIR/low" ]
+}
+
+# guard_big_max: the big policy's guard cap, clamped to an available
+# frequency as the saver clamps the little cluster; no answer when the
+# policy offers no list to clamp by (or is not there).
+guard_big_max() {
+    local avail
+    avail=$(read_val "$big_policy/scaling_available_frequencies")
+    if [ -z "$avail" ]; then
+        return 1
+    fi
+    cap_freq "$avail" "$GUARD_BIG_MAX_KHZ"
+}
+
+# guard_flag NAME yes|no: create or remove one of the guard's flags, in
+# the saver flag's style.
+guard_flag() {
+    if [ "$2" = yes ]; then
+        if : > "$RUN_DIR/$1" 2>/dev/null; then
+            chmod 0644 "$RUN_DIR/$1" 2>/dev/null || true
+        else
+            log "cannot create $RUN_DIR/$1"
+        fi
+    else
+        rm -f "$RUN_DIR/$1" 2>/dev/null || log "cannot remove $RUN_DIR/$1"
+    fi
+}
+
 # big_cores up|down: online or offline the big cluster, one cpu at a time
 # in t715-keys' order.  A cpu without an online file is logged (a kernel
 # without the Exynos5433 hot-unplug has none at all); the little cluster
@@ -260,12 +373,19 @@ big_cores() {
     done
 }
 
-# active_profile: what PPD holds, from powerprofilesctl, or from its state
+# active_profile: what PPD holds, asked over D-Bus, or from its state
 # file, or balanced when neither answers (as before PPD starts at boot).
+# busctl, not powerprofilesctl: the guard asks every 30 s, and
+# powerprofilesctl, a Python program, costs 0.7 s of CPU per call on the
+# A53s against 13 ms for busctl (measured 2026-11-07).  busctl answers
+# with the D-Bus type first: s "power-saver".
 active_profile() {
     local p=""
-    if p=$(powerprofilesctl get 2>/dev/null); then
-        p=${p%%[[:space:]]*}
+    if p=$(busctl get-property org.freedesktop.UPower.PowerProfiles \
+            /org/freedesktop/UPower/PowerProfiles \
+            org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null); then
+        p=${p#s \"}
+        p=${p%%\"*}
     elif p=$(sed -n 's/^Profile=//p' "$PPD_STATE" 2>/dev/null); then
         p=${p%%[[:space:]]*}
     else
@@ -337,7 +457,7 @@ apply_power_saver() {
 }
 
 apply_balanced() {
-    local p avail="" want="" dev
+    local p avail="" want="" cur="" capped dev
     # The flag goes before the cores come back, so that a wake in between
     # already sees the saver off.
     rm -f "$RUN_DIR/saver" 2>/dev/null || log "cannot remove $RUN_DIR/saver"
@@ -356,17 +476,28 @@ apply_balanced() {
     fi
     # Every active policy back on schedutil at its top frequency.  A policy
     # whose cpus are all offline answers EBUSY: it keeps its settings and
-    # gets them back with its cpus.
+    # gets them back with its cpus.  The big policy takes the guard's cap
+    # instead while a guard flag holds (the little cluster never does).
     note_little="-"
     for p in "$CPUFREQ"/policy*; do
         [ -d "$p" ] || continue
         [ -n "$(read_val "$p/scaling_governor")" ] || continue
         set_governor schedutil "$p/scaling_governor" "$p/scaling_available_governors"
         want=$(read_val "$p/cpuinfo_max_freq")
+        capped=no
+        if [ "$p" = "$big_policy" ] && has_big && guard_capped; then
+            avail=$(read_val "$p/scaling_available_frequencies")
+            if [ -n "$avail" ]; then
+                want=$(cap_freq "$avail" "$GUARD_BIG_MAX_KHZ")
+                capped=yes
+            fi
+        fi
         if [ -n "$want" ]; then
             write_val "$want" "$p/scaling_max_freq"
             if [ "$p" = "$little_policy" ]; then
                 note_little=$want
+            elif [ "$capped" = yes ]; then
+                note_big="$note_big, guard max $want"
             fi
         else
             log "${p##*/}: no cpuinfo_max_freq, its max stays"
@@ -378,13 +509,23 @@ apply_balanced() {
         write_val 1 "$CPUFREQ/boost"
         note_boost=1
     fi
-    # The GPU back on simple_ondemand at its top frequency.
+    # The GPU back on simple_ondemand at its top frequency, or at the
+    # guard's cap while a guard flag holds (its min brought down first
+    # where it sits above that cap, as the saver does).
     note_gpu="-"
     for dev in $(gpu_devs); do
         set_governor simple_ondemand "$dev/governor" "$dev/available_governors"
         avail=$(read_val "$dev/available_frequencies")
         if [ -n "$avail" ]; then
-            want=$(cap_freq "$avail" "")
+            if guard_capped; then
+                want=$(cap_freq "$avail" "$GUARD_GPU_MAX_HZ")
+                cur=$(read_val "$dev/min_freq")
+                if [ -n "$cur" ] && [ "$cur" -gt "$want" ]; then
+                    write_val "$want" "$dev/min_freq"
+                fi
+            else
+                want=$(cap_freq "$avail" "")
+            fi
             write_val "$want" "$dev/max_freq"
             note_gpu="${dev##*/}=$want"
         else
@@ -410,8 +551,120 @@ apply() {
     log "$profile: little max ${note_little:-?}, big ${note_big:-?}, gpu ${note_gpu:-?}, boost ${note_boost:-?}"
 }
 
+# guard: read the battery, keep the two flags, and, while balanced is the
+# active profile, enforce what they mean on the big cluster and the GPU.
+# Power-saver caps both harder than the guard, so it only gets the flags;
+# a missing battery leaves everything as it is, without a log line.
+guard() {
+    local bat temp cap ext tstr cause="" biglog="" gpulog=""
+    local hot_was low_was hot_now low_now capped profile dev avail want cur
+    if [ "$GUARD" = off ]; then
+        rm -f "$RUN_DIR/hot" "$RUN_DIR/low" 2>/dev/null \
+            || log "cannot remove the guard flags"
+        return 0
+    fi
+    bat=$(find_battery) || return 0
+    temp=$(read_val "$bat/temp" | tr -d '[:space:]')
+    cap=$(read_val "$bat/capacity" | tr -d '[:space:]')
+    if external_power; then ext=yes; else ext=no; fi
+    if mkdir -p "$RUN_DIR" 2>/dev/null; then
+        chmod 0755 "$RUN_DIR" 2>/dev/null || true
+    fi
+    # Hot with hysteresis: set at GUARD_HOT_ON_DECIC, cleared only at
+    # GUARD_HOT_OFF_DECIC, and a reading in between keeps the state.
+    hot_was=no
+    [ -e "$RUN_DIR/hot" ] && hot_was=yes
+    hot_now=$hot_was
+    if [ "$hot_was" = yes ]; then
+        if [ "$temp" -le "$GUARD_HOT_OFF_DECIC" ]; then hot_now=no; fi
+    elif [ "$temp" -ge "$GUARD_HOT_ON_DECIC" ]; then
+        hot_now=yes
+    fi
+    # Low only away from the charger: with external power the tablet can
+    # charge its way out of it, whatever the capacity reads.
+    low_was=no
+    [ -e "$RUN_DIR/low" ] && low_was=yes
+    low_now=no
+    if [ -n "$cap" ] && [ "$cap" -le "$GUARD_LOW_PCT" ] && [ "$ext" = no ]; then
+        low_now=yes
+    fi
+    if [ "$hot_now" != "$hot_was" ]; then
+        guard_flag hot "$hot_now"
+    fi
+    if [ "$low_now" != "$low_was" ]; then
+        guard_flag low "$low_now"
+    fi
+    capped=no
+    if [ "$hot_now" = yes ] || [ "$low_now" = yes ]; then
+        capped=yes
+    fi
+    find_clusters
+    profile=$(active_profile)
+    # Only balanced gets the writes: power-saver already caps both harder.
+    if [ "$profile" = balanced ]; then
+        # The big policy, when it is active: the guard's cap while a flag
+        # holds, its cpuinfo_max_freq otherwise -- exactly what apply
+        # balanced writes there.  Inactive (its cpus offline), it is
+        # skipped silently: the next run catches up once it is online.
+        if has_big && [ -n "$(read_val "$big_policy/scaling_governor")" ]; then
+            if [ "$capped" = yes ]; then
+                want=$(guard_big_max)
+            else
+                want=$(read_val "$big_policy/cpuinfo_max_freq")
+            fi
+            if [ -n "$want" ]; then
+                cur=$(read_val "$big_policy/scaling_max_freq")
+                if [ "$cur" != "$want" ]; then
+                    write_val "$want" "$big_policy/scaling_max_freq"
+                fi
+                biglog=$want
+            fi
+        fi
+        # Every GPU devfreq device, same rule, its min brought down first
+        # where it sits above the cap (as the saver does).
+        for dev in $(gpu_devs); do
+            avail=$(read_val "$dev/available_frequencies")
+            [ -n "$avail" ] || continue
+            if [ "$capped" = yes ]; then
+                want=$(cap_freq "$avail" "$GUARD_GPU_MAX_HZ")
+                cur=$(read_val "$dev/min_freq")
+                if [ -n "$cur" ] && [ "$cur" -gt "$want" ]; then
+                    write_val "$want" "$dev/min_freq"
+                fi
+            else
+                want=$(cap_freq "$avail" "")
+            fi
+            cur=$(read_val "$dev/max_freq")
+            if [ "$cur" != "$want" ]; then
+                write_val "$want" "$dev/max_freq"
+            fi
+            gpulog=$want
+        done
+    fi
+    # One line, and only when a flag changed.
+    if [ "$hot_now" != "$hot_was" ] || [ "$low_now" != "$low_was" ]; then
+        tstr=$(decic_to_c "$temp")
+        if [ "$hot_now" = yes ] || [ "$low_now" = yes ]; then
+            case "$hot_now$low_now" in
+                yesno) cause="hot (battery $tstr)" ;;
+                noyes) cause="low (battery $tstr, ${cap:-?} %)" ;;
+                yesyes) cause="hot and low (battery $tstr, ${cap:-?} %)" ;;
+            esac
+            if [ -n "$biglog" ]; then
+                cause="$cause: big max $biglog"
+            fi
+            if [ -n "$gpulog" ]; then
+                cause="$cause, gpu max $gpulog"
+            fi
+        else
+            cause="back to the balanced limits (battery $tstr, ${cap:-?} %)"
+        fi
+        log "guard: $cause"
+    fi
+}
+
 status() {
-    local p dev n b v online gov
+    local p dev n b v online gov bat ext
     find_clusters
     printf 'profile: %s\n' "$(active_profile)"
     for p in "$CPUFREQ"/policy*; do
@@ -454,6 +707,23 @@ status() {
         v=absent
     fi
     printf 'saver flag: %s (%s)\n' "$v" "$RUN_DIR/saver"
+    # The guard's own one-liner: what the battery reads and the flags it
+    # makes, or why none of it is there.
+    if [ "$GUARD" = off ]; then
+        printf 'guard: off\n'
+    elif bat=$(find_battery); then
+        if external_power; then ext=yes; else ext=no; fi
+        v=no
+        [ -e "$RUN_DIR/hot" ] && v=yes
+        n=no
+        [ -e "$RUN_DIR/low" ] && n=yes
+        b=$(read_val "$bat/capacity" | tr -d '[:space:]')
+        printf 'guard: battery %s, %s %%, external power %s: hot %s, low %s\n' \
+            "$(decic_to_c "$(read_val "$bat/temp" | tr -d '[:space:]')")" \
+            "${b:-?}" "$ext" "$v" "$n"
+    else
+        printf 'guard: no battery\n'
+    fi
 }
 
 case ${1:-} in
@@ -474,6 +744,13 @@ case ${1:-} in
             exit 2
         fi
         status
+        ;;
+    guard)
+        if [ $# -ne 1 ]; then
+            usage
+            exit 2
+        fi
+        guard
         ;;
     *)
         usage

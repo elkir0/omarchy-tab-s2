@@ -836,7 +836,9 @@ The quick settings' **Battery saver** tile switches power-profiles-daemon
 between `balanced` and `power-saver` (`omarchy-powerprofiles-set`), whose
 placeholder driver does nothing on this kernel. `t715-power-profile`
 (`/usr/local/sbin/`, the overlay) applies the caps as root:
-`t715-power-profile.service` (`multi-user.target`, after and wanting PPD)
+`t715-power-profile.service` (`graphical.target`, after and wanting PPD;
+not `multi-user.target`, which PPD 0.30's unit starts after: that ordering
+cycle made systemd drop the job at every boot until 2026-11-07)
 runs `apply` once at boot, and `t715-power-profile.path`
 (`PathChanged=/var/lib/power-profiles-daemon/state.ini`) runs it again on
 every switch. Power-saver caps the A53 cluster at 1 GHz, takes the A57
@@ -851,10 +853,14 @@ can override the caps (`SAVER_LITTLE_MAX_KHZ`, `SAVER_BIG=offline|keep`,
 kernel #7, and the boost part a kernel with `cpufreq/boost`; each is
 skipped, with a log line, while its file is absent. The whole story is in
 `docs/hardware/BATTERY.md` §13.
-`configure-system.sh` enables both units;
+`t715-power-guard.service` (run by `t715-power-guard.timer`, every 30 s)
+adds the battery heat and low-battery guard: while balanced is active and
+the battery is hot or low, the A57 cluster and the GPU sit at the guard's
+caps instead of their top frequencies.
+`configure-system.sh` enables the three units;
 `image/tests/test_t715_power_profile.sh` runs the script off the device on
 a fake sysfs, `image/tests/test_t715_keys.sh` covers the flag, and
-`verify-rootfs.sh` checks the files, the modes and the two enabled units.
+`verify-rootfs.sh` checks the files, the modes and the enabled units.
 
 ## Modem and telephony
 

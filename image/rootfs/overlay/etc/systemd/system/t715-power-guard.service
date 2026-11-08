@@ -1,0 +1,11 @@
+# SM-T715: cap the big CPU cluster and the GPU while the battery runs hot
+# or low, and give both their balanced limits back once it recovers
+# (t715-power-profile guard, docs/hardware/CPUFREQ.md decision D6).  Run by
+# t715-power-guard.timer, not on its own.
+[Unit]
+Description=Cap the big cluster and the GPU for a hot or low battery (SM-T715)
+After=t715-power-profile.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t715-power-profile guard

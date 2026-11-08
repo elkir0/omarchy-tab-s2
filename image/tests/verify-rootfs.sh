@@ -1014,13 +1014,14 @@ check "t715-reboot-to present, mode 0755 (RECOVERY or Download mode without Andr
 check "t715-reboot-to byte for byte" cmp -s <(cat_ /usr/local/sbin/t715-reboot-to) /our-overlay/usr/local/sbin/t715-reboot-to
 echo "== Battery saver (docs/image/ROOTFS.md, docs/hardware/BATTERY.md) =="
 PP=/usr/local/sbin/t715-power-profile
-for f in usr/local/sbin/t715-power-profile etc/systemd/system/t715-power-profile.service etc/systemd/system/t715-power-profile.path; do
+for f in usr/local/sbin/t715-power-profile etc/systemd/system/t715-power-profile.service etc/systemd/system/t715-power-profile.path \
+         etc/systemd/system/t715-power-guard.service etc/systemd/system/t715-power-guard.timer; do
     get "/$f"
     check "/$f identical to rootfs/overlay" cmp -s "$W/f" "/our-overlay/$f"
 done
 check "$PP mode 0755" test "$(fmode $PP)" = 0755
-t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-power-profile.service || true)"
-check "t715-power-profile.service enabled (multi-user.target.wants -> ${t:-missing})" \
+t="$(resolve /etc/systemd/system/graphical.target.wants/t715-power-profile.service || true)"
+check "t715-power-profile.service enabled (graphical.target.wants -> ${t:-missing}; PPD starts after multi-user.target)" \
     test "$t" = /etc/systemd/system/t715-power-profile.service
 t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-power-profile.path || true)"
 check "t715-power-profile.path enabled (multi-user.target.wants -> ${t:-missing})" \
@@ -1033,6 +1034,13 @@ get /etc/systemd/system/t715-power-profile.path; cp "$W/f" "$W/pp.path"
 check "t715-power-profile.path: watches PPD's state.ini and runs the service" \
     sh -c 'grep -qx "PathChanged=/var/lib/power-profiles-daemon/state.ini" "$1" &&
            grep -qx "Unit=t715-power-profile.service" "$1"' _ "$W/pp.path"
+t="$(resolve /etc/systemd/system/timers.target.wants/t715-power-guard.timer || true)"
+check "t715-power-guard.timer enabled (timers.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-power-guard.timer
+get /etc/systemd/system/t715-power-guard.service; cp "$W/f" "$W/pg.service"
+check "t715-power-guard.service: oneshot, runs guard, after t715-power-profile" \
+    sh -c 'grep -qx "Type=oneshot" "$1" && grep -qx "ExecStart=/usr/local/sbin/t715-power-profile guard" "$1" &&
+           grep -qx "After=t715-power-profile.service" "$1"' _ "$W/pg.service"
 get $PP; cp "$W/f" "$W/pp"
 check "t715-power-profile: the clusters by cpu_capacity, never a hardcoded cpu number" \
     sh -c 'grep -q "cpu_capacity" "$1" && ! grep -Eq "cpu[4-7]" "$1"' _ "$W/pp"
