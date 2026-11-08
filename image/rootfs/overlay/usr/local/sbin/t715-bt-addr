@@ -12,18 +12,23 @@
 # the CID nor the address is logged.
 #
 # mgmt only changes the public address of a powered-off controller; the
-# kernel then re-runs the setup with the new address and bluetoothd powers
-# the adapter on again.
+# kernel then writes the new address, announces the controller again, and
+# bluetoothd powers the adapter on.
 #
 # Usage: t715-bt-addr hciN  (started by t715-bt-addr@hciN.service, which
 # 90-t715-bt-addr.rules pulls in when the controller appears)
+#
+# Test hook (image/tests/test_t715_bt_addr.sh): T715_BT_ADDR_CID, the file
+# holding the CID (/sys/block/mmcblk0/device/cid); btmgmt and sleep are
+# taken from PATH.
 set -eu
 
 idx=${1:-hci0}
 idx=${idx#hci}
 log() { echo "t715-bt-addr: $*"; }
 
-if ! cid=$(cat /sys/block/mmcblk0/device/cid 2>/dev/null) || [ -z "$cid" ]; then
+if ! cid=$(cat "${T715_BT_ADDR_CID:-/sys/block/mmcblk0/device/cid}" 2>/dev/null) ||
+    [ -z "$cid" ]; then
     log "no eMMC CID, hci$idx keeps its address"
     exit 0
 fi
@@ -35,16 +40,21 @@ for c in 3 5 7 9 11; do
     addr=$addr:$(printf '%s' "$h" | cut -c"$c-$((c + 1))" | tr a-f A-F)
 done
 
+# The controller's address as mgmt reports it, empty while mgmt does not
+# list the index.  btmgmt exits 0 even when a command fails, so the script
+# reads the address back instead of trusting its exit status.
+mgmt_addr() {
+    btmgmt --index "$idx" info 2>/dev/null |
+        sed -n 's/^[[:space:]]*addr \([0-9A-Fa-f:]*\) .*/\1/p'
+}
+
 # hci_bcm registers the controller before its setup (patch download,
 # about 6 s) is over; until then mgmt does not list the index.
 cur=
 i=0
 while [ "$i" -lt 60 ]; do
-    if info=$(btmgmt --index "$idx" info 2>/dev/null) &&
-        cur=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*addr \([0-9A-Fa-f:]*\) .*/\1/p') &&
-        [ -n "$cur" ]; then
-        break
-    fi
+    cur=$(mgmt_addr)
+    [ -n "$cur" ] && break
     sleep 1
     i=$((i + 1))
 done
@@ -57,16 +67,34 @@ if [ "$cur" = "$addr" ]; then
     exit 0
 fi
 
-# Right after its setup the kernel still powers the controller up on its
-# own (auto-off window) and bluetoothd powers it on as soon as it shows
-# up: the change can be refused, so power off and retry for a while.
+# Right after its setup the kernel keeps the controller up for two seconds
+# without reporting it powered (HCI_AUTO_OFF), and bluetoothd powers it on
+# as soon as it shows up.  An address set inside that window is accepted,
+# but the kernel's power-on then takes its auto-off shortcut: it never
+# writes the address and never announces the controller again, and
+# bluetoothd has no adapter until the next boot (net/bluetooth/mgmt.c
+# set_public_address, hci_core.c hci_power_on; one boot in five on
+# 2026-11-08).  Powering on ends the window, so power on, then off for
+# real.  bluetoothd can still power the controller on in between, which
+# refuses the change: try again for a while.
 n=0
 while :; do
+    btmgmt --index "$idx" power on >/dev/null 2>&1 || true
     btmgmt --index "$idx" power off >/dev/null 2>&1 || true
-    if btmgmt --index "$idx" public-addr "$addr" >/dev/null 2>&1; then
-        log "hci$idx: generated address set"
-        exit 0
-    fi
+    btmgmt --index "$idx" public-addr "$addr" >/dev/null 2>&1 || true
+    # Accepted, the change takes the controller out of mgmt's list until
+    # the kernel has written the address; refused, the old one stays.
+    i=0
+    while [ "$i" -lt 10 ]; do
+        cur=$(mgmt_addr)
+        if [ "$cur" = "$addr" ]; then
+            log "hci$idx: generated address set"
+            exit 0
+        fi
+        [ -n "$cur" ] && break
+        sleep 1
+        i=$((i + 1))
+    done
     n=$((n + 1))
     if [ "$n" -ge 10 ]; then
         log "hci$idx: setting the generated address failed"
