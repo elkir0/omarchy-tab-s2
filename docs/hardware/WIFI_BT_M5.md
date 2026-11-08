@@ -93,7 +93,8 @@ root (same as TM2 `exynos5433-tm2-common.dtsi:39`).
 | child `interrupt-parent`/`interrupts` | `<&gpa2 2 IRQ_TYPE_EDGE_RISING>` | stock gpio 2 / `cfg-hostwake` gpa2-2 (438-444); rising edge = downstream `IRQF_TRIGGER_RISING` (kernel_universal5433 `bcm4358.c`); `interrupt-names "host-wakeup"` is what `hci_bcm` requests (`hci_bcm.c:1245`, `of_irq_get_byname(node, "host-wakeup")`) |
 | child `clocks` | `<&s2mps13_osc S2MPS11_CLK_BT>` | 32.768 kHz BT clock, PMIC clk output 2 (`s2mps13_bt`); `S2MPS11_CLK_BT = 2` (`include/dt-bindings/clock/samsung,s2mps11.h:15`); osc node from m2.dtsi:37-42. TM2 wires the same (`exynos5433-tm2-common.dtsi:1268-1269`). The stock BT node carries no `clocks`; this is the one borrowed-from-TM2 value (see §5) |
 | child `clock-names` | `"extclk"` | deprecated alias of `txco`; resolves through `bcm_get_txco` fallback (`hci_bcm.c:1067-1082`) |
-| child `max-speed` | `<921600>` | vendor userspace attach rate: `boot/README.md:63,137` + overlay `etc/default/brcm-bluetooth` (`BT_BAUD=921600`); consumed by hci_bcm as `oper_speed` |
+| child `max-speed` | `<3000000>` | TM2's speed on the same UART (`exynos5433-tm2-common.dtsi`); the baud clock comes from the audio PLL through `&cmu_aud` (§7.8), 460800 from 2026-10-28 to 2026-11-08, 921600 never worked on the bootloader's oscclk (§7.4); consumed by hci_bcm as `oper_speed` |
+| `&cmu_aud` assigned-clocks | `mout_aud_pll_user` → `fout_aud_pll`, `sclk_aud_uart` the PLL undivided, the other dividers /8 | `exynos5433-gts28ltexx-bt.dtsi` (`t715-bluetooth`), TM2's `&cmu_aud` (`exynos5433-tm2-common.dtsi`); the bootloader leaves the mux on oscclk — §7.8 |
 | child `pinctrl-0` | `<&bt_host_wake_pins &bt_wake_pins &bt_en_pins>` | stock `cfg-hostwake` (438-444), `cfg-btwake` (3496-3501), `cfg-en` (6196-6201) |
 | `brcm,requires-autobaud-mode` | **not set** | stock flow never autobauds: fixed 921600 open + patchram |
 
@@ -418,14 +419,14 @@ scan finds nearby devices:
      - CTS (gpz1-2) goes low as soon as BT_EN (gpd4-0) rises.
    - So the earlier failure was only the masked interrupt. The forced-on
      retry had come after a first failed setup.
-2. **460800 baud instead of 921600** (`-m5.dtsi`, `max-speed`).
+2. **460800 baud instead of 921600** (`-m5.dtsi`, `max-speed`) —
+   superseded by §7.8, which moves the clock to the audio PLL and runs
+   3 Mbaud.
    - UART3 runs from `sclk_aud_uart` = 24 MHz (oscclk). At 921600 the
      Samsung driver programs `UBRDIV = 0` / `UFRACVAL = 10`.
    - The patched controller accepts the `0xfc18` baud change at 115200,
      then never answers at 921600.
    - 460800 (`UBRDIV = 2`) works.
-   - Getting back to 921600 needs a faster UART3 clock (audio PLL
-     parent); left for later.
 3. **L2CAP getsockopt** (`net/socket.c`).
    - The 6.12.114 tree converted L2CAP to `->getsockopt_iter`
      (`sockopt_t`, `include/linux/net.h`) but `do_sock_getsockopt` only
@@ -481,7 +482,9 @@ Firmware and address:
   - The script powers the controller off (mgmt refuses
     `set_public_address` while powered, `net/bluetooth/mgmt.c`), sets the
     address, and the kernel re-runs the setup with `set_bdaddr`; bluetoothd
-    powers the adapter on again.
+    powers the adapter on again. This sequence lost the adapter on some
+    boots, through the kernel's auto-off window, until 2026-11-08: see
+    §7.8.
   - EFS is never read or written; neither the CID nor the address is
     logged.
 - Result on the tablet with no manual step:
@@ -581,3 +584,149 @@ The instrumentation of both sessions is kept in `out/m5-debug/`
   - verify-rootfs: 43 checks.
 - **Limit of the RAM-overlay root:** saved Wi-Fi connections (passwords)
   are lost at every reboot until the root filesystem is persistent.
+
+### 7.8 Bluetooth at 3 Mbaud, UHID and the address race (2026-11-08)
+
+Kernel `#10`: the daily `#9` tree (the 1.0.1 release tree plus
+`t715-sdcard`) plus the `t715-bluetooth` series, built with
+`--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=10`,
+tested on the tablet from RECOVERY, then the daily kernel: in BOOT since
+19:27. Not in a release yet.
+
+**3 Mbaud.** The BCM4358's UART (UART3, `ttySAC3`, inside the audio
+subsystem LPASS) ran at 460800 baud (§7.4) because its clock
+`sclk_aud_uart` came from oscclk: the bootloader leaves CMU_AUD's
+`mout_aud_pll_user` on the 24 MHz oscillator. 460800 baud carries
+46 kB/s; A2DP's high-quality SBC takes about 41 kB/s before its framing,
+and SBC-XQ more than the link has. 921600 was never an option there
+(UBRDIV = 0, §7.4).
+
+The series moves `mout_aud_pll_user` to the audio PLL (`fout_aud_pll`,
+196608009 Hz), as TM2 does (`exynos5433-tm2-common.dtsi`), gives
+`sclk_aud_uart` the PLL undivided, and sets `max-speed = <3000000>`,
+TM2's speed on the same UART. The Samsung UART driver rounds the divider
+down: read back on the tablet, UBRDIV = 3 and UFRACVAL = 1, that is
+196608009 / 65 = 3.025 Mbaud, 0.8 % fast.
+
+The other CMU_AUD dividers go to /8, so `div_aclk_aud` (the audio bus),
+the CA5 and `sclk_aud_i2s/pcm/slimbus` run at 24.6 MHz (24576002 Hz read
+back) instead of 24 MHz. Audio does not depend on these rates: the WM1814
+codec is the I2S bit and frame clock provider, from its own MCLK (the
+PMU's CLKOUT, the 24 MHz XXTI), and I2S0 runs on its bus clock
+(`gts28_wm1814.c`: CBP_CFP, `SAMSUNG_I2S_OPCLK_PCLK`). Checked on the
+tablet:
+
+- 2 s of playback took 2.46 s, against 2.42 s before; microphone capture
+  works; the same two existing codec warnings ("Mixer dropped sample",
+  "ASRC underclocked").
+- `/proc/tty/driver/s3c2410_serial` shows no framing, parity or overrun
+  counter on line 3.
+- A 20 s scan finds 16 devices.
+
+The patch RAM (firmware 0144) still loads at 115200 baud before the
+switch, about 5.7 s at boot: the compatible `brcm,bcm43540-bt` sets
+`no_early_set_baudrate`. At rest UMCON = 0 is expected: hci_bcm
+runtime-suspends the port 5 s after the last traffic (it has the host-wake
+interrupt) and stops the flow (CRTSCTS off, RTS low) while suspended.
+
+**UHID.** BlueZ 5.87 creates the input device of every Bluetooth keyboard
+or mouse through `/dev/uhid`: LE ones always (HID over GATT), classic ones
+too since `UserspaceHID=true` is the default in `/etc/bluetooth/input.conf`.
+Without `CONFIG_UHID` — every kernel up to the 1.0.1 release and the daily
+`#9` — no Bluetooth keyboard or mouse can connect. The series builds it
+in; `/dev/uhid` exists at boot (`crw------- root`, and bluetoothd runs as
+root).
+
+**The address race.** On some boots bluetoothd had no adapter ("No default
+controller") although `hci0` existed and the patch RAM had loaded: once in
+a 5-reboot loop on 2026-11-08, and once before on a test root. In that
+boot the journal shows bluetoothd's "Battery Provider Manager destroyed"
+right after the address change, and no "created" after it. The cause, in
+the kernel:
+
+- Right after a controller's setup the kernel keeps it up for two seconds
+  with `HCI_AUTO_OFF` (the auto-off window). mgmt reports it unpowered, so
+  `btmgmt power off` does nothing.
+- `set_public_address` (`net/bluetooth/mgmt.c`) accepts the change,
+  because the controller counts as unpowered. It removes the index and
+  queues a power-on.
+- `hci_power_on` (`net/bluetooth/hci_core.c`) then sees the controller
+  still up with `HCI_AUTO_OFF` and takes its shortcut: it never writes the
+  new address and never sends "Index Added". `HCI_CONFIG` stays set, so
+  mgmt answers "Invalid Index" until the next boot.
+
+The script hit the window whenever it ran before bluetoothd had powered
+the adapter on. The fix (`t715-bt-addr`): power on first, which ends the
+window, then power off for real, then set the address. `btmgmt` exits 0
+even when a command fails, so the script reads the address back: an
+accepted change takes the controller out of the list until the kernel has
+written the address, a refused one leaves the old address and the script
+tries again, at most 10 times. Proofs:
+
+- bluetoothd is D-Bus-activated, so it was masked for the test with
+  `systemctl mask --runtime bluetooth.service` (a plain stop is undone
+  within 0.2 s).
+- An address change opens a fresh window. The fixed script run inside it
+  set the address 5 times out of 5. The old sequence (power off,
+  public-addr) inside the same window lost the controller: `hci0` still in
+  sysfs, absent from mgmt.
+- Then 8 consecutive reboots of the daily system on kernel `#10` with the
+  fixed script (18:01 to 18:13): the adapter came up powered with its
+  generated address every time, and the journal shows "generated address
+  set" each boot.
+- `image/tests/test_t715_bt_addr.sh` models the window off the device
+  (9 groups, including a copy of the script without the power-on line,
+  which the model shows losing the controller).
+
+**Operating facts.**
+
+- The Bluetooth tile and airplane mode switch Bluetooth with rfkill
+  (`omarchy-bluetooth-power`). systemd-rfkill saves the soft block in
+  `/var/lib/systemd/rfkill/` and restores it at boot: Bluetooth switched
+  off stays off after a reboot, by design. `rfkill unblock bluetooth` or
+  the tile turns it back on. (On 2026-11-08 the tablet's daily system had
+  it blocked this way since an earlier session.)
+- Never unbind `hci_uart_bcm`
+  (`/sys/bus/serial/drivers/hci_uart_bcm/unbind`) or remove the
+  `hci_uart` module while Wi-Fi is up. On 2026-11-08 an unbind and
+  rebind brought Bluetooth back (address set, adapter powered), but
+  within 4 s Wi-Fi's firmware stopped answering
+  (`brcmf_msgbuf_query_dcmd: Timeout on response`) until a reboot. The
+  likely cause: the BCM4358's Bluetooth and Wi-Fi share the chip's
+  32.768 kHz low-power clock, which comes from the PMIC's `s2mps13_bt`
+  output — only the Bluetooth node claims it, so the unbind switches it
+  off. BT_EN going low is the other candidate; this was not separated.
+  rfkill, the tile and airplane mode only close the HCI device, the chip
+  stays powered, so normal use never does this.
+
+**Devices tested (2026-11-08).** Each device was paired from the quick
+settings' Bluetooth panel (which pairs, trusts and connects), about 18:30
+to 19:00, on the daily system booted from RECOVERY.
+
+- A keyboard (Bluetooth LE, HID over GATT, through `/dev/uhid`): pairs,
+  trusts, types and reconnects after sleeping. A classic keyboard
+  (BR/EDR HID) paired too. bluetoothd logs "Write output report failed:
+  Attribute value length is invalid" — the keyboard refuses the LED
+  output report; harmless. Omarchy's keyboard shortcuts did not answer;
+  its 226 default bindings are loaded. Not investigated yet.
+- A mouse, a Logitech MX Master 3S (Bluetooth LE, through `/dev/uhid`):
+  pairs, trusts, clicks, scrolls and reconnects after sleeping. Its first
+  pairing crashed the touch shell once: quickshell 0.3.2 died with
+  SIGSEGV 11 s after the mouse's input device appeared, while handling
+  BlueZ property updates for it; the core dump's only frame is
+  `pthread_mutex_lock` on a thread other than the main one, with no
+  symbols. systemd-coredump then held the tablet about 40 s with a black
+  screen (two 24 MB cores, the crash handler's fork dumps too: 420 MB and
+  23 s of CPU each), after which `omarchy-shell` relaunched the shell.
+  Not seen again: the mouse reconnected later without a crash.
+- A speaker, a BeoPlay A1 (A2DP sink, codec SBC): pairs, trusts, plays
+  cleanly, and the volume keys move it; AVRCP adds an input device for
+  its buttons. While it played the UART carried 46,074 B/s to the chip:
+  all the old 460800 baud could carry, 15 % of the 3 Mbaud link. No UART
+  error. At connection, bluetoothd's "a2dp-source profile connect failed:
+  Device or resource busy" is both sides connecting at once; the stream
+  came up.
+- When an input device pairs, bluetoothd logs "Set device flags return
+  status: Invalid Parameters" and the kernel `hci0: Bad flag given (0x1)
+  vs supported (0x0)`: BlueZ asks for remote wakeup, which hci_bcm does
+  not offer; the image has no system suspend. Harmless.

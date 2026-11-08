@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/2] ARM: configs: gts28ltexx: UHID, for Bluetooth keyboards
+ and mice
+
+BlueZ creates the input device of a Bluetooth keyboard or mouse through
+/dev/uhid: always for LE ones (the HID over GATT profile), and for
+classic ones too since UserspaceHID became the default in input.conf
+(BlueZ 5.87 on the tablet).  Without UHID no Bluetooth keyboard or
+mouse can connect.  Build it in, so /dev/uhid is there when bluetoothd
+starts; HIDP stays for UserspaceHID=false.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index ed177b8bd..4d20651dd 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -315,6 +315,10 @@ CONFIG_BT_BNEP=m
+ CONFIG_BT_BNEP_MC_FILTER=y
+ CONFIG_BT_BNEP_PROTO_FILTER=y
+ CONFIG_BT_HIDP=m
++# Bluetooth keyboards and mice: BlueZ hands their HID reports to the
++# kernel through /dev/uhid, LE ones always and classic ones by default
++# (input.conf UserspaceHID=true); HIDP above serves UserspaceHID=false.
++CONFIG_UHID=y
+ CONFIG_SERIAL_DEV_BUS=y
+ CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+ CONFIG_SERIAL_SAMSUNG=m
+-- 
+2.52.0
+

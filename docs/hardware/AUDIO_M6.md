@@ -184,6 +184,20 @@ I2S0 in mainline is the i2sv7 type with `QUIRK_PRI_6CHAN | QUIRK_SEC_DAI |
 QUIRK_NEED_RSTCLR | QUIRK_SUPPORTS_TDM` (`sound/soc/samsung/i2s.c:1687-1692`);
 DAI names `samsung-i2s` / `samsung-i2s-sec` (`i2s.c:1172`).
 
+Since `t715-bluetooth` (2026-11-08) CMU_AUD runs from the audio PLL, not
+the bootloader's oscclk: `mout_aud_pll_user` sits on `fout_aud_pll`
+(196608009 Hz) and the block's dividers other than the UART's go to /8,
+so `div_aclk_aud`, the CA5 and `sclk_aud_i2s/pcm/slimbus` run at 24.6 MHz
+(24576002 Hz read back) instead of 24 MHz. Audio is unaffected: the WM1814
+is the I2S bit and frame clock provider, from its own MCLK (the PMU's
+CLKOUT, the 24 MHz XXTI of the chain above), and I2S0 runs on its bus
+clock (`gts28_wm1814.c`: CBP_CFP, `SAMSUNG_I2S_OPCLK_PCLK`). Checked on
+the tablet: 2 s of playback took 2.46 s against 2.42 s before, microphone
+capture works, and the codec logs the same two existing warnings
+("Mixer dropped sample", "ASRC underclocked"). The reason for the change
+is UART3's baud clock, which the PLL carries to 3 Mbaud:
+`docs/hardware/WIFI_BT_M5.md` §7.8.
+
 ---
 
 ## 4. Machine driver specification (transcribed for the future milestone)

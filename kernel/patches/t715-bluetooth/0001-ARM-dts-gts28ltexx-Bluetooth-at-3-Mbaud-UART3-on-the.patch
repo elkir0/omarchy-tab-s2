@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/2] ARM: dts: gts28ltexx: Bluetooth at 3 Mbaud, UART3 on the
+ audio PLL
+
+The BCM4358 ran at 460800 baud because UART3's clock, sclk_aud_uart,
+came from the oscillator: the bootloader leaves CMU_AUD's
+mout_aud_pll_user on the 24 MHz oscclk, and 921600 needs a zero UBRDIV,
+after which the controller stopped answering.  460800 baud carries
+46 kB/s; A2DP's high quality SBC takes 41 kB/s before its framing, and
+SBC-XQ more than the link has.
+
+Move mout_aud_pll_user to the audio PLL, as TM2 does
+(exynos5433-tm2-common.dtsi), give sclk_aud_uart the PLL's 196.6 MHz
+undivided, and run the controller at 3 Mbaud, TM2's speed on the same
+UART.  The driver rounds the divider down to UBRDIV 3 and UFRACVAL 1:
+3.025 Mbaud, 0.8 % fast.
+
+The PLL feeds the whole audio block, so its other dividers go to 8: the
+audio bus, the CA5 and the I2S, PCM and SLIMbus clocks run at 24.6 MHz
+instead of 24 MHz.  The WM1814 is the I2S clock provider, from its own
+MCLK (the PMU's CLKOUT), and I2S0 runs on its bus clock
+(gts28_wm1814.c: CBP_CFP, SAMSUNG_I2S_OPCLK_PCLK), so playback and
+capture do not depend on these rates.  On the tablet: firmware 0144
+loads, a scan finds 16 devices, the UART counts no framing, parity or
+overrun error, and 2 s of playback and 2.5 s of microphone capture
+behave as before (same duration, the same two existing codec warnings).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx-bt.dtsi | 44 ++++++++++++++++---
+ 1 file changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
+index 81e5f5b60..37581a6df 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-bt.dtsi
+@@ -109,16 +109,46 @@ bluetooth {
+ 		clock-names = "extclk";
+ 
+ 		/*
+-		 * Stock runs 921600 (libbt_vndcfg.txt UART_TARGET_BAUD_RATE),
+-		 * but UART3 is clocked at 24 MHz here (sclk_aud_uart from
+-		 * oscclk), which gives UBRDIV = 0 at 921600: after the baud
+-		 * switch the controller no longer answers (seen on the
+-		 * device, 2026-10-28).  460800 gives UBRDIV = 2 (0.16 %
+-		 * error) and works.
++		 * 3 Mbaud, as TM2 runs the same UART: sclk_aud_uart comes
++		 * from the audio PLL at 196.6 MHz (&cmu_aud below), and the
++		 * driver, which rounds the divider down, sets UBRDIV 3 and
++		 * UFRACVAL 1 (read back on the tablet): 3.025 Mbaud, 0.8 %
++		 * fast.  On the bootloader's 24 MHz oscclk the UART stopped
++		 * at 460800: 921600 needs UBRDIV = 0, after which the
++		 * controller no longer answered (2026-10-28), and 460800
++		 * baud carries 46 kB/s, which A2DP's high quality SBC
++		 * (41 kB/s before its framing) nearly fills and SBC-XQ
++		 * exceeds (2026-11-08).  The stock tree runs 921600
++		 * (libbt_vndcfg.txt UART_TARGET_BAUD_RATE).
+ 		 */
+-		max-speed = <460800>;
++		max-speed = <3000000>;
+ 
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&bt_host_wake_pins &bt_wake_pins &bt_en_pins>;
+ 	};
+ };
++
++/*
++ * UART3's baud clock, sclk_aud_uart, divides CMU_AUD's mout_aud_pll_user,
++ * which the bootloader leaves on oscclk: 24 MHz for the whole audio block.
++ * Move it to the audio PLL (fout_aud_pll, 196.6 MHz, already running) as
++ * TM2 does (exynos5433-tm2-common.dtsi &cmu_aud), give the UART the PLL
++ * undivided, and divide everything else by 8, to 24.6 MHz, so the audio
++ * block's bus, its debug clocks and the I2S, PCM and SLIMbus clocks stay
++ * close to the 24 MHz they ran at: the codec drives the I2S bit and frame
++ * clocks from its own MCLK (the PMU CLKOUT), and I2S0 only uses its bus
++ * clock (gts28_wm1814.c: CBP_CFP, SAMSUNG_I2S_OPCLK_PCLK).  The rates
++ * carry a few hertz of slack because the PLL runs at 196608009 Hz and a
++ * divider never goes above the rate it is asked for.
++ */
++&cmu_aud {
++	assigned-clocks = <&cmu_aud CLK_MOUT_AUD_PLL_USER>,
++			  <&cmu_aud CLK_DIV_AUD_CA5>,
++			  <&cmu_aud CLK_DIV_SCLK_AUD_I2S>,
++			  <&cmu_aud CLK_DIV_SCLK_AUD_PCM>,
++			  <&cmu_aud CLK_DIV_SCLK_AUD_SLIMBUS>,
++			  <&cmu_aud CLK_DIV_SCLK_AUD_UART>;
++	assigned-clock-parents = <&cmu_top CLK_FOUT_AUD_PLL>;
++	assigned-clock-rates = <0>, <24576002>, <24576002>, <24576002>,
++			       <24576002>, <196608010>;
++};
+-- 
+2.52.0
+
