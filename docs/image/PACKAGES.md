@@ -239,7 +239,7 @@ targets Omarchy 4.0.6.
 ### omamobile-shell 0.2.94-2
 
 Moved from 0.2.32-1.15 on 2026-11-03 (the owner's yes); 0.2.94-2 (2026-11-05)
-adds the Modem tile. What the tablet
+adds the Modem tile, 0.2.94-5 (2026-11-08) the SD card tile. What the tablet
 gains from upstream: the drawer swiped up from anywhere and following the
 finger, with no keyboard and no icon rescan; the home pill in a 44 px bottom
 bar that apps no longer draw under; recents named by app; a media card in the
@@ -253,7 +253,7 @@ is what lets the widgets idle while the panel is off.
   `omamobile-setup-user`, `-launch`, `-osk-watch`, `-bt-agent`,
   `-screenrecord`, `-widget`; `omamobile-setup-user.service` (masked in the
   image); the polkit rule that asks a wheel member for their own password.
-- **Changed for the tablet**, eleven patches against 87b8395:
+- **Changed for the tablet**, twelve patches against 87b8395:
   `0001-tablet-quick-settings-tiles.patch`
   (`TilesModel.js`: no mobile data, hotspot, torch, location, NFC,
   fingerprint or rotation-lock tile; the tablet's default layout;
@@ -273,7 +273,10 @@ is what lets the widgets idle while the panel is off.
   goes through `t715-keys`, its Escape by name finds no key here),
   `0011-tablet-modem-tile.patch` (the Modem tile over `t715-modem-power`, from
   `t715-modem`: the CP off now and at boot, a long press for Réseau mobile and its
-  standby setting; "Modem off" on the Mobile data tile meanwhile). Upstream
+  standby setting; "Modem off" on the Mobile data tile meanwhile),
+  `0012-tablet-sdcard-tile.patch` (the SD card tile over `t715-sdcard`: on
+  while the card is mounted, a tap mounts or ejects, a long press opens the
+  card in Files, dimmed without the command or the slot). Upstream
   now has what 0.2.32's 0003 (the light drawer), 0009 and 0010 (the bottom
   strip, app names in recents) did, so they are gone. `tablet-shell.json` as `profile/shell.json` (the eight
   plugins, the watchers on, the drawer at 6 columns, Omarchy's idle timers at 0,

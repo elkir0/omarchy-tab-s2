@@ -1,0 +1,159 @@
+The SD card tile, over t715-sdcard
+
+The microSD slot's own tile, after the Modem one: on while the card is mounted,
+off with a card in but not mounted (a tap mounts it, about a second) or with no
+card. The session's udiskie already mounts a card that goes in, so the tile
+shows and changes the state rather than owning it. A long press opens the card
+in Files (Disks when it cannot be read). Without the command or the slot no
+sdcard key is probed and the tile stays dimmed, so an image without t715-sdcard
+or a kernel without the slot never fails. Against omarchy-mobile 87b8395
+(omamobile-shell 0.2.94) and the patches before it, packages/omamobile-shell.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -222,7 +222,7 @@ Item {
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+     "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane, "modem": modem,
+-    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
++    "sdcard": sdcard, "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+     "screen-record": screenRecord, "fingerprint": fingerprint, "keyboard": keyboard,
+@@ -1047,6 +1047,46 @@ Item {
+     onTriggered: root.refreshProbe()
+   }
+ 
++  // SM-T715 tablet: the microSD slot (t715-sdcard, in the root image's
++  // overlay). The session's udiskie already mounts a card that goes in, so
++  // the tile shows and changes the state rather than owning it. A tap mounts
++  // a readable card that is not mounted, ejects one that is, and does
++  // nothing without a card; a long press opens the card in Files (Disks
++  // when it cannot be read). No "sdcard" key without the command or the
++  // slot: the tile stays dimmed, on a kernel or an image without it.
++  QtObject {
++    id: sdcard
++    readonly property bool available: root.probedHas("sdcard")
++    readonly property bool enabled: available && root.probedOn("sdcard", "sdcard")
++    readonly property bool hasCard: available && root.probed.sdcard_card === "yes"
++    // A full-size SD glyph while a card is in, the micro SD one without.
++    readonly property string icon: hasCard ? "󰑹" : "󰟜"
++    readonly property string status: {
++      if (!available) return "No slot"
++      if (root.optimistic["sdcard"] !== undefined)
++        return root.optimistic["sdcard"] ? "Mounting…" : "Ejecting…"
++      if (!hasCard) return "No card"
++      if (!enabled) return root.probed.sdcard_fs ? "Not mounted" : "Not readable"
++      return root.probed.sdcard_free ? root.probed.sdcard_free + " free" : "On"
++    }
++    readonly property bool longPress: true
++    function toggle() {
++      if (!available || !hasCard) return
++      root.runTileAction("sdcard", !enabled)
++      sdcardProbeLater.restart()
++    }
++    function openDetails() {
++      root.dismiss()
++      Quickshell.execDetached(["t715-sdcard", "open"])
++    }
++  }
++
++  Timer {
++    id: sdcardProbeLater
++    interval: 2000
++    onTriggered: root.refreshProbe()
++  }
++
+   // Rotation lock over omamobile-autorotate (omamobile-sensors): it rotates
+   // the screen while the sensor proxy has an accelerometer, unless
+   // ~/.local/state/omamobile/rotation-lock exists. Turning the lock off also
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -18,13 +18,16 @@ var VERSION = 1
+ // Mobile data goes through NetworkManager. Rotation is t715-rotate
+ // (docs/image/ROTATION.md). Hotspot needs the modem as its uplink: the tile
+ // takes the Wi-Fi radio off the client network while it is on. Modem is the
+-// modem's own switch, t715-modem-power (docs/hardware/MODEM.md §5.4).
++// modem's own switch, t715-modem-power (docs/hardware/MODEM.md §5.4). SD card
++// is the microSD slot's mount, t715-sdcard (udiskie mounts a card that goes
++// in; the tile shows and changes the state).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
+   { id: "modem", label: "Modem" },
++  { id: "sdcard", label: "SD card" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
+@@ -54,7 +57,7 @@ var DEFAULT_LAYOUT = [
+   "wifi", "bluetooth", "mobile-data", "dnd",
+   "airplane", "rotation-lock", "rotate", "battery-saver",
+   "dark-theme", "night-light", "keyboard", "clipboard",
+-  "screenshot", "location", "modem"
++  "screenshot", "location", "modem", "sdcard"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -106,6 +106,11 @@ case $tile in
+     # powers the CP down and keeps it off across a reboot; on boots it again.
+     exec t715-modem-power "$want"
+     ;;
++  sdcard)
++    # SM-T715: the microSD card's mount (t715-sdcard). Mounting takes about a
++    # second; ejecting unmounts and says so.
++    if [ "$want" = on ]; then exec t715-sdcard mount; else exec t715-sdcard eject; fi
++    ;;
+   mobile-data)
+     # The first gsm connection (t715-mobile on the SM-T715).
+     con=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2 == "gsm" { print $1; exit }')
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -28,6 +28,13 @@
+ #                 without the modem
+ #   modem_cp      the CP's state while it is on: online, booting, waiting,
+ #                 crashed, offline, stopping or off
++#   sdcard        SM-T715: the microSD slot (t715-sdcard): on while the card
++#                 is mounted, off with a card in and not mounted or with no
++#                 card; no line without the command, or on a kernel without
++#                 the slot
++#   sdcard_card   a card in the slot: yes or no
++#   sdcard_fs     its file system, empty when none can be read
++#   sdcard_free   its free space while it is mounted, empty otherwise
+ 
+ t() { timeout 3 "$@" 2>/dev/null; }
+ have() { command -v "$1" >/dev/null 2>&1; }
+@@ -128,6 +135,26 @@ else
+   echo "modem=none"
+ fi
+ 
++# sdcard: the microSD slot through t715-sdcard's state, one call; no key at
++# all without the command or the slot, so the tile stays dimmed ("no slot"
++# here is a kernel without the slot driver, not an empty slot).
++if have t715-sdcard; then
++  sdc=$(t t715-sdcard state)
++  case $(printf '%s\n' "$sdc" | sed -n 's/^slot=//p') in
++    yes)
++      card=$(printf '%s\n' "$sdc" | sed -n 's/^card=//p')
++      fs=$(printf '%s\n' "$sdc" | sed -n 's/^fs=//p')
++      printf 'sdcard_card=%s\nsdcard_fs=%s\n' "$card" "$fs"
++      if [ "$(printf '%s\n' "$sdc" | sed -n 's/^mounted=//p')" = yes ]; then
++        echo "sdcard=on"
++        echo "sdcard_free=$(printf '%s\n' "$sdc" | sed -n 's/^free=//p')"
++      else
++        echo "sdcard=off"
++      fi
++      ;;
++  esac
++fi
++
+ # data: the NetworkManager gsm connection on the modem (SM-T715: the modem is
+ # served by shannond's ModemManager facade, not omamobile-sit). None without a
+ # gsm device or connection.
