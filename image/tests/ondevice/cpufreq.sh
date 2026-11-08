@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # cpufreq.sh — CPU frequency checks on the SM-T715, run as root ON THE TABLET
-# over SSH (docs/hardware/CPUFREQ.md section 9).
+# over SSH (docs/hardware/CPUFREQ.md section 9). T715_CLUSTER picks the
+# cluster under test: a53 (the default) is stage 1, policy0, the A53s, cpus
+# 0-3, the kernel capped at 1.2 GHz; a57 is stage 2, policy4, the A57s, cpus
+# 4-7, the kernel with the 800 MHz-1.5 GHz A57 table.
 #
 #   ssh root@172.16.42.1 'bash -s' -- precheck               < tests/ondevice/cpufreq.sh
 #   ssh root@172.16.42.1 'bash -s' -- load                   < tests/ondevice/cpufreq.sh
@@ -8,6 +11,10 @@
 #   ssh root@172.16.42.1 'bash -s' -- storm 400000 1200000 5 < tests/ondevice/cpufreq.sh
 #   ssh root@172.16.42.1 'bash -s' -- throttle               < tests/ondevice/cpufreq.sh
 #   ssh root@172.16.42.1 'bash -s' -- idle schedutil 10      < tests/ondevice/cpufreq.sh
+#   ssh root@172.16.42.1 'T715_CLUSTER=a57 bash -s' -- load                    < tests/ondevice/cpufreq.sh
+#   ssh root@172.16.42.1 'T715_CLUSTER=a57 bash -s' -- step 1300000 15         < tests/ondevice/cpufreq.sh
+#   ssh root@172.16.42.1 'T715_CLUSTER=a57 bash -s' -- storm 800000 1500000 10 < tests/ondevice/cpufreq.sh
+#   ssh root@172.16.42.1 'T715_CLUSTER=a57 bash -s' -- throttle 1200000        < tests/ondevice/cpufreq.sh
 #
 # precheck is P0 of the protocol. It reads only: /dev/mem is opened O_RDONLY
 # and mapped PROT_READ, so it cannot write, and the regmap file is read line by
@@ -17,38 +24,51 @@
 # last line says what was being read. The two A57 cluster blocks come last, one
 # word each, with the disks synced first.
 #
-# load, step, storm, throttle and idle are stage 1 (section 9, rows 1a-1d and
-# 1f): the TEST kernel in RECOVERY, cpufreq_dt a module loaded here by hand.
+# load, step, storm, throttle and idle are the stage rows (section 9, 1a-1d
+# and 1f): the TEST kernel in RECOVERY, cpufreq_dt a module loaded here by
+# hand. In a57 mode the cluster must be up: policy4 and its cpufreq-cpu4
+# cooling device exist only while cpus 4-7 are online, and the session daemon
+# offlines them when the screen goes dark, so every command but status and
+# rest refuses until they are online again, and one going offline during
+# step, storm, throttle or idle is an abort. The cluster not under test is
+# the reference: it stays at its fixed level, carries the flipper, the
+# monitor and the reference hashes, and its policy is never written.
 #   load                    1a: panic sysctls and console level 7, marker in
 #                             /dev/kmsg, modprobe, one PASS/FAIL line per item
 #                             (policies, levels, governors, rails, cooling
-#                             devices, zone maps, kernel messages), then the
-#                             reference hashes and clip, made on the fixed
-#                             A57. LOAD PASS / LOAD FAIL.
-#   step KHZ MIN            1b: policy0 at KHZ (clock and rail checked against
-#                             the OPP), one timed mem run on cpu0 into
-#                             speed.txt, then the load and the monitor.
+#                             devices, zone maps, kernel messages; a57 also
+#                             the A57 body-bias registers and boot line), then
+#                             the reference hashes and clip, made on the
+#                             reference cluster's fixed cpu. LOAD PASS / LOAD
+#                             FAIL.
+#   step KHZ MIN            1b: the tested policy at KHZ (clock and rail
+#                             checked against the OPP), one timed mem run on
+#                             the tested cluster's first cpu into speed.txt,
+#                             then the load and the monitor.
 #   storm KHZ1 KHZ2 MIN     1c: the same while the level flips every 50 ms;
 #                             ends with the total_trans delta (20 per second).
-#   throttle                1d: emul_temp on the three CPU zones; per case the
+#   throttle [KHZ]          1d: emul_temp on the three CPU zones; per case the
 #                             cooling state, scaling_max_freq and cur_freq,
 #                             then release back to state 0 and 1200000.
 #   idle KHZ|schedutil MIN  1f: no load, a status line every 10 s, then the
 #                             mean current and power, the total_trans delta and
-#                             time_in_state; policy0 back to userspace 1200000.
-#   rest                    policy0 back to userspace at 1200000, status line.
+#                             time_in_state of the tested policy; the tested
+#                             policy back to userspace 1200000.
+#   rest                    the tested policy back to userspace at 1200000,
+#                             status line.
 #   status                  one status line.
-# The load is one worker per A53, pinned with taskset, looping the workloads
-# (mem = sha256 of the 256 MiB stream file, neon/int = the 64 MiB stream hashed
-# through the NEON or the integer openssl code, video = the clip's md5) into
-# /run/t715-cpufreq/results.log, one line per result:
-# `<uptime> cpu<N> <workload> OK|BAD <value>`. The script comes over stdin:
-# everything backgrounded reads /dev/null, or it eats the script. Only
-# policy0's scaling_setspeed and scaling_governor, the three CPU zones'
-# emul_temp, the panic sysctls, printk and /dev/kmsg are ever written — never
-# policy4, never a regulator file, never /dev/mem or the regmap. On abort:
-# ABORT line, last status line, load stopped, sync, systemctl reboot (back to
-# the daily kernel); T715_NOREBOOT=1 skips the reboot and exits 3.
+# The load is one worker per cpu of the tested cluster, pinned with taskset,
+# looping the workloads (mem = sha256 of the 256 MiB stream file, neon/int =
+# the 64 MiB stream hashed through the NEON or the integer openssl code,
+# video = the clip's md5) into /run/t715-cpufreq/results.log, one line per
+# result: `<uptime> cpu<N> <workload> OK|BAD <value>`. The script comes over
+# stdin: everything backgrounded reads /dev/null, or it eats the script. Only
+# the tested policy's scaling_setspeed and scaling_governor, the three CPU
+# zones' emul_temp, the panic sysctls, printk and /dev/kmsg are ever written —
+# never the reference policy, never a regulator file, never an online file,
+# never /dev/mem for writing or the regmap. On abort: ABORT line, last status
+# line, load stopped, sync, systemctl reboot (back to the daily kernel);
+# T715_NOREBOOT=1 skips the reboot and exits 3.
 set -u
 cmd=${1:-}
 
@@ -63,13 +83,34 @@ reg_file() { ls -d /sys/kernel/debug/regmap/*-0066 2>/dev/null | head -1; }
 reg() { dd if="$(reg_file)/registers" bs=7 skip=$(($1)) count=1 2>/dev/null | tr -d '\n'; }
 clk() { awk -v n="$1" '$1 == n { print $1 "=" $5 }' /sys/kernel/debug/clk/clk_summary; }
 
-# ---- stage 1: policy0 (the A53s) only; policy4 is never written ----
+# ---- the two clusters; T715_CLUSTER picks the one under test (PT); the
+# other one, the reference, is never written ----
 P0=/sys/devices/system/cpu/cpufreq/policy0
 P4=/sys/devices/system/cpu/cpufreq/policy4
 FG=/sys/class/power_supply/sm5703-fuelgauge
 CHG=/sys/class/power_supply/sm5703-charger
 OUT=/run/t715-cpufreq
-LEVELS="400000 500000 600000 800000 900000 1000000 1100000 1200000"
+A53_LEVELS="400000 500000 600000 800000 900000 1000000 1100000 1200000"
+A53_UV="875000 912500 937500 1000000 1025000 1087500 1125000 1162500"
+A57_LEVELS="800000 900000 1000000 1100000 1200000 1300000 1400000 1500000"
+A57_UV="987500 1012500 1012500 1037500 1062500 1125000 1150000 1175000"
+case ${T715_CLUSTER:-a53} in
+a53)
+    CLUSTER=a53; PT=$P0; PTNUM=0; PTCpus="0 1 2 3"; PRFirst=4
+    LEVELS=$A53_LEVELS; UVS=$A53_UV; RAIL=vdd_kfc; PTOK=cpufreq-cpu0
+    MAXLBL="cpuinfo_max_freq both 1200000"; MAXWANT="1200000/1200000"
+    P4LEVELS=1200000; C4MAX=0; REFNAME=A57
+    ;;
+a57)
+    CLUSTER=a57; PT=$P4; PTNUM=4; PTCpus="4 5 6 7"; PRFirst=0
+    LEVELS=$A57_LEVELS; UVS=$A57_UV; RAIL=vdd_eagle; PTOK=cpufreq-cpu4
+    MAXLBL="cpuinfo_max_freq 1200000/1500000"; MAXWANT="1200000/1500000"
+    P4LEVELS=$A57_LEVELS; C4MAX=7; REFNAME=A53
+    ;;
+*)
+    echo "refused: T715_CLUSTER must be a53 or a57"; exit 2 ;;
+esac
+PTFirst=${PTCpus%% *}
 # the deterministic stream (AES-128-CTR of zeros, key and IV zero), hashed on
 # another machine; the workloads must produce exactly these.
 H256=87ce2d77e0b6dd1326c473b66de288b27003c21c03a110cdb31323491ab28f44
@@ -78,10 +119,18 @@ BADMSG='Internal error|(^|[^a-z])Oops[ :-]|undefined instruction|Unhandled fault
 
 pids=""; flipper=""; EMUL_TOUCHED=""; MT=0; LOST=""; MSG=""; bad=0
 
-uv_of() { case $1 in
-    400000) echo 875000 ;; 500000) echo 912500 ;; 600000) echo 937500 ;; 800000) echo 1000000 ;;
-    900000) echo 1025000 ;; 1000000) echo 1087500 ;; 1100000) echo 1125000 ;; 1200000) echo 1162500 ;; esac; }
-is_level() { case $1 in 400000|500000|600000|800000|900000|1000000|1100000|1200000) return 0 ;; *) return 1 ;; esac; }
+uv_of() { # KHZ in $LEVELS -> its uV, from the cluster's parallel table
+    local i=0 k
+    for k in $LEVELS; do
+        [ "$k" = "$1" ] && { nth_uv "$i"; return 0; }
+        i=$(( i + 1 ))
+    done
+}
+nth_uv() { # INDEX -> the INDEXth uV of the tested cluster
+    local i=0 u
+    for u in $UVS; do [ "$i" = "$1" ] && { echo "$u"; return 0; }; i=$(( i + 1 )); done
+}
+is_level() { case " $LEVELS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 ok_min() { case $1 in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 30 ]; }
 norm_list() { tr ' ' '\n' | awk 'NF' | sort -n | tr '\n' ' '; }
 rail() { dirname "$(grep -lx "$1" /sys/class/regulator/*/name 2>/dev/null | head -1)"; }
@@ -93,6 +142,31 @@ cdev_by_type() { local c; for c in /sys/class/thermal/cooling_device*; do
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; bad=1; }
 chk() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1: $2, wanted $3"; fi; }
+
+# cpus 4-7: the session daemon offlines them when the screen goes dark, and
+# with them go policy4 and the cpufreq-cpu4 cooling device, so in a57 mode
+# every command but status and rest refuses until they are back, and one
+# going offline during a run is an abort reason (watch, throttle).
+cpu_online() { # N: is cpu N in /sys/devices/system/cpu/online (ranges allowed)
+    local part
+    for part in $(cat /sys/devices/system/cpu/online 2>/dev/null | tr ',' ' '); do
+        case $part in
+        *-*) [ "$1" -ge "${part%-*}" ] && [ "$1" -le "${part#*-}" ] && return 0 ;;
+        *) [ "$part" = "$1" ] && return 0 ;;
+        esac
+    done
+    return 1
+}
+first_offline() { # -> "cpuN" for the first cpu of the tested cluster not online
+    local n
+    for n in $PTCpus; do cpu_online "$n" || { echo "cpu$n"; return 0; }; done
+    return 1
+}
+online_ok() { local n; for n in $PTCpus; do cpu_online "$n" || return 1; done; return 0; }
+need_online() { # for guard: refuse (exit 2) unless the tested cluster is up
+    local oc
+    online_ok || { oc=$(first_offline); echo "refused: ${oc:-cpu of $PTCpus} not online (policy4 and cpufreq-cpu4 exist only while cpus 4-7 are online; keep the screen on)"; exit 2; }
+}
 
 # workloads: the stream hashed three ways; OPENSSL_armcap pins the NEON (1) or
 # integer (0) code path of both openssl processes.
@@ -128,7 +202,10 @@ on_cpu() { # CPU CMD...: CMD and its children on one CPU, in a subshell, stdin
 start_load() {
     mkdir -p "$OUT"; rm -f "$OUT/stop"; : > "$OUT/results.log"; pids=""
     local n
-    for n in 0 1 2 3; do
+    # T715_LOAD_CPUS: a subset of the tested cluster's cpus for the load (one
+    # or two A57s hold a level that four take past 81 C within seconds)
+    for n in ${T715_LOAD_CPUS:-$PTCpus}; do
+        case " $PTCpus " in *" $n "*) ;; *) continue ;; esac
         ( taskset -pc "$n" "$BASHPID" >/dev/null 2>&1; worker "$n" ) </dev/null >/dev/null 2>&1 &
         pids="$pids $!"
     done
@@ -236,20 +313,21 @@ watch() { # "KHZ..." (empty: any clock) [nocdev]: the abort checks of section 9
     ring_check
     [ -n "$LOST" ] && abort "dmesg: the ring no longer reaches back to the last check"
     [ -n "$MSG" ] && abort "kernel message: $MSG"
+    if [ "$CLUSTER" = a57 ] && ! online_ok; then abort "$(first_offline) went offline"; fi
     if [ -n "$1" ]; then
         ok=0
         for p in 1 2 3; do # again after 0.3 s: a read can land mid-transition
-            cur=$(cat "$P0/scaling_cur_freq" 2>/dev/null); uv=$(rail_uv vdd_kfc)
+            cur=$(cat "$PT/scaling_cur_freq" 2>/dev/null); uv=$(rail_uv "$RAIL")
             for k in $1; do [ "$cur" = "$k" ] && [ "$uv" = "$(uv_of "$k")" ] && ok=1; done
             [ "$ok" = 1 ] && break; sleep 0.3
         done
-        [ "$ok" = 1 ] || abort "clock $cur / rail $uv, wanted $1 at its vdd_kfc"
+        [ "$ok" = 1 ] || abort "clock $cur / rail $uv, wanted $1 at its $RAIL"
     fi
     for z in /sys/class/thermal/thermal_zone*; do
         t=$(cat "$z/temp" 2>/dev/null); [ -n "$t" ] && [ "$t" -ge 85000 ] && abort "$(cat "$z/type" 2>/dev/null) at $t"
     done
     if [ "${2:-}" != nocdev ]; then
-        cs=$(cat "$(cdev_by_type cpufreq-cpu0)/cur_state" 2>/dev/null || echo 0)
+        cs=$(cat "$(cdev_by_type "$PTOK")/cur_state" 2>/dev/null || echo 0)
         [ "$cs" -gt 0 ] && abort "cooling state $cs: a trip is active"
     fi
     gt=$(cat "$FG/temp" 2>/dev/null || echo 0); [ "$gt" -ge 540 ] && abort "gauge temp $gt"
@@ -272,21 +350,27 @@ monitor() { # MIN KHZ...: a status line and the abort checks every 5 s
         sleep 5
     done
 }
-check_zone() { # TYPE T1 T2: exactly two cdev links to cpufreq-cpu0, passive, at T1/T2
-    local zn l ty tp temps n badty want got
-    zn=$(zone_by_type "$1")
-    [ -n "$zn" ] || { fail "$1: zone missing"; return 0; }
+check_zone() { # TYPE CDEV T1 [T2 T3]: exactly one passive cdev link to CDEV
+    # per temperature given, at those temperatures (stage 1: two trips on
+    # cpufreq-cpu0; stage 2: two or three on cpufreq-cpu4; the GPU devfreq
+    # device bound to the same trips is not counted)
+    local zn l ty tp temps n badty want got ztype cdev lbl
+    ztype=$1; cdev=$2; shift 2
+    zn=$(zone_by_type "$ztype")
+    [ -n "$zn" ] || { fail "$ztype: zone missing"; return 0; }
     n=0; badty=0; temps=""
     for l in $(ls "$zn" | grep -E '^cdev[0-9]+$'); do
         ty=$(cat "$zn/$l/type" 2>/dev/null)
-        [ "$ty" = cpufreq-cpu0 ] || continue
+        [ "$ty" = "$cdev" ] || continue
         n=$((n + 1)); tp=$(cat "$zn/${l}_trip_point" 2>/dev/null)
         temps="$temps $(cat "$zn/trip_point_${tp}_temp" 2>/dev/null)"
         [ "$(cat "$zn/trip_point_${tp}_type" 2>/dev/null)" = passive ] || badty=1
     done
-    want=$(printf '%s %s' "$2" "$3" | norm_list); got=$(printf '%s' "$temps" | norm_list)
-    if [ "$n" = 2 ] && [ "$badty" = 0 ] && [ "$got" = "$want" ]; then pass "$1: two passive trips $2/$3 on cpufreq-cpu0"
-    else fail "$1: n=$n passive=$(( 1 - badty )) temps=[$got] want=[$want]"; fi
+    want=$(printf '%s' "$*" | norm_list); got=$(printf '%s' "$temps" | norm_list)
+    if [ "$n" = "$#" ] && [ "$badty" = 0 ] && [ "$got" = "$want" ]; then
+        if [ "$#" = 2 ]; then lbl="two passive trips $1/$2"; else lbl="$# passive trips $*"; fi
+        pass "$ztype: $lbl on $cdev"
+    else fail "$ztype: n=$n passive=$(( 1 - badty )) temps=[$got] want=[$want]"; fi
 }
 guard() { # [load|any]: the test kernel only, and the module state must be right;
     # any (rest, status) also works below 50 %, to put things back
@@ -297,6 +381,8 @@ guard() { # [load|any]: the test kernel only, and the module state must be right
     local t
     for t in openssl taskset python3; do command -v "$t" >/dev/null 2>&1 || { echo "refused: $t missing"; exit 2; }; done
     [ "$(rd32 0x10004000 2>/dev/null)" = "0x01110111" ] || { echo "refused: fuse 0x10004000 is not 0x01110111, not this chip's table"; exit 2; }
+    # a57: policy4 and cpufreq-cpu4 exist only while cpus 4-7 are online
+    [ "$CLUSTER" = a57 ] && [ "${1:-}" != any ] && need_online
     mkdir -p "$OUT"
     local cap; cap=$(cat "$FG/capacity" 2>/dev/null) || { echo "refused: no fuel gauge"; exit 2; }
     [ "${1:-}" = any ] || [ "$cap" -ge 50 ] || { echo "refused: battery at $cap %"; exit 2; }
@@ -304,13 +390,19 @@ guard() { # [load|any]: the test kernel only, and the module state must be right
         lsmod | grep -q '^cpufreq_dt ' && { echo "refused: cpufreq_dt already loaded"; exit 2; }
     else
         lsmod | grep -q '^cpufreq_dt ' || { echo "refused: cpufreq_dt not loaded (run load first)"; exit 2; }
-        [ -d "$P0" ] || { echo "refused: no policy0"; exit 2; }
+        # a57: policy4 exists only while cpus 4-7 are online, so its absence
+        # is refused only when they are up; rest and status must work with
+        # the cluster down, to see the state and put things back
+        if [ ! -d "$PT" ]; then
+            { [ "$CLUSTER" = a57 ] && ! online_ok; } || { echo "refused: no policy$PTNUM"; exit 2; }
+        fi
     fi
 }
 
 case "$cmd" in
 precheck)
     grep -q bootmode=2 /proc/cmdline || { echo "refused: run this from the rescue (t715-reboot-to recovery)"; exit 2; }
+    [ "$CLUSTER" != a57 ] || need_online # its A57-block reads need cpus 4-7 up
     echo "kernel $(uname -r); hottest $(cat /sys/class/thermal/thermal_zone*/temp | sort -n | tail -1)"
 
     echo "--- P1 fuses (CHIPID2)"
@@ -355,15 +447,15 @@ load)
     kfc0=$(rail_uv vdd_kfc); eagle0=$(rail_uv vdd_eagle)
     echo "rails before: vdd_kfc $kfc0 vdd_eagle $eagle0"
     modprobe cpufreq_dt || { echo "LOAD FAIL: modprobe cpufreq_dt"; exit 1; }
-    for _ in $(seq 1 20); do [ -d "$P0" ] && break; sleep 0.5; done
+    for _ in $(seq 1 20); do [ -d "$P0" ] && [ -d "$P4" ] && break; sleep 0.5; done
 
     echo "--- 1a policies and levels"
     if [ -d "$P0" ] && [ -d "$P4" ]; then pass "policies policy0 policy4"; else fail "policies policy0/policy4"; fi
     chk "policy0 related_cpus" "$(cat $P0/related_cpus 2>/dev/null)" "0 1 2 3"
     chk "policy4 related_cpus" "$(cat $P4/related_cpus 2>/dev/null)" "4 5 6 7"
-    chk "cpuinfo_max_freq both 1200000" "$(cat $P0/cpuinfo_max_freq 2>/dev/null)/$(cat $P4/cpuinfo_max_freq 2>/dev/null)" "1200000/1200000"
-    chk "policy0 frequencies" "$(cat $P0/scaling_available_frequencies 2>/dev/null | norm_list)" "$(printf '%s' "$LEVELS" | norm_list)"
-    chk "policy4 frequencies" "$(cat $P4/scaling_available_frequencies 2>/dev/null | norm_list)" "$(echo 1200000 | norm_list)"
+    chk "$MAXLBL" "$(cat $P0/cpuinfo_max_freq 2>/dev/null)/$(cat $P4/cpuinfo_max_freq 2>/dev/null)" "$MAXWANT"
+    chk "policy0 frequencies" "$(cat $P0/scaling_available_frequencies 2>/dev/null | norm_list)" "$(printf '%s' "$A53_LEVELS" | norm_list)"
+    chk "policy4 frequencies" "$(cat $P4/scaling_available_frequencies 2>/dev/null | norm_list)" "$(printf '%s' "$P4LEVELS" | norm_list)"
     chk "governors userspace" "$(cat $P0/scaling_governor 2>/dev/null)/$(cat $P4/scaling_governor 2>/dev/null)" "userspace/userspace"
     chk "cur_freq 1200000 both" "$(cat $P0/scaling_cur_freq 2>/dev/null)/$(cat $P0/cpuinfo_cur_freq 2>/dev/null)/$(cat $P4/scaling_cur_freq 2>/dev/null)/$(cat $P4/cpuinfo_cur_freq 2>/dev/null)" "1200000/1200000/1200000/1200000"
 
@@ -375,36 +467,54 @@ load)
     c0=$(cdev_by_type cpufreq-cpu0); c4=$(cdev_by_type cpufreq-cpu4)
     if [ -n "$c0" ] && [ "$(cat "$c0/max_state" 2>/dev/null)" = 7 ]; then pass "cdev cpufreq-cpu0 max_state 7"
     else fail "cdev cpufreq-cpu0 max_state $(cat "$c0/max_state" 2>/dev/null)"; fi
-    if [ -n "$c4" ] && [ "$(cat "$c4/max_state" 2>/dev/null)" = 0 ]; then pass "cdev cpufreq-cpu4 max_state 0"
+    if [ -n "$c4" ] && [ "$(cat "$c4/max_state" 2>/dev/null)" = "$C4MAX" ]; then pass "cdev cpufreq-cpu4 max_state $C4MAX"
     else fail "cdev cpufreq-cpu4 max_state $(cat "$c4/max_state" 2>/dev/null)"; fi
-    check_zone atlas0-thermal 95000 100000
-    check_zone atlas1-thermal 95000 100000
-    check_zone apollo-thermal 81000 86000
-    c4hit=""
-    for zn in /sys/class/thermal/thermal_zone*; do
-        for l in $(ls "$zn" 2>/dev/null | grep -E '^cdev[0-9]+$'); do
-            [ "$(cat "$zn/$l/type" 2>/dev/null)" = cpufreq-cpu4 ] && c4hit="$c4hit $(cat "$zn/type" 2>/dev/null)"
+    check_zone atlas0-thermal cpufreq-cpu0 95000 100000
+    check_zone atlas1-thermal cpufreq-cpu0 95000 100000
+    check_zone apollo-thermal cpufreq-cpu0 81000 86000
+    if [ "$CLUSTER" = a53 ]; then
+        c4hit=""
+        for zn in /sys/class/thermal/thermal_zone*; do
+            for l in $(ls "$zn" 2>/dev/null | grep -E '^cdev[0-9]+$'); do
+                [ "$(cat "$zn/$l/type" 2>/dev/null)" = cpufreq-cpu4 ] && c4hit="$c4hit $(cat "$zn/type" 2>/dev/null)"
+            done
         done
-    done
-    [ -z "$c4hit" ] && pass "no zone bound to cpufreq-cpu4" || fail "cpufreq-cpu4 bound to:$c4hit"
+        [ -z "$c4hit" ] && pass "no zone bound to cpufreq-cpu4" || fail "cpufreq-cpu4 bound to:$c4hit"
+    else
+        # stage 2: cpufreq-cpu4 is bound, with stock's own passive trips per
+        # zone (section 5.2); the GPU devfreq device on the same trips is not
+        # the script's business
+        check_zone atlas0-thermal cpufreq-cpu4 81000 95000 100000
+        check_zone atlas1-thermal cpufreq-cpu4 81000 95000 100000
+        check_zone apollo-thermal cpufreq-cpu4 81000 86000
+        # the built-in driver must have put the cluster in the vendor state
+        chk "0x105C0780 (A57 ABB)" "$(rd32 0x105C0780 2>/dev/null)" "0x80000088"
+        w=$(rd32 0x11810330 2>/dev/null)
+        if [ $(( (w >> 20) & 7 )) = 3 ] && [ $(( (w >> 8) & 7 )) = 3 ]; then
+            pass "0x11810330 (EMA) fields 3/3 ($w)"
+        else fail "0x11810330 (EMA) $w, wanted bits22:20 and bits10:8 both 3"; fi
+        if { journalctl -k -b --no-pager -o cat 2>/dev/null || dmesg; } | grep -Eq 'A57 body bias: BB_CON0 0x[0-9a-f]+ -> 0x80000088; EMA 3 on cpus 4-7'; then
+            pass "A57 body bias boot line"
+        else fail "A57 body bias boot line missing"; fi
+    fi
     ring_check
     [ -n "$LOST" ] && fail "dmesg: the ring no longer reaches back to the marker"
     [ -n "$MSG" ] && fail "kernel message: $MSG" || pass "no bad kernel message"
 
-    echo "--- 1a references, on the fixed A57"
-    on_cpu 4 make_data
-    h=$(on_cpu 4 hash_mem); chk "data.bin sha256 (256 MiB)" "$h" "$H256"
-    h=$(on_cpu 4 hash_neon); chk "neon reference (64 MiB)" "$h" "$H64"
-    h=$(on_cpu 4 hash_int); chk "int reference (64 MiB)" "$h" "$H64"
+    echo "--- 1a references, on the fixed $REFNAME"
+    on_cpu "$PRFirst" make_data
+    h=$(on_cpu "$PRFirst" hash_mem); chk "data.bin sha256 (256 MiB)" "$h" "$H256"
+    h=$(on_cpu "$PRFirst" hash_neon); chk "neon reference (64 MiB)" "$h" "$H64"
+    h=$(on_cpu "$PRFirst" hash_int); chk "int reference (64 MiB)" "$h" "$H64"
     if command -v ffmpeg >/dev/null 2>&1; then
-        if on_cpu 4 make_clip && [ -s "$OUT/clip.mp4" ]; then
-            on_cpu 4 ffmpeg -v error -i "$OUT/clip.mp4" -f md5 - > "$OUT/clip.md5" 2>/dev/null
-            h=$(on_cpu 4 hash_video); chk "clip md5 round-trip" "$h" "$(cat "$OUT/clip.md5" 2>/dev/null)"
+        if on_cpu "$PRFirst" make_clip && [ -s "$OUT/clip.mp4" ]; then
+            on_cpu "$PRFirst" ffmpeg -v error -i "$OUT/clip.mp4" -f md5 - > "$OUT/clip.md5" 2>/dev/null
+            h=$(on_cpu "$PRFirst" hash_video); chk "clip md5 round-trip" "$h" "$(cat "$OUT/clip.md5" 2>/dev/null)"
         else fail "clip encode"; fi
     else
         echo "WARN no ffmpeg: video workload skipped"
     fi
-    echo "policy0 total_trans $(cat "$P0/stats/total_trans" 2>/dev/null)"
+    echo "policy$PTNUM total_trans $(cat "$PT/stats/total_trans" 2>/dev/null)"
     [ "$bad" = 0 ] && { echo "LOAD PASS"; exit 0; } || { echo "LOAD FAIL"; exit 1; }
     ;;
 step)
@@ -413,12 +523,12 @@ step)
     is_level "$KHZ" || { echo "refused: KHZ must be one of $LEVELS"; exit 2; }
     ok_min "$MIN" || { echo "refused: MIN must be 1-30"; exit 2; }
     mark
-    echo "$KHZ" > "$P0/scaling_setspeed"
+    echo "$KHZ" > "$PT/scaling_setspeed"
     sleep 0.5
-    cur=$(cat "$P0/scaling_cur_freq"); cif=$(cat "$P0/cpuinfo_cur_freq"); uv=$(rail_uv vdd_kfc)
+    cur=$(cat "$PT/scaling_cur_freq"); cif=$(cat "$PT/cpuinfo_cur_freq"); uv=$(rail_uv "$RAIL")
     { [ "$cur" = "$KHZ" ] && [ "$cif" = "$KHZ" ] && [ "$uv" = "$(uv_of "$KHZ")" ]; } || \
         abort "clock $cur/$cif rail $uv at $KHZ (wanted $(uv_of "$KHZ"))"
-    t0=$(date +%s%N); h=$(on_cpu 0 hash_mem); t1=$(date +%s%N)
+    t0=$(date +%s%N); h=$(on_cpu "$PTFirst" hash_mem); t1=$(date +%s%N)
     [ "$h" = "$H256" ] || abort "mem hash $h during the timed run"
     ns=$(( t1 - t0 )); mbs=$(( 268435456000 / ns ))
     echo "mem at $KHZ: $mbs MB/s ($(( ns / 1000000 )) ms)"
@@ -428,7 +538,7 @@ step)
         awk -v a="$mbs" -v b="$base" -v k="$KHZ" 'BEGIN { printf "report: speed ratio %.3f against clock ratio %.3f (vs 1200000)\n", a / b, k / 1200000 }'
     fi
     start_load
-    pin_self 4
+    pin_self "$PRFirst"
     monitor "$MIN" "$KHZ"
     unpin_self
     stop_load
@@ -443,59 +553,78 @@ storm)
     ok_min "$MIN" || { echo "refused: MIN must be 1-30"; exit 2; }
     mark
     start_load
-    tt0=$(cat "$P0/stats/total_trans" 2>/dev/null)
+    tt0=$(cat "$PT/stats/total_trans" 2>/dev/null)
     rm -f "$OUT/hold"
-    ( taskset -pc 4 "$BASHPID" >/dev/null 2>&1
+    ( taskset -pc "$PRFirst" "$BASHPID" >/dev/null 2>&1
       while [ ! -e "$OUT/stop" ]; do
           for k in "$K1" "$K2"; do # monitor() holds it on a level for its reads
               while [ -e "$OUT/hold" ] && [ ! -e "$OUT/stop" ]; do sleep 0.02; done
-              echo "$k" > "$P0/scaling_setspeed"; sleep 0.05
+              echo "$k" > "$PT/scaling_setspeed"; sleep 0.05
           done
       done ) </dev/null >/dev/null 2>&1 &
     flipper=$!
-    pin_self 4
+    pin_self "$PRFirst"
     monitor "$MIN" "$K1" "$K2"
     unpin_self
     kill "$flipper" 2>/dev/null; flipper=""; rm -f "$OUT/hold"
-    echo 1200000 > "$P0/scaling_setspeed"
+    echo 1200000 > "$PT/scaling_setspeed"
     stop_load
     watch "" nocdev
-    tt1=$(cat "$P0/stats/total_trans" 2>/dev/null)
+    tt1=$(cat "$PT/stats/total_trans" 2>/dev/null)
     echo "total_trans delta $(( tt1 - tt0 )) expected $(( MIN * 60 * 20 )) (20 per second)"
     echo "STORM PASS $(wl_counts)"
     ;;
 throttle)
     guard
+    KHZ=${2:-1200000}
+    is_level "$KHZ" || { echo "refused: KHZ must be one of $LEVELS"; exit 2; }
     mark
-    echo 1200000 > "$P0/scaling_setspeed"
-    c0=$(cdev_by_type cpufreq-cpu0)
-    [ -n "$c0" ] || { echo "refused: no cpufreq-cpu0 cooling device"; exit 2; }
+    echo "$KHZ" > "$PT/scaling_setspeed"
+    c0=$(cdev_by_type "$PTOK")
+    [ -n "$c0" ] || { echo "refused: no $PTOK cooling device"; exit 2; }
+    if [ "$CLUSTER" = a53 ]; then # the stage 1 maps, on cpufreq-cpu0
+        set -- "apollo-thermal 82000 1 2 -ge 1000000" \
+               "apollo-thermal 87000 2 7 -le 1000000" \
+               "atlas0-thermal 96000 1 2 -ge 1000000" \
+               "atlas0-thermal 101000 2 7 -le 1000000" \
+               "atlas1-thermal 96000 1 2 -ge 1000000" \
+               "atlas1-thermal 101000 2 7 -le 1000000"
+    else # section 5.2's stage 2 maps on cpufreq-cpu4: state 0 = 1.5 GHz,
+        # 7 = 0.8 GHz, so each trip's states and the ceiling it leaves
+        set -- "apollo-thermal 82000 3 6 -le 1200000" \
+               "apollo-thermal 87000 6 7 -le 900000" \
+               "atlas0-thermal 82000 1 3 -le 1400000" \
+               "atlas0-thermal 96000 3 6 -le 1200000" \
+               "atlas0-thermal 101000 6 7 -le 900000" \
+               "atlas1-thermal 82000 1 3 -le 1400000" \
+               "atlas1-thermal 96000 3 6 -le 1200000" \
+               "atlas1-thermal 101000 6 7 -le 900000"
+    fi
     trc=0
-    for spec in "apollo-thermal 82000 1 2 -ge" "apollo-thermal 87000 2 7 -le" \
-                "atlas0-thermal 96000 1 2 -ge" "atlas0-thermal 101000 2 7 -le" \
-                "atlas1-thermal 96000 1 2 -ge" "atlas1-thermal 101000 2 7 -le"; do
+    for spec in "$@"; do # the list is fixed above; set -- below cannot touch it
         set -- $spec
-        zt=$1; et=$2; lo=$3; hi=$4; op=$5
+        zt=$1; et=$2; lo=$3; hi=$4; op=$5; ceil=$6
+        [ "$CLUSTER" = a57 ] && ! online_ok && abort "$(first_offline) went offline"
         set_emul "$zt" "$et" || { fail "$zt $et: emul_temp refused"; trc=1; continue; }
         sleep 3
-        st=$(cat "$c0/cur_state" 2>/dev/null); mf=$(cat "$P0/scaling_max_freq" 2>/dev/null); cf=$(cat "$P0/scaling_cur_freq" 2>/dev/null)
+        st=$(cat "$c0/cur_state" 2>/dev/null); mf=$(cat "$PT/scaling_max_freq" 2>/dev/null); cf=$(cat "$PT/scaling_cur_freq" 2>/dev/null)
         ok=1
         case $st in ''|*[!0-9]*) ok=0 ;; *) [ "$st" -ge "$lo" ] && [ "$st" -le "$hi" ] || ok=0 ;; esac
-        case $mf in ''|*[!0-9]*) ok=0 ;; *) if [ "$op" = -ge ]; then [ "$mf" -ge 1000000 ] || ok=0
-            else [ "$mf" -le 1000000 ] || ok=0; fi ;; esac
+        case $mf in ''|*[!0-9]*) ok=0 ;; *) if [ "$op" = -ge ]; then [ "$mf" -ge "$ceil" ] || ok=0
+            else [ "$mf" -le "$ceil" ] || ok=0; fi ;; esac
         if [ "$ok" = 1 ]; then echo "PASS $zt $et: state $st, max_freq $mf, cur_freq $cf"
-        else echo "FAIL $zt $et: state $st (want $lo-$hi), max_freq $mf (want $op 1000000), cur_freq $cf"; trc=1; fi
+        else echo "FAIL $zt $et: state $st (want $lo-$hi), max_freq $mf (want $op $ceil), cur_freq $cf"; trc=1; fi
         set_emul "$zt" 0
         rok=0
         for i in $(seq 1 20); do
             sleep 0.5
             [ "$(cat "$c0/cur_state" 2>/dev/null)" = 0 ] || continue
-            if [ "$(cat "$P0/scaling_cur_freq" 2>/dev/null)" = 1200000 ]; then rok=1; break; fi
+            if [ "$(cat "$PT/scaling_cur_freq" 2>/dev/null)" = "$KHZ" ]; then rok=1; break; fi
         done
-        if [ "$rok" = 1 ]; then echo "PASS $zt released: state 0, cur_freq 1200000"
-        else echo "FAIL $zt release: state $(cat "$c0/cur_state" 2>/dev/null), cur_freq $(cat "$P0/scaling_cur_freq" 2>/dev/null)"; trc=1; fi
+        if [ "$rok" = 1 ]; then echo "PASS $zt released: state 0, cur_freq $KHZ"
+        else echo "FAIL $zt release: state $(cat "$c0/cur_state" 2>/dev/null), cur_freq $(cat "$PT/scaling_cur_freq" 2>/dev/null)"; trc=1; fi
     done
-    echo 1200000 > "$P0/scaling_setspeed"
+    echo "$KHZ" > "$PT/scaling_setspeed"
     exit "$trc"
     ;;
 idle)
@@ -504,13 +633,13 @@ idle)
     if [ "$mode" != schedutil ]; then is_level "$mode" || { echo "refused: KHZ must be in $LEVELS, or schedutil"; exit 2; }; fi
     ok_min "$MIN" || { echo "refused: MIN must be 1-30"; exit 2; }
     mark
-    tt0=$(cat "$P0/stats/total_trans" 2>/dev/null)
+    tt0=$(cat "$PT/stats/total_trans" 2>/dev/null)
     if [ "$mode" = schedutil ]; then
-        echo schedutil > "$P0/scaling_governor" 2>/dev/null
-        [ "$(cat "$P0/scaling_governor")" = schedutil ] || { echo "refused: schedutil governor not available"; exit 2; }
+        echo schedutil > "$PT/scaling_governor" 2>/dev/null
+        [ "$(cat "$PT/scaling_governor")" = schedutil ] || { echo "refused: schedutil governor not available"; exit 2; }
         accept=""
     else
-        echo "$mode" > "$P0/scaling_setspeed"
+        echo "$mode" > "$PT/scaling_setspeed"
         accept="$mode"
     fi
     n=0; si=0; sp=0
@@ -525,16 +654,18 @@ idle)
     done
     watch "$accept" nocdev
     awk -v si="$si" -v sp="$sp" -v n="$n" 'BEGIN { if (n > 0) printf "mean current %.1f mA, mean power %.1f mW over %d samples\n", si / n / 1000, sp / n / 1000000000, n }'
-    echo "total_trans delta $(( $(cat "$P0/stats/total_trans" 2>/dev/null || echo 0) - tt0 ))"
-    echo "--- policy0/stats/time_in_state"
-    cat "$P0/stats/time_in_state" 2>/dev/null
-    echo userspace > "$P0/scaling_governor"
-    echo 1200000 > "$P0/scaling_setspeed"
+    echo "total_trans delta $(( $(cat "$PT/stats/total_trans" 2>/dev/null || echo 0) - tt0 ))"
+    echo "--- policy$PTNUM/stats/time_in_state"
+    cat "$PT/stats/time_in_state" 2>/dev/null
+    echo userspace > "$PT/scaling_governor"
+    echo 1200000 > "$PT/scaling_setspeed"
     ;;
 rest)
     guard any
-    echo userspace > "$P0/scaling_governor" 2>/dev/null
-    echo 1200000 > "$P0/scaling_setspeed"
+    if [ -d "$PT" ]; then # a57 with the cluster down: no policy4 to restore
+        echo userspace > "$PT/scaling_governor" 2>/dev/null
+        echo 1200000 > "$PT/scaling_setspeed"
+    fi
     status_line
     ;;
 status)
@@ -543,8 +674,10 @@ status)
     ;;
 *)
     echo "usage: cpufreq.sh precheck | load | step KHZ MIN | storm KHZ1 KHZ2 MIN |"
-    echo "                throttle | idle KHZ|schedutil MIN | rest | status"
-    echo "       KHZ is one of $LEVELS; on abort the tablet reboots back to the"
-    echo "       daily kernel, unless T715_NOREBOOT=1 (then no reboot, exit 3)"
+    echo "                throttle [KHZ] | idle KHZ|schedutil MIN | rest | status"
+    echo "       KHZ is one of $LEVELS of the cluster under test"
+    echo "       (T715_CLUSTER=a53, the default, or a57); on abort the tablet"
+    echo "       reboots back to the daily kernel, unless T715_NOREBOOT=1 (then"
+    echo "       no reboot, exit 3)"
     exit 2 ;;
 esac
