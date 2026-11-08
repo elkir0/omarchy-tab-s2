@@ -96,7 +96,9 @@ calls `/data/media/0/linux/rootfs-omarchy.img`.
    - from an **exFAT microSD card**, with the tablet's own file manager:
      Android's, or TWRP's File Manager. The card must be exFAT (or another
      file system without FAT32's 4 GiB file limit, which the raw image is
-     over), and it is only a ferry: Linux itself cannot read the microSD card;
+     over), and it is only a ferry: 1.0.1's Linux cannot read the microSD
+     card — the next release reads it
+     ([hardware/SDCARD.md](hardware/SDCARD.md));
    - over **MTP**, with the tablet plugged into the computer (not yet tested
      end to end);
    - with **adb**, over Wi-Fi (Android drops big files over USB):

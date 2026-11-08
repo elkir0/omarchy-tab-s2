@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **microSD card.** The slot works: cards are read and written in FAT32 and
+  exFAT, at up to UHS-I SDR104 on a 100 MHz bus (34 MB/s read on the test
+  card). A new card is mounted by itself on insertion, with notifications and
+  an "SD card" tile in quick settings
+  ([docs/image/ROOTFS.md](docs/image/ROOTFS.md)). Two safety changes come
+  with it: `/dev/disk/by-partlabel/*` stays on the eMMC, and the initramfs
+  reads partition names from the eMMC only
+  ([docs/hardware/SDCARD.md](docs/hardware/SDCARD.md)).
+
 ## 1.0.1, pre-release
 
 Everything since 1.0 Beta 1: the GPU up to 700 MHz and the big cores up to 1.5 GHz, the Battery
