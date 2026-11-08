@@ -10,6 +10,18 @@
   with it: `/dev/disk/by-partlabel/*` stays on the eMMC, and the initramfs
   reads partition names from the eMMC only
   ([docs/hardware/SDCARD.md](docs/hardware/SDCARD.md)).
+- **Bluetooth.** The link to the Bluetooth chip is 6.5 times faster (3 Mbaud,
+  was 460800 baud), which leaves room for high-quality Bluetooth audio. And
+  Bluetooth keyboards and mice can now connect — they could not before, the
+  kernel was missing the interface BlueZ builds their input devices with. A
+  keyboard and a mouse (both Bluetooth LE) and a speaker were tried on the
+  tablet: all three work, the keyboard and the mouse reconnect after
+  sleeping, and a mouse now shows a pointer (hidden on touch). Known
+  issue: pairing the mouse crashed the touch shell once; it came back by
+  itself after about 40 s. The adapter no longer goes missing on some
+  boots: the address script no longer races the kernel
+  ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md),
+  [docs/image/ROOTFS.md](docs/image/ROOTFS.md)).
 
 ## 1.0.1, pre-release
 

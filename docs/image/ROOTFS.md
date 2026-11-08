@@ -502,6 +502,7 @@ it skips them (each recorded in the MANIFEST with its reason):
 | `omamobile-monitor-scale`, `omamobile-gdk-scale` | scale 3 is the phone's 480x1040; the tablet keeps scale 2 (768x1024) and Omarchy's `GDK_SCALE=2` |
 | `omamobile-osk` | P1 starts squeekboard (`t715-squeekboard.service`) and sets its gsettings |
 | `omamobile-phone-rules` | `hypr/phone.lua` (maximize everything, no gaps, `omamobile-keys` bindings) is not shipped; `t715-tablet.lua` has the tablet's rules |
+| `omamobile-hide-cursor` | a tablet takes a mouse: the tablet block of `looknfeel.lua` (`t715-looknfeel.lua`) shows the pointer while it moves and hides it on touch or after 3 s still |
 | `omamobile-suspend-off` | the build sets Omarchy's suspend-off toggle already |
 | `omamobile-idle`, `omamobile-lock-keypad`, `omamobile-lock-after-screensaver`, `omamobile-credential-type`, `omamobile-menu-pin` | the phone's 60 s idle lock and PIN: `omamobile-set-pin` sets the toggles itself, the build adds the PIN row, t715-keys locks when the screen goes off, and Omarchy's idle cycle is off through the tablet profile's zero timers |
 | `omamobile-fingerprint-plugin`, `omamobile-menu-fingerprint`, `omamobile-call-plugin`, `omamobile-access-plugin`, `omamobile-update-plugin`, `omamobile-menu-update` | plugins and menu rows for what is not shipped |
@@ -515,12 +516,12 @@ screen-off and the stay-awake state belongs to the Stay awake tile —
 Omarchy's bar widgets in `disabledPlugins`), the keyboard, home
 and back plugins, no keybindings welcome,
 dev and duplicate apps hidden from the drawer (Qt tools, Disks, Evince,
-fcitx5's settings, foot's server and client entries), no pointer on screen
-(`cursor:invisible`, `hide_on_touch`), foot with 6 px padding and a 300 ms
-long press, the portrait screensaver wordmark, and menu rows that cannot
-work here hidden (Update > Channel and the config resets, Logout, EFI and
-drive rows, keybinding guides, bar positions, x86_64-only installers). Its
-terminal-layout step finds P1's link and leaves it. Then the build copies
+fcitx5's settings, foot's server and client entries), foot with 6 px
+padding and a 300 ms long press, the portrait screensaver wordmark, and
+menu rows that cannot work here hidden (Update > Channel and the config
+resets, Logout, EFI and drive rows, keybinding guides, bar positions,
+x86_64-only installers). Its terminal-layout step finds P1's link and
+leaves it. Then the build copies
 the tablet `home.json` (`~/.config/omamobile/home.json`) and hides
 Omarchy's Docker entry, which needs lazydocker (`NoDisplay=true` in alarm's
 copy). Its web apps stay in the drawer and open in Chromium.
@@ -652,17 +653,30 @@ XDG_RUNTIME_DIR=/run/user/1000'`):
 ## Bluetooth
 
 From the Phosh session (2026-10-28, commits 8e1c3e9 and
-bd3536d): the kernel drives the BCM4358 over its UART (serdev, 460800 baud,
-no `btattach`); the initramfs copies the module tree into the root, so the
-image still ships no `/lib/modules`.
+bd3536d): the kernel drives the BCM4358 over its UART (serdev, no
+`btattach`); the initramfs copies the module tree into the root, so the
+image still ships no `/lib/modules`. Since the `t715-bluetooth` series
+(2026-11-08) the UART runs at 3 Mbaud, where it ran at 460800 baud from
+2026-10-28 (`docs/hardware/WIFI_BT_M5.md` §7.8).
 
 | Piece | Where | From |
 |---|---|---|
 | Patch RAM | `/usr/lib/firmware/brcm/BCM4358A3.hcd` and the same file under its original name `bcm4358A3_V0086.0144.hcd` (0644), and `BCM.samsung,gts28ltexx.hcd` -> `BCM4358A3.hcd`: btbcm finds no chip name for this LMP subversion and asks for `brcm/BCM.<board compatible>.hcd` | the vendor dump `$T715_LINUX_DIR/dumps/vendor_firmware/bcm4358A3_V0086.0144.hcd` (53841 bytes, git-ignored there, never copied into this repository): `image/tools/build-rootfs` checks it in preflight, stages it read-only into its temporary build context (`firmware/bt/`, deleted with it), and the Dockerfile step after the package steps installs it as the Phosh Dockerfile does; its sha256 is in the MANIFEST |
-| Stable address | `/usr/local/sbin/t715-bt-addr`, `t715-bt-addr@.service`, `90-t715-bt-addr.rules`: the controller gets a locally administered address derived from the eMMC CID (never logged) | byte for byte from `image/rootfs/overlay/` |
+| Stable address | `/usr/local/sbin/t715-bt-addr`, `t715-bt-addr@.service`, `90-t715-bt-addr.rules`: the controller gets a locally administered address derived from the eMMC CID (never logged). Since 2026-11-08 the script powers the controller on first, then off for real, then sets the address: an address set inside the kernel's two-second auto-off window after setup was accepted but left the adapter missing until the next boot (one boot in five in a 5-reboot loop; `docs/hardware/WIFI_BT_M5.md` §7.8). `image/tests/test_t715_bt_addr.sh` models the window off the device | byte for byte from `image/rootfs/overlay/` |
+| Keyboard and mouse input | the kernel needs `CONFIG_UHID` (built in since `t715-bluetooth`): BlueZ creates the input device of every Bluetooth keyboard or mouse through `/dev/uhid`, LE ones always and classic ones too by default (`input.conf` `UserspaceHID=true`). No kernel up to the 1.0.1 release and the daily `#9` had it, so none could connect one | `kernel/patches/t715-bluetooth/` (`kernel/README.md`) |
 | Daemon | `bluez`, `bluez-utils` (`btmgmt`, which the script needs), from Omarchy's list; `bluetooth.service` enabled (Omarchy's `hardware/bluetooth.sh` leaf, made sure of in `configure-system.sh`) | ALARM |
 | Pairing agent | the quick settings' own, `omamobile-bt-agent` (KeyboardDisplay: it asks), registered only while the Bluetooth panel is open. Omarchy's `bt-agent.service` (`bt-agent -c NoInputNoOutput`, which accepts every request) never starts: a drop-in adds a condition that cannot hold | `/etc/systemd/user/bt-agent.service.d/10-t715-no-auto-accept.conf` |
 | Audio | `pipewire-audio` (PipeWire's BlueZ SPA plugin, for Bluetooth audio), `pipewire-pulse` (the PulseAudio server Firefox needs), `rtkit` (realtime priority for PipeWire), and the wm1814 card's UCM profile (`/usr/share/alsa/ucm2/conf.d/wm1814/`, from commit `159d3e9`): speaker and microphone | `image/rootfs/packages.extra`, `image/rootfs/overlay/` |
+
+The tile and airplane mode switch Bluetooth with rfkill
+(`omarchy-bluetooth-power`), and systemd-rfkill saves the soft block in
+`/var/lib/systemd/rfkill/` and restores it at boot: Bluetooth switched off
+stays off after a reboot, by design — `rfkill unblock bluetooth` or the
+tile turns it back on. And never unbind `hci_uart_bcm`
+(`/sys/bus/serial/drivers/hci_uart_bcm/unbind`) or remove the `hci_uart`
+module while Wi-Fi is up: within 4 s Wi-Fi's firmware stops answering
+until a reboot (`docs/hardware/WIFI_BT_M5.md` §7.8). rfkill and the tile
+only close the HCI device, so normal use never does this.
 
 Why the auto-accept agent goes: its unit's comment assumes the adapter is
 pairable only while Omarchy's Bluetooth panel scans, but slot 3 found
@@ -681,14 +695,24 @@ patch RAM, the link, `btmgmt`, and the plugin with its libraries.
 **On the tablet**: `dmesg | grep -i bluetooth` shows the patch RAM loaded;
 `btmgmt info` and `bluetoothctl show` show `hci0` up with the generated
 address (not `43:58:A3:...`), `systemctl status t715-bt-addr@hci0` succeeded;
-`bluetoothctl power on; bluetoothctl scan on` finds devices; the quick
+`journalctl -b -u t715-bt-addr@hci0` says "generated address set" (8
+consecutive reboots on 2026-11-08); `/dev/uhid` exists (keyboards and
+mice; `crw------- root`); `bluetoothctl power on; bluetoothctl scan on`
+finds devices; the quick
 settings' Bluetooth tile and panel show the adapter. `$A systemctl --user
 status bt-agent` is inactive with "condition failed"; with the panel
 closed, a phone's pairing attempt must fail (no agent), with it open the
 tablet asks.
 Pair a headset from the panel: `$A wpctl status` lists a bluez5 sink, and
 the volume keys move it; no "BlueZ SPA plugin" warning in `journalctl -b
-_UID=1000 | grep -i wireplumber`.
+_UID=1000 | grep -i wireplumber`. A keyboard and a mouse pair from the
+panel the same way, and the mouse draws a pointer, shown while it moves
+and hidden on touch or after 3 s still (the tablet block of
+`looknfeel.lua`); pairing the mouse once crashed the touch shell, which
+came back by itself (`docs/hardware/WIFI_BT_M5.md` §7.8). For tests,
+mask bluetoothd at runtime (`systemctl mask --runtime bluetooth.service`)
+rather than stopping it: a plain stop is undone within 0.2 s, because the
+service is D-Bus-activated.
 
 ## Wi-Fi
 
@@ -1145,6 +1169,7 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tests/test_t715_idle.sh` | off-device test of t715-idle's hypridle.conf (the stay-awake hold) |
 | `image/tests/test_t715_animations.sh` | off-device test of t715-animations and the saver-flag read in looknfeel.lua |
 | `image/tests/test_t715_sdcard.sh` | off-device test of t715-sdcard (fake sysfs, stubs, a scripted event stream for watch) |
+| `image/tests/test_t715_bt_addr.sh` | off-device test of t715-bt-addr (a btmgmt stand-in models the kernel's mgmt API and its auto-off window) |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
 | `image/rootfs/smoke-check.sh` | binaries-load check (`/usr/lib/t715-omarchy/smoke-check` in the image) |
@@ -1152,5 +1177,5 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/rootfs/packages.omarchy-skip`, `image/rootfs/packages.extra`, `image/rootfs/packages.mobile` | package lists (`packages.mobile`: touch layer P2, from `image/pkg/`) |
 | `image/pkg/omamobile-shell/`, `image/pkg/omamobile-omarchy/` | the touch shell and Omarchy's patches, built by `image/tools/build-pkg` (`docs/image/PACKAGES.md`); the tablet's `shell.json` and `home.json` |
 | `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units; the microSD card's `t715-sdcard`, its user unit and the `61-t715-removable-partlabel.rules` udev rule) |
-| `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance; the block's animations follow the Battery saver) and `hyprland.lua` (touch layers P1 and P2) |
+| `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance; the block's animations follow the Battery saver; the pointer shows with a mouse and hides on touch or after 3 s still) and `hyprland.lua` (touch layers P1 and P2) |
 | `image/rootfs/shim/` | Hyprland's dmabuf-check shim (LD_PRELOAD) |
