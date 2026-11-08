@@ -5,7 +5,7 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 1.0.1.** It runs daily on one tablet. The published image went through its first boot on
+**Version 1.0.2.** It runs daily on one tablet. The published image went through its first boot on
 that tablet, on a persistent root of its own next to its owner's system, and was checked there
 before publication. No install by anyone else has been reported yet, and the install from stock
 Android or TWRP has never been run end to end: see [the install guide](docs/INSTALL.md).
@@ -33,7 +33,7 @@ An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 | Desktop | Hyprland 0.57 and the Omarchy shell at scale 2 on the 1536x2048 panel; status bar, quick settings, app drawer, recents, home screens, back swipe, on-screen keyboard |
 | Keys | Power, Home, cover, and the Back and Recent touch keys |
 | Modem | LTE, calls, SMS, mobile data, airplane mode, Wi-Fi hotspot over LTE; a Modem tile and a switch to turn it off, now and at boot, or only while the screen is off |
-| Wi-Fi, Bluetooth | WPA2 (the firmware has no WPA3); pairing from quick settings |
+| Wi-Fi, Bluetooth | WPA2 (the firmware has no WPA3); pairing from quick settings; keyboards, mice and audio over Bluetooth, with a pointer for the mouse |
 | Sound | speaker and microphone through PipeWire; vibration motor |
 | Cameras | both, through libcamera's software ISP on the CPU: the Camera app with a preview, tap to focus, photos and video; Photo and Selfie in the drawer; the sensors' tables made at the first boot from your tablet's own firmware |
 | GPS | position from the satellites through GeoClue, offline, the receiver on only while an app asks; a cold fix in about a minute under a clear sky, none indoors; a Location tile, off by default |
@@ -97,7 +97,7 @@ expect rough edges, and report them.
    On Windows, follow [the install guide](docs/INSTALL.md#2-put-the-image-on-the-tablet) instead.
 3. Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
    public key as `linux/authorized_keys` if you want to log in over SSH: the image has none.
-4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.1-AP.tar.md5`, or Heimdall:
+4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.2-AP.tar.md5`, or Heimdall:
 
    ```bash
    heimdall flash --BOOT boot.img --RECOVERY recovery.img

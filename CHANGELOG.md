@@ -1,27 +1,103 @@
 # Changelog
 
-## Unreleased
+## 1.0.2, pre-release
 
-- **microSD card.** The slot works: cards are read and written in FAT32 and
-  exFAT, at up to UHS-I SDR104 on a 100 MHz bus (34 MB/s read on the test
-  card). A new card is mounted by itself on insertion, with notifications and
-  an "SD card" tile in quick settings
-  ([docs/image/ROOTFS.md](docs/image/ROOTFS.md)). Two safety changes come
-  with it: `/dev/disk/by-partlabel/*` stays on the eMMC, and the initramfs
-  reads partition names from the eMMC only
-  ([docs/hardware/SDCARD.md](docs/hardware/SDCARD.md)).
-- **Bluetooth.** The link to the Bluetooth chip is 6.5 times faster (3 Mbaud,
-  was 460800 baud), which leaves room for high-quality Bluetooth audio. And
-  Bluetooth keyboards and mice can now connect — they could not before, the
-  kernel was missing the interface BlueZ builds their input devices with. A
-  keyboard and a mouse (both Bluetooth LE) and a speaker were tried on the
-  tablet: all three work, the keyboard and the mouse reconnect after
-  sleeping, and a mouse now shows a pointer (hidden on touch). Known
-  issue: pairing the mouse crashed the touch shell once; it came back by
-  itself after about 40 s. The adapter no longer goes missing on some
-  boots: the address script no longer races the kernel
-  ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md),
-  [docs/image/ROOTFS.md](docs/image/ROOTFS.md)).
+Everything since 1.0.1: the microSD slot at work, Bluetooth at 3 Mbaud with keyboards and mice,
+a pointer for the mouse, and a Bluetooth adapter that is there at every boot.
+
+- **microSD card.** The slot works: cards are read and written in FAT32 and exFAT, at up to
+  UHS-I SDR104 on a 100 MHz bus (34 MB/s read from files on the test card, a 16 GB SDHC). A
+  card is mounted by itself on insertion, with notifications and an "SD card" tile in quick
+  settings (omamobile-shell 0.2.94-5). Two safety changes come with it:
+  `/dev/disk/by-partlabel/*` stays on the eMMC (a udev rule in the root image), and the
+  initramfs reads partition names from the eMMC only (in `boot.img`):
+  [docs/hardware/SDCARD.md](docs/hardware/SDCARD.md) and
+  [docs/image/ROOTFS.md](docs/image/ROOTFS.md), section "microSD card".
+- **Bluetooth.** The UART link to the chip runs at 3 Mbaud, where 1.0.1 ran it at 460800 baud:
+  room for high-quality Bluetooth audio. A speaker played cleanly in SBC while the link
+  carried 46 kB/s, which is all 460800 baud could carry and 15 % of the new link. And
+  Bluetooth keyboards and mice can connect now — before, none could: the kernel lacked UHID,
+  which BlueZ 5.87 uses to create the input device of every Bluetooth keyboard and mouse. A
+  mouse shows a pointer, hidden on touch and after 3 s without movement, where the touch shell
+  hid it for good. The adapter no longer goes missing on some boots: it was one boot in five,
+  the address script racing the kernel's auto-off window. Tested on the owner's daily system
+  on 2026-11-08 with kernel `#10`, built from exactly the same source tree as the release
+  kernel: a Bluetooth LE keyboard, which types and reconnects after sleeping; a Logitech MX
+  Master 3S mouse (Bluetooth LE), which clicks, scrolls and reconnects; a BeoPlay A1 speaker
+  (A2DP, SBC), which plays cleanly, its volume keys moving it
+  ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.8,
+  [docs/image/ROOTFS.md](docs/image/ROOTFS.md), section "Bluetooth").
+- **Kernel.** Linux 6.12.114 with two new series on top of 1.0.1's eleven, `t715-sdcard` and
+  `t715-bluetooth`. Thirteen in all, in this order: `bringup modem parity gps charger
+  camera-af cpufreq power camera-mc power-gpu turbo sdcard bluetooth`. Built from the
+  published patches with the fixed identity ([kernel/README.md](kernel/README.md)). The
+  optional `t715-linkpm` series is still not in it.
+- **Software.** omamobile-shell 0.2.94-5, was 0.2.94-4. Omarchy stays on 4.0.6, pinned. The
+  main packages keep 1.0.1's versions: Hyprland 0.57.1, Mesa 26.2.6, Qt 6.12.0, Quickshell
+  0.3.2, systemd 262.1, Firefox 157.0, Chromium 150. The root image is 5.3 GiB raw (5704253440
+  bytes); the published `rootfs-omarchy.img.xz` is 1237739200 bytes.
+- **From 1.0.1.** There is no update path yet, the same rule as 1.0.1 from 1.0 Beta 1: the
+  first boot copies the image only into a persistent root that does not exist yet. Flashing
+  only 1.0.2's `boot.img` over a 1.0.1 install gives that system the new kernel: the microSD
+  slot, Bluetooth at 3 Mbaud, keyboards and mice, and the initramfs's eMMC-only partition
+  names. It does not give what lives in the root image: the SD card notifications and tile,
+  the address fix, the pointer, and the udev rule that keeps `/dev/disk/by-partlabel` on the
+  eMMC. So on such a mixed system, do not insert a card whose partitions carry the tablet's
+  partition names (RADIO, EFS, SYSTEM and the like); a card formatted by a PC or a camera is
+  fine.
+
+Tested on one tablet, the reference one, on 2026-11-08, booted from RECOVERY next to its owner's
+system with test boot images carrying the release's kernel and initramfs (the release's
+`boot.img` differs only by the knobs that name the image and the root). The published
+`rootfs-omarchy.img.xz` was sent to the tablet, unpacked there (`xz -dk`, 152 s) and checked
+against `SHA256SUMS`, both lines OK, then got a persistent root of its own: the first boot
+copied it in 192 s (3 min 12 s; 1.0.1: 3 min 16 s), took the Wi-Fi and Bluetooth files from
+SYSTEM, made the cameras' seven tables, bound the sensors, and Omarchy's session came up by
+itself. On that boot: the release kernel (`#1`, 2026-11-08); the microSD card mounted by itself (exFAT),
+its "SD card" tile showing it (checked by eye), no partition label from the card under
+`/dev/disk/by-partlabel`, no MMC error; Bluetooth powered with its generated address,
+`/dev/uhid` present, no UART error; no pointer on screen without a mouse (checked by eye), and
+the pointer settings in place; the Battery saver switched through power-profiles-daemon,
+power-saver taking the A57 cores offline, the A53 cores to 1 GHz, the GPU to 266 MHz and the
+animations off within 3 s, balanced giving it all back within 4 s; the modem's switch (22
+checks); Chromium, Phone, Messages, Réseau mobile and the terminal starting; Wi-Fi scanning,
+the speaker and microphone devices. Just after the first boot's copy, thermal cooling held the
+A57 cores at 1.2 GHz for about a minute, the zones near 56 °C after, then 1.5 GHz again. A
+second boot copied nothing and kept the data (a marker file), the cameras present from the
+start and Bluetooth with its address again; the rescue's test image booted the image
+read-only, with no modem module. `image/tests/verify-rootfs.sh` passes its 362 checks on the
+image, and two builds of the kernel from the published patches, in two trees, were identical
+byte for byte.
+
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), joining a Wi-Fi network on
+the test system, the GPS, the power draw on this build, the Bluetooth devices on the release
+image itself (they were tested on the daily system with kernel `#10`, the same tree, since
+pairing them on the test system would have broken their pairing with the daily one), the Stay
+awake tile by hand, the heat guard's caps, and the Odin, Heimdall and TWRP installs.
+
+Known issues:
+- **A Bluetooth mouse crashed the touch shell once, at its first pairing** (Quickshell 0.3.2,
+  SIGSEGV): the screen stayed black about 40 s while the crash was written, then the shell
+  came back by itself. Not seen again when the mouse reconnected.
+- **Omarchy's keyboard shortcuts did not answer** with the Bluetooth keyboard tried; not
+  investigated yet.
+- **The Camera app and the GPU.** While the Camera app runs, the kernel logs panfrost job
+  faults (`DATA_INVALID_FAULT`, `TILE_RANGE_FAULT`, `INSTR_TYPE_MISMATCH`, `JOB_BUS_FAULT`),
+  GPU page faults and now and then a `gpu sched timeout`, the GPU reset after a stuck job:
+  from none to a few dozen in a 45-second use, and once a burst of about 300. 1.0 Beta 1's
+  kernel, its GPU fixed at 266 MHz, does the same on this image (404 in one use, then 2, 0, 9
+  and 1), and so does this kernel with the GPU pinned at 266 MHz: it comes with the Camera
+  app's use of the GPU, not with the new frequencies. The app and the session kept running.
+- Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
+  when a new window appears (twice during the app test).
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped
+  contiguously` lines per boot (37 at the check): the display rejects GPU buffers for direct
+  scanout and the compositor draws them instead.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive. Once, on the reference tablet, the USB link to a Mac stopped receiving until the
+  cable was plugged in again.
 
 ## 1.0.1, pre-release
 

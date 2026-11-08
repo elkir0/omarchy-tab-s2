@@ -4,6 +4,25 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
+## State at 1.0.2 (2026-11-08)
+
+Since 1.0.1, tested on the same tablet (`CHANGELOG.md` has the release's own test
+notes):
+
+- **The microSD card works**: FAT32 and exFAT, up to UHS-I SDR104 on a 100 MHz bus; a card
+  mounts by itself on insertion, with notifications and an "SD card" tile in quick settings
+  (`kernel/patches/t715-sdcard`, `docs/hardware/SDCARD.md`, `docs/image/ROOTFS.md` "microSD
+  card"), and two guards keep a card from impersonating the eMMC: a udev rule keeps
+  `/dev/disk/by-partlabel/*` on the eMMC, and the initramfs reads partition names from the
+  eMMC only.
+- **Bluetooth at 3 Mbaud**, was 460800 baud: room for high-quality audio
+  (`kernel/patches/t715-bluetooth`, `docs/hardware/WIFI_BT_M5.md` section 7.8). A speaker
+  played cleanly in SBC while the link carried all the old baud rate could.
+- **Bluetooth keyboards and mice connect**, through UHID, which no kernel had before
+  (`kernel/patches/t715-bluetooth`); a mouse shows a pointer, hidden on touch and after 3 s
+  still, and the Bluetooth adapter no longer goes missing on some boots (the address script
+  raced the kernel's auto-off window).
+
 ## State at 1.0.1 (2026-11-08)
 
 Since 1.0 Beta 1, tested on the same tablet (`CHANGELOG.md` has the release's own test
@@ -63,5 +82,11 @@ Since 0.9.3, tested on one tablet (`CHANGELOG.md` has the release's own test not
    1.0 Beta 1's kernel and 1.0.1's alike (`CHANGELOG.md`, 1.0.1's known issues); find whether
    Mesa's Midgard driver, the preview's buffers or the kernel's import path makes them
    (`docs/hardware/GPU.md` section 10.10).
-5. **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
-6. **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
+5. **Omarchy's keyboard shortcuts with a Bluetooth keyboard**: they did not answer with the
+   keyboard tried on 2026-11-08, its 226 default bindings loaded (`docs/hardware/WIFI_BT_M5.md`
+   section 7.8); not investigated yet.
+6. **The touch shell's crash while a Bluetooth mouse paired**, once (Quickshell 0.3.2,
+   SIGSEGV, the shell back by itself after about 40 s): find what in the BlueZ property
+   updates took it down (`docs/hardware/WIFI_BT_M5.md` section 7.8).
+7. **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
+8. **Omarchy 4.5** once omarchy-mobile's touch patches follow it.

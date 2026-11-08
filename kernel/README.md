@@ -22,13 +22,13 @@ rebuild the kernel:
 | `patches/t715-turbo/` (8 patches) | `t715-power-gpu` (`363385ef3`) | the daily kernel on 2026-11-08 (`#8`, in BOOT from 01:15 to 16:43, when `#9` with `t715-sdcard` replaced it), qualified on the tablet on 2026-11-07: the GPU back on the G3D PLL at the vendor's eight Mali levels, 160 to 700 MHz at this chip's stock voltages + 37.5 mV, behind a parking mux (`mout_g3d_pll` on OSCCLK whenever the PLL is off or relocking, the vendor's own P/M/S); the A57s in the vendor kernel's body bias (level 8) and EMA 3 by a new built-in driver (`exynos5433-atlas-asv`), A57 scaling from 800 MHz to 1.5 GHz at this chip's stock voltages (+ 37.5 mV above 1.2 GHz), BUCK2 bounded 987.5 mV to 1.175 V, A57 cooling maps on both zones (`docs/hardware/GPU.md` §10.14, `docs/hardware/CPUFREQ.md` §9 stage 2); and a fix in `arch_topology`, whose capacity product overflowed 32 bits on ARM32 once the A57s reached 1.5 GHz (the A53s became the big cores for the scheduler); and the G3D body bias driver's routine transitions logged at debug level, since pd_g3d powers off several times a second while the GPU works (9800 times in the soak). Built with `--fragment gts28ltexx_turbo_test.config` (test, image mode, userspace governor); `gts28ltexx_turbo_soak.config` builds the daily candidate (release `6.12.114-turbo`), which soaked 2 hours on 2026-11-07 and passed (`docs/hardware/CPUFREQ.md` §9); BOOT's `#8` is the same tree built with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=8` (release `6.12.114 #8`). The series applies unchanged on top of `t715-camera-mc` in the 1.0.1 release kernel |
 | `patches/t715-camera-mc/` (4 patches) | `t715-power` (`630bec1c7`) | the cameras through the media controller, for libcamera: `t715-sensor.ko`, the S5K4H5 and S5K6B2 as V4L2 subdevices (their rails, reset, MCLK, the `<firmware-name>-m<N>.seq` mode tables, exposure, gain, blanking, flips and orientation, the DW9807 as a lens subdevice); `t715-camera.ko` reduced to the capture side, one media device per camera with the sensor found through the device tree graph; the board's sensor nodes and endpoints; `VIDEO_T715_SENSOR` and the dma-buf heaps of libcamera's software ISP. Tested on the device over `t715-cpufreq` (`out/boot-camera-mc`). Over `t715-power` it is the 1.0 Beta 1 release kernel (`#1`, the fixed identity below), booted on the reference tablet from RECOVERY on 2026-11-05: both cameras, the modem's switch, Wi-Fi and Bluetooth. Built with `--fragment gts28ltexx_cpufreq.config` |
 | `patches/t715-linkpm/` (2 patches) | `t715-camera-mc` | **optional, not in the 1.0 Beta 1 kernel**: the SS333's link power management of the 3.10 kernel, behind `sec_modem_v1`'s `pm_mode` parameter (`lockon`, the default, unchanged; `fsm`, the stock state machine, which lets the CP release the MIPI-LLI link and sleep), and the LLI driver's link PM callbacks (`research/modem/LINK-PM.md`, `docs/hardware/MODEM.md` §5.5). Written on `t715-power` and validated there without a SIM (20 of 20 AP wakes, 30 minutes of soak, 10 CP power-offs, no failure); it applies unchanged on `t715-camera-mc` and builds with `--fragment gts28ltexx_cpufreq.config` and the release's fixed identity into the release's zImage and DTB, byte for byte: only `sec_modem_v1.ko` and `exynos5433-mipi-lli.ko` differ (same vermagic). The power saved is not measured, calls and SMS are untested |
-| `patches/t715-sdcard/` (2 patches) | the 1.0.1 release tree (`t715-release-1.0.1`, that is `t715-turbo` applied after `t715-camera-mc`) | the microSD slot on `mshc_2` — the node, its pins and pads, the two slot rails renamed so the eMMC's host stops taking them, the `mmc1` alias (`docs/hardware/SDCARD.md`) — and vfat, exFAT and their code pages built in. **Not in a release yet**; **the daily kernel on 2026-11-08** (`#9`, in BOOT from 16:43 to 19:27, when `#10` with `t715-bluetooth` replaced it: the 1.0.1 release tree plus this series, so the daily line has the cameras' media controller again). Built with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=9` |
-| `patches/t715-bluetooth/` (2 patches) | `t715-sdcard` | the Bluetooth UART at 3 Mbaud — `&cmu_aud` moves `mout_aud_pll_user` to the audio PLL as TM2 does (`exynos5433-tm2-common.dtsi`), `sclk_aud_uart` gets the PLL undivided and the block's other dividers go to /8, `max-speed = <3000000>` (`docs/hardware/WIFI_BT_M5.md` §7.8) — and `CONFIG_UHID` built in, which BlueZ needs to create the input device of any Bluetooth keyboard or mouse (no kernel up to here had it). **Not in a release yet**; **the daily kernel since 2026-11-08** (`#10`: the `#9` tree plus this series, tested from RECOVERY, in BOOT at 19:27). Built with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=10` |
+| `patches/t715-sdcard/` (2 patches) | the 1.0.1 release tree (`t715-release-1.0.1`, that is `t715-turbo` applied after `t715-camera-mc`) | the microSD slot on `mshc_2` — the node, its pins and pads, the two slot rails renamed so the eMMC's host stops taking them, the `mmc1` alias (`docs/hardware/SDCARD.md`) — and vfat, exFAT and their code pages built in. **In the 1.0.2 release kernel**; **the daily kernel on 2026-11-08** (`#9`, in BOOT from 16:43 to 19:27, when `#10` with `t715-bluetooth` replaced it: the 1.0.1 release tree plus this series, so the daily line has the cameras' media controller again). Built with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=9` |
+| `patches/t715-bluetooth/` (2 patches) | `t715-sdcard` | the Bluetooth UART at 3 Mbaud — `&cmu_aud` moves `mout_aud_pll_user` to the audio PLL as TM2 does (`exynos5433-tm2-common.dtsi`), `sclk_aud_uart` gets the PLL undivided and the block's other dividers go to /8, `max-speed = <3000000>` (`docs/hardware/WIFI_BT_M5.md` §7.8) — and `CONFIG_UHID` built in, which BlueZ needs to create the input device of any Bluetooth keyboard or mouse (no kernel up to here had it). **In the 1.0.2 release kernel**; **the daily kernel since 2026-11-08** (`#10`: the `#9` tree plus this series, tested from RECOVERY, in BOOT at 19:27). Built with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=10` |
 | `patches/t715-camtest/` | `t715-parity` at `7d34675d8`, before the cameras | test only, in RECOVERY: the debugfs bring-up modules `t715-cam-probe` and `t715-cam-capture`, each camera step by hand; its copy of `t715-camera.c` is older than `t715-parity`'s. Built with `--fragment gts28ltexx_camtest.config` |
 
 ## The release kernel
 
-The 1.0.1 release runs `v6.12.114` plus eleven series in this order, built with the cpufreq
+The 1.0.2 release runs `v6.12.114` plus thirteen series in this order, built with the cpufreq
 fragment and a fixed identity, so that anyone can rebuild the release's kernel from this
 repository:
 
@@ -37,22 +37,27 @@ git clone --branch v6.12.114 --depth 1 https://git.kernel.org/pub/scm/linux/kern
 ```
 
 ```bash
-git -C src/linux-6.12 switch -c t715-release-1.0.1
+git -C src/linux-6.12 switch -c t715-release-1.0.2
 ```
 
 ```bash
-for s in bringup modem parity gps charger camera-af cpufreq power camera-mc power-gpu turbo; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
+for s in bringup modem parity gps charger camera-af cpufreq power camera-mc power-gpu turbo sdcard bluetooth; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
 ```
 
 ```bash
 KBUILD_SKIP_ARM64=1 KBUILD_BUILD_TIMESTAMP="Sun Nov  8 12:00:00 UTC 2026" KBUILD_BUILD_USER=omarchy-tab-s2 KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 bash kernel/kbuild-mainline.sh --fragment gts28ltexx_cpufreq.config
 ```
 
-For 1.0.1 this gives a zImage with sha256 `c7f8b5095ec78d27...`, the DTB `61ef5b69d15216ce...`
+For 1.0.2 this gives a zImage with sha256 `76753352b37e7041...`, the DTB `aeb8db71e6da51c6...`
 and 95 module files: two builds from these patches, in two trees, were identical byte for byte.
 
-1.0 Beta 1 ran nine series, the same loop without `power-gpu turbo`, built with
-`KBUILD_BUILD_TIMESTAMP="Thu Nov  5 12:00:00 UTC 2026"`: its zImage has sha256
+1.0.1 ran eleven series, the same loop without `sdcard bluetooth`, built with the same fixed
+identity (`KBUILD_BUILD_TIMESTAMP="Sun Nov  8 12:00:00 UTC 2026"`, the same date as 1.0.2):
+its zImage has sha256 `c7f8b5095ec78d27...`, its DTB `61ef5b69d15216ce...` and its 95 module
+files; two builds from these patches, in two trees, were identical byte for byte.
+
+1.0 Beta 1 ran nine series, the same loop without `power-gpu turbo sdcard bluetooth`, built
+with `KBUILD_BUILD_TIMESTAMP="Thu Nov  5 12:00:00 UTC 2026"`: its zImage has sha256
 `f6156169f13c98a3...`, its DTB `13aaf64b7e1c8b2c...` and its 96 module files; two builds, one
 from these patches and one from the development tree, were identical byte for byte.
 
