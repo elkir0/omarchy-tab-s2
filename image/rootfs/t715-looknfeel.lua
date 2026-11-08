@@ -49,4 +49,10 @@ hl.animation({ leaf = "layersOut", enabled = false })
 hl.animation({ leaf = "fadeLayersIn", enabled = true, speed = 1, bezier = "almostLinear" })
 hl.animation({ leaf = "fadeLayersOut", enabled = false })
 hl.animation({ leaf = "specialWorkspace", enabled = true, speed = 1.5, bezier = "easeOutQuint", style = "slidevert" })
+
+-- The pointer: shown while a mouse moves (Bluetooth or USB), hidden on
+-- touch and after 3 s without movement, so none sits mid-screen after
+-- boot. The phone's step that hides it for good, omamobile-hide-cursor,
+-- is pre-marked in omarchy-user-setup.sh.
+hl.config({ cursor = { invisible = false, hide_on_touch = true, inactive_timeout = 3 } })
 -- SM-T715 end

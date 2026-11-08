@@ -215,7 +215,7 @@ if [ -f "$lnf" ] && ! grep -q '^-- SM-T715 begin' "$lnf"; then
     { echo; cat /t715/t715-looknfeel.lua; } >> "$lnf"
 fi
 if grep -q '^-- SM-T715 end' "$lnf" 2>/dev/null; then
-    record "looknfeel.lua: tablet block" ok "opaque windows, shorter animations, no Xwayland (rootfs/t715-looknfeel.lua)"
+    record "looknfeel.lua: tablet block" ok "opaque windows, shorter animations, no Xwayland, the pointer for a mouse (rootfs/t715-looknfeel.lua)"
 else
     record "looknfeel.lua: tablet block" failed "no $lnf from Omarchy's skel"
 fi
@@ -325,6 +325,7 @@ premark=(
     "omamobile-gdk-scale|follows the scale-3 step; Omarchy's GDK_SCALE=2 matches scale 2"
     "omamobile-osk|P1 has the on-screen keyboard: squeekboard started by t715-squeekboard.service, its gsettings set at build time"
     "omamobile-phone-rules|hypr/phone.lua (every window maximized, no gaps, omamobile-keys bindings) is not shipped; rootfs/t715-tablet.lua has the tablet's rules"
+    "omamobile-hide-cursor|a tablet takes a mouse: the tablet block of looknfeel.lua (rootfs/t715-looknfeel.lua) shows the pointer while it moves and hides it on touch or after 3 s still"
     "omamobile-suspend-off|the build set Omarchy's suspend-off toggle already (omarchy-toggle suspend-off on)"
     "omamobile-idle|a phone's 60 s idle lock: t715-keys locks when the screen goes off, once a PIN is set; Omarchy's idle cycle is off through the tablet profile's zero timers"
     "omamobile-lock-keypad|omamobile-set-pin sets it with the PIN"

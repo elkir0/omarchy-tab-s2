@@ -348,6 +348,9 @@ check "looknfeel.lua: the tablet block reads the saver flag" \
     sh -c 'grep -q "io.open(\"/run/t715-power/saver\", \"r\")" "$1" &&
            grep -q "animations = { enabled = t715_saver == nil }" "$1" &&
            ! grep -q "hl.config({ animations = { enabled = false } })" "$1"' _ "$W/lnf"
+check "looknfeel.lua: the pointer shows with a mouse (cursor invisible = false, hide_on_touch, inactive_timeout 3)" \
+    sh -c 'grep -qFx "hl.config({ cursor = { invisible = false, hide_on_touch = true, inactive_timeout = 3 } })" "$1" &&
+           ! grep -q "invisible = true" "$1"' _ "$W/lnf"
 ANIM=/usr/local/bin/t715-animations
 check "$ANIM present with mode 0755" test "$(fmode $ANIM)" = 0755
 for u in t715-animations.path t715-animations.service; do
