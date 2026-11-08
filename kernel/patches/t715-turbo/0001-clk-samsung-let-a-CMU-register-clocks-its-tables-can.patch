@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/8] clk: samsung: let a CMU register clocks its tables cannot
+ describe
+
+samsung_cmu_info describes a CMU's clocks as tables of standard types.
+A clock with its own behaviour, such as a mux that must follow the state
+of the PLL behind it, fits none of them.  An optional register_extra
+callback, run by samsung_cmu_register_clocks() after the tables, lets
+the SoC driver register such a clock while the CMU is still held active
+and before the provider is added, so that its id resolves like the
+others.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/samsung/clk.c | 2 ++
+ drivers/clk/samsung/clk.h | 6 ++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/drivers/clk/samsung/clk.c b/drivers/clk/samsung/clk.c
+index 47ae261de..2d9057d52 100644
+--- a/drivers/clk/samsung/clk.c
++++ b/drivers/clk/samsung/clk.c
+@@ -355,6 +355,8 @@ void __init samsung_cmu_register_clocks(struct samsung_clk_provider *ctx,
+ 						  cmu->nr_fixed_factor_clks);
+ 	if (cmu->cpu_clks)
+ 		samsung_clk_register_cpu(ctx, cmu->cpu_clks, cmu->nr_cpu_clks);
++	if (cmu->register_extra)
++		cmu->register_extra(ctx);
+ }
+ 
+ /*
+diff --git a/drivers/clk/samsung/clk.h b/drivers/clk/samsung/clk.h
+index fb06caa71..f4fd271be 100644
+--- a/drivers/clk/samsung/clk.h
++++ b/drivers/clk/samsung/clk.h
+@@ -365,6 +365,12 @@ struct samsung_cmu_info {
+ 
+ 	/* ARM64 Exynos CMUs */
+ 	bool manual_plls;
++
++	/*
++	 * Clocks that the tables above cannot describe, registered by the SoC
++	 * driver after them (optional).
++	 */
++	void (*register_extra)(struct samsung_clk_provider *ctx);
+ };
+ 
+ struct samsung_clk_provider *samsung_clk_init(struct device *dev,
+-- 
+2.52.0
+

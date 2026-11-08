@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 6/8] ARM: configs: gts28ltexx: the turbo test and soak
+ fragments
+
+gts28ltexx_turbo_test.config: the cpufreq test fragment (userspace
+governor, cpufreq_dt a module loaded by hand, no modem driver) under its
+own module tree, 6.12.114-turbo, for the GPU and A57 qualification from
+RECOVERY in image mode.  gts28ltexx_turbo_soak.config: the daily
+gts28ltexx_cpufreq.config, unchanged, under the same module tree, for
+the soak from RECOVERY on the persistent root, apart from the BOOT
+kernel's lib/modules/6.12.114.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_turbo_soak.config | 45 +++++++++++++++++
+ arch/arm/configs/gts28ltexx_turbo_test.config | 49 +++++++++++++++++++
+ 2 files changed, 94 insertions(+)
+ create mode 100644 arch/arm/configs/gts28ltexx_turbo_soak.config
+ create mode 100644 arch/arm/configs/gts28ltexx_turbo_test.config
+
+diff --git a/arch/arm/configs/gts28ltexx_turbo_soak.config b/arch/arm/configs/gts28ltexx_turbo_soak.config
+new file mode 100644
+index 000000000..07f3c2a5d
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_turbo_soak.config
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# The turbo daily candidate, for its soak from RECOVERY on the persistent
++# root: gts28ltexx_cpufreq.config's lines below, unchanged, for the board
++# files that take the GPU to 700 MHz and the A57s to 1.5 GHz, and its own
++# module tree (LOCALVERSION at the end), apart from the BOOT kernel's
++# lib/modules/6.12.114. The BOOT kernel itself is built with
++# gts28ltexx_cpufreq.config.
++
++# --- gts28ltexx_modem.config ---
++# SPI core built in for the SS333 boot link; the controller, MIPI-LLI and
++# modem_v1 as modules that shannon-loader inserts (see that fragment).
++CONFIG_SPI=y
++CONFIG_SPI_S3C64XX=m
++CONFIG_MIPI_LLI=m
++CONFIG_SEC_MODEM_V1=m
++CONFIG_GPIO_SYSFS=y
++
++# --- CPU frequency scaling ---
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++
++# schedutil by default: stage 1's idle run held the A53s at 400 MHz 95 % of
++# the time. userspace stays for cpufreq.sh's steps.
++CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
++CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
++
++# A module, as in the test kernels: udev loads it from the root, after the
++# initramfs's watchdog guard, so a fault in it cannot loop the boot.
++CONFIG_CPUFREQ_DT=m
++
++# CPU cooling for the board's A53 maps.
++CONFIG_CPU_THERMAL=y
++CONFIG_CPU_FREQ_THERMAL=y
++
++# The soak's detectors (CPUFREQ.md section 9, 1f): a lockup or a hung task is
++# reported in the log. They only panic if their sysctls ask for it.
++CONFIG_DEBUG_KERNEL=y
++CONFIG_SOFTLOCKUP_DETECTOR=y
++CONFIG_DETECT_HUNG_TASK=y
++
++# --- the soak's own module tree ---
++CONFIG_LOCALVERSION="-turbo"
+diff --git a/arch/arm/configs/gts28ltexx_turbo_test.config b/arch/arm/configs/gts28ltexx_turbo_test.config
+new file mode 100644
+index 000000000..ce1b30a12
+--- /dev/null
++++ b/arch/arm/configs/gts28ltexx_turbo_test.config
+@@ -0,0 +1,49 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# GPU at 700 MHz and A57 scaling to 1.5 GHz, TEST kernels only (GPU.md
++# section 10 and CPUFREQ.md stage 2). Built from the cpufreq test fragment:
++# CPU frequency scaling, TEST kernels only (docs/hardware/CPUFREQ.md sections
++# 2.1 and 8.3 in the omarchy-tab-s2 repository).  Merged on top of
++# gts28ltexx_defconfig (kernel/kbuild-mainline.sh --fragment
++# gts28ltexx_turbo_test.config), for the board's
++# exynos5433-gts28ltexx-cpufreq.dtsi.  Takes the place of
++# gts28ltexx_modem.config: one fragment per build.
++
++# gts28ltexx_modem.config's lines without the modem drivers.  A test kernel
++# carries no modem module, so shannon-modem-prepare.service skips itself and
++# the CP never boots under a CPU being qualified: its boot programs eFuses
++# (CPUFREQ.md section 8.4).  SPI_S3C64XX only serves the modem's boot link.
++CONFIG_SPI=y
++CONFIG_GPIO_SYSFS=y
++
++# cpufreq core, with the transition table as the record of what ran.
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++
++# userspace by default: loading the driver changes no clock and no rail.
++# The tests pin levels with scaling_setspeed; schedutil is for the soak.
++CONFIG_CPU_FREQ_DEFAULT_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
++CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
++
++# A module, blacklisted at boot by t715.modblacklist=cpufreq_dt and loaded by
++# hand after the initramfs guard has run: built in, a bad table would hang
++# before it (the panfrost boot loop, CPUFREQ.md section 8.3).  Selects
++# CPUFREQ_DT_PLATDEV, built in, which creates the device it binds to.
++CONFIG_CPUFREQ_DT=m
++
++# CPU cooling: the cpufreq core registers each policy as a cooling device for
++# the board's maps.
++CONFIG_CPU_THERMAL=y
++CONFIG_CPU_FREQ_THERMAL=y
++
++# A hang must end in a panic, and the panic in a reset back to the daily
++# kernel (CPUFREQ.md section 8.3; the freeze of 2026-10-29).  The test script
++# sets the *_panic sysctls at load.
++CONFIG_DEBUG_KERNEL=y
++CONFIG_SOFTLOCKUP_DETECTOR=y
++CONFIG_DETECT_HUNG_TASK=y
++
++# Its own module tree, apart from the daily kernel's lib/modules/6.12.114.
++CONFIG_LOCALVERSION="-turbo"
+-- 
+2.52.0
+

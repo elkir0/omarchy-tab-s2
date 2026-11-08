@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:00:00 +0000
+Subject: [PATCH 8/8] soc: samsung: the G3D body bias logs its routine
+ transitions at debug level
+
+pd_g3d powers on and off several times a second while the GPU works: a
+2-hour soak at 160 to 700 MHz counted 9800 power-offs.  The driver
+logged every BB_CON4 write at info level, rate limited, which kept the
+kernel log busy with nothing worth reading.
+
+Log the routine transitions with dev_dbg; the debugfs file still counts
+them (power_on_count, power_off_count).  A value this driver did not
+leave in BB_CON4, written by something else, still gets a line of its
+own, a rate-limited warning, since it means someone else programs the
+G3D body bias.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/samsung/exynos5433-g3d-abb.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/soc/samsung/exynos5433-g3d-abb.c b/drivers/soc/samsung/exynos5433-g3d-abb.c
+index b92010bc0..7e89d0080 100644
+--- a/drivers/soc/samsung/exynos5433-g3d-abb.c
++++ b/drivers/soc/samsung/exynos5433-g3d-abb.c
+@@ -78,11 +78,21 @@ static int g3d_abb_set(struct g3d_abb *abb, u32 val, const char *why)
+ 
+ 	regmap_read(abb->pmu, EXYNOS5433_PMU_BB_CON4, &old);
+ 	ret = regmap_write(abb->pmu, EXYNOS5433_PMU_BB_CON4, val);
++	/*
++	 * The domain powers on and off several times a second while the GPU
++	 * works (9800 power-offs in a 2-hour soak), so the routine transitions
++	 * are debug lines; the debugfs file counts them.  Only a value this
++	 * driver did not leave there, written by something else, is worth a
++	 * line of its own.
++	 */
+ 	if (ret)
+ 		dev_err(abb->dev, "%s: cannot write BB_CON4: %d\n", why, ret);
+-	else
+-		dev_info_ratelimited(abb->dev, "%s: BB_CON4 0x%08x -> 0x%08x\n",
++	else if (old != abb->on_val && old != abb->off_val)
++		dev_warn_ratelimited(abb->dev,
++				     "%s: BB_CON4 was 0x%08x, not a level of this driver; now 0x%08x\n",
+ 				     why, old, val);
++	else
++		dev_dbg(abb->dev, "%s: BB_CON4 0x%08x -> 0x%08x\n", why, old, val);
+ 	return ret;
+ }
+ 
+-- 
+2.52.0
+

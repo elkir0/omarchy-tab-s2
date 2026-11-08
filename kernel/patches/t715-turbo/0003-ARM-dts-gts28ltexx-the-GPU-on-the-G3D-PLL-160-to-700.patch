@@ -1,0 +1,267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/8] ARM: dts: gts28ltexx: the GPU on the G3D PLL, 160 to 700
+ MHz
+
+With mout_g3d_pll parked on OSCCLK whenever the G3D PLL is off or
+relocking, the GPU can run from the PLL again, at the vendor kernel's
+eight Mali levels instead of the 100-400 MHz that aclk_g3d_400 divides
+to.  At panfrost's probe the GPU mux moves onto mout_g3d_pll, the PLL
+goes to 160 MHz while it is off and the GPU divider to 1; aclk_g3d_400,
+CMU_G3D's register clock, stays at 400 MHz.
+
+Voltages: this chip's stock G3D values (ASV table version 8, group 1)
+plus 37.5 mV, what stock itself programs on this chip when cold:
+160 MHz 912.5 mV, 266 925, 350 950, 420 975, 500 1000, 550 1025,
+600 1075 and 700 MHz 1175 mV, under BUCK6's 1.2 V stock ceiling.  The
+G3D sensor is disabled, so stock's KFC rule on the A53 sensor (81 C:
+420 MHz at most, 86 C: 160 MHz) and the A57 sensors' 95 and 100 C trips
+(the same caps) stand in for stock's G3D caps.
+
+glmark2 on the SM-T715 (2026-11-07), each level pinned: 125 at 160 MHz,
+328 at 266, 424 at 350, 501 at 420, 586 at 500, 637 at 550, 686 at 600
+and 781 at 700 MHz, at 63 C at most; no fault but Mesa's known
+DATA_INVALID job faults, seen at every clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../samsung/exynos5433-gts28ltexx-gpu.dtsi    | 162 ++++++++++++------
+ arch/arm/configs/gts28ltexx_defconfig         |   2 +-
+ 2 files changed, 109 insertions(+), 55 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+index a3ad3f9ac..3871c6774 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-gpu.dtsi
+@@ -4,7 +4,7 @@
+  *
+  * Enables the SoC's gpu@14ac0000 node (exynos5433.dtsi:1186-1235) for the
+  * mainline panfrost driver, with frequency and voltage scaling on the G3D
+- * bus clock (100 to 400 MHz, below) and BUCK6 as its rail.  docs/GPU.md
++ * PLL (160 to 700 MHz, below) and BUCK6 as its rail.  docs/GPU.md
+  * has the source tables and the reasoning.
+  *
+  * Stock reference (01_dumps/live_fdt.dts:1830-1836, node "mali"): same
+@@ -32,98 +32,152 @@ &gpu {
+ 	 * and the regulator the stock Mali platform code drives
+ 	 * (kernel_universal5433 drivers/gpu/arm/t7xx/r22p0/platform/exynos/
+ 	 * gpu_exynos5433.c:683, regulator_get(NULL, "vdd_g3d")).  The board
+-	 * file keeps it always-on at the bootloader voltage (600-1500 mV
+-	 * window, no voltage request from anyone).  With no OPP table below,
+-	 * panfrost only takes an enable reference on it
+-	 * (panfrost_device.c:86-117, 225-230) and never sets a voltage.
+-	 * The phandle also orders the GPU probe after the PMIC.
++	 * file keeps it always on (600-1500 mV window); the OPP table below
++	 * sets its voltage at each level.  The phandle also orders the GPU
++	 * probe after the PMIC.
+ 	 */
+ 	mali-supply = <&buck6_reg>;
+ 	status = "okay";
+ 
+ 	/*
+-	 * The G3D block runs from CMU_TOP's aclk_g3d_400, not from the G3D
+-	 * PLL the bootloader left at 266 MHz.  CMU_G3D's own registers are
+-	 * clocked from that same mux: with the PLL behind it, gating the GPU
+-	 * clock stopped the PLL (pll_35xx has a disable op) and CMU_G3D's
+-	 * runtime suspend, which reads its registers next, hung the bus at
+-	 * panfrost's first runtime suspend (2026-11-04).  From aclk_g3d_400,
+-	 * which CMU_G3D holds while it is resumed (clk-exynos-arm64.c
+-	 * exynos_arm64_cmu_resume()), the registers keep a clock until the
+-	 * unit has switched itself to OSCCLK and released it.  The mux never
+-	 * moves back to the PLL on a rate request (CLK_SET_RATE_NO_REPARENT in
+-	 * clk-exynos5433.c).
++	 * The GPU runs from the G3D PLL (mout_aclk_g3d_400 on mout_g3d_pll),
++	 * at the vendor kernel's eight Mali levels, 160 to 700 MHz.  The PLL
++	 * path hung the bus once (2026-11-04): gating the GPU clock stopped
++	 * the PLL while the mux still selected it, and CMU_G3D's own
++	 * registers are clocked from that tree.  mout_g3d_pll now moves to
++	 * OSCCLK by itself whenever the PLL is off or relocking
++	 * (clk-exynos5433.c, exynos5433_g3d_register_park()), as the vendor
++	 * kernel did by hand.
+ 	 *
+-	 * aclk_g3d_400 is the bus PLL (800 MHz) divided by 2, its nominal
+-	 * 400 MHz, and the GPU clock divides it again in CMU_G3D (DIV_G3D,
+-	 * 1 to 8): 400, 200, 133 and 100 MHz, the OPPs below.  The GPU
+-	 * divider is set first, so the GPU never runs at 400 MHz on the
+-	 * bootloader's voltage: 266/2 = 133 MHz, then 400/2 = 200 MHz, where
+-	 * devfreq starts (panfrost_devfreq.c, the current rate).
++	 * At panfrost's probe, of_clk_set_defaults() sets the parents, then
++	 * the rates in this order: the GPU mux onto mout_g3d_pll, which sits
++	 * on OSCCLK while nothing is enabled; the PLL to 160 MHz while it is
++	 * off; the GPU divider to 1, so 160 MHz; aclk_g3d_400, CMU_TOP's bus
++	 * clock into the block and CMU_G3D's register clock, at its nominal
++	 * 400 MHz.  devfreq starts at 160 MHz, the lowest OPP, which any
++	 * voltage the rail may hold then (912.5 mV or more) carries.
+ 	 */
+ 	assigned-clocks = <&cmu_g3d CLK_MOUT_ACLK_G3D_400>,
++			  <&cmu_g3d CLK_FOUT_G3D_PLL>,
+ 			  <&cmu_g3d CLK_DIV_ACLK_G3D>,
+ 			  <&cmu_top CLK_DIV_ACLK_G3D_400>;
+-	assigned-clock-parents = <&cmu_top CLK_ACLK_G3D_400>, <0>, <0>;
+-	assigned-clock-rates = <0>, <133333333>, <400000000>;
++	assigned-clock-parents = <&cmu_g3d CLK_MOUT_G3D_PLL>, <0>, <0>, <0>;
++	assigned-clock-rates = <0>, <160000000>, <160000000>, <400000000>;
+ 
+ 	/* the NoC timeout that a power-off of pd_g3d clears (panfrost_gpu.c) */
+ 	samsung,sysreg = <&sysreg_g3d>;
+ 
+ 	/*
+-	 * GPU frequency scaling on the bus clock (simple_ondemand).  The SoC
+-	 * table is the stock Mali driver's default, on the G3D PLL; this board
+-	 * replaces it.  Voltages: this chip's stock G3D values (ASV table
+-	 * version 8, group 1, printed by stock at every boot; docs/hardware/
+-	 * GPU.md section 10.3) plus 37.5 mV, stock's own cold margin, each OPP
+-	 * on the stock level at or above it: 400 MHz on 420 MHz's 937.5 mV
+-	 * (+37.5 = 975 mV), 200 MHz on 266 MHz's 887.5 mV (925 mV), 133 and
+-	 * 100 MHz on 160 MHz's 875 mV (912.5 mV).  400 MHz is below stock's
+-	 * first thermal cap (420 MHz from 95 C on the G3D sensor).
++	 * GPU frequency scaling (simple_ondemand) on the vendor kernel's
++	 * levels, with the vendor's P, M and S for the G3D PLL.  Voltages:
++	 * this chip's own stock G3D values (ASV table version 8, group 1,
++	 * printed by stock at every boot; docs/hardware/GPU.md section 10.3)
++	 * plus 37.5 mV, stock's cold margin: what stock itself programs on
++	 * this chip at or below 19 C.  The 100-400 MHz bus-clock table of
++	 * kernel #7 ran these voltages at 133-400 MHz on 2026-11-07.  Stock
++	 * kept 700 MHz for its counter-driven boost and capped the rest at
++	 * 600 MHz; simple_ondemand uses 700 MHz whenever the GPU is busy.
+ 	 */
+-	operating-points-v2 = <&gpu_opp_table_bus>;
++	operating-points-v2 = <&gpu_opp_table_pll>;
+ 	#cooling-cells = <2>;
+ 	/delete-node/ opp-table;
+ 
+-	gpu_opp_table_bus: opp-table-gpu-bus {
++	gpu_opp_table_pll: opp-table-gpu-pll {
+ 		compatible = "operating-points-v2";
+ 
+-		opp-100000000 {
+-			opp-hz = /bits/ 64 <100000000>;
++		opp-160000000 {
++			opp-hz = /bits/ 64 <160000000>;
+ 			opp-microvolt = <912500>;
+ 		};
+ 
+-		opp-133333333 {
+-			opp-hz = /bits/ 64 <133333333>;
+-			opp-microvolt = <912500>;
++		opp-266000000 {
++			opp-hz = /bits/ 64 <266000000>;
++			opp-microvolt = <925000>;
+ 		};
+ 
+-		opp-200000000 {
+-			opp-hz = /bits/ 64 <200000000>;
+-			opp-microvolt = <925000>;
++		opp-350000000 {
++			opp-hz = /bits/ 64 <350000000>;
++			opp-microvolt = <950000>;
+ 		};
+ 
+-		opp-400000000 {
+-			opp-hz = /bits/ 64 <400000000>;
++		opp-420000000 {
++			opp-hz = /bits/ 64 <420000000>;
+ 			opp-microvolt = <975000>;
+ 		};
++
++		opp-500000000 {
++			opp-hz = /bits/ 64 <500000000>;
++			opp-microvolt = <1000000>;
++		};
++
++		opp-550000000 {
++			opp-hz = /bits/ 64 <550000000>;
++			opp-microvolt = <1025000>;
++		};
++
++		opp-600000000 {
++			opp-hz = /bits/ 64 <600000000>;
++			opp-microvolt = <1075000>;
++		};
++
++		opp-700000000 {
++			opp-hz = /bits/ 64 <700000000>;
++			opp-microvolt = <1175000>;
++		};
+ 	};
+ };
+ 
+ /*
+- * GPU cooling, stock's KFC rule (exynos_thermal.c:997-1000): from 86 C on
+- * the A53 sensor, the GPU at its slowest level, beside the A53s' own map
+- * on the same trip (exynos5433-gts28ltexx-cpufreq.dtsi, included before
+- * this file).  devfreq cooling counts from the fastest OPP: 0 = 400,
+- * 1 = 200, 2 = 133, 3 = 100 MHz.  The G3D sensor is disabled
+- * (exynos5433-gts28ltexx-thermal.dtsi), and stock's 95-110 C G3D caps
+- * start at 420 MHz, above this table.
++ * GPU cooling.  The G3D sensor is disabled
++ * (exynos5433-gts28ltexx-thermal.dtsi), so stock's G3D caps (420 MHz from
++ * 95 C, down to 160 MHz from 110 C) have no sensor here; what stands in:
++ *  - stock's KFC rule (exynos_thermal.c:991-1000): from 81 C on the A53
++ *    sensor, the GPU at 420 MHz at most, from 86 C at 160 MHz, on the
++ *    trips of the A53s' own maps (exynos5433-gts28ltexx-cpufreq.dtsi,
++ *    included before this file);
++ *  - the A57 sensors' 95 and 100 C trips, the same two caps: not stock,
++ *    a guard for a GPU that heats the die with no sensor of its own.
++ * devfreq cooling counts from the fastest OPP: 0 = 700, 1 = 600, 2 = 550,
++ * 3 = 500, 4 = 420, 5 = 350, 6 = 266, 7 = 160 MHz.
+  */
+ &apollo_thermal {
+ 	cooling-maps {
++		map-gpu-420 {
++			trip = <&apollo_a53_1g>;
++			cooling-device = <&gpu 4 4>;
++		};
++
+ 		map-gpu-min {
+ 			trip = <&apollo_a53_min>;
+-			cooling-device = <&gpu 3 3>;
++			cooling-device = <&gpu 7 7>;
++		};
++	};
++};
++
++&atlas0_thermal {
++	cooling-maps {
++		map-gpu-420 {
++			trip = <&atlas0_a53_1g>;
++			cooling-device = <&gpu 4 4>;
++		};
++
++		map-gpu-min {
++			trip = <&atlas0_a53_min>;
++			cooling-device = <&gpu 7 7>;
++		};
++	};
++};
++
++&atlas1_thermal {
++	cooling-maps {
++		map-gpu-420 {
++			trip = <&atlas1_a53_1g>;
++			cooling-device = <&gpu 4 4>;
++		};
++
++		map-gpu-min {
++			trip = <&atlas1_a53_min>;
++			cooling-device = <&gpu 7 7>;
+ 		};
+ 	};
+ };
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index f1a5783d4..b30ce4e59 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -184,7 +184,7 @@ CONFIG_RMI4_F12=y
+ CONFIG_DRM_PANFROST=m
+ 
+ # GPU frequency scaling: panfrost devfreq over the board's OPP table, on
+-# the G3D bus clock (exynos5433-gts28ltexx-gpu.dtsi, 100 to 400 MHz).
++# the G3D PLL (exynos5433-gts28ltexx-gpu.dtsi, 160 to 700 MHz).
+ # PM_DEVFREQ is also selected by panfrost and selects PM_OPP.  panfrost's
+ # governor built in, so devfreq_add_device() needs no request_module() at
+ # panfrost load (drivers/devfreq/devfreq.c); the devfreq cooling device,
+-- 
+2.52.0
+

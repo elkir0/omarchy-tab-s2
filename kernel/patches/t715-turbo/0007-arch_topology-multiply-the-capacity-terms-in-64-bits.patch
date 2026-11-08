@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 7/8] arch_topology: multiply the capacity terms in 64 bits
+
+topology_normalize_cpu_scale() multiplies a u32 capacity-dmips-mhz by
+capacity_freq_ref, an unsigned long in kHz, and stores the product in a
+u64; the multiplication itself is done in unsigned long, which is
+32 bits on ARM32.  On the SM-T715 (Exynos5433, ARM32 kernel) the A57s'
+3575 times 1 500 000 kHz is 5 362 500 000, which wraps to 1 067 532 704:
+once the A57 table reached 1.5 GHz, the A57s got capacity 444 and the
+A53s 1024, so the scheduler took the little cores for the big ones.  At
+1.2 GHz the product, 4 290 000 000, was just under 2^32.
+
+Cast the first factor to u64, as the destination already is.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/base/arch_topology.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/base/arch_topology.c b/drivers/base/arch_topology.c
+index 176429904..6158bb2cc 100644
+--- a/drivers/base/arch_topology.c
++++ b/drivers/base/arch_topology.c
+@@ -293,13 +293,13 @@ void topology_normalize_cpu_scale(void)
+ 
+ 	capacity_scale = 1;
+ 	for_each_possible_cpu(cpu) {
+-		capacity = raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
++		capacity = (u64)raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
+ 		capacity_scale = max(capacity, capacity_scale);
+ 	}
+ 
+ 	pr_debug("cpu_capacity: capacity_scale=%llu\n", capacity_scale);
+ 	for_each_possible_cpu(cpu) {
+-		capacity = raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
++		capacity = (u64)raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
+ 		capacity = div64_u64(capacity << SCHED_CAPACITY_SHIFT,
+ 			capacity_scale);
+ 		topology_set_cpu_scale(cpu, capacity);
+-- 
+2.52.0
+

@@ -25,6 +25,12 @@ everything above 1.2 GHz until decision D7.
 9.** Every level from 400 MHz to 1.2 GHz passed, as did the storm and the
 throttle. Screen off, the gain is small: 60-90 mW of 1.48 W.
 
+**Stage 2 ran for the A57s on 2026-11-07, then a 2-hour soak: results in
+section 9. Kernel `#8` has been the daily kernel in BOOT since
+2026-11-08.** The A57s scale from 800 MHz to 1.5 GHz in the vendor's body
+bias and EMA 3, and the GPU from 160 to 700 MHz; under 45 minutes of
+8-core stress the hottest sensor read 97 °C.
+
 Evidence tags, used wherever it matters:
 
 * **[M]** measured on this tablet under mainline (today's figures or a saved
@@ -982,6 +988,149 @@ in RECOVERY (`058d0481b509`). Four clean reboots, 39 s each: persistent root,
 the abort list, no failed unit. Innocuity identical before and after. To go
 back: `out/boot-camaf/boot.img` (`6f47a0356be0`) with `device/write-part.sh BOOT`.
 
+### Results of stage 2 (A57), 2026-11-07
+
+Kernel: branch `t715-turbo` on `t715-power-gpu` (`363385ef3`), the GPU
+on the G3D PLL and the A57s in the vendor kernel's state — the built-in
+`exynos5433-atlas-asv` driver (decision D7) writes body bias level 8
+(BB_CON0 `0x00000000` -> `0x80000088`) and EMA 3 (`0x11810330`:
+`0x00210210` -> `0x00310310`), both logged at boot. A57 table 800 MHz
+to 1.5 GHz: this chip's stock voltages up to 1.2 GHz, stock + 37.5 mV
+above (decision D3); BUCK2 987 500 to 1 175 000 uV; A57 cooling maps
+(atlas 81 °C -> 1.2 GHz one level per poll, 95 °C -> 0.9 GHz, 100 °C ->
+0.8 GHz; apollo 81 °C -> 0.9 GHz, 86 °C -> 0.8 GHz), each zone cooling
+both clusters. Test RECOVERY, **image mode** (persistent root not
+mounted), CP off, no modem driver, 13:20-15:24, owner present (D8).
+Built with `--fragment gts28ltexx_turbo_test.config` (release
+6.12.114-turbo, userspace governor, `cpufreq_dt` loaded by hand).
+
+**2a load: pass** [M]. `image/tests/ondevice/cpufreq.sh` with
+`T715_CLUSTER=a57`: tables, rails, cooling devices and trips, and the
+two registers (ABB, EMA) all as expected.
+
+**2b steps: pass at 800 MHz and 1 GHz** [M]. 3 minutes each with the
+four A57s loaded: every hash right. The timed 256 MiB sha256 on one
+A57 scales with the clock:
+
+| level MHz | rail uV | sha256 MB/s (one A57, 256 MiB) |
+|---|---|---|
+| 1200 | 1 062 500 | 393 |
+| 1300 | 1 125 000 | 425 |
+| 1400 | 1 150 000 | 454 |
+| 1500 | 1 175 000 | 483 |
+
+At 1.2 GHz with four A57s loaded, atlas1 went from 71 to 85 °C in about
+6 s: the 85 °C project rule stopped the step, 12 of 12 results right.
+At 1.3, 1.4 and 1.5 GHz with four A57s, the 81 °C trip took the cluster
+down to 1.3 then 1.2 GHz within seconds, every result right. 1.5 GHz on
+one A57 for 3 minutes: 79 of 79 results right, 1.175 V, at most 67 °C.
+
+**Storm: pass.** 800 MHz <-> 1.5 GHz every 50 ms under load on one A57:
+1735 transitions, 40 of 40 results right.
+
+**Throttle: pass** [M]. The eight emulated-temperature cases gave the
+mapped caps — apollo 82 °C: 1.2 GHz; 87 °C: 0.9 GHz; atlas 82 °C:
+1.4 GHz; 96 °C: 1.2 GHz; 101 °C: 0.9 GHz — and every release went back
+to state 0.
+
+**D4, the critical trip** (THERMAL.md section 7): emulated 117 °C on
+atlas0 (read back as 116 °C; the emulation reads 1 °C low) gave an
+orderly "hardware protection" shutdown and a full power-off; the next
+power-key boot went to RECOVERY. Before it, 111 °C on atlas0 kept the
+board running with the A57s at 0.9 GHz and the GPU at 160 MHz.
+
+**Conclusion.** Four loaded A57s pass 81 °C within seconds even at
+1.2 GHz, so the upper levels are short bursts under schedutil, with the
+cooling maps and the battery heat guard behind them.
+
+**The scheduler's capacities overflowed** (found at the start of the
+soak, fixed by patch 7 of `t715-turbo`). `topology_normalize_cpu_scale()`
+multiplies `capacity-dmips-mhz` (3575 for the A57s on this board) by the
+policy's maximum in kHz in an `unsigned long`, 32 bits on ARM32:
+3575 × 1 500 000 = 5 362 500 000 wraps to 1 067 532 704, so the A57s got
+capacity 444 and the A53s 1024 [M], and the scheduler took the A53s for
+the big cores. At 1.2 GHz the product, 4 290 000 000, was just under
+2^32, which is why stage 1 and kernel #7 read 1024 and 586. With the
+product in 64 bits: A57 1024, A53 469 [M]. The stage 2 runs above had
+the wrapped values, which changed nothing there: every level was pinned
+by hand and every workload pinned to its CPU.
+
+**Soak of the daily candidate, 2026-11-07 15:59-18:00: pass** [M]. The
+same series built with `--fragment gts28ltexx_turbo_soak.config` and
+`KBUILD_BUILD_VERSION=8`, release `6.12.114-turbo #8` (patch 7, the
+capacity fix, included — the paragraph above), booted from RECOVERY on
+the persistent root — the daily root, after the image-mode passes above
+— with the CP online, Wi-Fi connected, the balanced profile and the
+battery heat guard on (its timer every 30 s). One sample every 30 s,
+236 of them (`image/tests/ondevice/soak-sample.sh` plus the A57 and GPU
+clocks, the battery temperature and the EMA rewrites). Load: about
+10 minutes of manual use (A57 bursts at 1.5 GHz, the GPU up to
+700 MHz), about 45 minutes of an 8-core stress (`openssl speed
+-multi 8`, with a 5-minute pause), then idle with the screen on. The
+screen stayed on for the whole soak, so the A57s never went offline.
+
+| | atlas1 | atlas0 | apollo | battery |
+|---|---|---|---|---|
+| at most | 97 °C | 90 °C | 81 °C | 44.2 °C |
+
+atlas1 spent about 40 minutes at or above 90 °C and about 4 minutes
+(8 samples) at or above 95 °C, all during the stress; it never reached
+100 °C. Under the 8-core stress the cooling maps held it at 91-97 °C:
+the A57s mostly at 1.0 GHz (0.9 to 1.2 GHz), the A53s at 1.0-1.1 GHz,
+the GPU capped at 420 MHz (cooling states read at 16:15:
+GPU 4, cpufreq-cpu0 2, cpufreq-cpu4 5). Over the whole soak the A57s
+ran 0.8 to 1.5 GHz (1.5 GHz in 25 of the 236 samples, the bursts), the
+A53s 0.4 to 1.2 GHz. The battery ran 32.4 to 44.2 °C and 88 % to 62 %,
+discharging at up to 1.57 A during the stress although the charger was
+connected; the heat guard never set its hot flag (it sets it at
+52 °C). The CP was online in every sample, Wi-Fi stayed connected, no
+gateway ping was lost, no systemd unit failed. The G3D domain powered
+off 9835 times with no hang, and the kernel log held nothing suspicious
+but the known Mesa job faults (GPU.md section 10.14).
+
+Two defects found by the soak, both fixed since:
+
+1. The battery heat guard (`docs/hardware/BATTERY.md` §13) cost about
+   1 s of CPU per run, 0.7 s of it `powerprofilesctl`, a Python
+   program; it now asks PPD with `busctl` (13 ms) and costs about
+   0.3 s per run.
+2. The G3D ABB driver (GPU.md section 10.12) logged every pd_g3d
+   power-on and power-off: 3769 lines plus 336 "callbacks suppressed"
+   lines in the 2 hours, about two thirds of the boot's kernel log.
+   The volume wrapped the dmesg ring, so the sampler's own count of
+   suspicious kernel lines went down during the soak (it reads dmesg;
+   the journal kept every line). The routine transitions are debug lines
+   in BOOT's kernel `#8`, patch 8 of `t715-turbo` (GPU.md section 10.12).
+
+**A57 hotplug after the soak, 18:06-18:08: pass** [M].
+`image/tests/ondevice/hotplug-a57.sh` with `N=10` and its default A57
+stages (core7, cores76, the cluster, the cluster under load on the
+A53s, then 120 s off), on the same boot: 40 cycles, 20 of them with
+all four A57s offline (taking the last core offline asks the secure
+monitor for the cluster), then 120 s with the cluster off. Every
+sha256 was right on every core and no suspicious kernel line appeared.
+After it: cpus 0-7 online, the A57 policy back with schedutil and
+1.5 GHz max, the capacities still A53 469 / A57 1024, the A57 cooling
+device at state 0. The atlas-asv driver logged no EMA rewrite — it
+logs every write that changes the register — so **the EMA register
+keeps the value written at boot while the cluster is off**: the answer
+to the question the stage 2 runs left open.
+
+**In BOOT since 2026-11-08, 01:15.** Kernel `#8`: the same tree built
+with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=8`
+(release `6.12.114 #8`, every module, the modem's included), with the
+G3D ABB log change, written to BOOT with the owner present
+(`out/boot8/img-boot/boot.img`, sha256 `78a2f8df4e9e`); the rescue is
+back in RECOVERY. At the first boot: no failed unit; the initramfs
+replaced `lib/modules/6.12.114` in the persistent root; the balanced
+profile applied at 12.7 s; the A53 policy at 400 MHz to 1.2 GHz and the
+A57 policy at 800 MHz to 1.5 GHz, both under schedutil, with the
+capacities A53 469 / A57 1024; the body bias and EMA lines once, at
+probe; the CP online 14 s after `t715-modem-power on`. The A57s were
+offline when checked, as designed (the lock screen had gone dark at
+39 s); cpu4, brought online by hand to read its policy, came back
+without an EMA rewrite.
+
 ## 10. Expected gain for Firefox
 
 Basis: the limiting thread's frame time has a part `c` that follows the CPU clock
@@ -1019,10 +1168,10 @@ threshold), stop there.** Stage 1 alone is still worth keeping, for throttling a
 | D1 | Allow P0 and S0 on the tablet, in the rescue | yes |
 | D2 | Replace the rescue in RECOVERY with test kernels during the campaign (no rescue behind the daily kernel meanwhile) | yes, restoring it after each stage |
 | D3 | Margin above 1.2 GHz: stock + 37.5 mV, or plain stock | + 37.5 mV to qualify; revisit after soak |
-| D4 | The 115 °C trip test, which needs you at the tablet | yes, once, before stage 2a |
-| D5 | Target cap: stop at stage 1, 1.5 GHz, or attempt 1.7 GHz | 1.5 GHz, decided on the measured `c` |
-| D6 | The userspace gauge and low-battery cap (52/49 °C, 20 %) | yes, before any cap above 1.2 GHz is daily; implemented as `t715-power-profile guard` (2026-11-07) |
-| D7 | P3 found A57 ABB in bypass and EMA 2, not stock's level 8 and EMA 3: accept a small kernel write that sets stock's values | needed for anything above 1.2 GHz, and advised before stage 1 |
+| D4 | The 115 °C trip test, which needs you at the tablet | yes, once, before stage 2a. **Done 2026-11-07**: emulated 117 °C on atlas0, orderly "hardware protection" shutdown and full power-off (section 9) |
+| D5 | Target cap: stop at stage 1, 1.5 GHz, or attempt 1.7 GHz | 1.5 GHz, decided on the measured `c`. **Done 2026-11-07**: the table stops at 1.5 GHz, qualified in stage 2 (section 9) |
+| D6 | The userspace gauge and low-battery cap (52/49 °C, 20 %) | yes, before any cap above 1.2 GHz is daily. **Done 2026-11-07**: `t715-power-profile guard`, every 30 s (`docs/hardware/BATTERY.md` §13) |
+| D7 | P3 found A57 ABB in bypass and EMA 2, not stock's level 8 and EMA 3: accept a small kernel write that sets stock's values | needed for anything above 1.2 GHz, and advised before stage 1. **Done 2026-11-07**: the built-in `exynos5433-atlas-asv` driver writes both at boot (section 9) |
 | D8 | Be within reach during stages 2 and up (power key) | yes: a 115 °C cut or a freeze needs a hand |
 
 Worth trying before all of this, because it costs nothing: a lower content

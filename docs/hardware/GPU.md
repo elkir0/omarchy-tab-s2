@@ -692,6 +692,10 @@ works: cap at stock's normal ceiling with a udev rule,
 `ACTION=="add", SUBSYSTEM=="devfreq", KERNEL=="14ac0000.gpu", ATTR{max_freq}="600000000"`.
 Superseded: the daily kernel caps at 420 MHz in the device tree
 (section 10.11), which needs no rule in either root image.
+Superseded again, 2026-11-07: the daily kernel runs devfreq on the bus
+clock, 100 to 400 MHz (section 10.13), and the qualified turbo kernel
+runs the full 160-700 MHz table on the G3D PLL (section 10.14).
+Since 2026-11-08 the daily kernel is that turbo kernel (`#8`).
 
 ### 10.5 Thermal throttling
 
@@ -788,9 +792,15 @@ not use power; the cooling device falls back to its frequency table,
    show as job faults or a hang right after a level change. Fix if seen:
    a clock notifier that parks `mout_g3d_pll` on oscclk around G3D PLL
    rate changes, as stock does (code change in `clk-exynos5433.c`).
+   Superseded, 2026-11-07: that parking mux is now the kernel's
+   (`t715-turbo` patch 2), and 1851 relocks under load passed clean
+   (section 10.14).
 4. **700 MHz**: PLL P = 3 never used by stock; 1 200 000 µV continuously,
    where stock reaches that voltage only cold, and 700 MHz only as a
-   boost.
+   boost. Superseded, 2026-11-07: the turbo table uses the vendor's own
+   P = 6 for 700 MHz and this chip's stock voltage + 37.5 mV =
+   1 175 000 µV (section 10.14), and every level up to 700 MHz passed
+   on the tablet.
 5. **BUCK6 ramp rate**: mainline waits ΔV / 12 000 µV/µs after a rise
    (board ramp-delay) but never programs the PMIC ramp (no
    `set_ramp_delay` in `s2mps14_reg_ops`, `s2mps11.c:618-628`); stock set
@@ -1289,3 +1299,184 @@ with ABB at 0x80000088 before raising the daily cap to 500 MHz.
    `cmu_g3d` probe, the node's attach): no GPU job runs then.
 5. Not checked on the tablet. T4 relies on `rmmod panfrost`, which has
    not been exercised on this board.
+
+**Checked on the tablet (2026-11-07).** The driver is in the daily
+kernel since that morning (kernel `#7`, series `t715-power-gpu`,
+`kernel/README.md`), and it does what stock does: `0x80000088` at each
+pd_g3d power-on, `0x8000008d` at each power-off. The register it found
+at boot was `0x00000000` (bypass): kernel #6 had left BB_CON4 there,
+not the reverse bias read in October (section 10.11). The condition
+for revisiting the cap is met; the cap itself moved with the clock
+source (sections 10.13 and 10.14).
+
+**Since 2026-11-07:** the soak of the turbo candidate found the
+per-transition lines too loud — 3769 of them plus 336 "callbacks
+suppressed" in 2 hours, about two thirds of the boot's kernel log, and
+enough to wrap the dmesg ring. The routine transitions become debug
+lines (the debugfs file `exynos5433-g3d-abb` still counts them), and
+the driver warns only when it finds a value it did not write
+(section 10.14).
+
+### 10.13 Kernel #7: devfreq on the bus clock, 100 to 400 MHz (2026-11-07)
+
+Series `t715-power-gpu` (3 patches on `t715-power` `630bec1c7`,
+`kernel/README.md`): patch 1 is the G3D body bias driver of section
+10.12, patch 2 the clock flag, patch 3 the board. **The daily kernel in
+BOOT from 2026-11-07 10:28 to 2026-11-08 01:15** (kernel `#7`, built with
+`--fragment gts28ltexx_cpufreq.config`, `KBUILD_BUILD_VERSION=7`; then
+kernel `#8`, section 10.14).
+
+**Design.** The GPU stays on `aclk_g3d_400`, the clock it had been on
+since the 2026-11-04 runtime-suspend hang: CMU_G3D's own registers are
+clocked from that same tree, and from the bus clock they keep a clock
+while the unit is resumed. Patch 2 gives `mout_aclk_g3d_400`
+`CLK_SET_RATE_NO_REPARENT`, so a rate request can no longer move the
+GPU back to the G3D PLL. Patch 3 is the board:
+
+* `aclk_g3d_400` at its nominal 400 MHz (bus PLL 800 MHz / 2), and
+  DIV_G3D in CMU_G3D divides it again: **100, 133, 200 and 400 MHz**,
+  no G3D PLL in the path.
+* Voltages: this chip's stock G3D values (section 10.3, ASV table
+  version 8, group 1) plus 37.5 mV, stock's cold margin — 912.5 mV at
+  100 and 133 MHz (stock 160 MHz's 875 mV + 37.5), 925 mV at 200 MHz
+  (stock 266 MHz's 887.5 + 37.5), 975 mV at 400 MHz (stock 420 MHz's
+  937.5 + 37.5).
+* Thermal: the A53 sensor's 86 °C trip takes the GPU to 100 MHz,
+  stock's KFC rule; 400 MHz is below stock's first G3D thermal cap
+  (420 MHz from 95 °C).
+
+**Measured, 2026-11-07 morning, from RECOVERY on the daily root.**
+glmark2 2023.01 (`glmark2-es2-wayland`), without the desktop and buffer
+scenes:
+
+| clock | glmark2 score |
+|---|---|
+| 100 MHz | 60 |
+| 200 MHz | 134 |
+| 400 MHz | 293 |
+| simple_ondemand | 292 |
+
+simple_ondemand against the former fixed 266 MHz: **about +50 %**. At
+most 68 °C with the charger on. No hang and no GPU reset in about
+25 minutes.
+
+Mesa's Midgard job faults — `DATA_INVALID_FAULT`, a few page faults at
+VA 0, one scheduler timeout — appeared at every clock, 100 MHz
+included, mostly in the terrain scene. They are a Mesa/panfrost bug,
+not an electrical fault of the levels: the slowest clock shows them
+too.
+
+### 10.14 The G3D PLL again: 160 to 700 MHz (`t715-turbo`, 2026-11-07)
+
+Series `t715-turbo` (7 patches on `t715-power-gpu` `363385ef3`,
+`kernel/README.md`): the GPU back on the G3D PLL, and the A57s scaling
+(section 9 of `CPUFREQ.md` for the CPU side, with patch 7, the
+`arch_topology` capacity fix). Qualified in RECOVERY, image mode
+(persistent root not mounted), CP off, no modem driver, then soaked
+2 hours as the daily candidate (below).
+
+**Why the PLL path hung, and the parking mux.** CMU_G3D's own registers
+and the G3D block's bus are clocked from the same tree as the GPU.
+Gating the GPU clock runs the G3D PLL's disable op, and with
+`mout_g3d_pll` still on the PLL the block lost its clock: CMU_G3D's
+runtime suspend, which reads its registers next, hung the bus
+(2026-11-04). Patch 1 adds a `register_extra` callback to
+`samsung_cmu_info`, so a CMU can register a clock its tables cannot
+describe while it is still held active. Patch 2 uses it to make
+`mout_g3d_pll` a clock of its own with the mux bit in its enable and
+disable ops: on OSCCLK whenever it is disabled, and from the PLL's
+`PRE_RATE_CHANGE` to its `POST_RATE_CHANGE` (a clock notifier), so the
+GPU **never runs on a PLL that relocks or is off**. The vendor kernel
+moves the same mux by hand around every G3D PLL change. The G3D PLL
+also gets the vendor's own P, M and S, one entry per Mali level from
+160 to 700 MHz (the shared table's 700 MHz entry uses P = 3, which the
+vendor kernel never programs into this PLL). Patch 3 is the board: at
+panfrost's probe the GPU mux moves onto `mout_g3d_pll`, the PLL to
+160 MHz while it is off, the GPU divider to 1; `aclk_g3d_400` stays at
+400 MHz.
+
+**OPPs.** This chip's stock G3D values + 37.5 mV, under BUCK6's 1.2 V
+stock ceiling:
+
+| MHz | mV |
+|---|---|
+| 160 | 912.5 |
+| 266 | 925 |
+| 350 | 950 |
+| 420 | 975 |
+| 500 | 1000 |
+| 550 | 1025 |
+| 600 | 1075 |
+| 700 | 1175 |
+
+**Thermal maps.** The G3D sensor is disabled, so stock's KFC rule on the
+A53 sensor and the A57 sensors' 95 and 100 °C trips stand in for stock's
+G3D caps:
+
+| zone | trip | cap |
+|---|---|---|
+| apollo (A53) | 81 °C | 420 MHz at most |
+| apollo (A53) | 86 °C | 160 MHz |
+| atlas (A57) | 95 °C | 420 MHz |
+| atlas (A57) | 100 °C | 160 MHz |
+
+**Measured, 2026-11-07, 13:20-15:24, owner present.** Test kernel in
+RECOVERY, image mode, CP off, no modem driver. Boot: the A57 driver's
+two writes (BB_CON0 `0x00000000` -> `0x80000088`, EMA `0x11810330`:
+`0x00210210` -> `0x00310310`), panfrost at 160 MHz on the PLL.
+
+Each level pinned, glmark2 without the desktop, buffer and terrain
+scenes:
+
+| clock | glmark2 score |
+|---|---|
+| 160 MHz | 125 |
+| 266 MHz | 328 |
+| 350 MHz | 424 |
+| 420 MHz | 501 |
+| 500 MHz | 586 |
+| 550 MHz | 637 |
+| 600 MHz | 686 |
+| 700 MHz | 781 |
+
+At most 63 °C. No fault kind but the Mesa `DATA_INVALID` job faults
+(section 10.13). Every frequency/voltage sample at or above the table.
+
+**Power-off path** (the hang of 2026-11-04 was here): 40 panel cycles,
+138 power-offs of pd_g3d, no hang.
+
+**PLL storm.** min/max flipped between 160 and 700 MHz every 50 ms for
+120 s under glmark2: **1851 PLL relocks**, no clock warning, no GPU
+reset. 26 samples read 700 MHz at 912.5 mV and 29 read 160 MHz at
+1175 mV: a read-order artifact (panfrost updates the reported frequency
+after the voltage), not an undervolt — the storm reads the clock and
+the rail one after the other while the level changes every 50 ms, the
+same race as stage 1c's first abort (`CPUFREQ.md` section 9).
+
+**simple_ondemand** over 160-700 MHz: 553 on the clean set; 464 on
+glmark2's default run at 71 °C, with the page faults at VA 0 and the
+one scheduler timeout in the terrain scene (the known Mesa bug,
+section 10.13). Under load the GPU spends most of its time at 700 MHz.
+
+**A57 side**: `docs/hardware/CPUFREQ.md` section 9, stage 2.
+
+**Soak (2026-11-07, 15:59-18:00).** The daily candidate (`--fragment
+gts28ltexx_turbo_soak.config`, `KBUILD_BUILD_VERSION=8`, release
+`6.12.114-turbo #8`) from RECOVERY on the persistent root, CP online:
+236 samples in 2 hours, the CPU and thermal facts in
+`CPUFREQ.md` section 9. The GPU side: 700 MHz was seen (in 20 of the
+236 samples, the manual-use bursts; the full range was 160 to
+700 MHz), the cooling maps capped it at 420 MHz under the 8-core
+stress (cooling state 4 at 16:15) and never lower (the trips that send
+it to 160 MHz, 86 °C on the A53 sensor and 100 °C on the A57 sensors,
+were never reached; the A53 sensor read 81 °C at most), the G3D domain
+powered off 9835 times on the parking mux with no hang, and the kernel
+log held nothing but the known Mesa/Midgard fault family — 9
+`DATA_INVALID_FAULT`, and one page fault at VA 0 (a read) followed
+4 ms later by a `JOB_BUS_FAULT` on the same job (section 10.13).
+
+**In BOOT since 2026-11-08** as kernel `#8` (`CPUFREQ.md` section 9,
+with the hotplug check after the soak): at the first boot devfreq
+offered the eight levels, 160 to 700 MHz, under simple_ondemand, and the
+ABB driver logged its probe line only (BB_CON4 `0x8000008d` →
+`0x80000088`), no transition line.

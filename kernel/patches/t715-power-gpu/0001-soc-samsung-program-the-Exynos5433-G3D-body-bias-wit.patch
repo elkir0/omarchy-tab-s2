@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 12:00:00 +0000
+Subject: [PATCH 1/3] soc: samsung: program the Exynos5433 G3D body bias with
+ pd_g3d
+
+The PMU register BB_CON4 (PMU + 0x0790) sets the adaptive body bias of
+the G3D (Mali) block.  Mainline never writes it: on the SM-T715 it keeps
+the bootloader's 0x8000008d, the reverse bias the stock kernel applies
+only while the GPU idles, so the GPU has been running with less timing
+margin than under stock.  Stock runs it at 0x80000088 (level 8,
+ABB_X100, no bias).
+
+New built-in driver exynos5433-g3d-abb: a node under the PMU, inside
+pd_g3d, adds a genpd power notifier to the domain and writes, through
+the PMU syscon regmap,
+
+  GENPD_NOTIFY_PRE_ON  the "on" level, before the PMU powers the block
+                       up and before any device of the domain resumes
+                       (panfrost's runtime resume, the CMU restore);
+  GENPD_NOTIFY_OFF     the "off" level, once the block is gated.
+
+So the GPU is never powered with the idle value, and the register holds
+stock's idle value whenever the domain is off, as under stock: the Mali
+platform code writes the running level before pm_runtime_resume() and
+G3D_RBB_VALUE before the runtime suspend (gpu_notifier.c:180-182,
+204-206, gpu_exynos5433.c:41,635-668 of kernel_universal5433).  A failed
+power-on is followed by OFF (off level back), a failed power-off by ON
+(on level still there).  At probe the domain is on (platform bus attach)
+and held by the device's disabled runtime PM; the driver writes the on
+level, then enables runtime PM in the suspended state, so the node never
+holds the domain.
+
+Encoding: (1 << 31) | (1 << 7) | level, 0 for ABB_BYPASS (cal_set_abb(),
+asv-exynos5433_cal.c:484-495).  The levels are board properties because
+the on level depends on the ASV table: this chip (table version 8, G3D
+group 1, stock boot logs) uses abb_table_g3d_v3, 8 at every level
+(asv-exynos5433.h:344-355); the off level is G3D_RBB_VALUE 0x8d = 13.
+Observable in dmesg (probe line, rate-limited line per transition) and
+in /sys/kernel/debug/exynos5433-g3d-abb (register, levels, counts).
+
+The board keeps its 420 MHz GPU cap until a device test has checked the
+bias and the faster levels; its comment is updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |  35 +++
+ arch/arm/configs/gts28ltexx_defconfig         |  18 ++
+ drivers/soc/samsung/Kconfig                   |  14 +
+ drivers/soc/samsung/Makefile                  |   2 +
+ drivers/soc/samsung/exynos5433-g3d-abb.c      | 239 ++++++++++++++++++
+ 5 files changed, 308 insertions(+)
+ create mode 100644 drivers/soc/samsung/exynos5433-g3d-abb.c
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index eb920a9fd..0ad80dbfb 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -874,6 +874,41 @@ &framebuffer {
+  * "Mali-T760 MC6 (Panfrost)" GLES 3.1 renderer in phoc, no GPU faults.
+  */
+ #include "exynos5433-gts28ltexx-gpu.dtsi"
++/*
++ * G3D adaptive body bias (docs/GPU.md section 10.12).  The PMU register
++ * BB_CON4 (PMU + 0x0790) biases the GPU block; mainline left the
++ * bootloader's 0x8000008d there, the reverse bias stock applies only
++ * while the GPU idles.  drivers/soc/samsung/exynos5433-g3d-abb.c writes
++ * the "on" level before pd_g3d powers on and the "off" level once it is
++ * off, as stock does around the GPU's power-up and idle
++ * (kernel_universal5433 drivers/gpu/arm/t7xx/r22p0/platform/exynos/
++ * gpu_notifier.c:180-182,204-206; gpu_exynos5433.c:635-668).  Register
++ * value: (1 << 31) | (1 << 7) | level (cal_set_abb(),
++ * arch/arm/mach-exynos/asv-exynos5433_cal.c:484-495).
++ *
++ * on: 8 = ABB_X100 (mach/asv-exynos5_cal.h:108), 0x80000088.  This chip
++ *   has ASV table version 8 and G3D group 1 (stock boot logs: "ASV Table
++ *   Ver : 8", "[G3D] DEVFREQ: ...Khz, ABB 8" at all eight levels), so
++ *   stock takes abb_table_g3d_v3 (asv-exynos5433_cal.c:443-449), which is
++ *   8 at every frequency and group (mach/asv-exynos5433.h:344-355).  Table
++ *   versions 0-4 would give ABB_BYPASS (255) instead.  The table path is
++ *   the one in use: the same logs show ABB 255 and 8 at different ARM
++ *   levels, which fused ABB (one 4-bit value per rail,
++ *   asv-exynos5433_cal.c:456-471) cannot give.
++ * off: 13 = ABB_X125 (mach/asv-exynos5_cal.h:113), 0x8000008d: stock's
++ *   G3D_RBB_VALUE 0x8d (gpu_exynos5433.c:41), masked to 5 bits.
++ *
++ * The node sits in pd_g3d only for the notifier: it has runtime PM
++ * enabled and stays suspended, so it never holds the domain on.
++ */
++&pmu_system_controller {
++	gpu-abb {
++		compatible = "samsung,exynos5433-g3d-abb";
++		power-domains = <&pd_g3d>;
++		samsung,abb-on-level = <8>;
++		samsung,abb-off-level = <13>;
++	};
++};
+ 
+ /* ==================================================================== */
+ /* 13. Bluetooth (BCM4358 on UART3, hci_bcm)                            */
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 15155793a..f1a5783d4 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -183,6 +183,24 @@ CONFIG_RMI4_F12=y
+ # RECOVERY again).  Loaded by hand / by the initramfs after the guard.
+ CONFIG_DRM_PANFROST=m
+ 
++# GPU frequency scaling: panfrost devfreq over the board's OPP table, on
++# the G3D bus clock (exynos5433-gts28ltexx-gpu.dtsi, 100 to 400 MHz).
++# PM_DEVFREQ is also selected by panfrost and selects PM_OPP.  panfrost's
++# governor built in, so devfreq_add_device() needs no request_module() at
++# panfrost load (drivers/devfreq/devfreq.c); the devfreq cooling device,
++# without which the GPU cooling-map never binds
++# (include/linux/devfreq_cooling.h stub).
++CONFIG_PM_DEVFREQ=y
++CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
++CONFIG_DEVFREQ_THERMAL=y
++
++# G3D adaptive body bias (docs/GPU.md section 10.12): stock's no-bias
++# level in PMU BB_CON4 whenever pd_g3d is on, its idle reverse bias while
++# it is off (board node &pmu_system_controller/gpu-abb).  Built in, so it
++# is bound before the panfrost module powers the GPU up; its probe only
++# touches an always-on PMU register.
++CONFIG_EXYNOS5433_G3D_ABB=y
++
+ # Requested by the Omarchy (Hyprland) track, built in because the rootfs
+ # ships no modules.  Firewall for ufw / iptables-nft (omarchy-mobile's
+ # kernel fragment):
+diff --git a/drivers/soc/samsung/Kconfig b/drivers/soc/samsung/Kconfig
+index 26d05f1b7..1b2b45a20 100644
+--- a/drivers/soc/samsung/Kconfig
++++ b/drivers/soc/samsung/Kconfig
+@@ -72,6 +72,20 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
+ 	  the CRC data block will take more memory, but will identify any
+ 	  faults with better precision.
+ 
++config EXYNOS5433_G3D_ABB
++	bool "Exynos5433 G3D adaptive body bias"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	depends on PM_GENERIC_DOMAINS && OF
++	select MFD_SYSCON
++	help
++	  Program the body bias of the Exynos5433 GPU block (PMU register
++	  BB_CON4) from the G3D power domain: a "samsung,exynos5433-g3d-abb"
++	  node under the PMU gives one level for while the domain is on and
++	  one for while it is off.  Mainline otherwise leaves the
++	  bootloader's value, which on the Samsung SM-T715 is the reverse
++	  bias the stock kernel uses only for an idle GPU.  Built in, so that
++	  it is bound before the GPU driver powers the domain up.
++
+ config EXYNOS_REGULATOR_COUPLER
+ 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
+ 	depends on ARCH_EXYNOS || COMPILE_TEST
+diff --git a/drivers/soc/samsung/Makefile b/drivers/soc/samsung/Makefile
+index 3d4934da6..768587480 100644
+--- a/drivers/soc/samsung/Makefile
++++ b/drivers/soc/samsung/Makefile
+@@ -12,6 +12,8 @@ obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
+ 					exynos5250-pmu.o exynos5420-pmu.o
+ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
+ 
++obj-$(CONFIG_EXYNOS5433_G3D_ABB)	+= exynos5433-g3d-abb.o
++
+ obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
+ 
+ obj-$(CONFIG_SAMSUNG_SEC_LOG_CONSOLE) += sec-log-console.o
+diff --git a/drivers/soc/samsung/exynos5433-g3d-abb.c b/drivers/soc/samsung/exynos5433-g3d-abb.c
+new file mode 100644
+index 000000000..b92010bc0
+--- /dev/null
++++ b/drivers/soc/samsung/exynos5433-g3d-abb.c
+@@ -0,0 +1,239 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Exynos5433 G3D adaptive body bias (ABB), switched with the G3D power
++ * domain.
++ *
++ * The PMU register BB_CON4 (PMU + 0x0790) sets the body bias of the G3D
++ * (Mali GPU) block.  Mainline never programs it, so the GPU runs with
++ * whatever the bootloader left there; on the SM-T715 that is 0x8000008d,
++ * the reverse body bias the stock kernel applies only while the GPU idles.
++ * Stock runs the GPU at 0x80000088 (level 8, no bias).
++ *
++ * This driver binds to a node that sits in pd_g3d and adds a genpd power
++ * notifier to it: the "on" level is written before the domain powers on
++ * (GENPD_NOTIFY_PRE_ON) and the "off" level after it has powered off
++ * (GENPD_NOTIFY_OFF).  The GPU block is therefore never powered with the
++ * "off" level, and the register holds the stock idle value whenever the
++ * domain is off.  The levels come from the device tree, because the "on"
++ * level depends on the chip's ASV table version.
++ *
++ * Stock references (Samsung kernel for the SM-T715, kernel_universal5433):
++ *
++ *  - register: abb_base_arr[SYSC_DVFS_G3D] = CHIPID_ABBG_BASE + 0x0790
++ *    (arch/arm/mach-exynos/asv-exynos5433_cal.c:26), CHIPID_ABBG_BASE =
++ *    S5P_VA_CHIPID5 (mach/asv-exynos5_cal.h:42), mapped from
++ *    EXYNOS_PA_CHIPID5 0x105C0000 (mach/map.h:79, mach-exynos/common.c:885-889),
++ *    which is the PMU (EXYNOS5430_PA_PMU, mach/map.h:87); the PMU header
++ *    names it EXYNOS5433_BB_CON4 (mach/regs-pmu-exynos5433.h:46).
++ *  - encoding: cal_set_abb() writes 0 for ABB_BYPASS, otherwise
++ *    (1 << 31) | (1 << 7) | (level & 0x1f) (asv-exynos5433_cal.c:484-495);
++ *    BIT(31) | BIT(7) is EXYNOS_ABB_INIT (mach/regs-pmu.h:104).  Levels:
++ *    ABB_X060 = 0 ... ABB_X100 = 8 ... ABB_X125 = 13 ... ABB_X160 = 20,
++ *    ABB_BYPASS = 255 (mach/asv-exynos5_cal.h:100-121).
++ *  - when: the Mali platform code writes the level of the current DVFS step
++ *    (gpu_dvfs_get_cur_asv_abb()) when the GPU leaves DVS, before
++ *    pm_runtime_resume() powers it up (drivers/gpu/arm/t7xx/r22p0/platform/
++ *    exynos/gpu_notifier.c:180-182, gpu_exynos5433.c:658-668), and
++ *    G3D_RBB_VALUE 0x8d (level 13) when it enters DVS on idle, before the
++ *    runtime suspend that powers it down (gpu_notifier.c:204-206,219-221,
++ *    gpu_exynos5433.c:41,635-652).  Both are skipped on chips with fused
++ *    ABB (cal_get_fs_abb(), asv-exynos5433_cal.c:110-115).
++ */
++
++#include <linux/bits.h>
++#include <linux/debugfs.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/mfd/syscon.h>
++#include <linux/mod_devicetable.h>
++#include <linux/notifier.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/seq_file.h>
++
++#define EXYNOS5433_PMU_BB_CON4	0x0790
++
++#define ABB_ENABLE		(BIT(31) | BIT(7))
++#define ABB_LEVEL_MASK		GENMASK(4, 0)
++#define ABB_LEVEL_MAX		20	/* ABB_X160 */
++#define ABB_LEVEL_BYPASS	255	/* ABB_BYPASS: register 0 */
++
++struct g3d_abb {
++	struct device *dev;
++	struct regmap *pmu;
++	struct notifier_block nb;
++	u32 on_val;
++	u32 off_val;
++	unsigned int on_count;
++	unsigned int off_count;
++};
++
++static int g3d_abb_set(struct g3d_abb *abb, u32 val, const char *why)
++{
++	u32 old = 0;
++	int ret;
++
++	regmap_read(abb->pmu, EXYNOS5433_PMU_BB_CON4, &old);
++	ret = regmap_write(abb->pmu, EXYNOS5433_PMU_BB_CON4, val);
++	if (ret)
++		dev_err(abb->dev, "%s: cannot write BB_CON4: %d\n", why, ret);
++	else
++		dev_info_ratelimited(abb->dev, "%s: BB_CON4 0x%08x -> 0x%08x\n",
++				     why, old, val);
++	return ret;
++}
++
++/*
++ * Called by genpd with the domain lock held (drivers/pmdomain/core.c,
++ * _genpd_power_on() and _genpd_power_off()).  PRE_ON comes before the PMU
++ * powers the block on, and before any device of the domain is resumed
++ * (genpd_runtime_resume() powers the domain on before the driver's
++ * callback), so the GPU never runs with the "off" level.  A failed power-on
++ * is followed by OFF, which puts the "off" level back.  A failed power-off
++ * is followed by ON, with the "on" level still in place.
++ */
++static int g3d_abb_notify(struct notifier_block *nb, unsigned long action,
++			  void *data)
++{
++	struct g3d_abb *abb = container_of(nb, struct g3d_abb, nb);
++
++	switch (action) {
++	case GENPD_NOTIFY_PRE_ON:
++		abb->on_count++;
++		return notifier_from_errno(g3d_abb_set(abb, abb->on_val,
++						       "pd_g3d power-on"));
++	case GENPD_NOTIFY_OFF:
++		abb->off_count++;
++		g3d_abb_set(abb, abb->off_val, "pd_g3d power-off");
++		return NOTIFY_OK;
++	default:
++		return NOTIFY_DONE;
++	}
++}
++
++static int g3d_abb_show(struct seq_file *s, void *unused)
++{
++	struct g3d_abb *abb = s->private;
++	u32 val;
++	int ret;
++
++	ret = regmap_read(abb->pmu, EXYNOS5433_PMU_BB_CON4, &val);
++	if (ret)
++		return ret;
++
++	seq_printf(s, "bb_con4: 0x%08x\n", val);
++	seq_printf(s, "on: 0x%08x\n", abb->on_val);
++	seq_printf(s, "off: 0x%08x\n", abb->off_val);
++	seq_printf(s, "power_on_count: %u\n", abb->on_count);
++	seq_printf(s, "power_off_count: %u\n", abb->off_count);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(g3d_abb);
++
++static int g3d_abb_read_level(struct device *dev, const char *prop, u32 *val)
++{
++	u32 level;
++	int ret;
++
++	ret = device_property_read_u32(dev, prop, &level);
++	if (ret)
++		return dev_err_probe(dev, ret, "missing %s\n", prop);
++
++	if (level == ABB_LEVEL_BYPASS) {
++		*val = 0;
++		return 0;
++	}
++	if (level > ABB_LEVEL_MAX)
++		return dev_err_probe(dev, -EINVAL, "%s: level %u out of range\n",
++				     prop, level);
++
++	*val = ABB_ENABLE | (level & ABB_LEVEL_MASK);
++	return 0;
++}
++
++/*
++ * Built in and never unbound (suppress_bind_attrs): the notifier and the
++ * debugfs file stay for the kernel's lifetime, so nothing is undone on
++ * remove.  The notifier is not device-managed: on a probe failure the
++ * platform bus detaches the domain before devres runs, and the notifier
++ * could no longer be found to unregister it.
++ */
++static int g3d_abb_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct g3d_abb *abb;
++	u32 old = 0;
++	int ret;
++
++	abb = devm_kzalloc(dev, sizeof(*abb), GFP_KERNEL);
++	if (!abb)
++		return -ENOMEM;
++	abb->dev = dev;
++
++	/* The node is a child of the PMU system controller. */
++	if (!dev->parent || !dev->parent->of_node)
++		return -ENODEV;
++	abb->pmu = syscon_node_to_regmap(dev->parent->of_node);
++	if (IS_ERR(abb->pmu))
++		return dev_err_probe(dev, PTR_ERR(abb->pmu), "no PMU regmap\n");
++
++	ret = g3d_abb_read_level(dev, "samsung,abb-on-level", &abb->on_val);
++	if (ret)
++		return ret;
++	ret = g3d_abb_read_level(dev, "samsung,abb-off-level", &abb->off_val);
++	if (ret)
++		return ret;
++
++	/*
++	 * The platform bus has attached this device to pd_g3d and powered the
++	 * domain on (drivers/base/platform.c, dev_pm_domain_attach()).  Runtime
++	 * PM is still disabled, which genpd counts as an active device
++	 * (genpd_power_off(), pm_runtime_suspended()), so the domain stays on
++	 * until runtime PM is enabled below: the notifier and the "on" level
++	 * are in place before it can toggle.
++	 */
++	abb->nb.notifier_call = g3d_abb_notify;
++	ret = dev_pm_genpd_add_notifier(dev, &abb->nb);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot add a pd_g3d notifier\n");
++
++	regmap_read(abb->pmu, EXYNOS5433_PMU_BB_CON4, &old);
++	ret = regmap_write(abb->pmu, EXYNOS5433_PMU_BB_CON4, abb->on_val);
++	if (ret) {
++		dev_pm_genpd_remove_notifier(dev);
++		return dev_err_probe(dev, ret, "cannot write BB_CON4\n");
++	}
++
++	/*
++	 * Runtime PM enabled in its initial suspended state: this device no
++	 * longer holds the domain, and genpd may power it off once the driver
++	 * core has synced it after probe (genpd_dev_pm_sync()).  The device
++	 * has no runtime PM callbacks and never resumes.
++	 */
++	pm_runtime_enable(dev);
++
++	debugfs_create_file("exynos5433-g3d-abb", 0444, NULL, abb,
++			    &g3d_abb_fops);
++
++	dev_info(dev, "G3D ABB 0x%08x while pd_g3d is on, 0x%08x while off; BB_CON4 was 0x%08x, now 0x%08x\n",
++		 abb->on_val, abb->off_val, old, abb->on_val);
++	return 0;
++}
++
++static const struct of_device_id g3d_abb_of_match[] = {
++	{ .compatible = "samsung,exynos5433-g3d-abb" },
++	{ }
++};
++
++static struct platform_driver g3d_abb_driver = {
++	.probe = g3d_abb_probe,
++	.driver = {
++		.name = "exynos5433-g3d-abb",
++		.of_match_table = g3d_abb_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(g3d_abb_driver);
+-- 
+2.52.0
+

@@ -269,6 +269,24 @@ checking `cat $Z/type`.
 4. Optional: repeat 3 on each zone (each instance has its own trim and
    threshold register).
 
+**Done on 2026-11-07**, during CPUFREQ.md's stage 2 (owner present):
+emulated 117 °C on atlas0, read back as 116 °C (the emulation reads
+1 °C low), gave the software path of case 3 — an orderly "hardware
+protection" shutdown and a full power-off; the next power-key boot went
+to RECOVERY. Before it, 111 °C on atlas0 kept the board running with
+the A57s throttled to 0.9 GHz and the GPU to 160 MHz.
+
+**A sustained load, the same day** (the turbo candidate's soak,
+`CPUFREQ.md` section 9): an 8-core stress for about 45 minutes with the
+cooling maps of that kernel. They held atlas1 at 91-97 °C for the whole
+stress — about 40 minutes at or above 90 °C, 4 at or above 95 °C — and
+it never reached 100 °C. Stock would have throttled at these
+temperatures too (its steps start at 80 °C) but kept the A57s online:
+its hotplug takes them offline only at 100 °C and back at 95 °C
+(`hotplug_out_threshold` / `hotplug_in_threshold`, `stock-dts:2016-2017`,
+section 8.1), which the soak never reached. The battery reached
+44.2 °C at most.
+
 ## 8. Left out, and why
 
 ### 8.1 cpufreq-dt cooling (throttling)

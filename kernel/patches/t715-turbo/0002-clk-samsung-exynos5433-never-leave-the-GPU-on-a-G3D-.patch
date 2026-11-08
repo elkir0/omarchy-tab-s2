@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/8] clk: samsung: exynos5433: never leave the GPU on a G3D
+ PLL that is off
+
+CMU_G3D's own registers and the G3D block's bus are clocked from the
+same tree as the GPU.  Gating the GPU clock runs the G3D PLL's disable
+op, and with mout_g3d_pll still on the PLL the block lost its clock:
+CMU_G3D's runtime suspend, which reads its registers next, hung the bus
+on the SM-T715 (2026-11-04), so the board ran the GPU from aclk_g3d_400
+at 400 MHz at most.
+
+mout_g3d_pll becomes a clock of its own, registered through the CMU's
+register_extra hook, with the mux bit in its enable and disable ops:
+OSCCLK whenever it is disabled (the framework disables it before the
+PLL, and enables it after the PLL has locked), and OSCCLK from the
+PLL's PRE_RATE_CHANGE to its POST_RATE_CHANGE (a clock notifier), so
+the GPU never runs on a PLL that relocks.  The vendor kernel moves the
+same mux by hand around every G3D PLL change.  For the framework it has
+the PLL as its only parent and passes rate requests on; it is never
+switched to a PLL that has not locked, and it waits for MUX_STAT_G3D.
+At registration the mux goes to OSCCLK and the PLL off, the state the
+framework assumes.
+
+The G3D PLL also gets the vendor kernel's own P, M and S, one entry per
+Mali level from 160 to 700 MHz.  The shared table gives the same rates
+and, but for 700 MHz, the same settings; its 700 MHz entry uses P = 3,
+which the vendor kernel never programs into this PLL.
+
+Tested on the SM-T715 on 2026-11-07, from the PLL at 160 to 700 MHz:
+138 power-offs of pd_g3d in 40 panel cycles, every level pinned under
+glmark2, 1851 PLL relocks in two minutes of 160/700 MHz flips under
+load, simple_ondemand over the whole table, with no hang and no clock
+warning.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/samsung/clk-exynos5433.c | 207 ++++++++++++++++++++++++++-
+ 1 file changed, 200 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/clk/samsung/clk-exynos5433.c b/drivers/clk/samsung/clk-exynos5433.c
+index c88d35169..7795117d0 100644
+--- a/drivers/clk/samsung/clk-exynos5433.c
++++ b/drivers/clk/samsung/clk-exynos5433.c
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
++#include <linux/iopoll.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/platform_device.h>
+@@ -3356,11 +3357,28 @@ static const struct samsung_clk_reg_dump g3d_suspend_regs[] = {
+ 
+ /* list of all parent clock list */
+ PNAME(mout_aclk_g3d_400_p)	= { "mout_g3d_pll", "aclk_g3d_400", };
+-PNAME(mout_g3d_pll_p)		= { "oscclk", "fout_g3d_pll", };
++
++/*
++ * The vendor kernel's G3D PLL settings, one per Mali DVFS level
++ * (kernel_universal5433 drivers/clk/samsung/clk-exynos5433.c, G3D PLL
++ * table).  The shared table above gives the same rates, all but 700 MHz
++ * with the same P, M and S; its 700 MHz entry uses P = 3, which the vendor
++ * kernel never programs into this PLL.
++ */
++static const struct samsung_pll_rate_table exynos5433_g3d_pll_rates[] __initconst = {
++	PLL_35XX_RATE(24 * MHZ, 700000000U, 350, 6, 1),
++	PLL_35XX_RATE(24 * MHZ, 600000000U, 500, 5, 2),
++	PLL_35XX_RATE(24 * MHZ, 550000000U, 550, 6, 2),
++	PLL_35XX_RATE(24 * MHZ, 500000000U, 500, 6, 2),
++	PLL_35XX_RATE(24 * MHZ, 420000000U, 350, 5, 2),
++	PLL_35XX_RATE(24 * MHZ, 350000000U, 350, 6, 2),
++	PLL_35XX_RATE(24 * MHZ, 266000000U, 532, 6, 3),
++	PLL_35XX_RATE(24 * MHZ, 160000000U, 320, 6, 3),
++};
+ 
+ static const struct samsung_pll_clock g3d_pll_clks[] __initconst = {
+ 	PLL(pll_35xx, CLK_FOUT_G3D_PLL, "fout_g3d_pll", "oscclk",
+-		G3D_PLL_LOCK, G3D_PLL_CON0, exynos5433_pll_rates),
++		G3D_PLL_LOCK, G3D_PLL_CON0, exynos5433_g3d_pll_rates),
+ };
+ 
+ static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+@@ -3368,17 +3386,191 @@ static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+ 	/*
+ 	 * Never reparented by a rate request: its first parent is the G3D
+ 	 * PLL, which the framework would pick for any rate the PLL can give
+-	 * exactly.  A board that runs the GPU from aclk_g3d_400 must stay
+-	 * there, since gating the GPU clock would then stop that PLL under
+-	 * CMU_G3D's register clock.  The parent is chosen by assigned-clocks.
++	 * exactly.  The parent is chosen by the board (assigned-clocks).
++	 * mout_g3d_pll, the other mux of MUX_SEL_G3D, is registered by
++	 * exynos5433_g3d_register_park() below.
+ 	 */
+ 	MUX_F(CLK_MOUT_ACLK_G3D_400, "mout_aclk_g3d_400", mout_aclk_g3d_400_p,
+ 			MUX_SEL_G3D, 8, 1,
+ 			CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),
+-	MUX_F(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
+-			MUX_SEL_G3D, 0, 1, CLK_SET_RATE_PARENT, 0),
+ };
+ 
++/*
++ * mout_g3d_pll, the G3D PLL's mux, never selects the PLL while the PLL is
++ * off or relocking.
++ *
++ * CMU_G3D's own registers and the G3D block's bus are clocked from the
++ * same tree as the GPU (div_aclk_g3d, div_pclk_g3d).  Gating the GPU clock
++ * runs the PLL's disable op; with this mux still on the PLL, the block
++ * lost its clock and CMU_G3D's runtime suspend, which reads its registers
++ * next, hung the bus (2026-11-04, SM-T715).  The vendor kernel moves the
++ * mux to OSCCLK by hand around every G3D PLL change (Mali platform code,
++ * gpu_set_clock_to_osc()).  This clock does it itself:
++ *
++ *  - enable, which the framework calls once the PLL is enabled and locked:
++ *    the PLL;
++ *  - disable, which comes before the PLL's own disable: OSCCLK;
++ *  - from the PLL's PRE_RATE_CHANGE to its POST_RATE_CHANGE (a clock
++ *    notifier): OSCCLK, so the GPU runs at 24 MHz rather than on a PLL
++ *    that relocks.
++ *
++ * For the framework it has a single parent, fout_g3d_pll, and passes rate
++ * requests on to it.  Disabled, it outputs OSCCLK, which nothing reads
++ * since the GPU clock is gated then; CMU_G3D's suspend value of
++ * MUX_SEL_G3D (0) agrees with that state.
++ */
++#define G3D_PARK_SEL_PLL	BIT(0)	/* MUX_SEL_G3D: 0 OSCCLK, 1 fout_g3d_pll */
++#define G3D_PARK_STAT_MASK	0x7	/* MUX_STAT_G3D: 1 OSCCLK, 2 the PLL, 4 changing */
++#define G3D_PLL_ENABLE		BIT(31)	/* G3D_PLL_CON0 */
++#define G3D_PLL_LOCKED		BIT(29)
++
++struct exynos5433_g3d_park {
++	struct clk_hw hw;
++	void __iomem *base;	/* CMU_G3D */
++	spinlock_t *lock;	/* the CMU's, which mout_aclk_g3d_400 also takes */
++	bool on;		/* enabled: the PLL is on and locked */
++	bool relock;		/* between the PLL's pre- and post-rate-change */
++	struct notifier_block nb;
++};
++
++#define to_g3d_park(_hw) container_of(_hw, struct exynos5433_g3d_park, hw)
++
++/* Called with park->lock held. */
++static void exynos5433_g3d_park_select(struct exynos5433_g3d_park *park,
++				       bool pll)
++{
++	u32 val, want = pll ? 2 : 1;
++
++	/* A PLL that has not locked is never selected. */
++	if (pll && !(readl_relaxed(park->base + G3D_PLL_CON0) & G3D_PLL_LOCKED)) {
++		pr_warn_ratelimited("mout_g3d_pll: the G3D PLL is not locked, staying on OSCCLK\n");
++		pll = false;
++		want = 1;
++	}
++
++	val = readl_relaxed(park->base + MUX_SEL_G3D);
++	if (pll)
++		val |= G3D_PARK_SEL_PLL;
++	else
++		val &= ~G3D_PARK_SEL_PLL;
++	writel_relaxed(val, park->base + MUX_SEL_G3D);
++
++	if (readl_relaxed_poll_timeout_atomic(park->base + MUX_STAT_G3D, val,
++					      (val & G3D_PARK_STAT_MASK) == want,
++					      0, 100))
++		pr_warn_ratelimited("mout_g3d_pll: MUX_STAT_G3D 0x%08x, not on %s\n",
++				    val, pll ? "the PLL" : "OSCCLK");
++}
++
++static int exynos5433_g3d_park_enable(struct clk_hw *hw)
++{
++	struct exynos5433_g3d_park *park = to_g3d_park(hw);
++	unsigned long flags;
++
++	spin_lock_irqsave(park->lock, flags);
++	park->on = true;
++	if (!park->relock)
++		exynos5433_g3d_park_select(park, true);
++	spin_unlock_irqrestore(park->lock, flags);
++
++	return 0;
++}
++
++static void exynos5433_g3d_park_disable(struct clk_hw *hw)
++{
++	struct exynos5433_g3d_park *park = to_g3d_park(hw);
++	unsigned long flags;
++
++	spin_lock_irqsave(park->lock, flags);
++	exynos5433_g3d_park_select(park, false);
++	park->on = false;
++	spin_unlock_irqrestore(park->lock, flags);
++}
++
++static const struct clk_ops exynos5433_g3d_park_ops = {
++	.enable = exynos5433_g3d_park_enable,
++	.disable = exynos5433_g3d_park_disable,
++};
++
++/*
++ * The framework sends PRE_RATE_CHANGE only for a rate that changes, and
++ * POST_RATE_CHANGE once the PLL's set_rate has written the new P, M and S
++ * and, the PLL being enabled, waited for the lock.
++ */
++static int exynos5433_g3d_park_notify(struct notifier_block *nb,
++				      unsigned long event, void *data)
++{
++	struct exynos5433_g3d_park *park =
++		container_of(nb, struct exynos5433_g3d_park, nb);
++	unsigned long flags;
++
++	spin_lock_irqsave(park->lock, flags);
++	switch (event) {
++	case PRE_RATE_CHANGE:
++		park->relock = true;
++		if (park->on)
++			exynos5433_g3d_park_select(park, false);
++		break;
++	case POST_RATE_CHANGE:
++	case ABORT_RATE_CHANGE:
++		park->relock = false;
++		if (park->on)
++			exynos5433_g3d_park_select(park, true);
++		break;
++	}
++	spin_unlock_irqrestore(park->lock, flags);
++
++	return NOTIFY_OK;
++}
++
++static void __init exynos5433_g3d_register_park(struct samsung_clk_provider *ctx)
++{
++	static const char * const parent = "fout_g3d_pll";
++	struct exynos5433_g3d_park *park;
++	struct clk_init_data init = {};
++	unsigned long flags;
++	struct clk *pll;
++	u32 val;
++	int ret;
++
++	park = kzalloc(sizeof(*park), GFP_KERNEL);
++	if (!park)
++		return;
++
++	park->base = ctx->reg_base;
++	park->lock = &ctx->lock;
++
++	/*
++	 * Start from the state the framework assumes, nothing enabled: the
++	 * mux on OSCCLK, then the PLL off.  The GPU driver is not loaded yet.
++	 */
++	spin_lock_irqsave(park->lock, flags);
++	exynos5433_g3d_park_select(park, false);
++	val = readl_relaxed(park->base + G3D_PLL_CON0);
++	writel_relaxed(val & ~G3D_PLL_ENABLE, park->base + G3D_PLL_CON0);
++	spin_unlock_irqrestore(park->lock, flags);
++
++	init.name = "mout_g3d_pll";
++	init.ops = &exynos5433_g3d_park_ops;
++	init.parent_names = &parent;
++	init.num_parents = 1;
++	init.flags = CLK_SET_RATE_PARENT;
++	park->hw.init = &init;
++
++	ret = clk_hw_register(ctx->dev, &park->hw);
++	if (ret) {
++		pr_err("%s: mout_g3d_pll: %d\n", __func__, ret);
++		kfree(park);
++		return;
++	}
++	samsung_clk_add_lookup(ctx, &park->hw, CLK_MOUT_G3D_PLL);
++
++	park->nb.notifier_call = exynos5433_g3d_park_notify;
++	pll = clk_hw_get_clk(ctx->clk_data.hws[CLK_FOUT_G3D_PLL], "g3d-park");
++	if (IS_ERR(pll) || clk_notifier_register(pll, &park->nb))
++		pr_warn("%s: the G3D PLL relocks under the GPU\n", __func__);
++}
++
+ static const struct samsung_div_clock g3d_div_clks[] __initconst = {
+ 	/* DIV_G3D */
+ 	DIV(CLK_DIV_SCLK_HPM_G3D, "div_sclk_hpm_g3d", "mout_g3d_pll", DIV_G3D,
+@@ -3438,6 +3630,7 @@ static const struct samsung_cmu_info g3d_cmu_info __initconst = {
+ 	.suspend_regs		= g3d_suspend_regs,
+ 	.nr_suspend_regs	= ARRAY_SIZE(g3d_suspend_regs),
+ 	.clk_name		= "aclk_g3d_400",
++	.register_extra		= exynos5433_g3d_register_park,
+ };
+ 
+ /*
+-- 
+2.52.0
+

@@ -1,0 +1,273 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 5/8] ARM: dts: gts28ltexx: A57 frequency scaling, 800 MHz to
+ 1.5 GHz
+
+The A57 policy had one level, the 1.2 GHz the bootloader leaves, until
+the cluster could run in the vendor kernel's body bias and EMA.  With
+the atlas-asv node setting them (level 8, EMA 3, this chip's fused
+values), the A57 table runs from 800 MHz to 1.5 GHz: this chip's stock
+voltages up to 1.2 GHz, stock plus 37.5 mV above it (stock's own cold
+margin), 987.5 mV to 1.175 V, and BUCK2 bounded to that range.  1.5 GHz
+is stock's boot level and its 90 C throttle level, and the cluster's
+bus divider changes between 1.5 and 1.6 GHz; 700 MHz stays out (P = 3).
+
+A57 cooling, both clusters from each zone as stock does: the A57
+sensors' new 81 C trip walks the A57s down to 1.2 GHz (a stand-in for
+stock's IPA at 81 C), their 95 C trip to 0.9 GHz and 100 C to 0.8 GHz;
+the A53 sensor's 81 C trip (stock's KFC rule) to 0.9 GHz and 86 C to
+0.8 GHz.
+
+Tested on the SM-T715 on 2026-11-07, image mode, cpufreq_dt by hand:
+800 MHz and 1 GHz for 3 minutes with every A57 loaded, 1.2 to 1.5 GHz in
+bursts until the 81 C trip took them down (four A57s pass 81 C within
+seconds at 1.2 GHz already), 1.5 GHz for 3 minutes on one A57, 1735
+transitions between 800 MHz and 1.5 GHz under load, every hash right;
+the eight emulated-temperature cases each gave the mapped cap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-cpufreq.dtsi        | 158 ++++++++++++++++--
+ 1 file changed, 144 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
+index 4379d9baa..2528186a9 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-cpufreq.dtsi
+@@ -24,12 +24,15 @@
+  * no EMA control on this cluster (asv-exynos5433_cal.c:505-516 is ATLAS
+  * only), so the lower levels run the cluster in stock's own state.
+  *
+- * A57 (cpu4-7, vdd_eagle on BUCK2): one level, the 1.2 GHz and 1 062 500 uV
+- * the cluster runs today. Not lower: the A57 ABB reads bypass and EMA 2, not
+- * stock's level 8 and EMA 3 (P0, decision D7), a state proven at 1.2 GHz
+- * only. cpufreq-dt needs a table on every possible CPU (an empty one fails
+- * dt_cpufreq_early_init(), and with it the whole probe), so the A57s get a
+- * policy that cannot move.
++ * A57 (cpu4-7, vdd_eagle on BUCK2): 800 MHz to 1.5 GHz, stage 2b of
++ * CPUFREQ.md section 4. The cluster runs in the vendor kernel's state, body
++ * bias level 8 and EMA 3, set by the atlas-asv node below (decision D7):
++ * the bootloader's bypass and EMA 2 were proven at 1.2 GHz only. Up to
++ * 1.2 GHz this chip's stock voltages; above it stock plus 37.5 mV, the cold
++ * margin stock itself adds (section 3.3, decision D3). 1.5 GHz is the
++ * natural stop: the cluster's bus divider changes between 1.5 and 1.6 GHz,
++ * and 1.5 GHz is stock's boot level and its 90 C throttle level (section
++ * 4). 700 MHz is left out (P = 3, as on the A53s).
+  *
+  * cpu-supply comes with the tables: without it the OPP core changes the
+  * clock and never the voltage (CPUFREQ.md section 2.3). cpu1-3 and cpu5-7
+@@ -100,12 +103,48 @@ cluster_a57_t715_opp_table: opp-table-t715-a57 {
+ 		compatible = "operating-points-v2";
+ 		opp-shared;
+ 
++		opp-800000000 {
++			opp-hz = /bits/ 64 <800000000>;
++			opp-microvolt = <987500>;
++			clock-latency-ns = <100000>;
++		};
++		opp-900000000 {
++			opp-hz = /bits/ 64 <900000000>;
++			opp-microvolt = <1012500>;
++			clock-latency-ns = <100000>;
++		};
++		opp-1000000000 {
++			opp-hz = /bits/ 64 <1000000000>;
++			opp-microvolt = <1012500>;
++			clock-latency-ns = <100000>;
++		};
++		opp-1100000000 {
++			opp-hz = /bits/ 64 <1100000000>;
++			opp-microvolt = <1037500>;
++			clock-latency-ns = <100000>;
++		};
+ 		opp-1200000000 {
+ 			opp-hz = /bits/ 64 <1200000000>;
+ 			opp-microvolt = <1062500>;
+ 			clock-latency-ns = <100000>;
+ 			opp-suspend;
+ 		};
++		/* stock + 37 500 uV from here */
++		opp-1300000000 {
++			opp-hz = /bits/ 64 <1300000000>;
++			opp-microvolt = <1125000>;
++			clock-latency-ns = <100000>;
++		};
++		opp-1400000000 {
++			opp-hz = /bits/ 64 <1400000000>;
++			opp-microvolt = <1150000>;
++			clock-latency-ns = <100000>;
++		};
++		opp-1500000000 {
++			opp-hz = /bits/ 64 <1500000000>;
++			opp-microvolt = <1175000>;
++			clock-latency-ns = <100000>;
++		};
+ 	};
+ };
+ 
+@@ -125,16 +164,35 @@ &cpu4 {
+ &cpu6 { operating-points-v2 = <&cluster_a57_t715_opp_table>; };
+ &cpu7 { operating-points-v2 = <&cluster_a57_t715_opp_table>; };
+ 
++/*
++ * The A57 cluster in the vendor kernel's state (decision D7,
++ * drivers/soc/samsung/exynos5433-atlas-asv.c): body bias level 8 in PMU
++ * BB_CON0, and EMA 3 in the cluster's EMA register (SYSREG_EGL + 0x330,
++ * 0x11810330), this chip's fused values as the stock kernel programs them
++ * (CPUFREQ.md P0: fuse word 0x33010008). Unit-specific, like the voltages.
++ * Built in, so both are set long before the cpufreq-dt module loads.
++ */
++&soc {
++	atlas-asv@11810000 {
++		compatible = "samsung,exynos5433-atlas-asv";
++		reg = <0x11810000 0x1000>;
++		samsung,pmu-syscon = <&pmu_system_controller>;
++		samsung,abb-level = <8>;
++		samsung,ema = <3>;
++		cpus = <&cpu4>, <&cpu5>, <&cpu6>, <&cpu7>;
++	};
++};
++
+ /*
+  * The rails cannot leave this stage's range, whatever a table says
+- * (CPUFREQ.md section 2.3, "Rail limit"): BUCK3 from the lowest A53 level to
+- * the highest, BUCK2 held where it is. Both ranges contain the voltage sboot
+- * leaves (B2OUT 0x6a, B3OUT 0x7a, P5), so the regulator core changes nothing
+- * at probe.
++ * (CPUFREQ.md section 2.3, "Rail limit"): each from its cluster's lowest
++ * level to its highest. Both ranges contain the voltage sboot leaves
++ * (B2OUT 0x6a, B3OUT 0x7a, P5), so the regulator core changes nothing at
++ * probe.
+  */
+ &buck2_reg {
+-	regulator-min-microvolt = <1062500>;
+-	regulator-max-microvolt = <1062500>;
++	regulator-min-microvolt = <987500>;
++	regulator-max-microvolt = <1175000>;
+ };
+ 
+ &buck3_reg {
+@@ -143,8 +201,7 @@ &buck3_reg {
+ };
+ 
+ /*
+- * CPU cooling (CPUFREQ.md section 5.2), A53 rows only: the A57 policy has a
+- * single level, so it has nothing to give.
++ * CPU cooling (CPUFREQ.md section 5.2).
+  *
+  * The SoC's maps go first: seven "active" trips from 65 C with states
+  * numbered for the SoC's tables (exynos5433-tmu.dtsi), which would take the
+@@ -161,6 +218,19 @@ &buck3_reg {
+  *                 notifies
+  *   atlas   95 C: down to 1.0 GHz, stock's 95 C row (exynos5433.dtsi:2054-2085)
+  *   atlas  100 C: down to 0.4 GHz, stock's 100 C row
++ *
++ * A57 states: 0 = 1.5 GHz, 1 = 1.4, 2 = 1.3, 3 = 1.2, 4 = 1.1, 5 = 1.0,
++ * 6 = 0.9, 7 = 0.8 GHz.
++ *   atlas   81 C: down to 1.2 GHz, one level per poll, a rough stand-in
++ *                 for stock's IPA (control temperature 81 C)
++ *   atlas   95 C: down to 0.9 GHz, stock's 95 C row
++ *   atlas  100 C: down to 0.8 GHz, stock's 100 and 110 C rows
++ *   apollo  81 C: down to 0.9 GHz, stock's KFC rule as above (95 C row)
++ *   apollo  86 C: down to 0.8 GHz, the KFC rule's 110 C row
++ * Each zone cools both clusters, as stock cools both from the hottest
++ * sensor. The A57 policy and its cooling device exist only while an A57 is
++ * online; t715-keys takes them offline with the screen.
++ *
+  * Hysteresis 2 C, as the board's other trips (stock threshold_falling).
+  * step_wise takes the first state of a range at once, then one more per
+  * poll (100 ms while passive) only while the temperature rises; at a steady
+@@ -202,11 +272,29 @@ map-a53-min {
+ 			cooling-device = <&cpu0 2 7>, <&cpu1 2 7>,
+ 					 <&cpu2 2 7>, <&cpu3 2 7>;
+ 		};
++
++		map-a57-900 {
++			trip = <&apollo_a53_1g>;
++			cooling-device = <&cpu4 3 6>, <&cpu5 3 6>,
++					 <&cpu6 3 6>, <&cpu7 3 6>;
++		};
++
++		map-a57-min {
++			trip = <&apollo_a53_min>;
++			cooling-device = <&cpu4 6 7>, <&cpu5 6 7>,
++					 <&cpu6 6 7>, <&cpu7 6 7>;
++		};
+ 	};
+ };
+ 
+ &atlas0_thermal {
+ 	trips {
++		atlas0_a57_1200: atlas0-a57-1200 {
++			temperature = <81000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "passive";
++		};
++
+ 		atlas0_a53_1g: atlas0-a53-1g {
+ 			temperature = <95000>;	/* millicelsius */
+ 			hysteresis = <2000>;	/* millicelsius */
+@@ -232,11 +320,35 @@ map-a53-min {
+ 			cooling-device = <&cpu0 2 7>, <&cpu1 2 7>,
+ 					 <&cpu2 2 7>, <&cpu3 2 7>;
+ 		};
++
++		map-a57-1200 {
++			trip = <&atlas0_a57_1200>;
++			cooling-device = <&cpu4 0 3>, <&cpu5 0 3>,
++					 <&cpu6 0 3>, <&cpu7 0 3>;
++		};
++
++		map-a57-900 {
++			trip = <&atlas0_a53_1g>;
++			cooling-device = <&cpu4 3 6>, <&cpu5 3 6>,
++					 <&cpu6 3 6>, <&cpu7 3 6>;
++		};
++
++		map-a57-min {
++			trip = <&atlas0_a53_min>;
++			cooling-device = <&cpu4 6 7>, <&cpu5 6 7>,
++					 <&cpu6 6 7>, <&cpu7 6 7>;
++		};
+ 	};
+ };
+ 
+ &atlas1_thermal {
+ 	trips {
++		atlas1_a57_1200: atlas1-a57-1200 {
++			temperature = <81000>;	/* millicelsius */
++			hysteresis = <2000>;	/* millicelsius */
++			type = "passive";
++		};
++
+ 		atlas1_a53_1g: atlas1-a53-1g {
+ 			temperature = <95000>;	/* millicelsius */
+ 			hysteresis = <2000>;	/* millicelsius */
+@@ -262,5 +374,23 @@ map-a53-min {
+ 			cooling-device = <&cpu0 2 7>, <&cpu1 2 7>,
+ 					 <&cpu2 2 7>, <&cpu3 2 7>;
+ 		};
++
++		map-a57-1200 {
++			trip = <&atlas1_a57_1200>;
++			cooling-device = <&cpu4 0 3>, <&cpu5 0 3>,
++					 <&cpu6 0 3>, <&cpu7 0 3>;
++		};
++
++		map-a57-900 {
++			trip = <&atlas1_a53_1g>;
++			cooling-device = <&cpu4 3 6>, <&cpu5 3 6>,
++					 <&cpu6 3 6>, <&cpu7 3 6>;
++		};
++
++		map-a57-min {
++			trip = <&atlas1_a53_min>;
++			cooling-device = <&cpu4 6 7>, <&cpu5 6 7>,
++					 <&cpu6 6 7>, <&cpu7 6 7>;
++		};
+ 	};
+ };
+-- 
+2.52.0
+

@@ -1,0 +1,288 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0000
+Subject: [PATCH 4/8] soc: samsung: put the Exynos5433 A57 cluster in the
+ vendor's body bias and EMA
+
+The bootloader leaves the A57 (ATLAS) cluster's body bias in bypass
+(PMU BB_CON0 = 0) and EMA 2 in both fields of SYSREG_EGL + 0x330, where
+the stock kernel runs this SoC with the fused body-bias level and EMA
+(on the SM-T715, level 8 and EMA 3, at every A57 level).  Mainline never
+programs either, and the bootloader's state was only ever proven at the
+1.2 GHz the cluster ran at.
+
+exynos5433-atlas-asv, built in, takes both values from a
+"samsung,exynos5433-atlas-asv" node: the body bias once at probe (the
+PMU is always on, so it holds while CPU hotplug powers the cluster off),
+the EMA from a CPU hotplug online callback on each A57 of the node's
+cpus, so the register is only touched from a CPU of the cluster, never
+while the cluster is off.  An EMA write that changes the register is
+logged, to show whether a power-off of the cluster resets it.  Stock
+sets the EMA at every A57 voltage change, to one fused value above
+900 mV and another at or below; the board's A57 voltages are all above
+900 mV, so one value covers them.
+
+On the SM-T715 (2026-11-07): "BB_CON0 0x00000000 -> 0x80000088" and
+"EMA 0x00210210 -> 0x00310310" at boot, then the A57 levels from
+800 MHz to 1.5 GHz passed with every hash right.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig      |   7 +
+ drivers/soc/samsung/Kconfig                |  13 ++
+ drivers/soc/samsung/Makefile               |   1 +
+ drivers/soc/samsung/exynos5433-atlas-asv.c | 188 +++++++++++++++++++++
+ 4 files changed, 209 insertions(+)
+ create mode 100644 drivers/soc/samsung/exynos5433-atlas-asv.c
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index b30ce4e59..4e7dc7db1 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -201,6 +201,13 @@ CONFIG_DEVFREQ_THERMAL=y
+ # touches an always-on PMU register.
+ CONFIG_EXYNOS5433_G3D_ABB=y
+ 
++# The A57 cluster in the vendor kernel's state (docs/hardware/CPUFREQ.md,
++# decision D7): body bias level 8 in PMU BB_CON0 and EMA 3, where the
++# bootloader leaves bypass and EMA 2 (board node atlas-asv).  Needed for
++# any A57 level other than 1.2 GHz, the only one run in the bootloader's
++# state.
++CONFIG_EXYNOS5433_ATLAS_ASV=y
++
+ # Requested by the Omarchy (Hyprland) track, built in because the rootfs
+ # ships no modules.  Firewall for ufw / iptables-nft (omarchy-mobile's
+ # kernel fragment):
+diff --git a/drivers/soc/samsung/Kconfig b/drivers/soc/samsung/Kconfig
+index 1b2b45a20..0e1c8b227 100644
+--- a/drivers/soc/samsung/Kconfig
++++ b/drivers/soc/samsung/Kconfig
+@@ -86,6 +86,19 @@ config EXYNOS5433_G3D_ABB
+ 	  bias the stock kernel uses only for an idle GPU.  Built in, so that
+ 	  it is bound before the GPU driver powers the domain up.
+ 
++config EXYNOS5433_ATLAS_ASV
++	bool "Exynos5433 A57 cluster body bias and SRAM EMA"
++	depends on ARCH_EXYNOS || COMPILE_TEST
++	depends on OF && HOTPLUG_CPU
++	select MFD_SYSCON
++	help
++	  Program the A57 (ATLAS) cluster's body bias (PMU register BB_CON0)
++	  and SRAM EMA the way the vendor kernel does, from a
++	  "samsung,exynos5433-atlas-asv" node: the bias once at boot, the
++	  EMA on each A57 as it comes online.  Mainline otherwise leaves the
++	  bootloader's values, which on the Samsung SM-T715 are bypass and
++	  EMA 2 where the stock kernel uses level 8 and EMA 3.
++
+ config EXYNOS_REGULATOR_COUPLER
+ 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
+ 	depends on ARCH_EXYNOS || COMPILE_TEST
+diff --git a/drivers/soc/samsung/Makefile b/drivers/soc/samsung/Makefile
+index 768587480..bac5d52f9 100644
+--- a/drivers/soc/samsung/Makefile
++++ b/drivers/soc/samsung/Makefile
+@@ -13,6 +13,7 @@ obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
+ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
+ 
+ obj-$(CONFIG_EXYNOS5433_G3D_ABB)	+= exynos5433-g3d-abb.o
++obj-$(CONFIG_EXYNOS5433_ATLAS_ASV)	+= exynos5433-atlas-asv.o
+ 
+ obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
+ 
+diff --git a/drivers/soc/samsung/exynos5433-atlas-asv.c b/drivers/soc/samsung/exynos5433-atlas-asv.c
+new file mode 100644
+index 000000000..2ce370d7f
+--- /dev/null
++++ b/drivers/soc/samsung/exynos5433-atlas-asv.c
+@@ -0,0 +1,188 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Exynos5433 A57 (ATLAS) cluster: the body bias and the SRAM EMA that the
++ * vendor kernel programs from the chip's ASV data, and mainline does not.
++ *
++ * On the SM-T715 the bootloader leaves the A57 body bias in bypass
++ * (PMU BB_CON0 = 0) and EMA 2 in both fields of the cluster's EMA register,
++ * where the stock kernel runs this chip with level 8 and EMA 3 at every A57
++ * voltage it uses (omarchy-tab-s2 docs/hardware/CPUFREQ.md, P0 and
++ * decision D7).  That state is proven at 1.2 GHz only, the one A57 level
++ * mainline ran until now; the levels around it are qualified in the
++ * vendor's state, which this driver restores:
++ *
++ *  - body bias: written once at probe.  The PMU is always on, so the value
++ *    holds while the cluster is powered off by CPU hotplug.
++ *  - EMA: written on each A57 as it comes online (a CPU hotplug state),
++ *    since the register sits with the cluster.  It is only ever touched
++ *    from a CPU of the cluster, so never while the cluster is off.  A
++ *    value that has to change is logged, which shows whether a power-off
++ *    of the cluster resets it.
++ *
++ * Stock references (Samsung kernel for the SM-T715, kernel_universal5433):
++ *
++ *  - body bias: abb_base_arr[SYSC_DVFS_EGL] = PMU + 0x0780, BB_CON0
++ *    (arch/arm/mach-exynos/asv-exynos5433_cal.c:22,
++ *    mach/regs-pmu-exynos5433.h:42); cal_set_abb() writes 0 for bypass,
++ *    otherwise (1 << 31) | (1 << 7) | level (asv-exynos5433_cal.c:484-495);
++ *    written at ASV init (asv-exynos5433.c:128-139), the same level 8 at
++ *    every A57 level on this chip (the stock boot logs).
++ *  - EMA: cal_set_ema() sets bits 22:20 and 10:8 of SYSREG_EGL + 0x330
++ *    (0x11810330, mach/asv-exynos5_cal.h:88) to the fused value for an A57
++ *    voltage above 900 mV, and to a second fused value at or below it,
++ *    0 meaning 2 (asv-exynos5433_cal.c:133-134,505-516); the A57 cpufreq
++ *    driver calls it at every voltage change (exynos-mp-cpufreq.c:503,527,
++ *    573).  Every A57 voltage of the board's table is above 900 mV, so one
++ *    value, from the device tree, covers them.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/cpu.h>
++#include <linux/cpuhotplug.h>
++#include <linux/cpumask.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/mfd/syscon.h>
++#include <linux/mod_devicetable.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/spinlock.h>
++
++#define EXYNOS5433_PMU_BB_CON0	0x0780
++
++#define ABB_ENABLE		(BIT(31) | BIT(7))
++#define ABB_LEVEL_MASK		GENMASK(4, 0)
++
++#define ATLAS_EMA_CON		0x0330
++#define ATLAS_EMA_HI		GENMASK(22, 20)
++#define ATLAS_EMA_LO		GENMASK(10, 8)
++#define ATLAS_EMA_MASK		(ATLAS_EMA_HI | ATLAS_EMA_LO)
++#define ATLAS_EMA_MAX		7
++
++struct atlas_asv {
++	struct device *dev;
++	void __iomem *base;
++	u32 ema;		/* both EMA fields, in place */
++	struct cpumask cpus;
++	spinlock_t lock;
++	unsigned int changes;	/* EMA writes that changed the register */
++};
++
++/* One A57 cluster on this SoC, so one instance for the hotplug callback. */
++static struct atlas_asv *atlas_asv;
++
++static int atlas_asv_cpu_online(unsigned int cpu)
++{
++	struct atlas_asv *asv = READ_ONCE(atlas_asv);
++	unsigned long flags;
++	u32 old, new;
++
++	if (!asv || !cpumask_test_cpu(cpu, &asv->cpus))
++		return 0;
++
++	spin_lock_irqsave(&asv->lock, flags);
++	old = readl(asv->base + ATLAS_EMA_CON);
++	new = (old & ~ATLAS_EMA_MASK) | asv->ema;
++	if (new != old) {
++		writel(new, asv->base + ATLAS_EMA_CON);
++		asv->changes++;
++	}
++	spin_unlock_irqrestore(&asv->lock, flags);
++
++	if (new != old)
++		dev_info_ratelimited(asv->dev, "cpu%u online: EMA 0x%08x -> 0x%08x (write %u)\n",
++				     cpu, old, new, asv->changes);
++
++	return 0;
++}
++
++static int atlas_asv_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct atlas_asv *asv;
++	struct regmap *pmu;
++	u32 level, ema, before, after;
++	int i, n, cpu, ret;
++
++	if (atlas_asv)
++		return dev_err_probe(dev, -EBUSY, "one A57 cluster only\n");
++
++	asv = devm_kzalloc(dev, sizeof(*asv), GFP_KERNEL);
++	if (!asv)
++		return -ENOMEM;
++	asv->dev = dev;
++	spin_lock_init(&asv->lock);
++
++	asv->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(asv->base))
++		return PTR_ERR(asv->base);
++
++	pmu = syscon_regmap_lookup_by_phandle(np, "samsung,pmu-syscon");
++	if (IS_ERR(pmu))
++		return dev_err_probe(dev, PTR_ERR(pmu), "no PMU regmap\n");
++
++	if (of_property_read_u32(np, "samsung,abb-level", &level) ||
++	    level > ABB_LEVEL_MASK)
++		return dev_err_probe(dev, -EINVAL, "samsung,abb-level missing or above %lu\n",
++				     ABB_LEVEL_MASK);
++
++	if (of_property_read_u32(np, "samsung,ema", &ema) ||
++	    !ema || ema > ATLAS_EMA_MAX)
++		return dev_err_probe(dev, -EINVAL, "samsung,ema missing or not 1 to %d\n",
++				     ATLAS_EMA_MAX);
++	asv->ema = FIELD_PREP(ATLAS_EMA_HI, ema) | FIELD_PREP(ATLAS_EMA_LO, ema);
++
++	n = of_count_phandle_with_args(np, "cpus", NULL);
++	for (i = 0; i < n; i++) {
++		struct device_node *cpu_np = of_parse_phandle(np, "cpus", i);
++
++		cpu = of_cpu_node_to_id(cpu_np);
++		of_node_put(cpu_np);
++		if (cpu < 0)
++			return dev_err_probe(dev, cpu, "cpus entry %d is no CPU\n", i);
++		cpumask_set_cpu(cpu, &asv->cpus);
++	}
++	if (cpumask_empty(&asv->cpus))
++		return dev_err_probe(dev, -EINVAL, "no cpus\n");
++
++	ret = regmap_read(pmu, EXYNOS5433_PMU_BB_CON0, &before);
++	if (!ret)
++		ret = regmap_write(pmu, EXYNOS5433_PMU_BB_CON0, ABB_ENABLE | level);
++	if (!ret)
++		ret = regmap_read(pmu, EXYNOS5433_PMU_BB_CON0, &after);
++	if (ret)
++		return dev_err_probe(dev, ret, "BB_CON0\n");
++	dev_info(dev, "A57 body bias: BB_CON0 0x%08x -> 0x%08x; EMA %u on cpus %*pbl\n",
++		 before, after, ema, cpumask_pr_args(&asv->cpus));
++
++	WRITE_ONCE(atlas_asv, asv);
++
++	/* Runs the callback now on each online CPU, then at every online. */
++	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "soc/exynos5433-atlas-asv:online",
++				atlas_asv_cpu_online, NULL);
++	if (ret < 0) {
++		WRITE_ONCE(atlas_asv, NULL);
++		return dev_err_probe(dev, ret, "CPU hotplug state\n");
++	}
++
++	return 0;
++}
++
++static const struct of_device_id atlas_asv_of_match[] = {
++	{ .compatible = "samsung,exynos5433-atlas-asv" },
++	{ }
++};
++
++static struct platform_driver atlas_asv_driver = {
++	.probe = atlas_asv_probe,
++	.driver = {
++		.name = "exynos5433-atlas-asv",
++		.of_match_table = atlas_asv_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(atlas_asv_driver);
+-- 
+2.52.0
+
