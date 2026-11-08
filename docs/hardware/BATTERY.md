@@ -701,8 +701,9 @@ does on every switch) applies real caps instead:
   1 GHz (`SAVER_LITTLE_MAX_KHZ`), the A57 cluster offline — section 10
   measured 169 ± 4 mW for that alone — `cpufreq/boost` off, and the GPU's
   devfreq `max_freq` at 266 MHz (`SAVER_GPU_MAX_HZ`), which the operating
-  points of the daily kernel #7 (100, 133, 200 and 400 MHz, `GPU.md`) turn
-  into 200 MHz. The flag
+  points of kernel #7 (100, 133, 200 and 400 MHz, `GPU.md`) turned into
+  200 MHz; those of the daily kernel #8 (160 to 700 MHz) keep 266 MHz.
+  Hyprland's animations go off. The flag
   `/run/t715-power/saver` is left behind: `t715-keys` reads it and keeps
   the A57s offline even when the screen lights (one log line per lit
   period), so a wake cannot undo the saver until the tile goes back to
@@ -712,7 +713,20 @@ does on every switch) applies real caps instead:
   frequency, the flag removed and the A57s back online — but only when the
   panel's DPMS state is `On`: `t715-keys` keeps them offline while the
   screen is dark, and waking them there would be undone at the next
-  screen-off.
+  screen-off. The animations come back.
+
+Hyprland's animations follow the saver too: the tablet block of
+`looknfeel.lua` reads the flag at Hyprland's start and on every config
+reload, and `t715-animations.path` with `t715-animations.service` in the
+user session (`/usr/local/bin/t715-animations`) flip the running Hyprland
+through `hyprctl eval`. Kernel #8 scales the GPU from 160 to 700 MHz;
+with the GPU at a fixed 266 MHz (the kernels before #7) the desktop felt
+snappier without animations, and the image kept them off. The off-device
+test is `image/tests/test_t715_animations.sh`. Checked on the tablet on
+2026-11-08 with kernel #8: power-saver turned the animations off within a
+second of the switch, with the A57s offline, the A53s at 1 GHz at most and
+the GPU at 266 MHz at most; balanced turned them back on, with cpus 0-7
+online, the A53s at 1.2 GHz and the GPU at 700 MHz at most.
 
 The clusters are told apart by the cpus' `cpufreq` links, never by cpu
 numbers: an offline cpu keeps its link but loses its `cpu_capacity`, and

@@ -22,13 +22,19 @@ hl.config({
   xwayland = { enabled = false },
 })
 
--- No animations: on the device the user found the
--- desktop snappier without them than with the short ones below, and the
--- GPU at 266 MHz is the bottleneck during animations.
-hl.config({ animations = { enabled = false } })
+-- Animations follow the Battery saver: on in balanced (the short ones
+-- below), off while t715-power-profile's flag /run/t715-power/saver
+-- exists. This read covers Hyprland's start and every config reload;
+-- t715-animations (a user path unit on the flag) flips them in the
+-- running session. With the GPU at a fixed 266 MHz (kernels before #7)
+-- the user found the desktop snappier without them; #8 scales the GPU
+-- up to 700 MHz.
+local t715_saver = io.open("/run/t715-power/saver", "r")
+if t715_saver then t715_saver:close() end
+hl.config({ animations = { enabled = t715_saver == nil } })
 
--- If animations are turned back on: shorter ones (speed unit: 100 ms; Omarchy
--- uses 150 to 540 ms), none when something closes. Omarchy's curves
+-- The animations in use: short ones (speed unit: 100 ms; Omarchy uses
+-- 150 to 540 ms), none when something closes. Omarchy's curves
 -- (default/hypr/looknfeel.lua).
 hl.animation({ leaf = "border", enabled = false })
 hl.animation({ leaf = "windows", enabled = true, speed = 2, bezier = "easeOutQuint" })

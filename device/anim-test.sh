@@ -23,6 +23,9 @@ for i in 1 2 3 4 5; do
 done
 sleep 5
 m "after 5 launcher cycles, animations on"
-au hyprctl eval "hl.config({ animations = { enabled = false } })" 2>&1 | head -2
-echo "animations restored: $(au hyprctl getoption animations:enabled 2>&1 | head -1)"
+# The image's animations follow the Battery saver (/run/t715-power/saver):
+# restore that, not a fixed off.
+if [ -e /run/t715-power/saver ]; then RESTORE=false; else RESTORE=true; fi
+au hyprctl eval "hl.config({ animations = { enabled = $RESTORE } })" 2>&1 | head -2
+echo "animations back as the saver says: $(au hyprctl getoption animations:enabled 2>&1 | head -1)"
 echo "shell restarts: $(journalctl -b --since '-1min' --no-pager | grep -c relaunching)"

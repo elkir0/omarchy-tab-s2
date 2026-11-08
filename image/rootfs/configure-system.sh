@@ -116,9 +116,13 @@ systemctl enable t715-power-profile.service t715-power-profile.path t715-power-g
 # Touch layer P1 (docs/image/ROOTFS.md): the Power and Home keys and the cover,
 # and the on-screen keyboard, for every user's graphical session
 # (/etc/systemd/user/t715-{keys,squeekboard}.service from the overlay).
+# t715-animations follows the Battery saver in the session (Hyprland's
+# animations): its .path unit watches the saver flag and the .service
+# runs once at the session's start.
 [ -x /usr/local/bin/t715-keys ] || die "no /usr/local/bin/t715-keys"
+[ -x /usr/local/bin/t715-animations ] || die "no /usr/local/bin/t715-animations"
 [ -x /usr/bin/squeekboard ] || die "no /usr/bin/squeekboard"
-systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer
+systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service
 
 # Touch layer P2: omamobile-setup-user runs once, at build time, as alarm
 # (omarchy-user-setup.sh). omamobile-shell also starts it at every login,

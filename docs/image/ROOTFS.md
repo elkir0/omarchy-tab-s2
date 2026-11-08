@@ -862,6 +862,18 @@ caps instead of their top frequencies.
 a fake sysfs, `image/tests/test_t715_keys.sh` covers the flag, and
 `verify-rootfs.sh` checks the files, the modes and the enabled units.
 
+Hyprland's animations follow the saver as well: on in balanced, off in
+power-saver. The tablet block of `looknfeel.lua`
+(`image/rootfs/t715-looknfeel.lua`) reads the flag at Hyprland's start
+and on every config reload, and `t715-animations`
+(`/usr/local/bin/`, the overlay) flips the running Hyprland through
+`hyprctl eval`; its `t715-animations.path` (a user unit on the flag,
+`PathChanged=` fires on the flag's creation and removal) starts
+`t715-animations.service`, which also runs once at the session's start,
+closing the window between Hyprland's config read and the path unit's
+start. `configure-system.sh` enables the two units for every user;
+`image/tests/test_t715_animations.sh` runs the script off the device.
+
 ## Modem and telephony
 
 The Shannon SS333 modem (`docs/hardware/MODEM.md`) needs a kernel with
@@ -1043,12 +1055,13 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tests/test_t715_keys.sh` | off-device test of t715-keys' gestures (fake input, stand-ins) |
 | `image/tests/test_t715_power_profile.sh` | off-device test of t715-power-profile (fake sysfs, stand-ins) |
 | `image/tests/test_t715_idle.sh` | off-device test of t715-idle's hypridle.conf (the stay-awake hold) |
+| `image/tests/test_t715_animations.sh` | off-device test of t715-animations and the saver-flag read in looknfeel.lua |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
 | `image/rootfs/smoke-check.sh` | binaries-load check (`/usr/lib/t715-omarchy/smoke-check` in the image) |
 | `image/rootfs/mkimage.sh` | export to ext4, in the helper container |
 | `image/rootfs/packages.omarchy-skip`, `image/rootfs/packages.extra`, `image/rootfs/packages.mobile` | package lists (`packages.mobile`: touch layer P2, from `image/pkg/`) |
 | `image/pkg/omamobile-shell/`, `image/pkg/omamobile-omarchy/` | the touch shell and Omarchy's patches, built by `image/tools/build-pkg` (`docs/image/PACKAGES.md`); the tablet's `shell.json` and `home.json` |
-| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units) |
-| `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance) and `hyprland.lua` (touch layers P1 and P2) |
+| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units) |
+| `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance; the block's animations follow the Battery saver) and `hyprland.lua` (touch layers P1 and P2) |
 | `image/rootfs/shim/` | Hyprland's dmabuf-check shim (LD_PRELOAD) |

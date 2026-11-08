@@ -344,6 +344,17 @@ get /home/alarm/.config/hypr/looknfeel.lua; cp "$W/f" "$W/lnf"
 check "looknfeel.lua: tablet block (opaque windows, no Xwayland, shorter animations)" \
     sh -c 'grep -q "^-- SM-T715 begin" "$1" && grep -q "^-- SM-T715 end" "$1" &&
            grep -q "opacity = \"1 1\"" "$1" && grep -q "xwayland = { enabled = false }" "$1"' _ "$W/lnf"
+check "looknfeel.lua: the tablet block reads the saver flag" \
+    sh -c 'grep -q "io.open(\"/run/t715-power/saver\", \"r\")" "$1" &&
+           grep -q "animations = { enabled = t715_saver == nil }" "$1" &&
+           ! grep -q "hl.config({ animations = { enabled = false } })" "$1"' _ "$W/lnf"
+ANIM=/usr/local/bin/t715-animations
+check "$ANIM present with mode 0755" test "$(fmode $ANIM)" = 0755
+for u in t715-animations.path t715-animations.service; do
+    a="$(resolve /etc/systemd/user/graphical-session.target.wants/$u || true)"
+    check "$u enabled for every user (graphical-session.target.wants -> ${a:-missing})" \
+        test "$a" = /etc/systemd/user/$u
+done
 get /usr/share/t715-omarchy/wallpapers.tsv; cp "$W/f" "$W/wp"
 check "theme backgrounds: all listed, none above a 2048 px short side" \
     sh -c '[ -s "$1" ] && awk -F"\t" '"'"'

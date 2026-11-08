@@ -1,0 +1,18 @@
+# t715-animations.service — Hyprland's animations follow the Battery
+# saver (omarchy-tab-s2, /usr/local/bin/t715-animations, docs/image/
+# ROOTFS.md "Battery saver"). Started by t715-animations.path whenever
+# the saver flag is created or removed; also enabled for
+# graphical-session.target, so one run at session start closes the
+# window between Hyprland's config read and the path unit's start.
+# Its log: journalctl --user -u t715-animations
+[Unit]
+Description=Set Hyprland's animations from the SM-T715 Battery saver
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/t715-animations apply
+
+[Install]
+WantedBy=graphical-session.target
