@@ -688,8 +688,16 @@ check_rootimg() {
     ROOTIMG=$_cr
 }
 
-# list_partnames: "DEVNAME PARTNAME" for every block device with a
-# partition name (GPT), from the kernel's uevent files.
+# list_partnames: "DEVNAME PARTNAME" for the eMMC's partitions only, from
+# the kernel's uevent files.  A microSD card can carry a copy of a tablet's
+# eMMC (a card cloned from one): its USERDATA would stop the boot ("several
+# partitions are named USERDATA") and its SYSTEM would feed
+# import_device_files two names and copy nothing.  The card is told from
+# the eMMC two ways, both from the device tree: the aliases fix the eMMC as
+# mmcblk0 and any card as mmcblk1 or above, and the card's block devices
+# sit under the SD host 15560000.mmc while the eMMC's sit under
+# 15540000.mmc.  Either mark leaves a device out; anything without them
+# (the test's loop devices, a disk on another SoC) is kept, as before.
 list_partnames() {
     for _lp_ue in /sys/class/block/*/uevent; do
         [ -r "$_lp_ue" ] || continue
@@ -701,7 +709,14 @@ list_partnames() {
             PARTNAME) _lp_name=$_lp_v ;;
             esac
         done <"$_lp_ue"
-        if [ -n "$_lp_dev" ] && [ -n "$_lp_name" ]; then
+        [ -n "$_lp_dev" ] || continue
+        case $_lp_dev in
+        mmcblk[1-9]*) continue ;; # the card: the eMMC is mmcblk0, by alias
+        esac
+        case $(readlink -f "/sys/class/block/$_lp_dev" 2>/dev/null) in
+        *15560000.mmc*) continue ;; # the SD slot's host, not the eMMC's
+        esac
+        if [ -n "$_lp_name" ]; then
             printf '%s %s\n' "$_lp_dev" "$_lp_name"
         fi
     done

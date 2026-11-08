@@ -30,7 +30,12 @@
 #     line).  Also the end-user defaults:
 #     no telnet on the default boot (port closed, log says so), and
 #     t715.failreboot=0 turning a failure into exit 97 with the on-screen
-#     failure line.  USERDATA must stay fsck-clean.
+#     failure line.  USERDATA must stay fsck-clean.  The eMMC-only
+#     partition lookup: list_partnames, extracted from the unpacked /init,
+#     ignores a microSD card that carries a clone of a tablet's eMMC
+#     (15560000.mmc, mmcblk1p*, USERDATA and SYSTEM among its names) while
+#     keeping the eMMC's and the test loop disk's names, and a boot with a
+#     second disk also named USERDATA is still refused.
 #
 # Usage: bash boot/tests/test_initramfs.sh
 # (internal: --in-container CPIO_GZ, run inside the test container)
@@ -679,6 +684,83 @@ scenario_nouserdata() {
   ip link del usb0 2>/dev/null || true
 }
 
+# A second disk also named USERDATA beside the first: the boot must refuse
+# to guess (both are kept devices here: loop disks carry no mmc marks, so
+# this is the "two USERDATA on the eMMC's side" case the eMMC-only lookup
+# must not weaken).  The second disk is a small GPT with USERDATA alone.
+scenario_two_userdata() {
+  echo "--- scenario: two partitions named USERDATA (refused)"
+  truncate -s 16M "$W/disk2.img"
+  sfdisk -q "$W/disk2.img" <<'EOF2'
+label: gpt
+start=2048, size=4096, name=USERDATA
+EOF2
+  local n
+  n=$(losetup -f)
+  losetup -P "$(node "$n")" "$W/disk2.img"
+  LOOPS+=("$n")
+  local i
+  for ((i = 0; i < 20; i++)); do
+    grep -qx "PARTNAME=USERDATA" "/sys/class/block/${n#/dev/}p1/uevent" 2>/dev/null && break
+    sleep 0.5
+  done
+  prepare_boot twoud
+  local rc=0
+  run_init twoud "t715.rootwait=2 t715.failwait=1" || rc=$?
+  check "rebooted after failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "refusal logged" log_has twoud "ERROR: several partitions are named USERDATA"
+  [[ $rc -eq 99 ]] || show_log twoud
+  losetup -d "$(node "$n")"
+  LOOPS=("${LOOPS[@]:0:${#LOOPS[@]}-1}")
+  ip link del usb0 2>/dev/null || true
+}
+
+# check_list_partnames: the eMMC-only partition lookup, against a fake
+# /sys.  The function is extracted from the unpacked /init (the same bytes
+# the boot scenarios run) and run by the cpio's busybox sh, with
+# /sys/class/block pointed at a tree holding an eMMC (15540000.mmc,
+# mmcblk0p*), a microSD card that looks like a clone of a tablet's eMMC
+# (15560000.mmc, mmcblk1p*, USERDATA and SYSTEM among its names) and a
+# plain loop disk (as the scenarios see their own).  The card's names must
+# be ignored, the eMMC's and the loop disk's kept.
+check_list_partnames() {
+  local S="$W/fake-sys"
+  rm -rf "$S" "$W/root-lp"
+  mkdir -p "$S/class/block" "$W/root-lp"
+  (cd "$W/root-lp" && gzip -dc "$CPIO" | cpio -idm --quiet --no-absolute-filenames)
+  sed -n '/^list_partnames()/,/^}/p' "$W/root-lp/init" \
+    | sed "s|/sys/class/block|$S/class/block|g" >"$W/lp.sh"
+  local emmc="$S/devices/platform/soc@0/15540000.mmc/mmc_host/mmc0:0001/block/mmcblk0"
+  local card="$S/devices/platform/soc@0/15560000.mmc/mmc_host/mmc1:0001/block/mmcblk1"
+  # lp_mk HOSTDIR NAME PARTNAME: one block device of the fake tree.
+  lp_mk() { # HOSTDIR NAME PARTNAME
+    mkdir -p "$1/$2"
+    printf 'MAJOR=179\nMINOR=8\nDEVNAME=%s\nPARTNAME=%s\n' "$2" "$3" >"$1/$2/uevent"
+    ln -s "$1/$2" "$S/class/block/$2"
+  }
+  lp_mk "$emmc" mmcblk0p1 EFS
+  lp_mk "$emmc" mmcblk0p3 USERDATA
+  lp_mk "$emmc" mmcblk0p5 SYSTEM
+  lp_mk "$card" mmcblk1p1 RADIO
+  lp_mk "$card" mmcblk1p3 USERDATA
+  lp_mk "$card" mmcblk1p4 SYSTEM
+  lp_mk "$card" mmcblk1p6 BOOT
+  mkdir -p "$S/devices/virtual/block/loop0/loop0p3"
+  printf 'DEVNAME=loop0p3\nPARTNAME=USERDATA\n' >"$S/devices/virtual/block/loop0/loop0p3/uevent"
+  ln -s "$S/devices/virtual/block/loop0/loop0p3" "$S/class/block/loop0p3"
+  "$W/x/bin/busybox" sh -c ". '$W/lp.sh'; list_partnames" >"$W/lp.out" 2>/dev/null
+  check "a cloned-eMMC card's USERDATA ignored (no mmcblk1p3)" \
+    sh -c "! grep -q '^mmcblk1p3 ' '$W/lp.out'"
+  check "the card's SYSTEM ignored (no mmcblk1p4)" \
+    sh -c "! grep -q '^mmcblk1p4 ' '$W/lp.out'"
+  check "the card's RADIO and BOOT ignored too" sh -c "! grep -q '^mmcblk1' '$W/lp.out'"
+  check "the eMMC's USERDATA still found" grep -qx 'mmcblk0p3 USERDATA' "$W/lp.out"
+  check "the eMMC's SYSTEM still found" grep -qx 'mmcblk0p5 SYSTEM' "$W/lp.out"
+  check "a disk without an mmc host still listed (the scenarios' loop)" \
+    grep -qx 'loop0p3 USERDATA' "$W/lp.out"
+  rm -rf "$S" "$W/root-lp"
+}
+
 in_container() {
   CPIO=$1
   trap container_cleanup EXIT
@@ -718,7 +800,12 @@ in_container() {
   scenario_persist_sidecar two-lines
   scenario_persist_space
   detach_inner_loops
+  # Two disks both carrying USERDATA, the outer one still attached: the
+  # boot must refuse to guess (both are plain disks here, so this is the
+  # refusal the eMMC-only lookup must keep once a card's names are out).
+  scenario_two_userdata
   detach_disk
+  check_list_partnames
   scenario_nouserdata
 
   sync
