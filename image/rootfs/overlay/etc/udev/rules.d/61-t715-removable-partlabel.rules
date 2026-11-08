@@ -1,0 +1,22 @@
+# SM-T715: /dev/disk/by-partlabel/* must always name the eMMC's (mmcblk0's)
+# partitions. System code reads those links by name, and a microSD card can
+# carry partitions with the same GPT names -- a whole copy of a tablet's
+# eMMC, for instance: systemd's 60-persistent-storage.rules would then add
+# disk/by-partlabel/RADIO, EFS, SYSTEM, USERDATA... for the card, taking
+# the names over (later symlinks replace earlier ones). The readers this
+# protects, all of them by name on the eMMC:
+#   shannon-loader        by-partlabel/RADIO   (the modem's boot image; its
+#                                              boot code programs eFuses,
+#                                              so it must never read a
+#                                              RADIO image from a card)
+#   shannon-nv-provision  by-partlabel/EFS
+#   t715-camera-tables    by-partlabel/SYSTEM
+#   t715-gps-prepare      by-partlabel/SYSTEM
+#   device/write-part.sh  by-partlabel/BOOT, RECOVERY
+# This rule runs after 60-persistent-storage.rules (61 > 60) and removes the
+# link again for the card's partitions (mmcblk[1-9]*; the eMMC is always
+# mmcblk0, fixed by the device tree's aliases), with udev's SYMLINK-=
+# operator (systemd 262). by-uuid, by-label and by-id are left alone: they
+# name file systems and devices, not Android's partitions, and the card's
+# own file systems keep their links.
+SUBSYSTEM=="block", KERNEL=="mmcblk[1-9]p[0-9]*", SYMLINK-="disk/by-partlabel/$env{ID_PART_ENTRY_NAME}"

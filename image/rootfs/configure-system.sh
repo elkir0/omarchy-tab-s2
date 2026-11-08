@@ -122,7 +122,11 @@ systemctl enable t715-power-profile.service t715-power-profile.path t715-power-g
 [ -x /usr/local/bin/t715-keys ] || die "no /usr/local/bin/t715-keys"
 [ -x /usr/local/bin/t715-animations ] || die "no /usr/local/bin/t715-animations"
 [ -x /usr/bin/squeekboard ] || die "no /usr/bin/squeekboard"
-systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service
+# The microSD card (docs/image/ROOTFS.md "microSD card"): t715-sdcard
+# watch notifies of every card event in the session (udiskie mounts add
+# events only), and the quick settings tile reads `t715-sdcard state`.
+[ -x /usr/local/bin/t715-sdcard ] || die "no /usr/local/bin/t715-sdcard"
+systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service t715-sdcard.service
 
 # Touch layer P2: omamobile-setup-user runs once, at build time, as alarm
 # (omarchy-user-setup.sh). omamobile-shell also starts it at every login,

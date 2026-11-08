@@ -355,6 +355,16 @@ for u in t715-animations.path t715-animations.service; do
     check "$u enabled for every user (graphical-session.target.wants -> ${a:-missing})" \
         test "$a" = /etc/systemd/user/$u
 done
+# The microSD card (docs/image/ROOTFS.md "microSD card"): the notifier as
+# a user unit for every user, the tool 0755, and the udev rule that keeps
+# /dev/disk/by-partlabel/* on the eMMC.
+SDCARD=/usr/local/bin/t715-sdcard
+check "$SDCARD present with mode 0755" test "$(fmode $SDCARD)" = 0755
+a="$(resolve /etc/systemd/user/graphical-session.target.wants/t715-sdcard.service || true)"
+check "t715-sdcard.service enabled for every user (graphical-session.target.wants -> ${a:-missing})" \
+    test "$a" = /etc/systemd/user/t715-sdcard.service
+check "the microSD partlabel rule installed (/etc/udev/rules.d/61-t715-removable-partlabel.rules)" \
+    exists /etc/udev/rules.d/61-t715-removable-partlabel.rules
 get /usr/share/t715-omarchy/wallpapers.tsv; cp "$W/f" "$W/wp"
 check "theme backgrounds: all listed, none above a 2048 px short side" \
     sh -c '[ -s "$1" ] && awk -F"\t" '"'"'

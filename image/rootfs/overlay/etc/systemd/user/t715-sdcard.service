@@ -1,0 +1,21 @@
+# t715-sdcard.service — the microSD card's notifications in the Omarchy
+# session (omarchy-tab-s2; /usr/local/bin/t715-sdcard watch, docs/image/
+# ROOTFS.md "microSD card"; the quick settings tile reads
+# `t715-sdcard state`). Event-driven only: udev block events and
+# mount-table changes, never a timer, so an idle slot costs nothing (the
+# tablet idles at 0.75 W with the screen off). Started with the
+# graphical session for every user (systemctl --global enable);
+# Restart=on-failure brings it back if a monitor goes.
+# Its log: journalctl --user -u t715-sdcard
+[Unit]
+Description=SM-T715 microSD card notifications (mount, eject, removal)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/t715-sdcard watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

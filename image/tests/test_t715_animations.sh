@@ -234,7 +234,7 @@ done
 grep -qx 'Type=oneshot' "$SUNIT" || fail "(j) the service is oneshot"
 grep -qx 'ExecStart=/usr/local/bin/t715-animations apply' "$SUNIT" \
     || fail "(j) the service runs t715-animations apply"
-grep -qx 'systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service' "$CONF" \
+grep -qx 'systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service t715-sdcard.service' "$CONF" \
     || fail "(j) configure-system.sh enables both units on its global enable line"
 grep -Fqx '[ -x /usr/local/bin/t715-animations ] || die "no /usr/local/bin/t715-animations"' "$CONF" \
     || fail "(j) configure-system.sh checks for t715-animations"

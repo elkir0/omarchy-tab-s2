@@ -874,6 +874,94 @@ closing the window between Hyprland's config read and the path unit's
 start. `configure-system.sh` enables the two units for every user;
 `image/tests/test_t715_animations.sh` runs the script off the device.
 
+## microSD card
+
+The kernel drives the microSD slot (`15560000.mmc`, a separate kernel
+series; the device tree's aliases fix the eMMC as `mmcblk0` and the card
+as `mmcblk1`), with a card-detect pin for hot-plug. FAT32, exFAT and ext4
+are built in. In the session, udisks2 mounts and unmounts as `alarm`
+without a password (polkit), and Omarchy's own `udiskie --automount`
+(its `autostart.lua`, not ours) mounts each partition silently at
+`/run/media/alarm/<LABEL>` — but it acts on add events only: a card
+already in the slot when the session starts is never mounted. `t715-sdcard`
+(`/usr/local/bin/`, the overlay) closes that gap and adds what a
+removable card needs on a tablet:
+
+- `t715-sdcard watch` (`t715-sdcard.service`, a user unit enabled for
+  every user) notifies of every card event: event-driven only, on udev
+  block events (`udevadm monitor`) and mount-table changes
+  (`findmnt --poll`), never a timer — an idle slot costs nothing (the
+  tablet idles at 0.75 W with the screen off; measured on the tablet: 0 ms
+  of CPU in a minute of idling). On insertion it waits
+  5 s for udiskie to mount the card, then mounts it itself; a card with
+  nothing mountable is announced as not readable, with a tap through to
+  Disks. A card that disappears while still mounted brings a critical
+  warning (files being written may be lost); one that leaves after an
+  eject is silent. A card in the slot at the session's start is mounted
+  at once. One log line per transition
+  (`journalctl --user -u t715-sdcard`).
+- The notifications (Nerd Fonts Material Design glyphs): "SD card" /
+  "LABEL (FS, SIZE): FREE free." when a card is mounted, clicking opens
+  it in Files; "SD card not readable" / "No file system this tablet can
+  open. Tap to format it in Disks." for an unformattable card; "SD card
+  removed" / "It was not ejected: files being written may be lost."
+  (critical) when a mounted card is ripped out; "SD card ejected" /
+  "You can remove it now." after `t715-sdcard eject`. Each replaces the
+  card's previous notification (`omarchy-notification-send -r`, the id
+  kept in `$XDG_RUNTIME_DIR/t715-sdcard`), so a card put back replaces
+  the removal warning, and the history keeps the card's latest state. At
+  the session's start the notifier waits up to 30 s for the shell's
+  notification server, which comes up a little after the card is mounted.
+- `t715-sdcard mount` mounts the card's file system (the first partition
+  whose file system is vfat, exfat, ext4, ext3, ext2, f2fs, btrfs or
+  ntfs3; a card formatted without a partition table uses the whole
+  disk); `eject` unmounts every mounted partition, then powers the card
+  off (a refusal of that is ignored, as it may be for an SD card) and
+  notifies; `open` opens the mount point in Files
+  (`nautilus --new-window`), mounting first when needed, or Disks
+  (`gnome-disks --block-device /dev/mmcblk1`) when nothing on the card
+  is mountable. Labels and mount points come from the card: everything
+  is quoted, nothing is ever eval'd.
+- `t715-sdcard state` prints the card as key=value lines, in this order:
+  `slot`, `card`, `device`, `fs`, `label`, `mounted`, `mountpoint`,
+  `size`, `free` — the interface the quick settings tile reads
+  (omamobile-shell's `0012-tablet-sdcard-tile.patch`), so the keys and
+  their order are fixed. `slot` is `no` on a kernel without the slot's host, `card`
+  `no` when the slot is empty, and `device`/`fs`/`label`/`size` name the
+  partition to act on even when it holds nothing mountable, so the tile
+  can always show something and Disks can open it.
+
+Two guards keep a card from impersonating the eMMC (a card carrying a
+copy of a tablet's eMMC — a whole GPT with RADIO, EFS, SYSTEM, USERDATA,
+BOOT, RECOVERY — would otherwise take those names over):
+
+- `/etc/udev/rules.d/61-t715-removable-partlabel.rules` (the overlay)
+  removes, for partitions of `mmcblk[1-9]*` (the card; the eMMC is always
+  `mmcblk0`), the `disk/by-partlabel/$env{ID_PART_ENTRY_NAME}` symlink
+  that systemd's `60-persistent-storage.rules` adds, with udev's
+  `SYMLINK-=` operator (systemd 262). So `/dev/disk/by-partlabel/*`
+  always names the eMMC's partitions: the modem loader reads `RADIO`
+  (its boot code programs eFuses — it must never read a RADIO image from
+  a card), `shannon-nv-provision` reads `EFS`, `t715-camera-tables` and
+  `t715-gps-prepare` read `SYSTEM`, and `device/write-part.sh` writes
+  `BOOT`/`RECOVERY`. `by-uuid`, `by-label` and `by-id` are left alone.
+- The initramfs's `list_partnames` lists the eMMC's partitions only
+  (`boot/initramfs/init`): a card's USERDATA would stop the boot
+  ("several partitions are named USERDATA") and its SYSTEM would feed
+  `import_device_files` two names and copy nothing. The card is told
+  from the eMMC by its device name (`mmcblk1` and up; the aliases fix
+  the eMMC as `mmcblk0`) and by its sysfs path under the SD host
+  `15560000.mmc` (the eMMC sits under `15540000.mmc`); either mark
+  leaves a device out.
+
+`configure-system.sh` checks for the tool and enables the unit for every
+user; `image/tests/test_t715_sdcard.sh` runs the script off the device
+(a fake sysfs, stubs, and a scripted event stream for `watch`),
+`boot/tests/test_initramfs.sh` covers the eMMC-only lookup (a cloned
+eMMC on a card ignored, two USERDATA still refused), and
+`verify-rootfs.sh` checks the tool's mode, the enabled unit and the
+udev rule.
+
 ## Modem and telephony
 
 The Shannon SS333 modem (`docs/hardware/MODEM.md`) needs a kernel with
@@ -1056,12 +1144,13 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tests/test_t715_power_profile.sh` | off-device test of t715-power-profile (fake sysfs, stand-ins) |
 | `image/tests/test_t715_idle.sh` | off-device test of t715-idle's hypridle.conf (the stay-awake hold) |
 | `image/tests/test_t715_animations.sh` | off-device test of t715-animations and the saver-flag read in looknfeel.lua |
+| `image/tests/test_t715_sdcard.sh` | off-device test of t715-sdcard (fake sysfs, stubs, a scripted event stream for watch) |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
 | `image/rootfs/smoke-check.sh` | binaries-load check (`/usr/lib/t715-omarchy/smoke-check` in the image) |
 | `image/rootfs/mkimage.sh` | export to ext4, in the helper container |
 | `image/rootfs/packages.omarchy-skip`, `image/rootfs/packages.extra`, `image/rootfs/packages.mobile` | package lists (`packages.mobile`: touch layer P2, from `image/pkg/`) |
 | `image/pkg/omamobile-shell/`, `image/pkg/omamobile-omarchy/` | the touch shell and Omarchy's patches, built by `image/tools/build-pkg` (`docs/image/PACKAGES.md`); the tablet's `shell.json` and `home.json` |
-| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units) |
+| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units; the microSD card's `t715-sdcard`, its user unit and the `61-t715-removable-partlabel.rules` udev rule) |
 | `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance; the block's animations follow the Battery saver) and `hyprland.lua` (touch layers P1 and P2) |
 | `image/rootfs/shim/` | Hyprland's dmabuf-check shim (LD_PRELOAD) |
