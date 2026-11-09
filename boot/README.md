@@ -75,6 +75,7 @@ file can look stale. The initramfs logs a warning in that case.
 | `t715.persist=0` | | image mode even if `rootfs.select` asks for a persistent root (rescue boot) |
 | `t715.quiet=1` | `0` | a quiet screen until the Plymouth splash: console loglevel 3 from the initramfs on (`CONFIG_CMDLINE`'s `loglevel=8` comes after anything sboot or a boot image header could add; sboot drops the header's command line anyway), the VT cleared and its cursor hidden |
 | `t715.wdtguard=0` | `1` | boot even when the previous reset was the watchdog (default: restart to Android at once) |
+| `t715.crashlog=1` | `0` | **test images only**: after a watchdog reset, just before the guard's restart, save the previous boot's pstore records (its console, a panic dump) to `media/0/linux/t715-crash/` on USERDATA, without the kernel command line, init's environment and MAC addresses; USERDATA gets `e2fsck -p` and a read-write mount for that copy only. Without it the guard's own short boot overwrites the console of the boot that hung |
 | `t715.returnafter=SECS` | `0` | unattended boot: SECS seconds after the hand-over, restart to Android through sysrq `b` (PMU SWRESET) and forward the journal to the kernel log |
 
 On the command line, add knobs to the end of `CONFIG_CMDLINE`. sboot's

@@ -701,7 +701,7 @@ bash device/flash-boot.sh out/test-recovery-slot/recovery.img
 ```
 
 The other knobs (`t715.shell`, `t715.rootwait`, `t715.modules`,
-`t715.modblacklist`, `t715.wdtguard`, `t715.autotest`, `t715.rootimg`,
+`t715.modblacklist`, `t715.wdtguard`, `t715.crashlog`, `t715.autotest`, `t715.rootimg`,
 `t715.telnet`, `t715.failreboot`, `t715.quiet`, `t715.persist`) are
 listed in the header of `boot/initramfs/init` and in
 `boot/README.md`.

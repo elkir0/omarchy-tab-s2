@@ -53,6 +53,13 @@
 #                        (bring-up tests, e.g. pci_exynos for Wi-Fi)
 #   t715.wdtguard=0      boot even if the previous reset was the watchdog
 #                        (default: restart to Android at once, see wdt_guard)
+#   t715.crashlog=1      TEST IMAGES ONLY: after a watchdog reset, before the
+#                        guard's restart, save the previous boot's pstore
+#                        records (its console, a panic dump) to
+#                        media/0/linux/t715-crash/ on USERDATA, without the
+#                        kernel command line, init's environment and MAC
+#                        addresses; USERDATA gets e2fsck -p and a read-write
+#                        mount for that copy only (see save_crashlog)
 #   t715.returnafter=SECS  unattended test boot: SECS seconds after the
 #                        hand-over, restart the board (back to Android) through
 #                        sysrq "b", and forward the systemd journal to the
@@ -146,6 +153,7 @@ USBFN=rndis
 RETURNAFTER=0
 RETURN_TIMER_PID=
 WDTGUARD=1
+CRASHLOG=0
 LOAD_MODULES=1
 MODBLACKLIST=       # module names from t715.modblacklist, comma-separated
 AUTOTEST=0
@@ -347,6 +355,9 @@ parse_knobs() {
         t715.wdtguard=0 | t715.wdtguard=1)
             WDTGUARD=${_pk#*=}
             ;;
+        t715.crashlog=0 | t715.crashlog=1)
+            CRASHLOG=${_pk#*=}
+            ;;
         t715.modules=0 | t715.modules=1)
             LOAD_MODULES=${_pk#*=}
             ;;
@@ -405,7 +416,7 @@ read_knobs() {
         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
     fi
     parse_knobs "$_rk_cmdline" "cmdline"
-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG"
 }
 
 # ---------------------------------------------------------------------------
@@ -1577,6 +1588,53 @@ do_reboot() {
     done
 }
 
+# save_crashlog: t715.crashlog, see the knob list at the top.  Called by
+# wdt_guard after a watchdog reset, just before its restart, whose own short
+# boot would otherwise overwrite the pstore console of the boot that hung
+# (2026-11-09).  On a test image USERDATA stayed read-only during that boot,
+# so e2fsck -p is quick; it is mounted read-write for the copy only.  The
+# kernel command line (and the kernel's list of unknown parameters), init's
+# environment (sboot's parameters, identifiers among them) and MAC addresses
+# never reach the copy.  Every failure is logged and skipped: the restart
+# goes on regardless.
+save_crashlog() {
+    [ "$CRASHLOG" = 1 ] || return 0
+    if [ ! -d /sys/fs/pstore ]; then
+        warn "t715.crashlog: no /sys/fs/pstore in this kernel, nothing saved"
+        return 0
+    fi
+    if ! is_mounted /sys/fs/pstore &&
+        ! run mount -t pstore -o nosuid,nodev,noexec pstore /sys/fs/pstore; then
+        warn "t715.crashlog: pstore not mounted, nothing saved"
+        return 0
+    fi
+    set -- /sys/fs/pstore/*-ramoops-*
+    if [ ! -e "$1" ]; then
+        log "t715.crashlog: no pstore record of the previous boot"
+        return 0
+    fi
+    find_userdata || return 0
+    fsck_userdata || return 0
+    mkdir -p "$UD_MNT"
+    if ! run mount -t ext4 -o rw,noatime,nosuid,nodev,noexec "$UD_DEV" "$UD_MNT"; then
+        warn "t715.crashlog: USERDATA not mounted read-write, nothing saved"
+        return 0
+    fi
+    _sc_dir=$UD_MNT/media/0/linux/t715-crash
+    if run mkdir -p "$_sc_dir"; then
+        for _sc_f in "$@"; do
+            grep -v -i -E 'kernel command line|androidboot\.' "$_sc_f" |
+                grep -v -E '^\[ *[0-9.]+\] {4,}[A-Za-z_]+=' |
+                sed -E 's/([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}/<addr>/g' \
+                    >"$_sc_dir/${_sc_f##*/}.txt" ||
+                warn "t715.crashlog: could not save ${_sc_f##*/}"
+        done
+        log "t715.crashlog: $# pstore record(s) of the previous boot saved in media/0/linux/t715-crash/"
+    fi
+    sync
+    run umount "$UD_MNT" || warn "t715.crashlog: USERDATA still mounted"
+}
+
 # wdt_guard: a watchdog reset clears INFORM3, and sboot then boots the
 # partition it booted last (here RECOVERY, i.e. this kernel) again: a test
 # kernel that hangs would loop forever (seen on 2026-10-28).  If the
@@ -1597,6 +1655,7 @@ wdt_guard() {
     if [ $((_wg_v & 32)) -ne 0 ]; then
         err "the previous reset was the watchdog (bootstatus $_wg_v): restarting to Android instead of booting (t715.wdtguard=0 to boot anyway)"
         [ -n "$TEST" ] && exit 98
+        save_crashlog
         do_reboot
     fi
     log "watchdog bootstatus $_wg_v: not a watchdog reset"
