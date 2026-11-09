@@ -34,7 +34,10 @@ RULE="$here/rootfs/overlay/etc/udev/rules.d/61-t715-removable-partlabel.rules"
 [ -f "$SD" ] || { echo "SETUP ERROR: no $SD" >&2; exit 2; }
 
 t=$(mktemp -d "${TMPDIR:-/tmp}/t715-sd-test.XXXXXX")
-cleanup() { rm -rf "$t"; }
+# The watch cases' stand-in monitors (the fake udevadm monitor and
+# findmnt --poll that `sd watch` starts) outlive it, blocked on their FIFO
+# for good: stop whatever runs from this directory before removing it.
+cleanup() { pkill -f -- "$t/" 2>/dev/null || true; rm -rf "$t"; }
 trap cleanup EXIT
 
 fail() {
