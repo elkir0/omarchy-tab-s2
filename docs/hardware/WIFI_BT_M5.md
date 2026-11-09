@@ -134,10 +134,14 @@ kernel actually provides:
    (`drivers/pci/controller/dwc/pci-exynos.c:307-314`), so this is the
    one mainline hook that powers the chip before perst. 1.8 V is the
    binding's vdd18 level; the live tree does not name the rail behind
-   the pin. `regulator-always-on` + `regulator-boot-on` keep it up
-   (boot-on alone would be dropped by `regulator_late_cleanup`,
-   `drivers/regulator/core.c:6381-6420`, which only skips
-   `always_on` rails). `startup-delay-us = <200000>` restates the
+   the pin. `regulator-boot-on` keeps it up from boot, and `pci-exynos`
+   holds it from its probe on (boot-on alone, with no consumer holding
+   the rail, would be dropped by `regulator_late_cleanup`,
+   `drivers/regulator/core.c:6381-6420`). Until 2026-11-09 it was also
+   `regulator-always-on`; since then (`t715-wifi-recovery`, §7.9) it is
+   not: `pci-exynos`, its only consumer, disables its supplies on
+   remove, so unbinding the PCIe host cuts WLAN_EN and binding it
+   powers the chip again. `startup-delay-us = <200000>` restates the
    downstream 200 ms settle delay in the mainline-supported property
    (`drivers/regulator/fixed.c:198`).
 
@@ -590,8 +594,9 @@ The instrumentation of both sessions is kept in `out/m5-debug/`
 Kernel `#10`: the daily `#9` tree (the 1.0.1 release tree plus
 `t715-sdcard`) plus the `t715-bluetooth` series, built with
 `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=10`,
-tested on the tablet from RECOVERY, then the daily kernel: in BOOT since
-19:27. Not in a release yet.
+tested on the tablet from RECOVERY, then the daily kernel from
+2026-11-08 until `#11` (§7.9) replaced it on 2026-11-09. Not in a
+release yet.
 
 **3 Mbaud.** The BCM4358's UART (UART3, `ttySAC3`, inside the audio
 subsystem LPASS) ran at 460800 baud (§7.4) because its clock
@@ -730,3 +735,136 @@ to 19:00, on the daily system booted from RECOVERY.
   status: Invalid Parameters" and the kernel `hci0: Bad flag given (0x1)
   vs supported (0x0)`: BlueZ asks for remote wakeup, which hci_bcm does
   not offer; the image has no system suspend. Harmless.
+
+### 7.9 Wi-Fi start failures and the automatic recovery (2026-11-09)
+
+Kernel `#11`: the `t715-wifi-recovery` series on the daily `#10` tree
+(the patch-series table, `kernel/README.md`), tested on the tablet from
+RECOVERY, then the daily kernel, in BOOT with the `t715-wifi-guard`
+service since 2026-11-09. Not in a release yet.
+
+**The symptom.** On some boots the Wi-Fi never comes up: the shell shows
+"no wifi radio", and only a reboot brought it back — 1 boot in 14 on
+the reference tablet on 2026-11-09.
+
+**How it was tested.** Unattended test boots from RECOVERY: the
+initramfs knob `t715.autotest=1` runs
+`image/tests/ondevice/autotest-wifi.sh` once Arch is up (the part named
+in `t715-autotest.part`), which runs `wifi-cycle.sh` — repeated Wi-Fi
+power cycles: the PCIe host unbound, so WLAN_EN off, then bound again,
+the start judged by the kernel log and a network scan — and ends with a
+software reset; the results are read back from pstore on the next boot.
+The new knob `t715.crashlog=1` saves the previous boot's pstore records
+to `media/0/linux/t715-crash/` on USERDATA after a watchdog reset
+(`boot/README.md`). Both knobs are for test images only.
+
+**What a failed start looks like.** The firmware (linux-firmware
+7.112.300.14, §7.7) runs its usual init — `wl_open`, then
+"wlc_bmac_switch_macfreq: 4350 need fix for 37.4Mhz", then
+"wlc_enable_probe_req: state down, deferring" — and its console stops
+there, 0.42 s into its run, with no trap line. The host then sees a
+PCIe link-down event (bit 2 of the controller's `irq_special`
+register), the link training state machine back in L0, and command
+timeouts ("Timeout on response for query command"); brcmfmac reports
+"Firmware has halted" or reads all ones from the chip.
+
+**What it is not.**
+
+- Not ASPM: starts fail as often with ASPM off from enumeration on.
+- Not the mailbox doorbell: this firmware reads mailbox data through
+  SBMBX only; a doorbell-1 write is never read.
+- Not the "wlc_stf_txcore_shmem_write: No clock" line at 0.070 s: good
+  starts print it too.
+- Not the NVRAM: it is the file the vendor's own Android uses for this
+  chip revision.
+
+**The SoC side: the PHY is never powered down.** Before the fix, once a
+start had failed, every later bind of the PCIe host took about 5 min
+20 s and failed with config reads of all ones ("BAR 0/2: error
+updating", then brcmfmac's "brcmf_chip_recognition: MMIO read failed:
+0xffffffff"): only a reset of the SoC recovered. Mainline never powers
+the Exynos 5433's PCIe PHY down. The vendor kernel does, at every Wi-Fi
+off/on: `exynos_pcie_poweroff()` asserts PERST#, turns the LTSSM off
+and sets bit 3 of PHY register 0x55 and bit 4 of 0x21;
+`exynos_pcie_poweron()` clears them 100 µs apart, pulses the pull of
+pin gpr3-6 (pull-down for 20 µs, then back to pull-up; the pin is not
+connected on the board) and releases PERST#. With the same steps in
+mainline (first on a test kernel, behind run-time switches), a failed
+start recovers at the next power cycle within seconds.
+
+**The chip side: power-cycle the whole chip.** The combo chip's shared
+part (its PMU and clocks) stays powered while Bluetooth's enable
+(BT_REG_ON) is high, so a Wi-Fi-only power cycle never resets it; a
+reboot drops both enables, which is why only a reboot used to clear a
+failed start. (Same fact as §7.8's warning that unbinding Bluetooth
+kills the Wi-Fi.) Measured with the SoC fix, 20 power cycles of 2 s per
+run, a failed start followed by a new power cycle:
+
+| What was power-cycled | Failed starts | Recovered by the next cycle |
+|---|---|---|
+| the Wi-Fi alone (Bluetooth left up) | 11 of 20 (55 %) | 6 of 10 |
+| the whole chip (Bluetooth unbound too), three orders of the two enables | 16 of 60 (27 %) | 12 of 15 (80 %) |
+
+The order of the two enables made no clear difference (3, 6 and 7
+failures in 20 for Bluetooth 1 s after the host, before the host, and
+after the Wi-Fi start is judged), and Bluetooth coming up after the
+Wi-Fi never broke a running Wi-Fi (0 of 13 good starts).
+
+**The kernel series.** `t715-wifi-recovery`, 4 patches on
+`t715-bluetooth`; kernel `#11` is the `#10` tree plus this series,
+built with `--fragment gts28ltexx_cpufreq.config` and
+`KBUILD_BUILD_VERSION=11`:
+
+1. the 5433 PCIe PHY's power-down in its exit and power-up at the
+   start of its init, as the vendor kernel drives it (bit 3 of
+   register 0x55 and bit 4 of 0x21, 100 µs apart);
+2. `wlan_reg_on` keeps `regulator-boot-on` but loses
+   `regulator-always-on`: `pci-exynos`, its only consumer, disables
+   its supplies on remove, so unbinding the PCIe host cuts WLAN_EN and
+   binding it powers the chip up again, as the vendor's Wi-Fi off/on
+   does;
+3. `pci-exynos`: PERST# asserted and the LTSSM off before the power
+   goes (on remove and in suspend), the gpr3-6 pulse before PERST# is
+   released, and a read-only module parameter
+   `pci_exynos.wifi_power_cycle`, which reads `Y` on this kernel: the
+   recovery service acts only when it does, since on older kernels a
+   rebind resets nothing;
+4. brcmfmac survives a chip that stops answering: a ring write index
+   past the ring's depth reads as no data (a halted firmware's garbage
+   index made `brcmf_msgbuf_process_rx` read past the ring and oops); a
+   mailbox status of all ones is reported as "mailbox status reads all
+   ones" with the root port's LnkSta and the vendor ID, instead of
+   being taken for a firmware halt and starting a bus reset against a
+   dead device; the console reader stops on a write index past its
+   buffer.
+
+**The service.** `t715-wifi-guard`, in the root image (its paragraph in
+`docs/image/ROOTFS.md`): at boot it waits up to 60 s for the Wi-Fi to
+settle and checks it, then follows the kernel log for the failure
+signatures; when the Wi-Fi is not up it power-cycles the whole chip —
+the PCIe host unbound (given 60 s), Bluetooth unbound, 2 s off, the
+host bound, Bluetooth bound 1 s later, the start judged 12 s after the
+bind (no failure signature, and an interface within 20 s) — up to six
+tries, at most three recoveries in any 30 minutes. Its test on the
+device, `image/tests/ondevice/wifi-guard-test.sh` (part `guard` of
+`autotest-wifi.sh`), ran 20 simulated boots on kernel `#11` (whole chip
+off 2 s, then on in the boot's order, the guard's check 15 s later):
+11 good at once, 8 recovered by the guard (1 to 3 tries, 18 to 60 s),
+1 not recovered after 4 tries — a try recovered 8 of 17 times, hence
+six tries by default. Its off-device test is
+`image/tests/test_t715_wifi_guard.sh`.
+
+**In use.** Kernel `#11` and the service have been the daily system's
+since 2026-11-09: on the first boot the Wi-Fi came up at once, the
+service's boot check found it up, no failure signature, Bluetooth and
+the modem fine. Back-to-back power cycles fail far more often than real
+boots (one start in four against one boot in fourteen).
+
+**What is left.** A start still fails about one time in four in
+back-to-back cycles, even from a fully powered-off chip: the chip
+itself stops right after `wl_open`, and the firmware's own 37.4 MHz
+line is the suspect (the crystal path, or a supply droop as the radio
+starts). The Wi-Fi through suspend is the next step (the roadmap,
+`docs/ROADMAP.md`): the firmware acknowledged the D3 handshake in one
+try of two, so the plan is to power the chip off before sleeping and
+let the service bring it back after.
