@@ -1085,7 +1085,7 @@ check "t715-wifi-guard.service: simple, runs run, after NetworkManager and bluet
            grep -qx "After=NetworkManager.service bluetooth.service" "$1" &&
            grep -qx "Restart=always" "$1" && grep -qx "WantedBy=multi-user.target" "$1"' _ "$W/wg.service"
 check "t715-wifi-guard: writes only the two drivers' bind and unbind files, never rfkill or NetworkManager's" \
-    sh -c '! grep -Eq "rfkill|nmcli|NetworkManager|ModemManager" "$1"' _ "$W/wg"
+    sh -c '! grep -v "^[[:space:]]*#" "$1" | grep -Eq "rfkill|nmcli|NetworkManager|ModemManager"' _ "$W/wg"
 check "t715-shutdown-log.service enabled (shutdown steps kept in pstore)" test "$(linkto /etc/systemd/system/sysinit.target.wants/t715-shutdown-log.service)" = /etc/systemd/system/t715-shutdown-log.service
 check "t715-stuck-procs: a system-shutdown hook, mode 0755, byte for byte" \
     sh -c '[ "$1" = 0755 ] && cmp -s "$2" "$3"' _ "$(fmode /usr/lib/systemd/system-shutdown/t715-stuck-procs)" \
