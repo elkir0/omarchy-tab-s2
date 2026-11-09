@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/4] PCI: exynos: the vendor's link sequence around a power
+ cycle
+
+The vendor kernel's pci-exynos (exynos_pcie_poweroff/poweron) asserts
+PERST# and turns the LTSSM off before the device's power goes, and
+pulses the pull of pin gpr3-6 (pull-down for 20 us, then back to
+pull-up) before it releases PERST#.  gpr3-6 is not connected on the
+SM-T715; the vendor pulses it at every power-on and link retry.  Do the
+same: PERST# and the LTSSM off on remove and in suspend_noirq, the pulse
+in host_init, its bank (GPR3 of pinctrl_fsys) mapped at a fixed address
+for that pulse alone.
+
+With the PHY's power-down and WLAN_EN switched by the host, unbinding
+and binding the host now power-cycles the Wi-Fi.  The read-only
+parameter wifi_power_cycle (Y) says so: t715-wifi-guard recovers a
+failed Wi-Fi start by such a power cycle, and only on a kernel where it
+reads Y, since on older ones a rebind resets nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/pci/controller/dwc/pci-exynos.c | 47 +++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pci-exynos.c b/drivers/pci/controller/dwc/pci-exynos.c
+index 580854f81..6d3474eae 100644
+--- a/drivers/pci/controller/dwc/pci-exynos.c
++++ b/drivers/pci/controller/dwc/pci-exynos.c
+@@ -60,8 +60,31 @@ struct exynos_pcie {
+ 	struct phy			*phy;
+ 	struct regulator_bulk_data	supplies[2];
+ 	struct gpio_desc		*perst;
++	void __iomem			*gpr3;
+ };
+ 
++/*
++ * The vendor kernel's link sequence around a Wi-Fi off/on (SM-T715,
++ * kernel_universal5433 pci-exynos.c exynos_pcie_poweroff/poweron): PERST#
++ * asserted and LTSSM off before the power goes, and a pull-down pulse on
++ * gpr3-6 (20 us, back to pull-up) before PERST# is released.  gpr3-6 is not
++ * connected on the board; the vendor pulses it on every power-on and link
++ * retry.  Its bank, GPR3 of pinctrl_fsys (0x15690000 + 0xa0, PUD at +0x8),
++ * is mapped at a fixed address for that pulse alone.
++ */
++#define EXYNOS5433_GPR3_BASE		0x156900a0
++#define EXYNOS5433_GPR3_PUD		0x8
++
++/*
++ * Read-only: this host cuts its device's power and powers the PHY down on
++ * remove, so that unbinding and binding it power-cycles the Wi-Fi.  The
++ * SM-T715's t715-wifi-guard recovers a failed Wi-Fi start that way, and only
++ * when this reads Y: with an older kernel a rebind resets nothing.
++ */
++static bool wifi_power_cycle = true;
++module_param(wifi_power_cycle, bool, 0444);
++MODULE_PARM_DESC(wifi_power_cycle, "Read-only: remove cuts the device's power and the PHY's (the Wi-Fi recovery relies on it)");
++
+ static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
+ {
+ 	writel(val, base + reg);
+@@ -72,6 +95,25 @@ static u32 exynos_pcie_readl(void __iomem *base, u32 reg)
+ 	return readl(base + reg);
+ }
+ 
++static void exynos_pcie_gpr3_6_pulse(struct exynos_pcie *ep)
++{
++	u32 v;
++
++	if (!ep->gpr3)
++		return;
++	v = readl(ep->gpr3 + EXYNOS5433_GPR3_PUD);
++	writel((v & ~(0x3 << 12)) | (0x1 << 12), ep->gpr3 + EXYNOS5433_GPR3_PUD);
++	udelay(20);
++	writel(v | (0x3 << 12), ep->gpr3 + EXYNOS5433_GPR3_PUD);
++}
++
++static void exynos_pcie_link_off(struct exynos_pcie *ep)
++{
++	if (ep->perst)
++		gpiod_set_value_cansleep(ep->perst, 1);
++	exynos_pcie_writel(ep->elbi_base, 0, PCIE_APP_LTSSM_ENABLE);
++}
++
+ static void exynos_pcie_sideband_dbi_w_mode(struct exynos_pcie *ep, bool on)
+ {
+ 	u32 val;
+@@ -242,6 +284,7 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
+ 	 */
+ 	if (ep->perst) {
+ 		usleep_range(100, 200);
++		exynos_pcie_gpr3_6_pulse(ep);
+ 		gpiod_set_value_cansleep(ep->perst, 0);
+ 		msleep(PCIE_T_PVPERL_MS);
+ 	}
+@@ -309,6 +352,8 @@ static int exynos_pcie_probe(struct platform_device *pdev)
+ 	if (IS_ERR(ep->phy))
+ 		return PTR_ERR(ep->phy);
+ 
++	ep->gpr3 = devm_ioremap(dev, EXYNOS5433_GPR3_BASE, 0x20);
++
+ 	/* Asserted (device in reset) until exynos_pcie_host_init() */
+ 	ep->perst = devm_gpiod_get_optional(dev, "perst", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(ep->perst))
+@@ -354,6 +399,7 @@ static void exynos_pcie_remove(struct platform_device *pdev)
+ 	struct exynos_pcie *ep = platform_get_drvdata(pdev);
+ 
+ 	dw_pcie_host_deinit(&ep->pci.pp);
++	exynos_pcie_link_off(ep);
+ 	exynos_pcie_assert_core_reset(ep);
+ 	phy_power_off(ep->phy);
+ 	phy_exit(ep->phy);
+@@ -364,6 +410,7 @@ static int exynos_pcie_suspend_noirq(struct device *dev)
+ {
+ 	struct exynos_pcie *ep = dev_get_drvdata(dev);
+ 
++	exynos_pcie_link_off(ep);
+ 	exynos_pcie_assert_core_reset(ep);
+ 	phy_power_off(ep->phy);
+ 	phy_exit(ep->phy);
+-- 
+2.52.0
+

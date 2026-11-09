@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/4] ARM: dts: gts28ltexx: WLAN_EN no longer always-on
+
+The Wi-Fi enable, WLAN_EN on gpj2-0, is the PCIe host's vdd18 supply: a
+fixed regulator, always-on and boot-on.  Always-on kept the chip
+powered across an unbind and a bind of the host, so a failed Wi-Fi start
+could not be power-cycled: only a reboot recovered it.
+
+Keep boot-on (the chip is powered from boot, as before) and drop
+always-on: pci-exynos, the regulator's only consumer, disables its
+supplies on remove, so unbinding the host cuts WLAN_EN and binding it
+powers the chip up again, as the vendor's Wi-Fi off/on does.
+t715-wifi-guard recovers a failed start that way, with Bluetooth's
+enable cycled too: the BCM4358's shared part stays powered while
+BT_REG_ON is high (2026-11-09).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/samsung/exynos5433-gts28ltexx-wifi.dtsi     | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
+index f7ea2da47..151459cec 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-wifi.dtsi
+@@ -18,9 +18,10 @@
+  *    vdd18/vdd10 before host init and link training
+  *    (drivers/pci/controller/dwc/pci-exynos.c:307-314), so wiring the
+  *    GPIO rail as the required vdd18-supply is the one mainline hook
+- *    that powers the chip before perst is released.  always-on +
+- *    boot-on keep it up for the chip's lifetime, matching stock bcmdhd
+- *    which leaves WLAN_EN asserted once Wi-Fi is on.
++ *    that powers the chip before perst is released.  boot-on keeps it
++ *    up from boot; it is not always-on, so that unbinding the PCIe host
++ *    cuts it and binding it powers the chip up again (the recovery of a
++ *    failed start, t715-wifi-guard), as stock's Wi-Fi off/on does.
+  *
+  *  - pcie_vdd10: the binding requires a 1.0 V PCIe rail
+  *    (samsung,exynos-pcie.yaml), but the live tree names no rail for
+@@ -60,7 +61,11 @@ wlan_reg_on: regulator-wlan-reg-on {
+ 		regulator-max-microvolt = <1800000>;
+ 		gpio = <&gpj2 0 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+-		regulator-always-on;
++		/*
++		 * Not always-on: pci-exynos, its only consumer, turns it off on
++		 * remove, so that unbinding and binding the PCIe host power-cycles
++		 * the Wi-Fi (t715-wifi-guard's recovery, 2026-11-09).
++		 */
+ 		regulator-boot-on;
+ 		/* WIFI_TURNON_DELAY, dhd_custom_exynos.c:64 (200 ms). */
+ 		startup-delay-us = <200000>;
+-- 
+2.52.0
+

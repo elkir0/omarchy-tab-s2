@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH 4/4] wifi: brcmfmac: survive a chip that stops answering on
+ PCIe
+
+On the SM-T715 (BCM4358) a Wi-Fi start fails now and then: the firmware
+stops right after wl_open and the chip drops off the link.  Three places
+then trust what the device's memory or registers read:
+
+- brcmf_commonring_get_read_ptr() takes the ring's write index from the
+  device.  A halted firmware leaves garbage there, and an index past the
+  ring's depth made brcmf_msgbuf_process_rx() read past the ring's
+  buffer and oops.  Such an index now reads as no data.
+- brcmf_pcie_isr_thread(): a mailbox status of all ones is a chip that
+  no longer answers, not a firmware halt; with every bit set the mailbox
+  data read as FWHALT and started a bus reset against a dead device.
+  Report it ("mailbox status reads all ones", with the root port's
+  LnkSta and the vendor ID) and touch nothing: userspace power-cycles
+  the chip (t715-wifi-guard).
+- brcmf_pcie_bus_console_read(): a write index past the console's
+  buffer (all ones) is never caught up with; stop there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../broadcom/brcm80211/brcmfmac/commonring.c  | 14 ++++++++++++
+ .../broadcom/brcm80211/brcmfmac/pcie.c        | 22 +++++++++++++++++++
+ 2 files changed, 36 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/commonring.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/commonring.c
+index e44236cb2..44393bccd 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/commonring.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/commonring.c
+@@ -210,6 +210,20 @@ void *brcmf_commonring_get_read_ptr(struct brcmf_commonring *commonring,
+ 	if (commonring->cr_update_wptr)
+ 		commonring->cr_update_wptr(commonring->cr_ctx);
+ 
++	/*
++	 * The write index comes from the device's memory.  A halted or crashed
++	 * firmware leaves garbage there, and an index past the ring's end
++	 * would make the caller read past the end of the ring's buffer
++	 * (an oops in brcmf_msgbuf_process_rx on the SM-T715, 2026-11-09).
++	 * Read nothing until the device is reset.
++	 */
++	if (commonring->w_ptr > commonring->depth) {
++		pr_err_ratelimited("brcmfmac: ring write index %u past its depth %u, ignored\n",
++				   commonring->w_ptr, commonring->depth);
++		*n_items = 0;
++		return NULL;
++	}
++
+ 	*n_items = (commonring->w_ptr >= commonring->r_ptr) ?
+ 				(commonring->w_ptr - commonring->r_ptr) :
+ 				(commonring->depth - commonring->r_ptr);
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index f95640542..fe81ec3fa 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -871,6 +871,9 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
+ 		return;
+ 	addr = console->base_addr + BRCMF_CONSOLE_WRITEIDX_OFFSET;
+ 	newidx = brcmf_pcie_read_tcm32(devinfo, addr);
++	/* All ones from a chip that no longer answers: never catch up */
++	if (newidx >= console->bufsize)
++		return;
+ 	while (newidx != console->read_idx) {
+ 		addr = console->buf_addr + console->read_idx;
+ 		ch = brcmf_pcie_read_tcm8(devinfo, addr);
+@@ -941,6 +944,25 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
+ 	devinfo->in_irq = true;
+ 	status = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint);
+ 	brcmf_dbg(PCIE, "Enter %x\n", status);
++	if (status == 0xffffffff) {
++		/*
++		 * All ones is a chip that no longer answers on PCIe, not a
++		 * firmware halt: with every bit set the mailbox data would read
++		 * as FWHALT and start a bus reset against a dead device.  Say so
++		 * and touch nothing; userspace power-cycles the chip
++		 * (t715-wifi-guard on the SM-T715).
++		 */
++		struct pci_dev *rp = pci_upstream_bridge(devinfo->pdev);
++		u16 lnksta = 0, vendor = 0;
++
++		if (rp)
++			pcie_capability_read_word(rp, PCI_EXP_LNKSTA, &lnksta);
++		pci_read_config_word(devinfo->pdev, PCI_VENDOR_ID, &vendor);
++		pr_err_ratelimited("brcmfmac: mailbox status reads all ones: the chip does not answer on PCIe (root port LnkSta 0x%04x, vendor 0x%04x)\n",
++				   lnksta, vendor);
++		devinfo->in_irq = false;
++		return IRQ_HANDLED;
++	}
+ 	if (status) {
+ 		brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxint,
+ 				       status);
+-- 
+2.52.0
+
