@@ -1068,6 +1068,24 @@ check "t715-power-guard.service: oneshot, runs guard, after t715-power-profile" 
 get $PP; cp "$W/f" "$W/pp"
 check "t715-power-profile: the clusters by cpu_capacity, never a hardcoded cpu number" \
     sh -c 'grep -q "cpu_capacity" "$1" && ! grep -Eq "cpu[4-7]" "$1"' _ "$W/pp"
+echo "== Wi-Fi guard =="
+WG=/usr/local/sbin/t715-wifi-guard
+for f in usr/local/sbin/t715-wifi-guard etc/systemd/system/t715-wifi-guard.service; do
+    get "/$f"
+    check "/$f identical to rootfs/overlay" cmp -s "$W/f" "/our-overlay/$f"
+done
+check "$WG mode 0755" test "$(fmode $WG)" = 0755
+get $WG; cp "$W/f" "$W/wg"
+t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-wifi-guard.service || true)"
+check "t715-wifi-guard.service enabled (multi-user.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-wifi-guard.service
+get /etc/systemd/system/t715-wifi-guard.service; cp "$W/f" "$W/wg.service"
+check "t715-wifi-guard.service: simple, runs run, after NetworkManager and bluetooth, restarts whatever its exit" \
+    sh -c 'grep -qx "Type=simple" "$1" && grep -qx "ExecStart=/usr/local/sbin/t715-wifi-guard run" "$1" &&
+           grep -qx "After=NetworkManager.service bluetooth.service" "$1" &&
+           grep -qx "Restart=always" "$1" && grep -qx "WantedBy=multi-user.target" "$1"' _ "$W/wg.service"
+check "t715-wifi-guard: writes only the two drivers' bind and unbind files, never rfkill or NetworkManager's" \
+    sh -c '! grep -Eq "rfkill|nmcli|NetworkManager|ModemManager" "$1"' _ "$W/wg"
 check "t715-shutdown-log.service enabled (shutdown steps kept in pstore)" test "$(linkto /etc/systemd/system/sysinit.target.wants/t715-shutdown-log.service)" = /etc/systemd/system/t715-shutdown-log.service
 check "t715-stuck-procs: a system-shutdown hook, mode 0755, byte for byte" \
     sh -c '[ "$1" = 0755 ] && cmp -s "$2" "$3"' _ "$(fmode /usr/lib/systemd/system-shutdown/t715-stuck-procs)" \

@@ -886,6 +886,37 @@ caps instead of their top frequencies.
 a fake sysfs, `image/tests/test_t715_keys.sh` covers the flag, and
 `verify-rootfs.sh` checks the files, the modes and the enabled units.
 
+`t715-wifi-guard` (`/usr/local/sbin/`, the overlay) brings the Wi-Fi back
+by itself when the BCM4358's Wi-Fi half fails to start, at boot or later —
+about one boot in four, even from a chip that was fully powered off
+(measured on the tablet on 2026-11-09: a start fails one time in four, and
+a whole-chip power cycle recovers a failed one four times in five).
+It needs a kernel whose PCIe host cuts the Wi-Fi's power and powers its PHY
+down on unbind, which `pci_exynos` says with its read-only parameter
+`wifi_power_cycle`; with an older kernel it recovers nothing and says so.
+`t715-wifi-guard.service` (enabled
+in `configure-system.sh`, after NetworkManager and bluetooth) runs `run`:
+at boot it waits up to 60 s for the Wi-Fi to settle, then checks, and
+afterwards it follows the kernel log (new lines only) and checks again 10 s after any of
+brcmfmac's failure signatures (a probe failure, an MMIO read, a halted
+firmware, a mailbox reading all ones, a ring past its depth, or the second
+timeout on a query command — only the signature's name is ever logged,
+never a kernel line, an address or an SSID). A failed check power-cycles
+the *whole* Wi-Fi/Bluetooth chip, six tries by default — unbind the PCIe
+host (which cuts the Wi-Fi enable line), unbind `hci_uart_bcm` (the
+Bluetooth enable), wait 2 s, bind the host, 1 s later bind Bluetooth
+again — because power-cycling the Wi-Fi alone recovers far less often:
+the chip's shared part stays powered while Bluetooth is on. A rebind needs
+nothing else from the script: the udev rules give the chip back its
+addresses and ASPM setting. The whole cycle kills a running Wi-Fi and
+Bluetooth for a few seconds — the limits of the approach — and it stops at
+the first good start; at most 3 recoveries in any 30 minutes, past that it
+only logs, until the next boot; only the two drivers' bind/unbind files
+are ever written, never the modem, rfkill or NetworkManager.
+`image/tests/test_t715_wifi_guard.sh` runs the script off the device on a
+fake sysfs (a fake kernel log, a trace of every sysfs write), and
+`verify-rootfs.sh` checks the files, the modes and the enabled unit.
+
 Hyprland's animations follow the saver as well: on in balanced, off in
 power-saver. The tablet block of `looknfeel.lua`
 (`image/rootfs/t715-looknfeel.lua`) reads the flag at Hyprland's start

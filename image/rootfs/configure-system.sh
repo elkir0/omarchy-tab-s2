@@ -166,6 +166,13 @@ command -v btmgmt >/dev/null || die "no btmgmt (bluez-utils), which t715-bt-addr
 [ -x /usr/local/sbin/t715-wifi-addr ] || die "no /usr/local/sbin/t715-wifi-addr"
 command -v wpa_supplicant >/dev/null || die "no wpa_supplicant (NetworkManager's Wi-Fi backend)"
 
+# The BCM4358's Wi-Fi half fails to start about one boot in four;
+# t715-wifi-guard watches for its failure signatures and power-cycles the
+# whole Wi-Fi/Bluetooth chip, then rebinds both drivers (docs/image/ROOTFS.md
+# "Battery saver" has the neighbouring power guard's story).
+[ -x /usr/local/sbin/t715-wifi-guard ] || die "no /usr/local/sbin/t715-wifi-guard"
+systemctl enable t715-wifi-guard.service
+
 # ufw on, nothing in but SSH and DHCP on the USB cable: the rules are the
 # overlay's /etc/ufw/user*.rules, written by ufw itself on the tablet.
 # config/firewall.sh is skipped: it opens LocalSend and Docker, and it would

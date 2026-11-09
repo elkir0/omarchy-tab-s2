@@ -1,0 +1,19 @@
+# SM-T715: power-cycle the BCM4358 (Wi-Fi and Bluetooth on one chip) and
+# rebind its drivers when the Wi-Fi fails to start at boot or later, so the
+# tablet brings its Wi-Fi back by itself instead of showing no radio until
+# the next reboot (docs/image/ROOTFS.md, "Wi-Fi guard").  One instance: its
+# recoveries serialize on flock /run/t715-wifi-guard.lock.  Restarted
+# whatever its exit, so the kernel log stays watched.
+[Unit]
+Description=Recover the Wi-Fi by power-cycling the BCM4358 chip (SM-T715)
+Documentation=file:///usr/local/sbin/t715-wifi-guard
+After=NetworkManager.service bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/t715-wifi-guard run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
