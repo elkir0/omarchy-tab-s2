@@ -37,10 +37,16 @@
 #                                           recover if it failed; then follow
 #                                           the kernel log and, 10 s after a
 #                                           new failure signature, check again
-#                                           and recover if needed.  At most 3
-#                                           recoveries in any 30 minutes: past
-#                                           that it logs once and stops
-#                                           recovering until the next boot.
+#                                           and recover if needed -- but check
+#                                           once more under the recovery lock,
+#                                           for another recovery may have
+#                                           brought the Wi-Fi up while this
+#                                           one waited for it: then nothing
+#                                           is cycled and it does not count.
+#                                           At most 3 recoveries in any 30
+#                                           minutes: past that it logs once
+#                                           and stops recovering until the
+#                                           next boot.
 #
 # The kernel must cut the Wi-Fi's power and power the PCIe PHY down when its
 # host is unbound, which pci_exynos says with its read-only parameter
@@ -71,9 +77,11 @@
 # MAC or Bluetooth address, an SSID, a network name or the kernel command
 # line: only which signature was seen.  `check` prints its one-line reason
 # on stdout; the rest talk through the logger only.  `run` and `recover`
-# serialize their recoveries on the lock; `check` only reads.  A refused
-# write is logged and the rest still runs.  Exits 0, 1 or 2 unless the
-# usage is wrong (2 as well).
+# serialize their recoveries on the lock; `check` only reads, and the
+# service's re-check under that lock answers 4 -- "the Wi-Fi came up
+# meanwhile" -- which run keeps to itself.  A refused write is logged and
+# the rest still runs.  Exits 0, 1 or 2 unless the usage is wrong (2 as
+# well).
 set -u
 
 SYS=${T715_WG_SYS:-/sys}
@@ -361,19 +369,33 @@ recover_cycles() {
     return 1
 }
 
-# locked TRIES: one recovery under the lock, so that only one instance of
-# this script power-cycles the chip at a time -- the service's run and a
-# recovery typed by hand serialize on it.  The recovery's exit code is
-# passed through.  With no flock (a test without util-linux) it runs
-# unlocked, with a log line.
+# locked TRIES [recheck]: one recovery under the lock, so that only one
+# instance of this script power-cycles the chip at a time -- the service's
+# run and a recovery typed by hand serialize on it.  The recovery's exit
+# code is passed through.  With recheck (what recover_maybe passes, never
+# the recover subcommand: an explicit ask always cycles) the check runs
+# again once the lock is held, before any cycle -- another recovery may
+# have brought the Wi-Fi up while this one waited for the lock, and a
+# cycle would then only break a start that came good: 4 comes back in that
+# case, the good start's counts saved and nothing cycled.  With no flock
+# (a test without util-linux) it runs unlocked, with a log line, the
+# re-check kept.
 locked() {
     if command -v flock >/dev/null 2>&1; then
         (
             flock -x 9
+            if [ "${2:-}" = recheck ] && run_check; then
+                save_state "$wg_digest"
+                exit 4
+            fi
             recover_cycles "$1"
         ) 9>"$LOCK"
     else
         log "no flock: recovering without the lock"
+        if [ "${2:-}" = recheck ] && run_check; then
+            save_state "$wg_digest"
+            return 4
+        fi
         recover_cycles "$1"
     fi
 }
@@ -381,7 +403,9 @@ locked() {
 # recover_maybe: one rate-limited recovery, what run does whenever its
 # check failed.  The timestamps of this boot's recoveries sit in RECS;
 # past MAX_REC in any WINDOW_SECS the decision is logged once and no more
-# recoveries happen until the next boot (the process keeps watching).
+# recoveries happen until the next boot (the process keeps watching).  A
+# start that came good while another recovery held the lock is not one of
+# them: nothing was cycled, so RECS does not grow either.
 RECS=""
 GAVEUP=0
 
@@ -406,8 +430,14 @@ recover_maybe() {
         log "$MAX_REC recoveries in $((WINDOW_SECS / 60)) minutes: not recovering any more until the next boot"
         return 0
     fi
-    locked "$TRIES_DEFAULT"
+    locked "$TRIES_DEFAULT" recheck
     wg_rc=$?
+    if [ "$wg_rc" -eq 4 ]; then
+        # The lock was held by another recovery and that one brought the
+        # Wi-Fi up: cycle nothing, count nothing.
+        log "recover: the Wi-Fi came up meanwhile (another recovery held the lock): nothing to do"
+        return 0
+    fi
     if [ "$wg_rc" -eq 0 ]; then
         log "recovered: the Wi-Fi is up"
     elif [ "$wg_rc" -eq 3 ]; then

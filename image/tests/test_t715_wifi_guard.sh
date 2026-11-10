@@ -205,7 +205,7 @@ echo "ok - signatures: each of the six fails a check, a single query timeout doe
 # --- (c) probe failure at boot, the next try good: one whole-chip cycle -------------
 mk_sysfs
 rm -rf "$S/class/net/wlp1s0"
-klog_seq 1 1 0 0   # settle, boot check, the try's before and judgment
+klog_seq 1 1 1 0 0   # settle, boot check, the re-check under the lock, the try's before and judgment
 wg run
 [ "$WG_RC" = 0 ] || fail "(c) run exits 0 when the second start is good (got $WG_RC)"
 [ "$(cat "$t/trace")" = "$CYCLE" ] \
@@ -288,6 +288,61 @@ grep -q '3 recoveries in 30 minutes: not recovering any more until the next boot
 [ "$(grep -c 'watch: failure signature' "$t/log" || true)" = 3 ] \
     || fail "(g) every signature still watched (log: $(cat "$t/log"))"
 echo "ok - rate limit: 3 recoveries, then one line and no more cycling, still watching"
+
+# --- (g2) the lock held by another recovery that brings the Wi-Fi up ---------------
+# The race of 2026-11-09: the watch check fails, but while this recovery
+# waits for the lock another one (typed by hand) has already brought the
+# Wi-Fi up.  Re-checked under the lock, the start is good: nothing is
+# cycled, the skip is not counted as a recovery, and three later real
+# failures still get their full rate limit -- had the skip counted, the
+# third of them would meet the 3-in-30-minutes limit and never cycle.
+# The fake kernel log plays the other recovery: its body turns good
+# between the watch check and the re-check (a bind with no signature
+# after it, the interface back, the device bound); where flock exists a
+# real outside holder keeps the lock across that turn, so the service's
+# re-check can only happen once the lock is given up.
+mk_sysfs
+printf '%s\n' \
+ '[ 1500.100000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110' \
+ '[ 1600.200000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110' \
+ '[ 1700.300000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110' \
+ '[ 1800.400000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110' \
+ > "$t/kfollow.lines"
+# boot good; watch fail, re-check good (the other recovery's start); then
+# three real failures, each failing the re-check as well and coming good
+# on the try's judgment.
+klog_seq 0 1 0  1 1 1 0  1 1 1 0  1 1 1 0
+holder=""
+if command -v flock >/dev/null 2>&1; then
+    (
+        flock -x 9
+        printf 'held\n' > "$t/run/holder"
+        /bin/sleep 1
+    ) 9>"$t/run/guard.lock" &
+    holder=$!
+    i=0
+    while [ ! -f "$t/run/holder" ] && [ "$i" -lt 50 ]; do
+        /bin/sleep 0.1
+        i=$((i + 1))
+    done
+    [ -f "$t/run/holder" ] || fail "(g2) the outside holder never got the lock"
+fi
+wg run
+if [ -n "$holder" ]; then wait "$holder" || true; fi
+[ "$WG_RC" = 0 ] || fail "(g2) run exits 0 (got $WG_RC)"
+[ "$(grep -c 'recover: the Wi-Fi came up meanwhile (another recovery held the lock): nothing to do' "$t/log" || true)" = 1 ] \
+    || fail "(g2) the came-up-meanwhile line, once (log: $(cat "$t/log"))"
+[ "$(host_binds)" = 3 ] \
+    || fail "(g2) the skipped recovery cycles nothing, the three real ones one cycle each (got $(host_binds) host binds)"
+want=""; i=0; while [ $i -lt 3 ]; do want="$want$CYCLE
+"; i=$((i + 1)); done
+[ "$(cat "$t/trace")" = "${want%
+}" ] || fail "(g2) three whole-chip cycles only, in order (trace: $(cat "$t/trace"))"
+! grep -q 'not recovering any more' "$t/log" \
+    || fail "(g2) the skip leaves the rate limit whole (log: $(cat "$t/log"))"
+[ "$(grep -c 'recovered: the Wi-Fi is up' "$t/log" || true)" = 3 ] \
+    || fail "(g2) the three later failures all recovered (log: $(cat "$t/log"))"
+echo "ok - lock held by another recovery: re-checked under the lock, nothing cycled, not counted, later failures still recovered"
 
 # --- (h) no address, no SSID, no kernel line in anything the script says -------------
 # The fake log's bodies carry a MAC address; nothing the script printed
