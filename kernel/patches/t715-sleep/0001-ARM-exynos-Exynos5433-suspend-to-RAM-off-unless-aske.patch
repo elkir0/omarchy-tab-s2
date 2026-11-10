@@ -1,0 +1,713 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 1/7] ARM: exynos: Exynos5433 suspend to RAM, off unless asked
+
+exynos5433_pm_init() maps the CMUs, the alive pin controller and the
+PMU's LPI page, and registers syscore and suspend ops built from the
+vendor kernel: the 83-entry SLEEP column of the PMU, its nine clock
+writes before the sleep, its boot-time PMU state applied for the sleep
+window only, and the wake-up masks.  firmware.c gives the monitor
+exynos_cpu_resume, which has the sleep magic in front of it, as the
+vendor kernel did.
+
+exynos5433_sleep=on registers the ops; dryrun runs all of .enter but
+SMC_CMD_SLEEP and takes the early-wake path back; anything else, or
+nothing, registers nothing and mem_sleep stays s2idle.  Every register,
+its value and its source: omarchy-tab-s2 research/suspend/PORT.md.
+
+Passed on the tablet on 2026-11-05 as a dry run, with the fixes that
+follow (pm_test platform, processors, core and none).  A real sleep has
+not been tried.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/mach-exynos/firmware.c             |  15 +-
+ arch/arm/mach-exynos/suspend.c              | 589 +++++++++++++++++++-
+ include/linux/soc/samsung/exynos-regs-pmu.h |  13 +
+ 3 files changed, 609 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm/mach-exynos/firmware.c b/arch/arm/mach-exynos/firmware.c
+index a5e22678e..14a3c9760 100644
+--- a/arch/arm/mach-exynos/firmware.c
++++ b/arch/arm/mach-exynos/firmware.c
+@@ -130,12 +130,23 @@ static int exynos_cpu_suspend(unsigned long arg)
+ 
+ static int exynos_suspend(void)
+ {
++	phys_addr_t resume = __pa_symbol(exynos_cpu_resume_ns);
++
+ 	if (read_cpuid_part() == ARM_CPU_PART_CORTEX_A9)
+ 		exynos_save_cp15();
+ 
++	/*
++	 * Exynos5433: the vendor kernel gives the monitor s3c_cpu_resume,
++	 * which the 0x2bedf00d sleep magic precedes (kernel_universal5433
++	 * arch/arm/plat-samsung/s5p-sleep.S:41-47).  exynos_cpu_resume has
++	 * that word in front of it and on this core just branches to
++	 * cpu_resume; exynos_cpu_resume_ns does not.
++	 */
++	if (soc_is_exynos5433())
++		resume = __pa_symbol(exynos_cpu_resume);
++
+ 	writel(EXYNOS_SLEEP_MAGIC, sysram_ns_base_addr + EXYNOS_BOOT_FLAG);
+-	writel(__pa_symbol(exynos_cpu_resume_ns),
+-		sysram_ns_base_addr + EXYNOS_BOOT_ADDR);
++	writel(resume, sysram_ns_base_addr + EXYNOS_BOOT_ADDR);
+ 
+ 	return cpu_suspend(0, exynos_cpu_suspend);
+ }
+diff --git a/arch/arm/mach-exynos/suspend.c b/arch/arm/mach-exynos/suspend.c
+index 2bbffaf35..41fee8c0f 100644
+--- a/arch/arm/mach-exynos/suspend.c
++++ b/arch/arm/mach-exynos/suspend.c
+@@ -13,6 +13,7 @@
+ #include <linux/suspend.h>
+ #include <linux/syscore_ops.h>
+ #include <linux/cpu_pm.h>
++#include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/irq.h>
+ #include <linux/irqchip.h>
+@@ -670,6 +671,583 @@ static const struct of_device_id exynos_pmu_of_device_ids[] __initconst = {
+ 
+ static struct syscore exynos_pm_syscore;
+ 
++/*
++ * Exynos5433 (32-bit port, vendor bootloader and secure monitor)
++ *
++ * System sleep entered the way the vendor 3.10 kernel enters it; "stock"
++ * files are kernel_universal5433 arch/arm/mach-exynos/ unless stated:
++ *  - syscore suspend: every secondary core powered off, the PMU state stock
++ *    sets at boot, the LPI mask, both central sequencers armed
++ *    (pm-exynos5433.c:190-196, pmu_cal_sys_exynos5433.c:133-151);
++ *  - .enter: the PMU wake-up masks (include/mach/pm-core.h:50-58), the
++ *    SYS_PWR_REG SLEEP column, XXTI, BLK_FSYS and the clock writes
++ *    (pm-exynos5433.c:213-236), then the firmware suspend op: resume address
++ *    and 0xbad magic at sysram-ns +0x8/+0xc (:215-217), SMC_CMD_SLEEP from
++ *    CPU0 inside cpu_suspend() (:160-188);
++ *  - syscore resume: early wake-up test, LPI mask, DRAM and JTAG pad
++ *    retention release (:239-289), then the boot PMU state put back.
++ * PMU INFORM0/1 stay untouched: stock never uses them on this SoC.  Neither
++ * is the PMU irqchip above used: the 5433 PMU node is no interrupt
++ * controller, and the wake-up sources of this board (the PMIC, which
++ * carries the RTC alarm, and the keys) are EINTs of gpa0-gpa3, whose PMU
++ * mask (0x060c) pinctrl writes in its late suspend.
++ *
++ * Off unless the command line has exynos5433_sleep=on ("deep" in
++ * /sys/power/mem_sleep) or exynos5433_sleep=dryrun (the same path without
++ * the SMC: the system does not sleep and resumes at once).
++ */
++
++enum exynos5433_sleep_mode {
++	EXYNOS5433_SLEEP_OFF,
++	EXYNOS5433_SLEEP_ON,
++	EXYNOS5433_SLEEP_DRYRUN,
++};
++
++static enum exynos5433_sleep_mode exynos5433_sleep __ro_after_init;
++
++static int __init exynos5433_sleep_setup(char *str)
++{
++	if (!str)
++		return -EINVAL;
++
++	if (!strcmp(str, "on") || !strcmp(str, "1"))
++		exynos5433_sleep = EXYNOS5433_SLEEP_ON;
++	else if (!strcmp(str, "dryrun"))
++		exynos5433_sleep = EXYNOS5433_SLEEP_DRYRUN;
++	else
++		exynos5433_sleep = EXYNOS5433_SLEEP_OFF;
++
++	return 0;
++}
++early_param("exynos5433_sleep", exynos5433_sleep_setup);
++
++/* PMU core and power domain power state, stock include/mach/regs-pmu.h:367,372 */
++#define EXYNOS5433_PWR_EN			0xf
++#define EXYNOS5433_NR_PMU_CORES			8
++
++/* PMU LPI block of the EAGLE side, stock include/mach/map.h:88; not in the DT */
++#define EXYNOS5433_PA_PMU_LPI_EAGLE		0x11820000
++#define EXYNOS5433_LPI_MASK_EAGLE_ASYNCBRIDGE	0x20
++#define EXYNOS5433_LPI_MASK_ATB_AUD_CSSYS	BIT(7)
++
++/* EINT_PEND of gpa0-gpa3 in the alive pin controller (EXYNOS7_WKUP_EPEND_OFFSET) */
++#define EXYNOS5433_EINT_PEND(n)			(0xa00 + 4 * (n))
++
++/* CMU_APOLLO (KFC), stock include/mach/regs-clock-exynos5433.h:634 */
++#define EXYNOS5433_KFC_STOPCTRL			0x1000
++
++enum {
++	EXYNOS5433_CMU_TOP,
++	EXYNOS5433_CMU_BUS2,
++	EXYNOS5433_CMU_CPIF,
++	EXYNOS5433_CMU_FSYS,
++	EXYNOS5433_CMU_MIF,
++	EXYNOS5433_CMU_PERIC,
++	EXYNOS5433_CMU_APOLLO,
++	EXYNOS5433_NR_CMU,
++};
++
++static const char *const exynos5433_cmu_compat[EXYNOS5433_NR_CMU] __initconst = {
++	[EXYNOS5433_CMU_TOP]	= "samsung,exynos5433-cmu-top",
++	[EXYNOS5433_CMU_BUS2]	= "samsung,exynos5433-cmu-bus2",
++	[EXYNOS5433_CMU_CPIF]	= "samsung,exynos5433-cmu-cpif",
++	[EXYNOS5433_CMU_FSYS]	= "samsung,exynos5433-cmu-fsys",
++	[EXYNOS5433_CMU_MIF]	= "samsung,exynos5433-cmu-mif",
++	[EXYNOS5433_CMU_PERIC]	= "samsung,exynos5433-cmu-peric",
++	[EXYNOS5433_CMU_APOLLO]	= "samsung,exynos5433-cmu-apollo",
++};
++
++static void __iomem *exynos5433_cmu[EXYNOS5433_NR_CMU] __ro_after_init;
++static void __iomem *exynos5433_lpi_eagle __ro_after_init;
++static void __iomem *exynos5433_eint_base __ro_after_init;
++
++/*
++ * SYS_PWR_REG values for SLEEP, the last column of exynos5433_pmu_config[]
++ * (stock pmu_cal_sys_exynos5433.c:36-122, columns at :37; offsets from
++ * include/mach/pmu_cal_sys_exynos5433.h:146-326), in its order.
++ */
++static const struct exynos5433_pmu_reg {
++	u32 offset;
++	u32 val;
++} exynos5433_sleep_conf[] = {
++	{ 0x1000, 0x8 },	/* ATLAS_CPU0 */
++	{ 0x1008, 0x0 },	/* DIS_IRQ_ATLAS_CPU0_CENTRAL */
++	{ 0x1010, 0x8 },	/* ATLAS_CPU1 */
++	{ 0x1018, 0x0 },	/* DIS_IRQ_ATLAS_CPU1_CENTRAL */
++	{ 0x1020, 0x8 },	/* ATLAS_CPU2 */
++	{ 0x1028, 0x0 },	/* DIS_IRQ_ATLAS_CPU2_CENTRAL */
++	{ 0x1030, 0x8 },	/* ATLAS_CPU3 */
++	{ 0x1038, 0x0 },	/* DIS_IRQ_ATLAS_CPU3_CENTRAL */
++	{ 0x1040, 0x8 },	/* APOLLO_CPU0 */
++	{ 0x1048, 0x0 },	/* DIS_IRQ_APOLLO_CPU0_CENTRAL */
++	{ 0x1050, 0x8 },	/* APOLLO_CPU1 */
++	{ 0x1058, 0x0 },	/* DIS_IRQ_APOLLO_CPU1_CENTRAL */
++	{ 0x1060, 0x8 },	/* APOLLO_CPU2 */
++	{ 0x1068, 0x0 },	/* DIS_IRQ_APOLLO_CPU2_CENTRAL */
++	{ 0x1070, 0x8 },	/* APOLLO_CPU3 */
++	{ 0x1078, 0x0 },	/* DIS_IRQ_APOLLO_CPU3_CENTRAL */
++	{ 0x1080, 0x8 },	/* ATLAS_NONCPU */
++	{ 0x1084, 0x8 },	/* APOLLO_NONCPU */
++	{ 0x10b0, 0x0 },	/* A5IS */
++	{ 0x10b4, 0x0 },	/* DIS_IRQ_A5IS_LOCAL */
++	{ 0x10b8, 0x0 },	/* DIS_IRQ_A5IS_CENTRAL */
++	{ 0x10c0, 0x7 },	/* ATLAS_L2 */
++	{ 0x10c4, 0x7 },	/* APOLLO_L2 */
++	{ 0x1100, 0x0 },	/* CLKSTOP_CMU_TOP */
++	{ 0x1104, 0x0 },	/* CLKRUN_CMU_TOP */
++	{ 0x110c, 0x0 },	/* RESET_CMU_TOP */
++	{ 0x111c, 0x0 },	/* RESET_CPUCLKSTOP */
++	{ 0x1120, 0x0 },	/* CLKSTOP_CMU_MIF */
++	{ 0x1124, 0x0 },	/* CLKRUN_CMU_MIF */
++	{ 0x112c, 0x0 },	/* RESET_CMU_MIF */
++	{ 0x1138, 0x1 },	/* DDRPHY_DLLLOCK */
++	{ 0x1140, 0x0 },	/* DISABLE_PLL_CMU_TOP */
++	{ 0x1144, 0x0 },	/* DISABLE_PLL_AUD_PLL */
++	{ 0x1160, 0x0 },	/* DISABLE_PLL_CMU_MIF */
++	{ 0x1180, 0x0 },	/* TOP_BUS */
++	{ 0x1184, 0x1 },	/* TOP_RETENTION */
++	{ 0x1188, 0x3 },	/* TOP_PWR */
++	{ 0x1190, 0x0 },	/* TOP_BUS_MIF */
++	{ 0x1194, 0x1 },	/* TOP_RETENTION_MIF */
++	{ 0x1198, 0x3 },	/* TOP_PWR_MIF */
++	{ 0x11a0, 0x0 },	/* LOGIC_RESET */
++	{ 0x11a4, 0x1 },	/* OSCCLK_GATE */
++	{ 0x11a8, 0x0 },	/* SLEEP_RESET */
++	{ 0x11b0, 0x0 },	/* LOGIC_RESET_MIF */
++	{ 0x11b4, 0x1 },	/* OSCCLK_GATE_MIF */
++	{ 0x11b8, 0x0 },	/* SLEEP_RESET_MIF */
++	{ 0x11c0, 0x0 },	/* MEMORY_TOP */
++	{ 0x1200, 0x0 },	/* PAD_RETENTION_LPDDR3 */
++	{ 0x1208, 0x0 },	/* PAD_RETENTION_JTAG */
++	{ 0x1220, 0x0 },	/* PAD_RETENTION_TOP */
++	{ 0x1224, 0x0 },	/* PAD_RETENTION_UART */
++	{ 0x1230, 0x0 },	/* PAD_RETENTION_EBIA */
++	{ 0x1234, 0x0 },	/* PAD_RETENTION_EBIB */
++	{ 0x1238, 0x0 },	/* PAD_RETENTION_SPI */
++	{ 0x123c, 0x0 },	/* PAD_RETENTION_MIF */
++	{ 0x1240, 0x1 },	/* PAD_ISOLATION */
++	{ 0x1244, 0x0 },	/* PAD_RETENTION_USBXTI */
++	{ 0x1248, 0x0 },	/* PAD_RETENTION_BOOTLDO */
++	{ 0x1250, 0x1 },	/* PAD_ISOLATION_MIF */
++	{ 0x1254, 0x0 },	/* PAD_RETENTION_FSYSGENIO */
++	{ 0x1260, 0x0 },	/* PAD_ALV_SEL */
++	{ 0x1284, 0x0 },	/* XXTI */
++	{ 0x1288, 0x0 },	/* XXTI26 */
++	{ 0x12c0, 0x0 },	/* EXT_REGULATOR */
++	{ 0x1300, 0x0 },	/* GPIO_MODE */
++	{ 0x1304, 0x0 },	/* GPIO_MODE_FSYS */
++	{ 0x1320, 0x0 },	/* GPIO_MODE_MIF */
++	{ 0x1340, 0x0 },	/* GPIO_MODE_AUD */
++	{ 0x1400, 0x0 },	/* GSCL */
++	{ 0x1404, 0x0 },	/* CAM0 */
++	{ 0x1408, 0x0 },	/* MSCL */
++	{ 0x140c, 0x0 },	/* G3D */
++	{ 0x1410, 0x0 },	/* DISP */
++	{ 0x1414, 0x0 },	/* CAM1 */
++	{ 0x1418, 0x0 },	/* AUD */
++	{ 0x141c, 0x0 },	/* FSYS */
++	{ 0x1420, 0x0 },	/* BUS2 */
++	{ 0x1424, 0x0 },	/* G2D */
++	{ 0x1428, 0x0 },	/* ISP */
++	{ 0x1430, 0x0 },	/* MFC */
++	{ 0x1438, 0x0 },	/* HEVC */
++	{ 0x15dc, 0x0 },	/* RESET_SLEEP_FSYS */
++	{ 0x15e0, 0x0 },	/* RESET_SLEEP_BUS2 */
++};
++
++/*
++ * Clock writes "before enter central sequence mode", exynos5433_set_clk[]
++ * (stock pm-exynos5433.c:49-59) in its order: CMU_FSYS before its bus
++ * clock aclk_fsys_200 (ENABLE_ACLK_TOP bit 18) stops, BUS2 on OSCCLK before
++ * aclk_bus2_400 (ENABLE_ACLK_MIF3 bit 4) stops.  Every register is in the
++ * save lists of clk-exynos5433.c, put back by the CMU syscore resume (TOP,
++ * BUS2, CPIF, MIF, PERIC) or by the runtime resume of CMU_FSYS.
++ */
++static const struct exynos5433_cmu_reg {
++	u8 cmu;
++	u16 offset;
++	u32 val;
++} exynos5433_sleep_clk[] = {
++	{ EXYNOS5433_CMU_FSYS,	0x0b00, 0x00007df9 },	/* ENABLE_IP_FSYS0 */
++	{ EXYNOS5433_CMU_PERIC,	0x0b00, 0xfffffeff },	/* ENABLE_IP_PERIC0 */
++	{ EXYNOS5433_CMU_TOP,	0x023c, 0x00000011 },	/* SRC_SEL_TOP_PERIC1 */
++	{ EXYNOS5433_CMU_FSYS,	0x0200, 0x00000000 },	/* SRC_SEL_FSYS0 */
++	{ EXYNOS5433_CMU_BUS2,	0x0200, 0x00000000 },	/* SRC_SEL_BUS2 */
++	{ EXYNOS5433_CMU_FSYS,	0x0a00, 0x00000000 },	/* ENABLE_SCLK_FSYS */
++	{ EXYNOS5433_CMU_CPIF,	0x0b00, 0x000ff000 },	/* ENABLE_IP_CPIF0 */
++	{ EXYNOS5433_CMU_TOP,	0x0800, 0x67e8ffed },	/* ENABLE_ACLK_TOP */
++	{ EXYNOS5433_CMU_MIF,	0x080c, 0x00000003 },	/* ENABLE_ACLK_MIF3 */
++};
++
++/*
++ * PMU state that stock sets once at boot in exynos5433_pmu_init() (stock
++ * pmu-exynos5433.c:457-531) and platsmp.c does not, i.e. the state every
++ * stock sleep started from: written over the bits given by the syscore
++ * suspend, put back as the bootloader left it by the syscore resume.
++ */
++static const struct exynos5433_pmu_bits {
++	u32 offset;
++	u32 mask;
++	u32 val;
++} exynos5433_boot_state[] = {
++	/*
++	 * exynos_use_feedback() (:252-266) on exynos_list_feed[] (:30-48)
++	 * past the two NONCPU entries: USE_SC_COUNTER off, USE_SC_FEEDBACK on
++	 * (include/mach/regs-pmu.h:295-296)
++	 */
++	{ 0x2c48, 0x3, 0x2 },	/* TOP_PWR_OPTION */
++	{ 0x2cc8, 0x3, 0x2 },	/* TOP_PWR_SYSMEM_OPTION */
++	{ 0x4008, 0x3, 0x2 },	/* GSCL_OPTION */
++	{ 0x4028, 0x3, 0x2 },	/* CAM0_OPTION */
++	{ 0x4048, 0x3, 0x2 },	/* MSCL_OPTION */
++	{ 0x4068, 0x3, 0x2 },	/* G3D_OPTION */
++	{ 0x4088, 0x3, 0x2 },	/* DISP_OPTION */
++	{ 0x40a8, 0x3, 0x2 },	/* CAM1_OPTION */
++	{ 0x40c8, 0x3, 0x2 },	/* AUD_OPTION */
++	{ 0x40e8, 0x3, 0x2 },	/* FSYS_OPTION */
++	{ 0x4108, 0x3, 0x2 },	/* BUS2_OPTION */
++	{ 0x4128, 0x3, 0x2 },	/* G2D_OPTION */
++	{ 0x4148, 0x3, 0x2 },	/* ISP_OPTION */
++	{ 0x4188, 0x3, 0x2 },	/* MFC_OPTION */
++	{ 0x41c8, 0x3, 0x2 },	/* HEVC_OPTION */
++	{ EXYNOS5433_OSC_DURATION, ~0U, 0x3a98 },		/* :466 */
++	/* STANDBYWFI of all eight cores, PROLOGNED_LOGIC_RESET: :468-470 */
++	{ S5P_CENTRAL_SEQ_OPTION, ~0U, 0x00ff1000 },
++	/*
++	 * USE_AUTOMATIC_L2FLUSHREQ and USE_RETENTION off; on the EAGLE L2,
++	 * USE_STANDBYWFIL2, USE_DEACTIVATE_ACP/ACE on (include/mach/
++	 * regs-pmu-exynos5433.h:206, regs-pmu.h:1026-1029)
++	 */
++	{ EXYNOS5433_L2_OPTION(0), 0x000f0010, 0x000d0000 },	/* :480-482, :492-495 */
++	{ EXYNOS5433_L2_OPTION(1), 0x00020010, 0x00000000 },	/* :484-486, :496-498 */
++	{ EXYNOS5433_PMU_SPARE0, BIT(1), BIT(1) },		/* EN_NONRET_RESET, :519-522 */
++	{ EXYNOS5433_PMU_DEBUG, 0x70, 0x40 },			/* :528-531 */
++};
++
++static u32 exynos5433_boot_state_saved[ARRAY_SIZE(exynos5433_boot_state)];
++static u32 exynos5433_kfc_stopctrl_saved;
++
++static void exynos5433_boot_state_apply(void)
++{
++	static bool shown;
++	unsigned int i;
++	u32 val;
++
++	for (i = 0; i < ARRAY_SIZE(exynos5433_boot_state); i++) {
++		const struct exynos5433_pmu_bits *r = &exynos5433_boot_state[i];
++
++		val = pmu_raw_readl(r->offset);
++		exynos5433_boot_state_saved[i] = val;
++		if (!shown && (val & r->mask) != r->val)
++			pr_info("EXYNOS5433: sleep: PMU 0x%04x 0x%08x -> 0x%08x (stock boot state)\n",
++				r->offset, val, (val & ~r->mask) | r->val);
++		pmu_raw_writel((val & ~r->mask) | r->val, r->offset);
++	}
++
++	/* clock freeze cycles around the cluster clamp, :524-526 */
++	val = readl_relaxed(exynos5433_cmu[EXYNOS5433_CMU_APOLLO] +
++			    EXYNOS5433_KFC_STOPCTRL);
++	exynos5433_kfc_stopctrl_saved = val;
++	if (!shown && val)
++		pr_info("EXYNOS5433: sleep: KFC_STOPCTRL 0x%08x -> 0 (stock boot state)\n",
++			val);
++	writel_relaxed(0, exynos5433_cmu[EXYNOS5433_CMU_APOLLO] +
++		       EXYNOS5433_KFC_STOPCTRL);
++
++	shown = true;
++}
++
++static void exynos5433_boot_state_restore(void)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(exynos5433_boot_state); i++)
++		pmu_raw_writel(exynos5433_boot_state_saved[i],
++			       exynos5433_boot_state[i].offset);
++
++	writel_relaxed(exynos5433_kfc_stopctrl_saved,
++		       exynos5433_cmu[EXYNOS5433_CMU_APOLLO] +
++		       EXYNOS5433_KFC_STOPCTRL);
++}
++
++/*
++ * exynos_eagle_asyncbridge_ignore_lpi(), stock pmu-exynos5433.c:317-329:
++ * the ATB_AUD_CSSYS bridge has no LPI port, BLK_AUD cannot go down unless
++ * its LPI is ignored.
++ */
++static void exynos5433_ignore_aud_lpi(void)
++{
++	void __iomem *reg = exynos5433_lpi_eagle +
++			    EXYNOS5433_LPI_MASK_EAGLE_ASYNCBRIDGE;
++
++	writel_relaxed(readl_relaxed(reg) | EXYNOS5433_LPI_MASK_ATB_AUD_CSSYS,
++		       reg);
++}
++
++/*
++ * Stock hot-unplugs CPUs 7..1 before every sleep; here suspend has taken
++ * them down through exynos_cpu_die().  A core that the monitor left
++ * powered would spin in Linux under the central sequencer: no sleep then.
++ */
++static int exynos5433_secondaries_off(void)
++{
++	u32 mpidr = read_cpuid_mpidr();
++	unsigned int self = MPIDR_AFFINITY_LEVEL(mpidr, 0) +
++			    4 * MPIDR_AFFINITY_LEVEL(mpidr, 1);
++	unsigned int i;
++	int ret = 0;
++
++	for (i = 0; i < EXYNOS5433_NR_PMU_CORES; i++) {
++		u32 status = pmu_raw_readl(EXYNOS_ARM_CORE_STATUS(i));
++
++		if (i == self ||
++		    (status & EXYNOS5433_PWR_EN) != EXYNOS5433_PWR_EN)
++			continue;
++
++		pr_err("EXYNOS5433: PMU core %u still powered (STATUS 0x%08x), no sleep\n",
++		       i, status);
++		ret = -EBUSY;
++	}
++
++	return ret;
++}
++
++static int exynos5433_pm_suspend(void *data)
++{
++	u32 tmp;
++	int ret;
++
++	ret = exynos5433_secondaries_off();
++	if (ret)
++		return ret;
++
++	exynos5433_boot_state_apply();
++	exynos5433_ignore_aud_lpi();		/* set at boot by stock, :472 */
++
++	/* exynos_central_sequencer_ctrl(true), pmu_cal_sys_exynos5433.c:142-151 */
++	tmp = pmu_raw_readl(S5P_CENTRAL_SEQ_CONFIGURATION);
++	pmu_raw_writel(tmp & ~S5P_CENTRAL_LOWPWR_CFG,
++		       S5P_CENTRAL_SEQ_CONFIGURATION);
++	tmp = pmu_raw_readl(EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION);
++	pmu_raw_writel(tmp & ~S5P_CENTRAL_LOWPWR_CFG,
++		       EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION);
++
++	return 0;
++}
++
++static void exynos5433_pm_resume(void *data)
++{
++	u32 seq = pmu_raw_readl(S5P_CENTRAL_SEQ_CONFIGURATION);
++	u32 seq_mif = pmu_raw_readl(EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION);
++	bool slept = seq & S5P_CENTRAL_LOWPWR_CFG;
++
++	/*
++	 * The PMU sets CENTRAL_LOWPWR_CFG again once it has put the system to
++	 * sleep.  Still clear, there was no sleep (a wake-up source pending, a
++	 * dry run, pm_test): disarm the sequencer (stock pm-exynos5433.c:243-255),
++	 * and the MIF one as set_pmu_early_wakeup() does
++	 * (pmu_cal_sys_exynos5433.c:190-193, :133-151).
++	 */
++	if (!slept)
++		pmu_raw_writel(seq | S5P_CENTRAL_LOWPWR_CFG,
++			       S5P_CENTRAL_SEQ_CONFIGURATION);
++	if (!(seq_mif & S5P_CENTRAL_LOWPWR_CFG))
++		pmu_raw_writel(seq_mif | S5P_CENTRAL_LOWPWR_CFG,
++			       EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION);
++
++	if (slept) {
++		/* "LPI MASK is reset after wakeup", pm-exynos5433.c:257-258 */
++		exynos5433_ignore_aud_lpi();
++
++		/*
++		 * Pad retention release, :260-262.  The other groups of
++		 * :263-275 are pinctrl's, which releases them after it has
++		 * restored its banks (pinctrl-exynos-arm64.c).
++		 */
++		pmu_raw_writel(EXYNOS_WAKEUP_FROM_LOWPWR,
++			       EXYNOS5433_PAD_RETENTION_DRAM_OPTION);
++		pmu_raw_writel(EXYNOS_WAKEUP_FROM_LOWPWR,
++			       EXYNOS5433_PAD_RETENTION_JTAG_OPTION);
++	}
++
++	exynos5433_boot_state_restore();
++
++	/* wake-up reason as stock reads it, pm-exynos5433.c:113-147 */
++	pr_info("EXYNOS5433: %s: WAKEUP_STAT 0x%08x, EINT_PEND %02x %02x %02x %02x, CENTRAL_SEQ 0x%08x MIF 0x%08x\n",
++		slept ? "woke up" : "no sleep (early wake-up, dry run or pm_test)",
++		pmu_raw_readl(S5P_WAKEUP_STAT),
++		readl_relaxed(exynos5433_eint_base + EXYNOS5433_EINT_PEND(0)),
++		readl_relaxed(exynos5433_eint_base + EXYNOS5433_EINT_PEND(1)),
++		readl_relaxed(exynos5433_eint_base + EXYNOS5433_EINT_PEND(2)),
++		readl_relaxed(exynos5433_eint_base + EXYNOS5433_EINT_PEND(3)),
++		seq, seq_mif);
++}
++
++static int exynos5433_pm_prepare(void)
++{
++	unsigned int i;
++	u32 status = 0;
++
++	/*
++	 * Wake-up masks, stock include/mach/pm-core.h:50-58: of the PMU
++	 * sources only bit 31 (meaning unknown) open, as in stock, and the
++	 * low halves of MASK1/2; EINT 32-63 (gpf1-gpf5) all masked, pinctrl
++	 * cannot arm them.  EINT 0-31 is pinctrl's.
++	 */
++	pmu_raw_writel(exynos_irqwake_intmask & ~BIT(31), EXYNOS5433_WAKEUP_MASK);
++	pmu_raw_writel(0xffff0000, EXYNOS5433_WAKEUP_MASK1);
++	pmu_raw_writel(0xffff0000, EXYNOS5433_WAKEUP_MASK2);
++	pmu_raw_writel(0xffffffff, EXYNOS5433_EINT_WAKEUP_MASK1);
++
++	/* pm-exynos5433.c:213, pmu_cal_sys_exynos5433.c:124-131 */
++	for (i = 0; i < ARRAY_SIZE(exynos5433_sleep_conf); i++)
++		pmu_raw_writel(exynos5433_sleep_conf[i].val,
++			       exynos5433_sleep_conf[i].offset);
++
++	/* XXTI kept on while CLKOUT (the codec MCLK1) runs, :61-63, :219-221 */
++	if (!(pmu_raw_readl(EXYNOS5433_PMU_DEBUG) & BIT(0)))
++		pmu_raw_writel(0x1, EXYNOS5_XXTI_SYS_PWR_REG);
++
++	/* BLK_FSYS on before CMU_FSYS is written, :223-230 (bounded here) */
++	if (pmu_raw_readl(EXYNOS5433_FSYS_STATUS) == 0) {
++		pmu_raw_writel(EXYNOS5433_PWR_EN, EXYNOS5433_FSYS_CONFIGURATION);
++		for (i = 0; i < 1000; i++) {
++			status = pmu_raw_readl(EXYNOS5433_FSYS_STATUS);
++			if (status == EXYNOS5433_PWR_EN)
++				break;
++			udelay(10);
++		}
++		if (status != EXYNOS5433_PWR_EN) {
++			pr_err("EXYNOS5433: BLK_FSYS does not power up (STATUS 0x%08x), no sleep\n",
++			       status);
++			return -ETIMEDOUT;
++		}
++	}
++
++	/* :232-236 */
++	for (i = 0; i < ARRAY_SIZE(exynos5433_sleep_clk); i++)
++		writel(exynos5433_sleep_clk[i].val,
++		       exynos5433_cmu[exynos5433_sleep_clk[i].cmu] +
++		       exynos5433_sleep_clk[i].offset);
++
++	return 0;
++}
++
++static int exynos5433_suspend_enter(suspend_state_t state)
++{
++	u32 eint_wakeup_mask = pmu_raw_readl(EXYNOS5433_EINT_WAKEUP_MASK);
++	bool dryrun = exynos5433_sleep == EXYNOS5433_SLEEP_DRYRUN;
++	int ret;
++
++	/* the test of exynos_suspend_enter(), on the 5433 EINT mask */
++	if (exynos_irqwake_intmask == -1U &&
++	    eint_wakeup_mask == EXYNOS_EINT_WAKEUP_MASK_DISABLED) {
++		pr_err("%s: No wake-up sources!\n", __func__);
++		pr_err("%s: Aborting sleep\n", __func__);
++		return -EINVAL;
++	}
++
++	ret = exynos5433_pm_prepare();
++	if (ret)
++		return ret;
++
++	pr_info("EXYNOS5433: %s: EINT_WAKEUP_MASK 0x%08x, CENTRAL_SEQ 0x%08x MIF 0x%08x OPTION 0x%08x, XXTI %u\n",
++		dryrun ? "dry run, no SMC_CMD_SLEEP" : "SMC_CMD_SLEEP",
++		eint_wakeup_mask,
++		pmu_raw_readl(S5P_CENTRAL_SEQ_CONFIGURATION),
++		pmu_raw_readl(EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION),
++		pmu_raw_readl(S5P_CENTRAL_SEQ_OPTION),
++		pmu_raw_readl(EXYNOS5_XXTI_SYS_PWR_REG));
++
++	if (dryrun)
++		return 0;
++
++	/*
++	 * firmware.c exynos_suspend(): resume address and magic, then
++	 * SMC_CMD_SLEEP inside cpu_suspend().  It returns 1 when the monitor
++	 * comes back without the PMU having taken the system down.
++	 */
++	ret = call_firmware_op(suspend);
++	if (ret)
++		return ret < 0 ? ret : -EBUSY;
++
++	return 0;
++}
++
++static const struct platform_suspend_ops exynos5433_suspend_ops = {
++	.enter		= exynos5433_suspend_enter,
++	.prepare	= exynos_suspend_prepare,
++	.finish		= exynos_suspend_finish,
++	.valid		= suspend_valid_only_mem,
++};
++
++static const struct syscore_ops exynos5433_syscore_ops = {
++	.suspend	= exynos5433_pm_suspend,
++	.resume		= exynos5433_pm_resume,
++};
++
++static const struct exynos_pm_data exynos5433_pm_data = {
++	.syscore_ops	= &exynos5433_syscore_ops,
++};
++
++static void __init exynos5433_pm_init(void)
++{
++	struct device_node *np, *alive;
++	unsigned int i;
++
++	if (exynos5433_sleep == EXYNOS5433_SLEEP_OFF) {
++		pr_info("EXYNOS5433: system sleep not registered (exynos5433_sleep=on or dryrun)\n");
++		return;
++	}
++
++	if (!pmu_base_addr || !sysram_ns_base_addr || !firmware_ops->suspend) {
++		pr_err("EXYNOS5433: system sleep needs the PMU, the sysram-ns page and the secure firmware; not registered\n");
++		return;
++	}
++
++	for (i = 0; i < EXYNOS5433_NR_CMU; i++) {
++		np = of_find_compatible_node(NULL, NULL, exynos5433_cmu_compat[i]);
++		if (!np)
++			goto err;
++		exynos5433_cmu[i] = of_iomap(np, 0);
++		of_node_put(np);
++		if (!exynos5433_cmu[i])
++			goto err;
++	}
++
++	np = of_find_compatible_node(NULL, NULL, "samsung,exynos5433-wakeup-eint");
++	alive = of_get_parent(np);
++	of_node_put(np);
++	if (!alive)
++		goto err;
++	exynos5433_eint_base = of_iomap(alive, 0);
++	of_node_put(alive);
++	if (!exynos5433_eint_base)
++		goto err;
++
++	exynos5433_lpi_eagle = ioremap(EXYNOS5433_PA_PMU_LPI_EAGLE, SZ_4K);
++	if (!exynos5433_lpi_eagle)
++		goto err;
++
++	pm_data = &exynos5433_pm_data;
++	exynos_pm_syscore.ops = pm_data->syscore_ops;
++	register_syscore(&exynos_pm_syscore);
++	suspend_set_ops(&exynos5433_suspend_ops);
++
++	pr_info("EXYNOS5433: system sleep registered%s\n",
++		exynos5433_sleep == EXYNOS5433_SLEEP_DRYRUN ?
++		" (dry run: SMC_CMD_SLEEP skipped)" : "");
++	return;
++
++err:
++	pr_err("EXYNOS5433: cannot map the CMU, pin controller or LPI registers; system sleep not registered\n");
++	if (exynos5433_eint_base)
++		iounmap(exynos5433_eint_base);
++	for (i = 0; i < EXYNOS5433_NR_CMU; i++)
++		if (exynos5433_cmu[i])
++			iounmap(exynos5433_cmu[i]);
++}
++
+ void __init exynos_pm_init(void)
+ {
+ 	const struct of_device_id *match;
+@@ -678,14 +1256,13 @@ void __init exynos_pm_init(void)
+ 
+ 	/*
+ 	 * Exynos5433 is an ARMv8 SoC that can also be booted in ARMv7
+-	 * mode by its bootloader. It has no data in the legacy ARM32
+-	 * suspend table below (its PMU is only used through the
+-	 * generic syscon regmap and power-domain drivers), so skip it
+-	 * explicitly to avoid the misleading "Failed to find PMU
+-	 * node" error.
++	 * mode by its bootloader. Its PMU node is no interrupt controller
++	 * and has no entry in the table below: it has its own setup.
+ 	 */
+-	if (of_machine_is_compatible("samsung,exynos5433"))
++	if (of_machine_is_compatible("samsung,exynos5433")) {
++		exynos5433_pm_init();
+ 		return;
++	}
+ 
+ 	np = of_find_matching_node_and_match(NULL, exynos_pmu_of_device_ids, &match);
+ 	if (!np) {
+diff --git a/include/linux/soc/samsung/exynos-regs-pmu.h b/include/linux/soc/samsung/exynos-regs-pmu.h
+index c0fb498b0..4aeebd794 100644
+--- a/include/linux/soc/samsung/exynos-regs-pmu.h
++++ b/include/linux/soc/samsung/exynos-regs-pmu.h
+@@ -640,10 +640,21 @@
+ 					 | EXYNOS5420_KFC_USE_STANDBY_WFI3)
+ 
+ /* For Exynos5433 */
++#define EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION		(0x0240)
+ #define EXYNOS5433_EINT_WAKEUP_MASK				(0x060C)
++#define EXYNOS5433_WAKEUP_MASK					(0x0610)
++#define EXYNOS5433_WAKEUP_MASK1					(0x0614)
++#define EXYNOS5433_WAKEUP_MASK2					(0x0618)
++#define EXYNOS5433_EINT_WAKEUP_MASK1				(0x062C)
+ #define EXYNOS5433_LLI_PHY_CONTROL				(0x0720)
+ #define EXYNOS5433_USBHOST30_PHY_CONTROL			(0x0728)
++#define EXYNOS5433_PMU_SPARE0					(0x0900)
++#define EXYNOS5433_PMU_DEBUG					(0x0A00)
++#define EXYNOS5433_L2_OPTION(_nr)				(0x2608 + (_nr) * 0x20)
++#define EXYNOS5433_OSC_DURATION					(0x2D3C)
++#define EXYNOS5433_PAD_RETENTION_DRAM_OPTION			(0x3008)
+ #define EXYNOS5433_PAD_RETENTION_AUD_OPTION			(0x3028)
++#define EXYNOS5433_PAD_RETENTION_JTAG_OPTION			(0x3048)
+ #define EXYNOS5433_PAD_RETENTION_MMC2_OPTION			(0x30C8)
+ #define EXYNOS5433_PAD_RETENTION_TOP_OPTION			(0x3108)
+ #define EXYNOS5433_PAD_RETENTION_UART_OPTION			(0x3128)
+@@ -657,6 +668,8 @@
+ #define EXYNOS5433_PAD_RETENTION_BOOTLDO_OPTION			(0x3248)
+ #define EXYNOS5433_PAD_RETENTION_UFS_OPTION			(0x3268)
+ #define EXYNOS5433_PAD_RETENTION_FSYSGENIO_OPTION		(0x32A8)
++#define EXYNOS5433_FSYS_CONFIGURATION				(0x40E0)
++#define EXYNOS5433_FSYS_STATUS					(0x40E4)
+ 
+ /* For Tensor GS101 */
+ #define GS101_SYSIP_DAT0					(0x810)
+-- 
+2.52.0
+

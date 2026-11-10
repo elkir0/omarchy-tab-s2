@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 4/7] clk: samsung: exynos5433: AUD gates open before the
+ domain powers off
+
+genpd could not power the AUD domain off once exynos-lpass let it go
+("Power domain AUD disable failed"), and the block stayed unreachable:
+after resume PipeWire took a SIGBUS and wireplumber's PCM open aborted
+on CMU_AUD.  The vendor kernel opens every AUD clock gate before the
+domain goes off (lpass_reset_clk_default()); CMU_AUD's suspend values
+now do the same, written by its runtime suspend just before genpd powers
+the domain off.
+
+With it the whole pm_test ladder passes on the tablet (2026-11-05):
+freezer, devices, platform, processors, core and none (the dry run),
+five more dry runs in a row, AUD answering afterwards, and a real s2idle
+woken by the PMIC RTC.  The Wi-Fi was unbound throughout.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/clk/samsung/clk-exynos5433.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/clk/samsung/clk-exynos5433.c b/drivers/clk/samsung/clk-exynos5433.c
+index 7795117d0..c676ebad3 100644
+--- a/drivers/clk/samsung/clk-exynos5433.c
++++ b/drivers/clk/samsung/clk-exynos5433.c
+@@ -3017,6 +3017,20 @@ static const unsigned long aud_clk_regs[] __initconst = {
+ static const struct samsung_clk_reg_dump aud_suspend_regs[] = {
+ 	{ MUX_SEL_AUD0, 0 },
+ 	{ MUX_SEL_AUD1, 0 },
++	/*
++	 * Every gate open before the domain goes off, as stock's
++	 * lpass_disable() does through lpass_reset_clk_default()
++	 * (sound/soc/samsung/lpass-exynos5433.c:147-154), ACLK as well.
++	 * With the drivers' gates closed the AUD power-off does not complete
++	 * ("Power domain AUD disable failed") and the block stays
++	 * unreachable after a system sleep (SM-T715, 2026-11-05).
++	 */
++	{ ENABLE_ACLK_AUD, 0x1fff },
++	{ ENABLE_PCLK_AUD, 0x3ffd },
++	{ ENABLE_SCLK_AUD0, 0x7 },
++	{ ENABLE_SCLK_AUD1, 0x7f },
++	{ ENABLE_IP_AUD0, 0x3ffff },
++	{ ENABLE_IP_AUD1, 0x3ff },
+ };
+ 
+ /* list of all parent clock list */
+-- 
+2.52.0
+

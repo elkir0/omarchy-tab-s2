@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH 5/7] ARM: exynos: 5433 sleep: an arm switch, the PMIC pins'
+ power-down state
+
+exynos5433_sleep.arm turns the next dry run of a kernel booted with
+exynos5433_sleep=dryrun into one real SMC_CMD_SLEEP, then disarms.  The
+daily kernel boots so, and the root's sleep hook arms each sleep once the
+CP and the Wi-Fi/Bluetooth chip are powered down: a suspend that nothing
+prepared stays a dry run.  Test kernels use the same switch, so that their
+dry runs and real sleeps need no second image.  The pm_prepare log notes
+PMU_DEBUG's CLKOUT bit, which skips the XXTI write.
+
+exynos5433-gts28ltexx-sleep-pdn.dtsi gives eight PMIC and power-control
+pins stock's power-down state (CON_PDN/PUD_PDN, which sboot leaves at 0,
+driving every pin low in sleep: WRSTBI low resets the PMIC's bucks), and
+the gpr3 pins of the PCIe link.  First real sleeps on 2026-11-09: seven
+SMC_CMD_SLEEP, seven clean wakes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../exynos5433-gts28ltexx-sleep-pdn.dtsi      | 101 ++++++++++++++++++
+ .../dts/samsung/exynos5433-gts28ltexx.dts     |   3 +
+ arch/arm/mach-exynos/suspend.c                |  37 ++++++-
+ 3 files changed, 138 insertions(+), 3 deletions(-)
+ create mode 100644 arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sleep-pdn.dtsi
+
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sleep-pdn.dtsi b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sleep-pdn.dtsi
+new file mode 100644
+index 000000000..044cf2480
+--- /dev/null
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx-sleep-pdn.dtsi
+@@ -0,0 +1,101 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab S2 8.0 LTE (SM-T715): the power-down ("sleep") state
++ * of the PMIC and power-control pins, for system sleep.
++ *
++ * In system sleep the off-domain pads stop following CON/DAT and take
++ * their CONPDN/PUDPDN state instead.  Mainline programs none of them, and
++ * CONPDN's reset value 00 drives every such pin low, where stock's tree
++ * gives each pin a sleep state (214 entries).  These are the pins that
++ * matter first, with stock's values (dumps/live_fdt.dts, the controllers'
++ * sleep-state groups):
++ *
++ *   gpf5-4 WRSTBI    out 1, no pull: low, the S2MPS13 sets its bucks back
++ *                    to their default voltages (sec-core.c)   live_fdt:550
++ *   gpf0-1 G3D_EN    out 0, no pull                          :5451
++ *   gpr3-0 DVS_EN    previous state, no pull                 :3775
++ *   gpr3-1 CP_ON     previous state, no pull                 :3793
++ *   gpr3-5 PERST     previous state, no pull                 :3703
++ *   gpj2-0 WLAN_EN   previous state, no pull                 :5609
++ *   gpd4-0 BT_EN     previous state, pull-up                 :6778
++ *   gpc0-5 CP_RESET  previous state, no pull                 :6646
++ *
++ * Each group carries only the two power-down fields, applied once as a hog
++ * of its controller: they act only in power-down, so nothing changes while
++ * the system runs, and a config-only group claims no pin, so the drivers
++ * that own these pins (hci_bcm, the PCIe host, the modem) keep them.
++ * gpf1-gpf5 are banks of the alive controller (its second region, 0x11090000).
++ */
++
++&pinctrl_alive {
++	pinctrl-names = "default";
++	pinctrl-0 = <&sleep_pdn_wrstbi>;
++
++	sleep_pdn_wrstbi: sleep-pdn-wrstbi-pins {
++		samsung,pins = "gpf5-4";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_OUT1>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_imem {
++	pinctrl-names = "default";
++	pinctrl-0 = <&sleep_pdn_g3d_en>;
++
++	sleep_pdn_g3d_en: sleep-pdn-g3d-en-pins {
++		samsung,pins = "gpf0-1";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_OUT0>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_fsys {
++	pinctrl-names = "default";
++	pinctrl-0 = <&sleep_pdn_fsys &sleep_pdn_fsys_nc>;
++
++	/*
++	 * Also gpr3-4 PCIE_CLKREQ_L and gpr3-7 BT_WAKE, previous state, and
++	 * gpr3-6 (not connected) an input with pull-down: stock's sleep
++	 * state, for the Wi-Fi kept powered through sleep
++	 * (kernel_universal5433 exynos5433-gts28_gpio_03.dtsi:158-165).
++	 */
++	sleep_pdn_fsys: sleep-pdn-fsys-pins {
++		samsung,pins = "gpr3-0", "gpr3-1", "gpr3-4", "gpr3-5", "gpr3-7";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
++	};
++
++	sleep_pdn_fsys_nc: sleep-pdn-fsys-nc-pins {
++		samsung,pins = "gpr3-6";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_INPUT>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_DOWN>;
++	};
++};
++
++&pinctrl_ese {
++	pinctrl-names = "default";
++	pinctrl-0 = <&sleep_pdn_wlan_en>;
++
++	sleep_pdn_wlan_en: sleep-pdn-wlan-en-pins {
++		samsung,pins = "gpj2-0";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
++
++&pinctrl_peric {
++	pinctrl-names = "default";
++	pinctrl-0 = <&sleep_pdn_bt_en &sleep_pdn_cp_reset>;
++
++	sleep_pdn_bt_en: sleep-pdn-bt-en-pins {
++		samsung,pins = "gpd4-0";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_UP>;
++	};
++
++	sleep_pdn_cp_reset: sleep-pdn-cp-reset-pins {
++		samsung,pins = "gpc0-5";
++		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
++		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
++	};
++};
+diff --git a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+index 5ca681742..75f68b476 100644
+--- a/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
++++ b/arch/arm/boot/dts/samsung/exynos5433-gts28ltexx.dts
+@@ -1119,3 +1119,6 @@ &pinctrl_aud {
+ 	clocks = <&cmu_aud CLK_PCLK_GPIO_AUD>;
+ 	clock-names = "pclk";
+ };
++
++/* The power-down state of the PMIC and power-control pins, for system sleep. */
++#include "exynos5433-gts28ltexx-sleep-pdn.dtsi"
+diff --git a/arch/arm/mach-exynos/suspend.c b/arch/arm/mach-exynos/suspend.c
+index 426832307..b527d877d 100644
+--- a/arch/arm/mach-exynos/suspend.c
++++ b/arch/arm/mach-exynos/suspend.c
+@@ -18,6 +18,7 @@
+ #include <linux/irq.h>
+ #include <linux/irqchip.h>
+ #include <linux/irqdomain.h>
++#include <linux/moduleparam.h>
+ #include <linux/of_address.h>
+ #include <linux/err.h>
+ #include <linux/regulator/machine.h>
+@@ -721,6 +722,26 @@ static int __init exynos5433_sleep_setup(char *str)
+ }
+ early_param("exynos5433_sleep", exynos5433_sleep_setup);
+ 
++/*
++ * A kernel booted with exynos5433_sleep=dryrun sleeps for real only when
++ * armed, one sleep at a time:
++ *
++ *   echo 1 > /sys/module/exynos5433_sleep/parameters/arm
++ *
++ * The next .enter issues SMC_CMD_SLEEP and disarms, so the parameter reads
++ * N again after that attempt, whatever its outcome.  The daily kernel boots
++ * so, and the root's sleep hook arms each sleep once the CP and the
++ * Wi-Fi/Bluetooth chip are powered down: a suspend that nothing prepared
++ * stays a dry run.  Test kernels use the switch the same way, so that their
++ * dry runs and real sleeps need no second image.  A kernel booted with
++ * exynos5433_sleep=on always sleeps, and one booted without the switch
++ * registers no system sleep at all, armed or not.
++ */
++static bool exynos5433_sleep_armed;
++#undef MODULE_PARAM_PREFIX
++#define MODULE_PARAM_PREFIX "exynos5433_sleep."
++module_param_named(arm, exynos5433_sleep_armed, bool, 0600);
++
+ /* PMU core and power domain power state, stock include/mach/regs-pmu.h:367,372 */
+ #define EXYNOS5433_PWR_EN			0xf
+ #define EXYNOS5433_NR_PMU_CORES			8
+@@ -1136,7 +1157,8 @@ static int exynos5433_pm_prepare(void)
+ static int exynos5433_suspend_enter(suspend_state_t state)
+ {
+ 	u32 eint_wakeup_mask = pmu_raw_readl(EXYNOS5433_EINT_WAKEUP_MASK);
+-	bool dryrun = exynos5433_sleep == EXYNOS5433_SLEEP_DRYRUN;
++	bool dryrun = exynos5433_sleep == EXYNOS5433_SLEEP_DRYRUN &&
++		      !READ_ONCE(exynos5433_sleep_armed);
+ 	int ret;
+ 
+ 	/* the test of exynos_suspend_enter(), on the 5433 EINT mask */
+@@ -1151,17 +1173,26 @@ static int exynos5433_suspend_enter(suspend_state_t state)
+ 	if (ret)
+ 		return ret;
+ 
+-	pr_info("EXYNOS5433: %s: EINT_WAKEUP_MASK 0x%08x, CENTRAL_SEQ 0x%08x MIF 0x%08x OPTION 0x%08x, XXTI %u\n",
++	/*
++	 * PMU_DEBUG bit 0 set (CLKOUT off) skips the XXTI write of
++	 * exynos5433_pm_prepare(): logged so that an XXTI read back with bit 0
++	 * clear tells the skipped write from one that did not hold.
++	 */
++	pr_info("EXYNOS5433: %s: EINT_WAKEUP_MASK 0x%08x, CENTRAL_SEQ 0x%08x MIF 0x%08x OPTION 0x%08x, XXTI 0x%08x, PMU_DEBUG 0x%08x\n",
+ 		dryrun ? "dry run, no SMC_CMD_SLEEP" : "SMC_CMD_SLEEP",
+ 		eint_wakeup_mask,
+ 		pmu_raw_readl(S5P_CENTRAL_SEQ_CONFIGURATION),
+ 		pmu_raw_readl(EXYNOS5433_CENTRAL_SEQ_MIF_CONFIGURATION),
+ 		pmu_raw_readl(S5P_CENTRAL_SEQ_OPTION),
+-		pmu_raw_readl(EXYNOS5_XXTI_SYS_PWR_REG));
++		pmu_raw_readl(EXYNOS5_XXTI_SYS_PWR_REG),
++		pmu_raw_readl(EXYNOS5433_PMU_DEBUG));
+ 
+ 	if (dryrun)
+ 		return 0;
+ 
++	/* armed for this attempt only */
++	WRITE_ONCE(exynos5433_sleep_armed, false);
++
+ 	/*
+ 	 * firmware.c exynos_suspend(): resume address and magic, then
+ 	 * SMC_CMD_SLEEP inside cpu_suspend().  It returns 1 when the monitor
+-- 
+2.52.0
+

@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:00:00 +0000
+Subject: [PATCH 3/7] ARM: exynos: Exynos5433 AUD trace bus out of the LPI
+ handshake
+
+As the vendor kernel does once at boot (pmu-exynos5433.c:472).  It did
+not cure "Power domain AUD disable failed" alone, the next change does;
+kept because the vendor kernel has it from boot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/mach-exynos/suspend.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm/mach-exynos/suspend.c b/arch/arm/mach-exynos/suspend.c
+index 41fee8c0f..426832307 100644
+--- a/arch/arm/mach-exynos/suspend.c
++++ b/arch/arm/mach-exynos/suspend.c
+@@ -1229,6 +1229,15 @@ static void __init exynos5433_pm_init(void)
+ 	if (!exynos5433_lpi_eagle)
+ 		goto err;
+ 
++	/*
++	 * Stock masks the AUD trace bus out of the low-power handshake once
++	 * at boot (pmu-exynos5433.c:472, exynos_eagle_asyncbridge_ignore_lpi).
++	 * Without it the AUD domain does not power off when exynos-lpass lets
++	 * it go in the noirq phase ("Power domain AUD disable failed") and
++	 * stays unreachable after resume (2026-11-05).
++	 */
++	exynos5433_ignore_aud_lpi();
++
+ 	pm_data = &exynos5433_pm_data;
+ 	exynos_pm_syscore.ops = pm_data->syscore_ops;
+ 	register_syscore(&exynos_pm_syscore);
+-- 
+2.52.0
+

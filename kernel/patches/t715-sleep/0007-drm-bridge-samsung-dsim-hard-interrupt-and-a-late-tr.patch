@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 12:00:00 +0000
+Subject: [PATCH 7/7] drm/bridge: samsung-dsim: hard interrupt, and a late
+ transfer finished by polling
+
+On the SM-T715 (Exynos5433), right after a system sleep, the screen often
+stayed black when a key woke the tablet: the panel's first command
+(39 03 00 00 f0 5a 5a) timed out, no frame ever started, and every
+commit then ended in "flip_done timed out" until the display was
+switched off and on again.  Lighting the screen the moment the system
+resumed reproduced it in 5 wakes of 6; a second later, never.
+
+At the timeout DSIM_INTSRC held the transfer's status bits, unmasked:
+the packet had gone out and its interrupt was raised, but the interrupt
+thread had not run, and the software reset's own release had been
+handled some 230 ms late.  Every interrupt thread runs on the
+interrupt's CPU, CPU0 here, at one priority, behind those of the drivers
+that resume with it.
+
+The handler only touches the DSIM's registers, the transfer list's
+spinlock and completions, so request it as a hard interrupt.  And when a
+transfer still times out, finish it from DSIM_INTSRC, the handler run
+with the interrupt held off, for up to about 50 ms more, with a
+rate-limited warning; a final timeout logs STATUS, INTSRC and INTMSK.
+
+The count does not prove the fix: the failure came in runs and did not
+come back after the test kernel that first dumped the registers (5 of 6
+on one kernel, then 3 of 6), neither with the thread and the polling
+(10 wakes) nor with the hard interrupt (12 wakes), the polling never
+needed.  Both changes rest on what the dumped registers showed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/bridge/samsung-dsim.c | 52 +++++++++++++++++++++++----
+ 1 file changed, 46 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/bridge/samsung-dsim.c b/drivers/gpu/drm/bridge/samsung-dsim.c
+index b13c68cf7..53fc7214b 100644
+--- a/drivers/gpu/drm/bridge/samsung-dsim.c
++++ b/drivers/gpu/drm/bridge/samsung-dsim.c
+@@ -1344,6 +1344,31 @@ static void samsung_dsim_remove_transfer(struct samsung_dsim *dsi,
+ 	spin_unlock_irqrestore(&dsi->transfer_lock, flags);
+ }
+ 
++static irqreturn_t samsung_dsim_irq(int irq, void *dev_id);
++
++/*
++ * A transfer whose interrupt was not handled in time: finish it from
++ * DSIM_INTSRC, the handler run here with the interrupt held off.  Up to about
++ * 50 ms more.  Returns whether the transfer is done.
++ */
++static bool samsung_dsim_transfer_poll(struct samsung_dsim *dsi,
++				       struct samsung_dsim_transfer *xfer)
++{
++	int i;
++
++	for (i = 0; i < 50; i++) {
++		if (samsung_dsim_read(dsi, DSIM_INTSRC_REG)) {
++			disable_irq(dsi->irq);
++			samsung_dsim_irq(dsi->irq, dsi);
++			enable_irq(dsi->irq);
++		}
++		if (xfer->result != -ETIMEDOUT)
++			return true;
++		usleep_range(1000, 2000);
++	}
++	return false;
++}
++
+ static int samsung_dsim_transfer(struct samsung_dsim *dsi,
+ 				 struct samsung_dsim_transfer *xfer)
+ {
+@@ -1367,12 +1392,20 @@ static int samsung_dsim_transfer(struct samsung_dsim *dsi,
+ 
+ 	wait_for_completion_timeout(&xfer->completed,
+ 				    msecs_to_jiffies(DSI_XFER_TIMEOUT_MS));
++	if (xfer->result == -ETIMEDOUT && samsung_dsim_transfer_poll(dsi, xfer)) {
++		dev_warn_ratelimited(dsi->dev,
++				     "xfer finished by polling: its interrupt was not handled in time\n");
++		return xfer->result;
++	}
+ 	if (xfer->result == -ETIMEDOUT) {
+ 		struct mipi_dsi_packet *pkt = &xfer->packet;
+ 
+ 		samsung_dsim_remove_transfer(dsi, xfer);
+-		dev_err(dsi->dev, "xfer timed out: %*ph %*ph\n", 4, pkt->header,
+-			(int)pkt->payload_length, pkt->payload);
++		dev_err(dsi->dev, "xfer timed out: %*ph %*ph (STATUS %08x INTSRC %08x INTMSK %08x)\n",
++			4, pkt->header, (int)pkt->payload_length, pkt->payload,
++			samsung_dsim_read(dsi, DSIM_STATUS_REG),
++			samsung_dsim_read(dsi, DSIM_INTSRC_REG),
++			samsung_dsim_read(dsi, DSIM_INTMSK_REG));
+ 		return -ETIMEDOUT;
+ 	}
+ 
+@@ -1997,10 +2030,17 @@ int samsung_dsim_probe(struct platform_device *pdev)
+ 	if (dsi->irq < 0)
+ 		return dsi->irq;
+ 
+-	ret = devm_request_threaded_irq(dev, dsi->irq, NULL,
+-					samsung_dsim_irq,
+-					IRQF_ONESHOT | IRQF_NO_AUTOEN,
+-					dev_name(dev), dsi);
++	/*
++	 * A hard interrupt handler: it only touches the DSIM's registers, the
++	 * transfer list's spinlock and completions.  As a thread, after a
++	 * system sleep on the SM-T715 (Exynos5433), the interrupt that ends a
++	 * transfer was sometimes handled after the transfer's 100 ms: the
++	 * panel's first command timed out and the screen stayed black at the
++	 * wake.  Every interrupt thread runs on the interrupt's CPU, CPU0, at
++	 * one priority, behind those of the drivers that resume with it.
++	 */
++	ret = devm_request_irq(dev, dsi->irq, samsung_dsim_irq,
++			       IRQF_NO_AUTOEN, dev_name(dev), dsi);
+ 	if (ret) {
+ 		dev_err(dev, "failed to request dsi irq\n");
+ 		return ret;
+-- 
+2.52.0
+

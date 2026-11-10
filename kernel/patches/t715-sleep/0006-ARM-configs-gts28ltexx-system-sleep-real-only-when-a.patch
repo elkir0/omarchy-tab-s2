@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 12:00:00 +0000
+Subject: [PATCH 6/7] ARM: configs: gts28ltexx: system sleep, real only when
+ armed
+
+exynos5433_sleep=dryrun on the built-in command line registers the 5433's
+suspend to RAM ("deep" becomes the default of /sys/power/mem_sleep), and a
+suspend sleeps for real only once the root's sleep hook has armed it
+(exynos5433_sleep.arm), after the CP and the Wi-Fi/Bluetooth chip are off.
+Any other suspend is a dry run: the whole path but the SMC, and the system
+resumes at once.
+
+The command line grows by 24 characters: sboot's own line is about 845 on BOOT
+and 878 on RECOVERY, and the whole is cut at 1023 (COMMAND_LINE_SIZE).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 4d20651dd..2c7d892c2 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -61,7 +61,7 @@ CONFIG_SMP=y
+ CONFIG_VMSPLIT_2G=y
+ CONFIG_NR_CPUS=8
+ CONFIG_HIGHMEM=y
+-CONFIG_CMDLINE="console=tty0 loglevel=8 clk_ignore_unused pd_ignore_unused panic=5 oops=panic s3c2410_wdt.tmr_atboot=1"
++CONFIG_CMDLINE="console=tty0 loglevel=8 clk_ignore_unused pd_ignore_unused panic=5 oops=panic s3c2410_wdt.tmr_atboot=1 exynos5433_sleep=dryrun"
+ CONFIG_CMDLINE_EXTEND=y
+ CONFIG_VFP=y
+ CONFIG_NEON=y
+-- 
+2.52.0
+
