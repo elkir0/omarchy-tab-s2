@@ -595,8 +595,8 @@ Kernel `#10`: the daily `#9` tree (the 1.0.1 release tree plus
 `t715-sdcard`) plus the `t715-bluetooth` series, built with
 `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=10`,
 tested on the tablet from RECOVERY, then the daily kernel from
-2026-11-08 until `#11` (§7.9) replaced it on 2026-11-09. Not in a
-release yet.
+2026-11-08 until `#11` (§7.9) replaced it on 2026-11-09. In the 1.0.2
+release kernel.
 
 **3 Mbaud.** The BCM4358's UART (UART3, `ttySAC3`, inside the audio
 subsystem LPASS) ran at 460800 baud (§7.4) because its clock
@@ -741,7 +741,7 @@ to 19:00, on the daily system booted from RECOVERY.
 Kernel `#11`: the `t715-wifi-recovery` series on the daily `#10` tree
 (the patch-series table, `kernel/README.md`), tested on the tablet from
 RECOVERY, then the daily kernel, in BOOT with the `t715-wifi-guard`
-service since 2026-11-09. Not in a release yet.
+service since 2026-11-09. In the 1.0.3 release.
 
 **The symptom.** On some boots the Wi-Fi never comes up: the shell shows
 "no wifi radio", and only a reboot brought it back — 1 boot in 14 on

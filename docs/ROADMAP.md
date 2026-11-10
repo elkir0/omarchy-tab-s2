@@ -4,6 +4,22 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
+## State at 1.0.3 (2026-11-10)
+
+Since 1.0.2, tested on the same tablet (`CHANGELOG.md` has the release's own test
+notes):
+
+- **A Wi-Fi start that fails is brought back by itself**: the service `t715-wifi-guard`,
+  in the root image, checks the Wi-Fi at boot and whenever the kernel logs a failure and
+  power-cycles the whole chip until a start succeeds, up to six tries (`docs/image/ROOTFS.md`);
+  the kernel series `t715-wifi-recovery` makes an unbind and a bind of the PCIe host
+  power-cycle the Wi-Fi — the PCIe PHY powered down as the vendor kernel does, WLAN_EN
+  switchable — and brcmfmac no longer crashes on a halted firmware
+  (`kernel/patches/t715-wifi-recovery`, `docs/hardware/WIFI_BT_M5.md` section 7.9). The
+  chip's own failure as its radio starts is not fixed.
+- Everything else is 1.0.2's: the microSD card, Bluetooth at 3 Mbaud with keyboards,
+  mice and a pointer; the kernel has 1.0.2's thirteen series and this one.
+
 ## State at 1.0.2 (2026-11-08)
 
 Since 1.0.1, tested on the same tablet (`CHANGELOG.md` has the release's own test
@@ -122,14 +138,14 @@ The steps, the riskiest last:
    unusable until a reboot; and the combo chip's shared part stays powered while Bluetooth
    is up, so a failed start needs the whole chip power-cycled. The kernel series
    `t715-wifi-recovery` and the service `t715-wifi-guard`, in the daily system since that
-   day, bring a failed start back that way (20 simulated boots: 11 good at once, 8 brought
-   back, 1 not), and brcmfmac no longer crashes on a halted firmware. Left: the chip's own
-   failure as its radio starts (its supplies and crystal as stock powers it, the firmware's
-   37.4 MHz path), then the Wi-Fi off before a sleep and brought back after it, or the D3
-   path again. The test kernel has a run-time switch for each piece (stock's handshake, the
-   chip kept powered), and the tests run unattended from RECOVERY (`t715.autotest=1`,
-   `t715.crashlog=1`; `image/tests/ondevice/autotest-wifi.sh`, `wifi-d3.sh`,
-   `wifi-cycle.sh`, `wifi-guard-test.sh`).
+   day and in 1.0.3, bring a failed start back that way (20 simulated boots: 11 good at
+   once, 8 brought back, 1 not), and brcmfmac no longer crashes on a halted firmware. Left:
+   the chip's own failure as its radio starts (its supplies and crystal as stock powers it,
+   the firmware's 37.4 MHz path), then the Wi-Fi off before a sleep and brought back after
+   it, or the D3 path again. The test kernel has a run-time switch for each piece (stock's
+   handshake, the chip kept powered), and the tests run unattended from RECOVERY
+   (`t715.autotest=1`, `t715.crashlog=1`; `image/tests/ondevice/autotest-wifi.sh`,
+   `wifi-d3.sh`, `wifi-cycle.sh`, `wifi-guard-test.sh`).
 3. The reads the first real sleep needs: the power-down state of WRSTBI (gpf5-4: low, it resets
    the PMIC's bucks) and of the other power-control pins, as sboot leaves them and as the test
    kernel sets them; `XXTI_SYS_PWR_REG` with `PMU_DEBUG`; and the PMIC's PWREN-controlled
@@ -246,6 +262,10 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 - **The touch shell's crash while a Bluetooth mouse paired**, once (Quickshell 0.3.2,
   SIGSEGV, the shell back by itself after about 40 s): find what in the BlueZ property
   updates took it down (`docs/hardware/WIFI_BT_M5.md` section 7.8).
+- **The Wi-Fi guard's backlog after a recovery**: once a recovery with failed tries ends,
+  the service replays those tries' kernel lines, one check every 10 s (9 lines, about a
+  minute and a half, in the 1.0.3 test). Harmless, nothing is cycled, but it should skip
+  the lines older than its last check.
 - **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were

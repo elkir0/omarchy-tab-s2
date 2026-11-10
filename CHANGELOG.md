@@ -1,5 +1,132 @@
 # Changelog
 
+## 1.0.3, pre-release
+
+Everything since 1.0.2: a Wi-Fi start that fails is brought back by itself, without a
+reboot, and the kernel no longer crashes when the Wi-Fi's firmware halts. Also new, for
+developers: the console of a hung boot kept after a watchdog reset, and the on-device
+test scripts.
+
+- **Wi-Fi.** On some boots the Wi-Fi never came up — the shell showed "no wifi radio" —
+  and only a reboot brought it back: 1 boot in 14 on the reference tablet on 2026-11-09.
+  Two causes, both fixed. Mainline never powered the Exynos 5433's PCIe PHY down, so
+  after one failed start the link stayed unusable until a reboot; and the BCM4358's
+  shared part stays powered while Bluetooth is on, so a failed start needs the whole
+  chip power-cycled. The kernel series `t715-wifi-recovery` (4 patches) makes an unbind
+  and a bind of the PCIe host power-cycle the Wi-Fi, and the new service
+  `t715-wifi-guard` in the root image brings a failed start back by itself: it checks
+  the Wi-Fi at boot and whenever the kernel logs a failure, and power-cycles the whole
+  chip (Wi-Fi and Bluetooth) until a start succeeds — up to six tries, at most three
+  recoveries in 30 minutes, and only on a kernel that can, which its read-only
+  `pci_exynos.wifi_power_cycle` says. A failed start comes back in 18 to 60 s. The
+  service's device test ran 20 simulated boots: 11 good at once, 8 brought back by the
+  service, 1 not within the 4 tries allowed then (6 now). And brcmfmac no longer
+  crashes the kernel on a halted firmware. The reference tablet's daily system has run
+  that kernel (`#11`, built from the same source tree as the release kernel) and the
+  service since 2026-11-09
+  ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.9,
+  [docs/image/ROOTFS.md](docs/image/ROOTFS.md)).
+- **For developers.** The initramfs knob `t715.crashlog=1` (test images only) keeps a
+  hung boot's console: after a watchdog reset, the previous boot's pstore records go to
+  `media/0/linux/t715-crash/` on USERDATA before the guard restarts the board
+  ([boot/README.md](boot/README.md)). The on-device test scripts — the sleep steps, the
+  Wi-Fi's unattended power cycles and the guard's simulated boots — live in
+  `image/tests/ondevice/`. The plan after 1.0.2, thirteen items with sleep first:
+  [docs/ROADMAP.md](docs/ROADMAP.md).
+- **Kernel.** Linux 6.12.114 with one new series on top of 1.0.2's thirteen,
+  `t715-wifi-recovery`. Fourteen in all, in this order: `bringup modem parity gps
+  charger camera-af cpufreq power camera-mc power-gpu turbo sdcard bluetooth
+  wifi-recovery`. Built from the published patches with the fixed identity
+  ([kernel/README.md](kernel/README.md)). The optional `t715-linkpm` series is still not
+  in it.
+- **Software.** Hyprland 0.57.2, was 0.57.1, the only change among the 248 packages the image's manifest
+  lists: the root image was built from a fresh package sync, and the main packages keep
+  1.0.2's versions — omamobile-shell 0.2.94-5, Omarchy 4.0.6 (pinned), Mesa 26.2.6, Qt 6.12.0,
+  Quickshell 0.3.2, systemd 262.1, Firefox 157.0, Chromium 150. The image adds the `t715-wifi-guard` service and its unit.
+  The root image is 5.3 GiB raw (5704253440 bytes); the published
+  `rootfs-omarchy.img.xz` is 1237599840 bytes.
+- **From 1.0.2.** There is no update path yet, the same rule as 1.0.2 from 1.0.1: the
+  first boot copies the image only into a persistent root that does not exist yet.
+  Flashing only 1.0.3's `boot.img` over a 1.0.2 install gives that system the new
+  kernel and its modules (the initramfs installs them into the root): the PHY's
+  power-down, WLAN_EN switchable, brcmfmac's guards. It does not give the service,
+  which lives in the root image; it can be added by hand, as the reference tablet's
+  daily system got it, from this repository's
+  `image/rootfs/overlay/usr/local/sbin/t715-wifi-guard` and
+  `image/rootfs/overlay/etc/systemd/system/t715-wifi-guard.service`:
+
+  ```bash
+  sudo install -m 755 t715-wifi-guard /usr/local/sbin/
+  sudo install -m 644 t715-wifi-guard.service /etc/systemd/system/
+  sudo systemctl enable t715-wifi-guard.service
+  ```
+
+  The service does nothing on a kernel without the series (it checks the parameter
+  first).
+
+Tested on one tablet, the reference one, on 2026-11-10, booted from RECOVERY next to its owner's
+system with test boot images carrying the release's kernel and initramfs (the release's
+`boot.img` differs only by the knobs that name the image and the root; the test images also
+had `t715.autotest=1`, whose script gave the test system the daily system's Wi-Fi network and
+its SSH rule, since the USB link was down). The published `rootfs-omarchy.img.xz` was sent to
+the tablet over Wi-Fi, unpacked there (`xz -dk`, 149 s) and checked against `SHA256SUMS`, both
+lines OK, then got a persistent root of its own: the first boot copied it in 211 s (3 min 31 s;
+1.0.2: 3 min 12 s), took the Wi-Fi and Bluetooth files from SYSTEM, made the cameras' seven
+tables, bound the sensors, and Omarchy's session came up by itself. On that boot: the release
+kernel (`#1`); `t715-wifi-guard` active, its boot check finding the Wi-Fi up,
+`pci_exynos.wifi_power_cycle` at Y, no failure signature in the kernel log; the Wi-Fi on the
+network (7 networks in a scan); a recovery asked by hand, which power-cycled the whole chip
+until a start came good (75 s, after failed tries), while the service, which had seen those
+failures, checked again once it held the lock and cycled nothing; the microSD card mounted by
+itself (exFAT), no partition label from the card under `/dev/disk/by-partlabel`, no MMC error;
+Bluetooth powered with its generated address, `/dev/uhid` present; the pointer settings in
+place; the Battery saver switched through power-profiles-daemon, power-saver taking the A57
+cores offline, the A53 cores to 1 GHz, the GPU to 266 MHz and the animations off within 3 s,
+balanced giving it all back within 4 s; the modem's switch (22 checks); Chromium, Phone,
+Messages, Réseau mobile and the terminal starting; the speaker and microphone devices. A
+second boot copied nothing and kept the data (a marker file), the cameras present from the
+start and the Wi-Fi up at once; the rescue's test image booted the image read-only, with no
+modem module, the session and the Wi-Fi up. A first build of the image went through the same
+test the evening before and showed the service's needless extra cycle, which the re-check
+under the lock now prevents. `image/tests/verify-rootfs.sh` passes its 368 checks on the
+image, and two builds of the kernel from the published patches, in two trees, were identical
+byte for byte.
+
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), the GPS, the power draw on
+this build, the Bluetooth devices on the release image itself (a keyboard, a mouse and a speaker
+were tested with 1.0.2; the Wi-Fi's recovery cycles Bluetooth too, and it came back powered
+each time), the SD card tile and the pointer by eye, the Camera app, the Stay awake tile by
+hand, the heat guard's caps, and the Odin, Heimdall and TWRP installs.
+
+Known issues:
+- **The Wi-Fi can still fail to start**, now and then: the service brings it back by
+  itself, which can take up to about a minute after the session comes up; the chip's
+  own failure as its radio starts (the firmware's 37.4 MHz path a suspect) is not
+  fixed.
+- **A Bluetooth mouse crashed the touch shell once, at its first pairing** (Quickshell 0.3.2,
+  SIGSEGV): the screen stayed black about 40 s while the crash was written, then the shell
+  came back by itself. Not seen again when the mouse reconnected.
+- **Omarchy's keyboard shortcuts did not answer** with the Bluetooth keyboard tried; not
+  investigated yet.
+- **The Camera app and the GPU.** While the Camera app runs, the kernel logs panfrost job
+  faults (`DATA_INVALID_FAULT`, `TILE_RANGE_FAULT`, `INSTR_TYPE_MISMATCH`, `JOB_BUS_FAULT`),
+  GPU page faults and now and then a `gpu sched timeout`, the GPU reset after a stuck job:
+  from none to a few dozen in a 45-second use, and once a burst of about 300. 1.0 Beta 1's
+  kernel, its GPU fixed at 266 MHz, does the same on this image (404 in one use, then 2, 0, 9
+  and 1), and so does this kernel with the GPU pinned at 266 MHz: it comes with the Camera
+  app's use of the GPU, not with the new frequencies. The app and the session kept running.
+- Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
+  when a new window appears (once during the app test).
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped
+  contiguously` lines per boot (70 at the check): the display rejects GPU buffers for direct
+  scanout and the compositor draws them instead.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive. On 2026-11-09 the reference tablet's USB link to a Mac stopped receiving after a
+  few frames and stayed so, through cable changes and replugs, until the end of the session
+  (the Mac was not restarted); the 1.0.3 test went over Wi-Fi instead.
+
 ## 1.0.2, pre-release
 
 Everything since 1.0.1: the microSD slot at work, Bluetooth at 3 Mbaud with keyboards and mice,
