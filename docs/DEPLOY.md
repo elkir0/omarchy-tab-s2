@@ -727,8 +727,12 @@ seconds after the shell starts (9.3 s for a cold shell restart).
 4. In image mode every boot is Omarchy's first login: the overlay forgot
    the last one. A "Setup Wi-Fi" notice opens quick settings and expires.
    On a persistent root (11.6) only the first boot is.
-5. Nothing locks or suspends; the screen goes off after two minutes idle
-   (`t715-idle.service`), and the power key wakes it. The **Stay awake**
+5. Nothing locks; the screen goes off after two minutes idle
+   (`t715-idle.service`), and the power key wakes it. On battery, once the
+   screen has been dark for a minute, the tablet suspends to RAM
+   (`t715-sleep`, `docs/image/ROOTFS.md` "Sleep"; on a kernel without the
+   5433's system sleep the service masks the sleep targets until the next
+   boot). The **Stay awake**
    tile holds that timer: on, the screen no longer goes off by itself, and
    only Power or the cover turns it off; off, the default, it goes off after
    two minutes.
@@ -1126,8 +1130,14 @@ From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` repor
 - **No cpufreq**: both clusters stay at 1.2 GHz. **No GPU frequency
   scaling**: the Mali-T760 stays at its 266 MHz boot clock (a design
   exists, not in the board).
-- **No suspend**: the sleep targets are masked, the cover only darkens the
-  screen.
+- **Suspend to RAM** needs the kernel of the `t715-sleep` series
+  (`kernel/README.md`; the daily kernel since 2026-11-10, not in a release
+  yet): `t715-sleep` sleeps the tablet once its screen has been dark for a
+  minute on battery, and on any other kernel it masks the sleep targets
+  until the next boot, since a suspend there would freeze the system with
+  the radios up (`docs/image/ROOTFS.md`, "Sleep"). Closing the cover
+  darkens the screen, the sleep follows a minute later on battery, and
+  opening it wakes the tablet.
 - **Modem**: calls, SMS and mobile data need the modem BOOT (11.8); the
   BOOT of 11.7 does not carry the modem series. `docs/hardware/MODEM.md`
   lists the gaps.

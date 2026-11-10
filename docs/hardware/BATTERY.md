@@ -641,6 +641,13 @@ As installed, the same method as the baseline above
 (184 mA at 4.10 V), 102 mW under `#5`'s 856. On the 15.2 Wh battery that
 is about 20 hours with the screen off, 5 % an hour.
 
+Since 2026-11-10 the tablet suspends to RAM daily: once its screen has
+been dark for a minute, on battery, `t715-sleep` powers the CP and the
+Wi-Fi/Bluetooth chip down and sleeps the whole tablet, waking on Power,
+Home, the cover, a cable or the RTC alarm (`docs/image/ROOTFS.md`,
+"Sleep"; the roadmap's item 1, `docs/ROADMAP.md`). The power drawn asleep
+is not measured yet.
+
 ## 12. The modem's share of standby (2026-11-05)
 
 **A real standby.** Off USB for 1 h 54 min, the screen off but for ten

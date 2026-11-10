@@ -226,11 +226,11 @@ exports `AQ_DRM_DEVICES`; of Omarchy's documented toggles only
 stay-awake state is left off, so the **Stay awake** tile starts off and
 `t715-idle`'s two-minute screen-off runs from the first boot; Omarchy's own
 idle cycle is off another way, through the tablet profile's zero timers
-("Touch layer P2"). The
-systemd sleep targets are masked as well: resume is untested on this
-kernel, and a hang that ends in a watchdog reset boot-loops the tablet
-into RECOVERY (`COORDINATION.md`). The touch layer's per-user settings
-follow (next section).
+("Touch layer P2"). Suspend
+to RAM is `t715-sleep`'s ("Sleep"): the image masks only the three
+hibernation targets, and on a kernel without the 5433's system sleep the
+service masks the sleep targets until the next boot. The touch layer's
+per-user settings follow (next section).
 
 ## Touch layer P1: on-screen keyboard, hardware keys, cover
 
@@ -248,7 +248,7 @@ image.
 | Keyboard settings | `org.gnome.desktop.a11y.applications screen-keyboard-enabled true` (squeekboard stays hidden without it) and `org.gnome.desktop.input-sources sources [('xkb', 'fr'), ('xkb', 'us')]` (squeekboard follows the first source: French AZERTY; US QWERTY in its layout menu), written at build time into alarm's `~/.config/dconf/user` through the private D-Bus session the user setup already uses | `image/rootfs/omarchy-user-setup.sh` |
 | Terminal layouts | squeekboard's terminal `us.yaml` with an Esc key, from omarchy-mobile, and its terminal `fr.yaml` (AZERTY, built into squeekboard 1.43.1) with the same Esc key added here, their license notice next to them; linked as `~/.local/share/squeekboard/keyboards/terminal/{us,fr}.yaml`: a terminal gets the terminal layout of the first input source | `/usr/share/t715-omarchy/squeekboard/keyboards/terminal/{us.yaml,fr.yaml,NOTICE}` |
 | Hardware keys | `t715-keys`, a user service that reads the `gpio-keys` input device and any device that reports a lid switch (alarm is in `input`); gestures below | `/usr/local/bin/t715-keys`, `/etc/systemd/user/t715-keys.service` (enabled with `systemctl --global enable`) |
-| The cover | its Hall sensor will report a lid switch (`SW_LID`) once the device tree has it. Omarchy's lid binds removed (`switch:on:Lid Switch` locks the session, `switch:off` and its clamshell script turn the internal panel off while an external monitor is driven): the tablet has no other display, and nothing could leave a lock. t715-keys turns the screen and touchscreen off when the cover closes, on when it opens. logind ignores the switch (`HandleLidSwitch`, `-ExternalPower`, `-Docked` = `ignore`, in a drop-in that sorts after Omarchy's `10-` and `20-`): suspend is not supported here | `image/rootfs/t715-tablet.lua`, `/etc/systemd/logind.conf.d/90-t715-lid.conf`, `t715-keys` |
+| The cover | its Hall sensor will report a lid switch (`SW_LID`) once the device tree has it. Omarchy's lid binds removed (`switch:on:Lid Switch` locks the session, `switch:off` and its clamshell script turn the internal panel off while an external monitor is driven): the tablet has no other display, and nothing could leave a lock. t715-keys turns the screen and touchscreen off when the cover closes, on when it opens. logind ignores the switch (`HandleLidSwitch`, `-ExternalPower`, `-Docked` = `ignore`, in a drop-in that sorts after Omarchy's `10-` and `20-`): the sleep is `t715-sleep`'s ("Sleep") and the cover is `t715-keys`' to act on | `image/rootfs/t715-tablet.lua`, `/etc/systemd/logind.conf.d/90-t715-lid.conf`, `t715-keys` |
 | Hyprland and the keys | Omarchy's `XF86PowerOff` binding (its system menu) removed; `XF86PowerOff` and `XF86HomePage` bound to nothing, so neither Omarchy nor the focused app acts on them (Firefox opens its home page on `XF86HomePage`); `key_press_enables_dpms = false` and `mouse_move_enables_dpms = false`: only t715-keys wakes the screen. logind already ignores the Power key (Omarchy's `10-ignore-power-button.conf`) | `image/rootfs/t715-tablet.lua` |
 | First-run notices | Omarchy's first run (every boot here) sends a critical "Setup Wi-Fi" notice that never expires and opens `omarchy.network`, which the tablet shell doesn't load, then an "Update System" one once a link is up. Replaced: a normal "Setup Wi-Fi" notice that expires and opens quick settings (the Wi-Fi tile), and no update notice there (`t715-update-check.timer` tells the owner when an update exists, once per version). Overwrites the `omarchy` package's file; no omamobile-omarchy patch touches it | `/usr/share/omarchy/install/user/first-run/wifi.sh` |
 | Wi-Fi passwords | The BCM4358 firmware has no SAE (WPA3): the Wi-Fi panel joins an SSID that Quickshell reports as SAE (one served as WPA3 and WPA2) with a WPA2-PSK profile through nmcli, the password on stdin (`image/pkg/omamobile-shell/0002-wifi-wpa2-without-sae.patch`) | `omamobile-shell` 0.2.32-1.2 |
@@ -535,7 +535,7 @@ the persistent root a new package's steps do not run by themselves: run
 | Function | Kept (P1 or image) | omarchy-mobile's, left out |
 |---|---|---|
 | Power and Home keys | `t715-keys` (Home now opens the shell's home and recents) | `omamobile-keys` and phone.lua's bindings; no Power+Volume chord |
-| Sleep | none: the sleep targets are masked | `omamobile-sleepd` and its unit |
+| Sleep | `t715-sleep` ("Sleep"): a real sleep once the screen has been dark for a minute, on battery | `omamobile-sleepd` and its unit |
 | Keyboard start and gsettings | `t715-squeekboard.service`, the dconf values written at build time | setup-user's `omamobile-osk` step (autostart.lua), phone.lua's gsettings at login, `omamobile-osk-guard` and its unit (it repairs the setting after the screensaver, which the tablet profile's zero idle timers keep off) |
 | Input-method environment | `/etc/environment.d/20-t715-osk.conf` | `/usr/lib/environment.d/20-omamobile-osk.conf` (also its portal file-picker variables) |
 | fcitx5 off | the `ConditionPathExists` drop-in in `/etc/systemd/user` | the package's own drop-in: two conditions would both have to hold, and touching P1's flag would no longer bring fcitx5 back |
@@ -918,7 +918,15 @@ addresses and ASPM setting. The whole cycle kills a running Wi-Fi and
 Bluetooth for a few seconds — the limits of the approach — and it stops at
 the first good start; at most 3 recoveries in any 30 minutes, past that it
 only logs, until the next boot; only the two drivers' bind/unbind files
-are ever written, never the modem, rfkill or NetworkManager.
+are ever written, never the modem, rfkill or NetworkManager. The
+subcommand `off` powers the whole chip down for the system's sleep
+("Sleep"): it takes the recovery lock (30 s at most), unbinds the PCIe
+host then Bluetooth, and leaves a marker in /run naming the Bluetooth
+device it unbound, so that `recover` binds it back; while the marker
+exists the watch judges nothing — the chip is down on purpose. Exit 0 when
+the chip is down, 1 when a recovery holds the lock or Bluetooth stayed
+bound, 2 when the host unbind got stuck, 3 when the kernel cannot
+power-cycle the Wi-Fi.
 `image/tests/test_t715_wifi_guard.sh` runs the script off the device on a
 fake sysfs (a fake kernel log, a trace of every sysfs write), and
 `verify-rootfs.sh` checks the files, the modes and the enabled unit.
@@ -934,6 +942,74 @@ and on every config reload, and `t715-animations`
 closing the window between Hyprland's config read and the path unit's
 start. `configure-system.sh` enables the two units for every user;
 `image/tests/test_t715_animations.sh` runs the script off the device.
+
+## Sleep
+
+`t715-sleep` (`/usr/local/sbin/`, the overlay) suspends the tablet to RAM
+once its screen has been dark for 60 s (the panel's DPMS file reading
+`Off`), on battery, and brings the radios back on the wake. It needs a
+kernel with the Exynos5433's system sleep (the `t715-sleep` series, the
+daily kernel `#16` since 2026-11-10 — the daily `#11` tree plus the
+series, tested from RECOVERY first; `kernel/README.md`): booted with
+`exynos5433_sleep=dryrun`, such a kernel
+runs the whole sleep path but sleeps for real only when
+`/sys/module/exynos5433_sleep/parameters/arm` was written just before —
+the sleep hook's own act — and the kernel clears that switch after every
+attempt, so a suspend nothing prepared stays a harmless dry run. On a
+kernel without the system sleep the service masks `sleep.target` and
+`suspend.target` until the next boot, says so once and exits: a suspend
+would freeze the system with the radios up. The image itself masks only
+the three hibernation targets now.
+
+Three units, `configure-system.sh` enabling the first two:
+
+- `t715-sleep.service` (after the Wi-Fi guard, restarted on failure) runs
+  the policy loop: every 5 s the dark screen counts up, and the tablet
+  suspends unless a reason holds — external power, ALSA or Bluetooth audio
+  playing, Omarchy's stay-awake, a pacman transaction, a Wi-Fi recovery, a
+  remote login, a block-mode sleep inhibitor, the CP between states, a
+  call, the hotspot — each reason one fixed line, logged when it changes
+  and judged again after another minute. A battery at 5 % or below powers
+  the tablet off instead of sleeping it.
+- `t715-sleep-prepare.service` (`Before=sleep.target`,
+  `RemainAfterExit=yes`) carries the work around the sleep. Its ExecStart,
+  `prepare`: the CP powered down through the modem's own units (never
+  `t715-modem-power on`/`off`, the user's persistent choice), the
+  Wi-Fi/Bluetooth chip powered down (`t715-wifi-guard off`), a 12-hour RTC
+  alarm for a battery check when the RTC is free, and only then the arm
+  switch, on battery only — on external power the radios go down all the
+  same and the suspend stays a dry run. Its ExecStop, `resume`, runs once
+  systemd brings the system back: it disarms, times the sleep and starts
+  the restore unit — unless it was the battery check, whose wake leaves
+  the radios off and the still-dark screen judged again within 10 s.
+- `t715-sleep-restore.service` (no Install section; started `--no-block`)
+  brings the radios back: the CP started again, then `t715-wifi-guard
+  recover` for the chip. A lit screen starts it too.
+
+What wakes the tablet: the Power key, the Home key, opening the cover, a
+cable plugged in, the RTC alarm; after a key wake `t715-keys` lights the
+screen by itself, and a lit screen is what brings the radios back. While
+it sleeps there is no Wi-Fi, no Bluetooth, no calls and no SMS (the CP is
+off) and no notifications; the Wi-Fi still cannot wake it. Measured on the
+reference tablet, 2026-11-10: about 80 real sleeps, woken by the RTC,
+Power, Home and the cover, all clean; the CP comes back in about 13 s and
+the Wi-Fi in 20 to 120 s (median about 40 s — the BCM4358's start fails
+about one try in two after a long power-off, and the guard's `recover`
+retries, up to 6). The power drawn asleep is not measured yet.
+
+`t715-sleep off` and `t715-sleep on` (root) switch it
+(`/var/lib/t715-sleep/mode`, read at every poll); `t715-sleep status`
+reports, and the logs are `journalctl -t t715-sleep`.
+`image/tests/test_t715_sleep.sh` runs the script off the device on a fake
+root with stub commands, and `verify-rootfs.sh` checks the script, its
+three units, their enabling and the targets. On the tablet,
+`image/tests/ondevice/sleep-soak.sh` runs real sleeps woken by the RTC,
+each timed and checked (20 sleeps of 60 s on 2026-11-10, all real), and
+`image/tests/ondevice/sleep-display.sh` lights the screen the moment the
+system resumes — the reproducer of the black screen at a key wake, fixed
+by the kernel series' DSI changes: 5 wakes in 6 failed on the first test
+kernel and 3 in 6 on the next, then none in 28 (the failure came in runs,
+so the count alone does not prove the fix).
 
 ## microSD card
 
@@ -1147,9 +1223,11 @@ They come with `pacman -U` or a new image.
    and shows its notifications (keybindings, "Set up Wi-Fi": `nm-online`
    finds no network until one is joined; the check runs in the background
    and blocks nothing).
-6. Nothing locks or suspends the session. The screen goes off after two
+6. Nothing locks the session. The screen goes off after two
    minutes without input (`t715-idle`, as a short Power press) unless the
-   Stay awake tile is on; Power turns it off and on (t715-keys).
+   Stay awake tile is on; Power turns it off and on (t715-keys), and on
+   battery the tablet suspends to RAM once its screen has been dark for a
+   minute (`t715-sleep`, "Sleep").
 
 Useful on the tablet (over SSH): `systemd-analyze`, `systemctl --failed`,
 `journalctl -b -u sddm`, `journalctl -b _UID=1000`,
@@ -1207,12 +1285,14 @@ to alarm's journal (`journalctl --user -u t715-keys` as alarm).
 | `image/tests/test_t715_animations.sh` | off-device test of t715-animations and the saver-flag read in looknfeel.lua |
 | `image/tests/test_t715_sdcard.sh` | off-device test of t715-sdcard (fake sysfs, stubs, a scripted event stream for watch) |
 | `image/tests/test_t715_bt_addr.sh` | off-device test of t715-bt-addr (a btmgmt stand-in models the kernel's mgmt API and its auto-off window) |
+| `image/tests/test_t715_sleep.sh` | off-device test of t715-sleep and its three units (a fake root, stub commands) |
+| `image/tests/ondevice/sleep-soak.sh`, `image/tests/ondevice/sleep-display.sh` | on-device tests of the daily suspend (real sleeps woken by the RTC; the display lit the moment the system resumes) |
 | `image/rootfs/Dockerfile` | the armv7h tree |
 | `image/rootfs/setup-pacman.sh`, `install-packages.sh`, `install-mobile.sh`, `install-wifi.sh`, `configure-system.sh`, `omarchy-system-setup.sh`, `omarchy-user-setup.sh`, `finalize.sh` | its steps |
 | `image/rootfs/smoke-check.sh` | binaries-load check (`/usr/lib/t715-omarchy/smoke-check` in the image) |
 | `image/rootfs/mkimage.sh` | export to ext4, in the helper container |
 | `image/rootfs/packages.omarchy-skip`, `image/rootfs/packages.extra`, `image/rootfs/packages.mobile` | package lists (`packages.mobile`: touch layer P2, from `image/pkg/`) |
 | `image/pkg/omamobile-shell/`, `image/pkg/omamobile-omarchy/` | the touch shell and Omarchy's patches, built by `image/tools/build-pkg` (`docs/image/PACKAGES.md`); the tablet's `shell.json` and `home.json` |
-| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units; the microSD card's `t715-sdcard`, its user unit and the `61-t715-removable-partlabel.rules` udev rule) |
+| `image/rootfs/overlay/` | files installed as is (the USB link files and the three Bluetooth and three Wi-Fi files are copies of the Phosh image's; the `Hyprland` wrapper; the touch layer's `t715-keys`, its unit, the squeekboard unit, the OSK environment, the fcitx5 drop-in, squeekboard's terminal layouts, the logind lid drop-in and the touch wording switch `30-t715-touch.conf`; the `bt-agent` drop-in; the Battery saver's `t715-power-profile` and its two units; the animations' `t715-animations` and its two user units; the microSD card's `t715-sdcard`, its user unit and the `61-t715-removable-partlabel.rules` udev rule; the sleep's `t715-sleep` and its three units) |
 | `image/rootfs/t715-looknfeel.lua`, `image/rootfs/t715-tablet.lua` | the blocks appended to alarm's `looknfeel.lua` (performance; the block's animations follow the Battery saver; the pointer shows with a mouse and hides on touch or after 3 s still) and `hyprland.lua` (touch layers P1 and P2) |
 | `image/rootfs/shim/` | Hyprland's dmabuf-check shim (LD_PRELOAD) |

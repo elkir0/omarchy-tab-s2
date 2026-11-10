@@ -867,4 +867,7 @@ line is the suspect (the crystal path, or a supply droop as the radio
 starts). The Wi-Fi through suspend is the next step (the roadmap,
 `docs/ROADMAP.md`): the firmware acknowledged the D3 handshake in one
 try of two, so the plan is to power the chip off before sleeping and
-let the service bring it back after.
+let the service bring it back after. The daily suspend has done so
+since 2026-11-10: `t715-wifi-guard off` powers the chip down
+before each sleep, and `recover` brings it back after it, in 20 to
+120 s (`docs/image/ROOTFS.md`, "Sleep").

@@ -4,6 +4,27 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
+## Since 1.0.3 (main, not released yet)
+
+Tested on the same tablet:
+
+- **The tablet suspends to RAM daily**: once its screen has been dark for a minute, on
+  battery, the service `t715-sleep` in the root image powers the modem's CP and the
+  Wi-Fi/Bluetooth chip down, suspends the whole tablet to RAM and brings the radios back
+  at the wake (`docs/image/ROOTFS.md`, "Sleep"). The kernel series `t715-sleep` registers
+  the Exynos5433's system sleep — the PMU's sleep table, the wake masks, one
+  `SMC_CMD_SLEEP` to the secure monitor — and sleeps for real only when armed by the sleep
+  hook (`kernel/patches/t715-sleep`, `kernel/README.md`). Daily on the reference tablet
+  since 2026-11-10 (kernel `#16`, the daily `#11` tree plus the series, tested from
+  RECOVERY first): about 80 real sleeps, all clean. Left: the drain over a night asleep,
+  and the Wi-Fi still cannot wake it (section 1).
+- **The black screen at a key wake fixed** (the same series): right after a system sleep
+  the panel's first DSI command timed out and the screen stayed black until switched off
+  and on; samsung-dsim's interrupt is handled in hard interrupt context and a late
+  transfer is finished by polling. The display test failed 5 wakes in 6 on the first test
+  kernel and 3 in 6 on the next, then none in 28 with the changes — the failure came in
+  runs, so the count alone does not prove the fix (`docs/image/ROOTFS.md`, "Sleep").
+
 ## State at 1.0.3 (2026-11-10)
 
 Since 1.0.2, tested on the same tablet (`CHANGELOG.md` has the release's own test
@@ -93,7 +114,7 @@ what it brings against what it costs. **Study** means a source study first, writ
 
 | # | Function | What it brings | What it takes | State |
 |---|---|---|---|---|
-| 1 | Sleep (suspend to RAM) | standby in days instead of about 20 hours | large: test kernels, then tests with the owner at the tablet | under way |
+| 1 | Sleep (suspend to RAM) | standby in days instead of about 20 hours | large: test kernels, then tests with the owner at the tablet | daily on the reference tablet since 2026-11-10 |
 | 2 | A modem that sleeps | about 150 mW less with the screen off and the modem on | small: calls and SMS with a SIM, then the release kernel | validated without a SIM |
 | 3 | Automatic brightness | the screen follows the room's light | medium: a new light sensor driver | not started |
 | 4 | Headphones and headsets | plug detection, the headset's microphone, headsets in calls | small to medium | not started |
@@ -107,7 +128,7 @@ what it brings against what it costs. **Study** means a source study first, writ
 | 12 | Fingerprint reader | unlocking with a finger | one test decides; then very large | studied |
 | 13 | Calls without 2G and 3G (VoLTE) | calls once those networks are switched off | study; likely out of reach | not started |
 
-### 1. Sleep (under way)
+### 1. Sleep (daily on the reference tablet since 2026-11-10)
 
 With the screen off the SoC stays awake: 754 mW, about 20 hours (`docs/hardware/BATTERY.md`
 section 11). Stock Android suspends to RAM: the PMU's sleep table, the wake masks, then one
@@ -139,29 +160,40 @@ The steps, the riskiest last:
    is up, so a failed start needs the whole chip power-cycled. The kernel series
    `t715-wifi-recovery` and the service `t715-wifi-guard`, in the daily system since that
    day and in 1.0.3, bring a failed start back that way (20 simulated boots: 11 good at
-   once, 8 brought back, 1 not), and brcmfmac no longer crashes on a halted firmware. Left:
-   the chip's own failure as its radio starts (its supplies and crystal as stock powers it,
-   the firmware's 37.4 MHz path), then the Wi-Fi off before a sleep and brought back after
-   it, or the D3 path again. The test kernel has a run-time switch for each piece (stock's
-   handshake, the chip kept powered), and the tests run unattended from RECOVERY
+   once, 8 brought back, 1 not), and brcmfmac no longer crashes on a halted firmware. Done:
+   the Wi-Fi is powered down before each sleep (`t715-wifi-guard off`) and brought back
+   after it, in 20 to 120 s. Left: the chip's own failure as its radio starts (its supplies
+   and crystal as stock powers it, the firmware's 37.4 MHz path), or keeping it powered
+   through sleep (the D3 path). The test kernel has a run-time switch for each piece
+   (stock's handshake, the chip kept powered), and the tests run unattended from RECOVERY
    (`t715.autotest=1`, `t715.crashlog=1`; `image/tests/ondevice/autotest-wifi.sh`,
    `wifi-d3.sh`, `wifi-cycle.sh`, `wifi-guard-test.sh`).
 3. The reads the first real sleep needs: the power-down state of WRSTBI (gpf5-4: low, it resets
    the PMIC's bucks) and of the other power-control pins, as sboot leaves them and as the test
    kernel sets them; `XXTI_SYS_PWR_REG` with `PMU_DEBUG`; and the PMIC's PWREN-controlled
-   modes.
+   modes. Done on 2026-11-09: sboot leaves the power-down state at 0 on every pin, which
+   would drive WRSTBI low in sleep and reset the PMIC's bucks. The eight rails stock runs
+   under PWREN are all always-on here, so PWREN low drops nothing. `XXTI` is explained by
+   PMU_DEBUG's CLKOUT bit.
 4. The first real `SMC_CMD_SLEEP`, the owner at the tablet: the CP off, the Wi-Fi off, USB
-   unplugged, woken by the power key. Done on 2026-11-09: seven real sleeps, seven clean wakes,
-   one by the power key and six by the RTC alarm (10 and 20 s); every core, the panel, the
-   storage and the touchscreen came back. Left: 100 cycles, and the drain over an hour asleep.
+   unplugged, woken by the power key. Done: seven real sleeps, seven clean wakes on
+   2026-11-09, and about 80 real sleeps on 2026-11-10, woken by the RTC, Power, Home and
+   the cover, all clean; `image/tests/ondevice/sleep-soak.sh` ran 20 sleeps of 60 s that
+   day, all real. Left: the drain over a night asleep.
 5. Stock's power-down pin table (214 entries) and the devices back in: Wi-Fi, Bluetooth's wake,
-   USB.
-6. The PMIC rails that stock runs under PWREN, off in sleep.
+   USB. Partly done: the eight PMIC and power-control pins, plus the PCIe link's gpr3 pins.
+   Not done: the 214-entry table. The devices: Wi-Fi and Bluetooth through the power cycle;
+   USB has no sleep on external power.
+6. The PMIC rails that stock runs under PWREN, off in sleep. Nothing to do: no rail is
+   PWREN-controlled here.
 7. The policy: sleep when the screen goes off, after a delay; the CP off before and back on
    after, as the modem port requires (`docs/hardware/BATTERY.md` section 10); the power key, the
    Home key, the cover and Bluetooth devices wake it; an RTC wake now and then to watch the
    battery. While it sleeps no call or SMS comes in, and the Wi-Fi cannot wake it: its host wake
-   sits on an EINT (gpf) that mainline cannot arm.
+   sits on an EINT (gpf) that mainline cannot arm. Done: the service `t715-sleep`
+   (`docs/image/ROOTFS.md`, "Sleep"), the sleep hook powering the CP and the chip down
+   before each sleep and bringing them back after, the RTC alarm 12 hours away for the
+   battery check. The Wi-Fi still cannot wake it.
 
 Later, the owner's call: the modem kept on through sleep, with stock's handshake (the CP-led
 unmount, CP2AP_WAKEUP armed as a wake source), a change to the modem stack.
