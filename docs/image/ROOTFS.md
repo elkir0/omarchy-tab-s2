@@ -904,7 +904,10 @@ timeout on a query command — only the signature's name is ever logged,
 never a kernel line, an address or an SSID), except a signature already
 judged: one logged, by its kernel timestamp, at or before the last good
 check (the lines a recovery's failed tries left behind, say) is skipped,
-with one log line. A failed check power-cycles
+with one log line. A check judges only the lines logged since the last
+good one, and a recovery try only those since its bind: the kernel's ring
+buffer turns over within hours, so counts over the whole log would fall
+as old lines leave it. A failed check power-cycles
 the *whole* Wi-Fi/Bluetooth chip, six tries by default — unbind the PCIe
 host (which cuts the Wi-Fi enable line), unbind `hci_uart_bcm` (the
 Bluetooth enable), wait 2 s, bind the host, 1 s later bind Bluetooth

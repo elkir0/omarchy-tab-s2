@@ -15,10 +15,13 @@
 # body per call, chosen by a try number from a sequence file (the last
 # entry repeats): body.0 a good start, body.1..6 one of brcmfmac's failure
 # signatures each, body.7 a single query timeout, which does not count,
-# body.8 and body.9 good starts late in the boot, after failed ones, and
-# body.10 a good start whose log has no timestamps.  A good body also
-# brings the wlp1s0 interface, a failed one leaves the chip without it; a
-# good body's log carries a MAC address, to prove the script never repeats
+# body.8 and body.9 good starts late in the boot, after failed ones,
+# body.10 a good start whose log has no timestamps, body.11 the log hours
+# later, turned over past every line an old judgment saw, and body.12 and
+# body.13 one and two query timeouts after a judgment's mark.  A good
+# body also brings the wlp1s0 interface, a failed one leaves the chip
+# without it -- except 11, 12 and 13, which keep it (see (m)); a good
+# body's log carries a MAC address, to prove the script never repeats
 # one.  sleep is a stub that returns at once and records the seconds, so a
 # judged start costs no time.
 #
@@ -74,8 +77,9 @@ STUB
 # -w, the follow the script's run watches, it prints the new lines it was
 # given and then ends: nothing more comes.  A good body (0, 7, whose
 # single query timeout does not count, and 8 to 10) also brings the
-# interface the driver would have created; any other body leaves the chip
-# without one.
+# interface the driver would have created, and so do 11, 12 and 13, whose
+# failures leave the netdev in place (the case the whole-log counts
+# missed, see (m)); any other body leaves the chip without one.
 cat > "$t/bin/dmesg" <<'STUB'
 #!/bin/sh
 if [ "${1:-}" = "-w" ] || [ "${1:-}" = "-W" ]; then
@@ -90,7 +94,7 @@ printf '%s\n' "$n" > "$T715_TEST_CALLS"
 try=$(sed -n "${n}p" "$T715_TEST_SEQ" 2>/dev/null)
 [ -n "$try" ] || try=$(tail -n 1 "$T715_TEST_SEQ" 2>/dev/null)
 case $try in ''|*[!0-9]*) try=0 ;; esac
-case $try in 0|7|8|9|10) mkdir -p "$T715_TEST_NET/wlp1s0/phy80211" 2>/dev/null ;;
+case $try in 0|7|8|9|10|11|12|13) mkdir -p "$T715_TEST_NET/wlp1s0/phy80211" 2>/dev/null ;;
              *) rm -rf "$T715_TEST_NET/wlp1s0" 2>/dev/null ;;
 esac
 cat "$T715_TEST_BODIES/body.$try" 2>/dev/null || exit 0
@@ -130,7 +134,13 @@ mk_sysfs() {
     # good start late in the boot, after failed ones (the log a recovery's
     # good try judges, its last line at 2040.300000), 9 the same and one
     # more benign line, at 2150.000000, 10 body 0 without its timestamps
-    # (a kernel log with none).
+    # (a kernel log with none), 11 the log hours later, every line newer
+    # than the 2040.300000 an old judgment stopped at and none stamped
+    # with it (the ring buffer turned over) yet holding a probe failure
+    # and keeping the interface -- the failure the whole-log counts
+    # missed, see (m) -- 12 body 7's lines and one more query timeout
+    # after its wm, 13 body 12 and a second timeout after it, a failure
+    # signature that keeps the interface too (see (m2)).
     mkdir -p "$t/klog"
     { printf '%s\n' '[    2.800000] exynos-pcie 15700000.pcie: PCIe link up'
       printf '%s\n' '[    3.100000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
@@ -158,6 +168,14 @@ mk_sysfs() {
     { printf '%s\n' 'exynos-pcie 15700000.pcie: PCIe link up'
       printf '%s\n' 'brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
       printf '%s\n' 'brcmfmac: using the NVRAM address 02:11:22:33:44:55' ; } > "$t/klog/body.10"
+    { printf '%s\n' '[ 9000.100000] exynos-pcie 15700000.pcie: PCIe link up'
+      printf '%s\n' '[ 9001.200000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110'
+      printf '%s\n' '[ 9001.300000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14' ; } > "$t/klog/body.11"
+    { cat "$t/klog/body.7"
+      printf '%s\n' '[   60.000000] brcmfmac: brcmf_proto_bcdc_query_dcmd: Timeout on response for query command (88)'
+      printf '%s\n' '[   60.500000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14' ; } > "$t/klog/body.12"
+    { cat "$t/klog/body.12"
+      printf '%s\n' '[   61.000000] brcmfmac: brcmf_proto_bcdc_query_dcmd: Timeout on response for query command (88)' ; } > "$t/klog/body.13"
     klog_seq 0
     : > "$t/kfollow.lines"
     : > "$t/log"
@@ -451,6 +469,77 @@ wg run
 ! grep -q '^wm=' "$t/run/guard.state" \
     || fail "(k2) a log without timestamps saves no wm (state: $(cat "$t/run/guard.state"))"
 echo "ok - a log without timestamps: no wm in the state, nothing skipped, every line watched"
+
+# --- (m) a turned-over ring buffer no longer hides a failure --------------------------
+# The flaw of 2026-11-10: the kernel log is a ring buffer, about 1500
+# lines on the tablet, and it turns over within hours.  A judgment saved
+# its counts over the whole log; hours later the lines of those very
+# failures are gone, and a new failure brings a count back to what the
+# state holds, not above it -- missed, and a failure that leaves the
+# netdev then passes for "up".  Body 11 is that log: every line newer than
+# the 2040.300000 of the state's wm, none stamped with it (the wm line
+# itself has turned over), a probe failure in it, the interface kept.  The
+# state is what body 8's good judgment would have saved.  With whole-log
+# counts, probe_failed=1 is not above the state's 1 and the interface is
+# there, so the old check said "up"; the judgment now reads the lines
+# after the wm -- every line still in the buffer.
+mk_sysfs
+printf '%s\n' 'probe_failed=1' 'mmio_read=1' 'fw_halted=1' 'mailbox_ones=0' \
+    'ring_depth=0' 'query_timeout=0' 'wm=2040.300000' > "$t/run/guard.state"
+klog_seq 11
+wg check
+[ "$WG_RC" = 1 ] || fail "(m) a failure past the state's counts exits 1 (got $WG_RC)"
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 1 ] \
+    || fail "(m) one line on stdout (got $(cat "$t/out"))"
+grep -q '(probe_failed)' "$t/out" \
+    || fail "(m) the reason names the probe failure (got $(cat "$t/out"))"
+echo "ok - turned-over ring buffer: a failure past the state's wm is judged, counts or no counts"
+
+# --- (m2) the query rule counts the timeouts since the mark ---------------------------
+# The older flaw: the query timeout counts only from its second
+# occurrence in what a judgment reads, and what it read was the whole
+# log.  A log that already held one timeout, and a start whose own good
+# bring-up showed one, counted two: a start that came up was failed and
+# the chip cycled again for nothing.  The rule now counts the timeouts in
+# the lines since the mark.  The state is body 7's good judgment (six
+# counts at 0, wm=3.500000); body 12 holds one timeout after that mark,
+# body 13 two.  check only reads, so the state stays as written between
+# the two.
+mk_sysfs
+printf '%s\n' 'probe_failed=0' 'mmio_read=0' 'fw_halted=0' 'mailbox_ones=0' \
+    'ring_depth=0' 'query_timeout=0' 'wm=3.500000' > "$t/run/guard.state"
+klog_seq 12
+wg check
+[ "$WG_RC" = 0 ] \
+    || fail "(m2) one timeout since the mark does not fail a check (got $WG_RC, out: $(cat "$t/out"))"
+klog_seq 13
+wg check
+[ "$WG_RC" = 1 ] \
+    || fail "(m2) two timeouts since the mark fail the check (got $WG_RC)"
+grep -q '(query_timeout)' "$t/out" \
+    || fail "(m2) the reason names the query timeout (got $(cat "$t/out"))"
+echo "ok - query timeouts: one since the mark is nothing, two since the mark fail the check"
+
+# --- (m3) a try's good start with one query timeout is good ---------------------------
+# The same flaw from the recovery side: the log before the bind already
+# held one timeout (body 7), and the start's own good bring-up added one
+# (body 12) -- two in the whole log, so the old judgment failed a start
+# that came up.  The try now judges the lines after the wm of its
+# pre-bind snapshot: body 12's one timeout is the start's own alone, the
+# try is good, one cycle, and the saved state carries the whole-log
+# digest with its wm.
+mk_sysfs
+rm -rf "$S/class/net/wlp1s0"
+klog_seq 7 12
+wg recover 1
+[ "$WG_RC" = 0 ] \
+    || fail "(m3) a good start whose log holds a prior timeout exits 0 (got $WG_RC)"
+grep -q 'recovery try 1 of 1: the Wi-Fi came up' "$t/log" \
+    || fail "(m3) the good try is logged (log: $(cat "$t/log"))"
+[ "$(host_binds)" = 1 ] || fail "(m3) exactly one host bind (got $(host_binds))"
+grep -q '^wm=60\.500000$' "$t/run/guard.state" \
+    || fail "(m3) the state holds the start's wm (state: $(cat "$t/run/guard.state" 2>/dev/null || true))"
+echo "ok - a try's good start with one query timeout of its own: good, one cycle, the wm saved"
 
 # --- (h) no address, no SSID, no kernel line in anything the script says -------------
 # The fake log's bodies carry a MAC address; nothing the script printed in

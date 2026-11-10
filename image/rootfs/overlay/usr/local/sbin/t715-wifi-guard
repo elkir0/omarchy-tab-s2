@@ -19,9 +19,16 @@
 # A start failed when the kernel log holds one of brcmfmac's failure
 # signatures (a probe failure, an MMIO read, a halted firmware, a mailbox
 # reading all ones, a ring past its depth, or the second timeout on a query
-# command), or when no 802.11 interface came within 20 s.  Only the two
-# drivers' bind and unbind files are ever written: never the modem, rfkill
-# or NetworkManager's settings.
+# command), or when no 802.11 interface came within 20 s.  Only the lines
+# logged since the last good judgment count: those after the line stamped
+# with the state's wm, or after the snapshot taken before a try's bind.
+# The kernel log is a ring buffer, about 1500 lines on the tablet, and it
+# turns over within hours: whole-log counts fall as the old lines leave,
+# far enough for a new failure to sit below the counts an old judgment
+# saved and pass for none.  The saved counts are only the fallback for a
+# judgment with no wm to mark where it stopped.  Only the two drivers'
+# bind and unbind files are ever written: never the modem, rfkill or
+# NetworkManager's settings.
 #
 # Usage: t715-wifi-guard check             0 when the Wi-Fi is up, else 1
 #                                           with one line on stdout saying why
@@ -69,11 +76,17 @@
 #   T715_WG_LOGGER     logger -t t715-wifi-guard
 #   T715_WG_LOCK       /run/t715-wifi-guard.lock, the flock of a recovery
 #   T715_WG_STATE      /run/t715-wifi-guard.state, the signature counts at
-#                      the last good bind: check judges the log since then,
-#                      and since boot while there is no such file (the state
-#                      lives in /run, so a new boot starts with none); it
-#                      also holds wm, the kernel timestamp of the last log
-#                      line that judgment saw (the watch skips up to it)
+#                      the last good bind: check judges the lines logged
+#                      after that judgment's wm -- the kernel log is a ring
+#                      buffer, about 1500 lines on the tablet, that turns
+#                      over within hours, and the whole-log counts fall as
+#                      the old lines leave, far enough to hide a new
+#                      failure -- and since boot while there is no such
+#                      file (the state lives in /run, so a new boot starts
+#                      with none); it also holds wm, the kernel timestamp
+#                      of the last log line that judgment saw (the watch
+#                      skips up to it); the counts alone are the fallback
+#                      when there is no wm
 #   T715_WG_TRACE      when set, every sysfs write is also appended there as
 #                      "<path relative to the root> <value>", so a test can
 #                      check the order of the writes
@@ -223,6 +236,25 @@ klog_wm() {
     printf '%s\n' "$1" | LC_ALL=C sed -n "s/$TS_RE.*/\\1/p" | tail -n 1
 }
 
+# klog_since TEXT WM: the lines of TEXT after the LAST line stamped WM --
+# what a judgment reads once the last good one stopped at WM.  Matching by
+# line, not by time: the lines without a timestamp that follow are in, and
+# two CPUs logging out of order changes nothing.  When no line is stamped
+# WM that line has left the ring buffer, and every line still in it was
+# logged after it: all of TEXT.  Callers pass only a WM that ts_valid
+# took.
+klog_since() {
+    wg_pat="^\[ *$(printf '%s\n' "$2" | sed 's/\./\\./g')]"
+    wg_ln=$(printf '%s\n' "$1" | LC_ALL=C grep -n "$wg_pat" 2>/dev/null | tail -n 1 | cut -d: -f1)
+    if [ -n "$wg_ln" ]; then
+        printf '%s\n' "$1" | LC_ALL=C sed -n "$((wg_ln + 1)),\$p"
+    else
+        # No line stamped WM: it has left the ring buffer, and every line
+        # still in it was logged after it.
+        printf '%s\n' "$1"
+    fi
+}
+
 # sig_digest TEXT: the signature counts of TEXT, one name=N per line; the
 # query timeout counts only from its second occurrence.  Then wm=, TEXT's
 # klog_wm, when a line of TEXT has a timestamp: a saved digest also says
@@ -315,10 +347,22 @@ log_has_signature() {
 
 # run_check: the Wi-Fi's state.  Sets wg_reason (why it is down, one line)
 # and wg_digest (the log's signature counts now, and its wm); returns 0
-# when it is up.
+# when it is up.  A failure signature is one in the lines logged since the
+# last good judgment -- those after the line stamped with its wm, which
+# the state carries: whole-log counts fall as the ring buffer turns over
+# (about 1500 lines on the tablet), and a new failure could sit below
+# them.  The saved counts, not the wm, say it when there is no valid wm
+# (an older version's state, a log without timestamps).
 run_check() {
-    wg_digest=$(sig_digest "$(klog_text)")
-    wg_reason=$(sig_new "$(read_state)" "$wg_digest")
+    wg_ktext=$(klog_text)
+    wg_digest=$(sig_digest "$wg_ktext")
+    wg_state=$(read_state)
+    wg_swm=$(sig_field "$wg_state" wm)
+    if ts_valid "$wg_swm"; then
+        wg_reason=$(sig_new "" "$(sig_digest "$(klog_since "$wg_ktext" "$wg_swm")")")
+    else
+        wg_reason=$(sig_new "$wg_state" "$wg_digest")
+    fi
     if [ -n "$wg_reason" ]; then
         wg_reason="wifi down: failure signature in the kernel log since the last bind ($wg_reason)"
         return 1
@@ -390,18 +434,32 @@ recover_cycles() {
             write_sysfs "$wg_bt" "$BT_DRV/unbind" || true
         fi
         do_sleep "$OFF_SECS"
-        wg_pre=$(sig_digest "$(klog_text)")
+        # The snapshot before the bind: the wm of its last timestamped
+        # line marks where the try's judgment starts.  It is judged by
+        # line, the lines after that wm, so the ring buffer turning over
+        # under it (about 1500 lines on the tablet) cannot make a failure
+        # after the bind fall below counts that hold lines gone from the
+        # log; with no wm in the snapshot, the counts carry the judgment
+        # as before.
+        wg_pretext=$(klog_text)
+        wg_pre=$(sig_digest "$wg_pretext")
+        wg_prewm=$(klog_wm "$wg_pretext")
         write_sysfs "$PCIE_HOST" "$PCIE_DRV/bind" || true
         do_sleep 1
         if [ -n "$wg_bt" ]; then
             write_sysfs "$wg_bt" "$BT_DRV/bind" || true
         fi
-        # The judgment, JUDGE_SECS after the bind: a signature that
-        # appeared after it fails the start, and the interface has until
-        # IFACE_SECS after it to come.
+        # The judgment, JUDGE_SECS after the bind: a signature in the
+        # lines logged after the pre-bind wm fails the start, and the
+        # interface has until IFACE_SECS after it to come.
         do_sleep "$JUDGE_SECS"
-        wg_cur=$(sig_digest "$(klog_text)")
-        wg_newsig=$(sig_new "$wg_pre" "$wg_cur")
+        wg_curtext=$(klog_text)
+        wg_cur=$(sig_digest "$wg_curtext")
+        if ts_valid "$wg_prewm"; then
+            wg_newsig=$(sig_new "" "$(sig_digest "$(klog_since "$wg_curtext" "$wg_prewm")")")
+        else
+            wg_newsig=$(sig_new "$wg_pre" "$wg_cur")
+        fi
         if [ -n "$wg_newsig" ]; then
             log "recovery try $wg_try of $wg_tries: failed: failure signature after the bind ($wg_newsig)"
             continue

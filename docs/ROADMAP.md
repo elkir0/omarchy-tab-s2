@@ -266,7 +266,11 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
   the service replayed those tries' kernel lines, one check every 10 s (9 lines, about a
   minute and a half, in the 1.0.3 test). Harmless, nothing was cycled. Fixed on
   2026-11-10: each good check also saves the kernel timestamp of the last line it saw,
-  and the watch skips the lines logged at or before it, with one log line.
+  and the watch skips the lines logged at or before it, with one log line. The same mark
+  closed a blind spot found then: the checks compared the signature counts of the whole
+  kernel log, which fall as its ring buffer turns over (about 1500 lines, some 4 hours, on
+  the tablet), so a failure after an earlier one's lines had gone could pass for a good
+  start; they now judge only the lines logged after the mark.
 - **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
