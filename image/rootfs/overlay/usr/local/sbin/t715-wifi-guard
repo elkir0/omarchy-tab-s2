@@ -38,6 +38,15 @@
 #                                           the host unbind got stuck, 3 when
 #                                           the kernel cannot power-cycle the
 #                                           Wi-Fi (see below)
+#        t715-wifi-guard off                power the whole chip down, Wi-Fi
+#                                           and Bluetooth, and leave it down
+#                                           for the system's sleep: 0 when it
+#                                           is down, 1 when a recovery holds
+#                                           the lock (the chip is left as it
+#                                           is) or Bluetooth stayed bound, 2
+#                                           when the host unbind got stuck, 3
+#                                           when the kernel cannot power-cycle
+#                                           the Wi-Fi
 #        t715-wifi-guard run                what the unit runs: at boot wait
 #                                           up to 60 s for the host to bind
 #                                           and the Wi-Fi to settle, check,
@@ -59,6 +68,14 @@
 #                                           minutes: past that it logs once
 #                                           and stops recovering until the
 #                                           next boot.
+#
+# The system-sleep hook calls `off` before every suspend: a chip that is
+# powered down for a sleep needs no watching, and `recover` after the resume
+# is how it comes back.  `off` leaves a marker in /run (OFF_MARK) to say the
+# chip is down on purpose: while it is there the watch judges nothing -- no
+# wait, no check, no recovery -- and `recover`'s cycles remove it before
+# their first bind, so a failed recovery leaves no marker either.  /run is
+# empty at boot, so no marker survives a reboot.
 #
 # The kernel must cut the Wi-Fi's power and power the PCIe PHY down when its
 # host is unbound, which pci_exynos says with its read-only parameter
@@ -92,6 +109,11 @@
 #                      check the order of the writes
 #   T715_WG_UNBIND_MAX 60, seconds given to the host unbind before giving up
 #   T715_WG_OFF_SECS   2, seconds the chip stays off
+#   T715_WG_OFF_LOCK   30, seconds `off` waits for the recovery lock before
+#                      giving up on powering the chip down
+#   T715_WG_OFF_MARK   /run/t715-wifi-guard.off, the marker that says the
+#                      chip is powered down for a sleep; the watch judges
+#                      nothing while it is there
 #
 # One log line per decision and per try, and never a raw kernel log line, a
 # MAC or Bluetooth address, an SSID, a network name or the kernel command
@@ -115,6 +137,8 @@ STATE=${T715_WG_STATE:-/run/t715-wifi-guard.state}
 TRACE=${T715_WG_TRACE:-}
 UNBIND_MAX=${T715_WG_UNBIND_MAX:-60}
 OFF_SECS=${T715_WG_OFF_SECS:-2}
+OFF_LOCK_SECS=${T715_WG_OFF_LOCK:-30}
+OFF_MARK=${T715_WG_OFF_MARK:-/run/t715-wifi-guard.off}
 JUDGE_SECS=12    # after the host's bind, when a start is judged
 IFACE_SECS=20    # how long the interface has to come after the bind
 SETTLE_SECS=60   # at boot, how long the first start has to settle
@@ -149,6 +173,7 @@ TS_RE='^\[ *\([0-9][0-9]*\.[0-9]\{6\}\)]'
 usage() {
     printf 'usage: t715-wifi-guard check\n' >&2
     printf '       t715-wifi-guard recover [TRIES]\n' >&2
+    printf '       t715-wifi-guard off\n' >&2
     printf '       t715-wifi-guard run\n' >&2
 }
 
@@ -409,6 +434,37 @@ kernel_can_cycle() {
     [ "$(cat "$CAP" 2>/dev/null)" = Y ]
 }
 
+# mark_off [BTDEV] / off_marked / off_bt: the marker that says the chip is
+# powered down for a sleep.  `off` writes it, with the name of the
+# Bluetooth device it unbound (serial0-0) when it unbound one: `recover`
+# binds that device back, since bt_dev finds only a bound one.  A marker
+# that exists already keeps its name when there is none to write (a second
+# off finds Bluetooth unbound by the first).  `recover`'s cycles remove it
+# before their first bind, so a failed recovery leaves no marker either;
+# while it is there the watch judges nothing.  /run starts empty at boot,
+# so a new boot starts with no marker.
+mark_off() {
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1" > "$OFF_MARK" 2>/dev/null ||
+            log "cannot write the off marker $OFF_MARK"
+    elif [ ! -e "$OFF_MARK" ]; then
+        : > "$OFF_MARK" 2>/dev/null || log "cannot write the off marker $OFF_MARK"
+    fi
+}
+
+# off_bt: the Bluetooth device the marker names, when it is a serial
+# device name and nothing else.
+off_bt() {
+    wg_ob=$(sed -n '1p' "$OFF_MARK" 2>/dev/null)
+    case $wg_ob in
+        serial[0-9]*-[0-9]*) case $wg_ob in *[!a-z0-9-]*) ;; *) printf '%s\n' "$wg_ob" ;; esac ;;
+    esac
+}
+
+off_marked() {
+    [ -e "$OFF_MARK" ]
+}
+
 # recover_cycles TRIES: the whole-chip power cycles, one per try, each
 # stopping at the first good start.  0 one came good (the state file then
 # holds that start's counts), 1 none did, 2 the host unbind got stuck, 3 the
@@ -420,10 +476,18 @@ recover_cycles() {
         log "this kernel cannot power-cycle the Wi-Fi (no pci_exynos.wifi_power_cycle): not recovering"
         return 3
     fi
+    # The chip is no longer down for a sleep: the cycles that follow are
+    # meant to bring it back, so the marker must not survive them -- a
+    # failed recovery leaves none either.
+    # Bluetooth unbound by `off` is not found by bt_dev: the marker names
+    # it, so that the cycles bind it back with the Wi-Fi.
+    wg_btoff=$(off_bt)
+    rm -f "$OFF_MARK" 2>/dev/null || true
     log "recover: up to $wg_tries whole-chip power cycles"
     while [ "$wg_try" -lt "$wg_tries" ]; do
         wg_try=$((wg_try + 1))
         wg_bt=$(bt_dev)
+        wg_btbind=${wg_bt:-$wg_btoff}
         if host_bound; then
             if ! unbind_host; then
                 log "recovery try $wg_try of $wg_tries: the host unbind did not return within $UNBIND_MAX s: giving up"
@@ -446,8 +510,8 @@ recover_cycles() {
         wg_prewm=$(klog_wm "$wg_pretext")
         write_sysfs "$PCIE_HOST" "$PCIE_DRV/bind" || true
         do_sleep 1
-        if [ -n "$wg_bt" ]; then
-            write_sysfs "$wg_bt" "$BT_DRV/bind" || true
+        if [ -n "$wg_btbind" ]; then
+            write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
         fi
         # The judgment, JUDGE_SECS after the bind: a signature in the
         # lines logged after the pre-bind wm fails the start, and the
@@ -479,6 +543,64 @@ recover_cycles() {
     done
     log "recover: $wg_tries tries, none brought the Wi-Fi up"
     return 1
+}
+
+# off_now: the chip powered down, Wi-Fi and Bluetooth, and left down -- the
+# state a suspend wants.  Idempotent: a chip already down is only marked.
+# 0 down, 1 Bluetooth stayed bound to its driver, 2 the host unbind got
+# stuck.
+off_now() {
+    wg_bt=$(bt_dev)
+    if ! host_bound && [ -z "$wg_bt" ]; then
+        mark_off
+        log "off: already powered down"
+        return 0
+    fi
+    wg_rc=0
+    if host_bound; then
+        if ! unbind_host; then
+            log "off: the host unbind did not return within $UNBIND_MAX s: giving up"
+            return 2
+        fi
+    fi
+    if [ -n "$wg_bt" ]; then
+        # A refused write is logged and the rest still runs: the marker and
+        # the log line say the chip is down only when it is.
+        if ! write_sysfs "$wg_bt" "$BT_DRV/unbind" && [ -n "$(bt_dev)" ]; then
+            log "off: Bluetooth stayed bound to its driver"
+            wg_rc=1
+        fi
+    fi
+    mark_off "$wg_bt"
+    [ "$wg_rc" -eq 0 ] && log "off: the Wi-Fi and Bluetooth chip is powered down"
+    return "$wg_rc"
+}
+
+# off_cmd: what the sleep hook calls before a suspend.  The kernel gate
+# first, as a recovery's: an unbind on a kernel that cannot power-cycle
+# makes every later bind hang.  Then the recovery lock, waited for at most
+# OFF_LOCK_SECS: a recovery in flight has the chip half-cycled and may be
+# bringing the Wi-Fi up, so the chip is left as it is rather than pulled
+# from under it.  With no flock it runs unlocked, with a log line.  0 the
+# chip is down, 1 a recovery holds the lock or Bluetooth stayed bound, 2
+# the host unbind got stuck, 3 the kernel cannot power-cycle.
+off_cmd() {
+    if ! kernel_can_cycle; then
+        log "this kernel cannot power-cycle the Wi-Fi (no pci_exynos.wifi_power_cycle): not powering down"
+        return 3
+    fi
+    if command -v flock >/dev/null 2>&1; then
+        (
+            if ! flock -w "$OFF_LOCK_SECS" 9; then
+                log "off: a recovery holds the lock: the chip is left as it is"
+                exit 1
+            fi
+            off_now
+        ) 9>"$LOCK"
+    else
+        log "no flock: powering down without the lock"
+        off_now
+    fi
 }
 
 # locked TRIES [recheck]: one recovery under the lock, so that only one
@@ -570,9 +692,23 @@ recover_maybe() {
 watch_loop() {
     wg_qcount=0
     wg_wm_said=""
+    wg_off_said=0
     while IFS= read -r wg_line; do
         wg_hit=$(line_signature "$wg_line")
         [ -n "$wg_hit" ] || continue
+        # The sleep skip: the chip is powered down on purpose (the marker
+        # `off` left), so nothing its power-down logs is a failure to judge
+        # -- no wait, no check, no query-timeout count.  One fixed line per
+        # marker, the first time only; the flag resets once the marker is
+        # gone, so a later sleep says it again.
+        if off_marked; then
+            if [ "$wg_off_said" -eq 0 ]; then
+                log "watch: the chip is off for a sleep: not judging"
+                wg_off_said=1
+            fi
+            continue
+        fi
+        wg_off_said=0
         # The skip: a line logged at or before the wm of the last good
         # judgment was in the log that judgment read, so it is judged
         # already -- the backlog a recovery leaves in the pipe, say.  No
@@ -648,6 +784,11 @@ case ${1:-} in
         esac
         [ "$wg_tries" -ge 1 ] || { usage; exit 2; }
         locked "$wg_tries"
+        exit $?
+        ;;
+    off)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        off_cmd
         exit $?
         ;;
     run)
