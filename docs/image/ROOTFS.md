@@ -901,7 +901,10 @@ afterwards it follows the kernel log (new lines only) and checks again 10 s afte
 brcmfmac's failure signatures (a probe failure, an MMIO read, a halted
 firmware, a mailbox reading all ones, a ring past its depth, or the second
 timeout on a query command — only the signature's name is ever logged,
-never a kernel line, an address or an SSID). A failed check power-cycles
+never a kernel line, an address or an SSID), except a signature already
+judged: one logged, by its kernel timestamp, at or before the last good
+check (the lines a recovery's failed tries left behind, say) is skipped,
+with one log line. A failed check power-cycles
 the *whole* Wi-Fi/Bluetooth chip, six tries by default — unbind the PCIe
 host (which cuts the Wi-Fi enable line), unbind `hci_uart_bcm` (the
 Bluetooth enable), wait 2 s, bind the host, 1 s later bind Bluetooth

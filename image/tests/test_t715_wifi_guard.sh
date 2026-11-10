@@ -14,11 +14,13 @@
 # FIFO, which a write with no reader blocks on.  The fake dmesg prints a
 # body per call, chosen by a try number from a sequence file (the last
 # entry repeats): body.0 a good start, body.1..6 one of brcmfmac's failure
-# signatures each, body.7 a single query timeout, which does not count.  A
-# good body also brings the wlp1s0 interface, a failed one leaves the chip
-# without it; a good body's log carries a MAC address, to prove the script
-# never repeats one.  sleep is a stub that returns at once and records the
-# seconds, so a judged start costs no time.
+# signatures each, body.7 a single query timeout, which does not count,
+# body.8 and body.9 good starts late in the boot, after failed ones, and
+# body.10 a good start whose log has no timestamps.  A good body also
+# brings the wlp1s0 interface, a failed one leaves the chip without it; a
+# good body's log carries a MAC address, to prove the script never repeats
+# one.  sleep is a stub that returns at once and records the seconds, so a
+# judged start costs no time.
 #
 # In the style of tests/test_t715_power_profile.sh (omarchy-mobile 5f7ba48,
 # MIT).
@@ -57,20 +59,23 @@ cat > "$t/bin/sleep" <<'STUB'
 printf '%s\n' "$1" >> "$T715_TEST_SLEEPS"
 exit 0
 STUB
-# logger: the script's decision lines land here, whatever they say.
+# logger: the script's decision lines land here, whatever they say, and
+# in a copy kept over all the scenarios, for the privacy check (h).
 cat > "$t/bin/logger" <<'STUB'
 #!/bin/sh
 # The script runs `logger -t t715-wifi-guard TEXT...`: drop the tag.
 [ "${1:-}" = "-t" ] && shift 2
 printf '%s\n' "$*" >> "$T715_TEST_LOG"
+printf '%s\n' "$*" >> "$T715_TEST_LOG_ALL"
 STUB
 # dmesg: the fake kernel log.  Without -w it prints the log as it stands:
 # line N of the sequence file names the body for call N (the calls counted
 # in a file), the last line repeating once the sequence is used up.  With
 # -w, the follow the script's run watches, it prints the new lines it was
-# given and then ends: nothing more comes.  A good body (0, and 7, whose
-# single query timeout does not count) also brings the interface the
-# driver would have created; any other body leaves the chip without one.
+# given and then ends: nothing more comes.  A good body (0, 7, whose
+# single query timeout does not count, and 8 to 10) also brings the
+# interface the driver would have created; any other body leaves the chip
+# without one.
 cat > "$t/bin/dmesg" <<'STUB'
 #!/bin/sh
 if [ "${1:-}" = "-w" ] || [ "${1:-}" = "-W" ]; then
@@ -85,7 +90,7 @@ printf '%s\n' "$n" > "$T715_TEST_CALLS"
 try=$(sed -n "${n}p" "$T715_TEST_SEQ" 2>/dev/null)
 [ -n "$try" ] || try=$(tail -n 1 "$T715_TEST_SEQ" 2>/dev/null)
 case $try in ''|*[!0-9]*) try=0 ;; esac
-case $try in 0|7) mkdir -p "$T715_TEST_NET/wlp1s0/phy80211" 2>/dev/null ;;
+case $try in 0|7|8|9|10) mkdir -p "$T715_TEST_NET/wlp1s0/phy80211" 2>/dev/null ;;
              *) rm -rf "$T715_TEST_NET/wlp1s0" 2>/dev/null ;;
 esac
 cat "$T715_TEST_BODIES/body.$try" 2>/dev/null || exit 0
@@ -94,7 +99,14 @@ chmod +x "$t/bin/sleep" "$t/bin/logger" "$t/bin/dmesg"
 export T715_TEST_LOG="$t/log" T715_TEST_SLEEPS="$t/sleeps" \
        T715_TEST_CALLS="$t/klog.calls" T715_TEST_SEQ="$t/klog.seq" \
        T715_TEST_BODIES="$t/klog" T715_TEST_KFOLLOW="$t/kfollow.lines" \
-       T715_TEST_NET="$t/sys/class/net"
+       T715_TEST_NET="$t/sys/class/net" T715_TEST_LOG_ALL="$t/log.all"
+# Everything the script prints, over all the scenarios, for the privacy
+# check (h): the log (the logger stub's copy), the traces, stdout and
+# stderr.  mk_sysfs starts a scenario's own files, never these.
+: > "$t/log.all"
+: > "$t/trace.all"
+: > "$t/out.all"
+: > "$t/err.all"
 
 # --- the fake sysfs ----------------------------------------------------------------
 S=$t/sys
@@ -114,7 +126,11 @@ mk_sysfs() {
     printf 'Y\n' > "$S/module/pci_exynos/parameters/wifi_power_cycle"
     # The kernel log bodies: 0 a good start (with a MAC address, which the
     # script must never repeat), 1..6 one failure signature each, 7 a
-    # single query timeout, which on its own does not fail a start.
+    # single query timeout, which on its own does not fail a start, 8 a
+    # good start late in the boot, after failed ones (the log a recovery's
+    # good try judges, its last line at 2040.300000), 9 the same and one
+    # more benign line, at 2150.000000, 10 body 0 without its timestamps
+    # (a kernel log with none).
     mkdir -p "$t/klog"
     { printf '%s\n' '[    2.800000] exynos-pcie 15700000.pcie: PCIe link up'
       printf '%s\n' '[    3.100000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
@@ -129,12 +145,22 @@ mk_sysfs() {
       printf '%s\n' '[    6.400000] brcmfmac: brcmf_proto_bcdc_query_dcmd: Timeout on response for query command (88)' ; } > "$t/klog/body.6"
     { printf '%s\n' '[    3.100000] brcmfmac: brcmf_proto_bcdc_query_dcmd: Timeout on response for query command (88)'
       printf '%s\n' '[    3.500000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14' ; } > "$t/klog/body.7"
+    { printf '%s\n' '[    2.800000] exynos-pcie 15700000.pcie: PCIe link up'
+      printf '%s\n' '[    3.100000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
+      printf '%s\n' '[ 2000.100000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110'
+      printf '%s\n' '[ 2005.200000] brcmfmac: MMIO read failed (0xffffffff) at 0x18002030'
+      printf '%s\n' '[ 2040.089000] brcmfmac: brcmf_fwmem: Firmware has halted'
+      printf '%s\n' '[ 2040.200000] exynos-pcie 15700000.pcie: PCIe link up'
+      printf '%s\n' '[ 2040.250000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
+      printf '%s\n' '[ 2040.300000] brcmfmac: using the NVRAM address 02:11:22:33:44:55' ; } > "$t/klog/body.8"
+    { cat "$t/klog/body.8"
+      printf '%s\n' '[ 2150.000000] brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14' ; } > "$t/klog/body.9"
+    { printf '%s\n' 'exynos-pcie 15700000.pcie: PCIe link up'
+      printf '%s\n' 'brcmfmac4358 PCIe 0000:01:00.0: F/W 7.112.300.14'
+      printf '%s\n' 'brcmfmac: using the NVRAM address 02:11:22:33:44:55' ; } > "$t/klog/body.10"
     klog_seq 0
     : > "$t/kfollow.lines"
     : > "$t/log"
-    : > "$t/trace.all"
-    : > "$t/out.all"
-    : > "$t/err.all"
 }
 # klog_seq TRY...: what the fake kernel log answers, one body per call,
 # the last repeating; also the try whose signature a check sees first.
@@ -344,12 +370,94 @@ want=""; i=0; while [ $i -lt 3 ]; do want="$want$CYCLE
     || fail "(g2) the three later failures all recovered (log: $(cat "$t/log"))"
 echo "ok - lock held by another recovery: re-checked under the lock, nothing cycled, not counted, later failures still recovered"
 
+# --- (k) the backlog after a recovery is skipped -------------------------------------
+# The noise of 2026-11-09: while a recovery runs, its failed tries' own
+# failure lines pile up in the follow pipe, and once the Wi-Fi was up the
+# watch gave each of them a 10 s wait and a check that passed.  Every good
+# judgment now saves, with its counts, the kernel timestamp of the last
+# line it saw (wm=), and the watch skips the lines logged at or before it,
+# with one log line per wm: no wait, no check, no count.
+# The fake log's calls: the boot check (body 0, good); L1's watch check
+# and the re-check under the lock (1, both fail); try 1, before its bind
+# and its judgment (1, then 2: an MMIO read after the bind, failed); try 2,
+# before and judgment (8, good: the state's wm is 2040.300000); every
+# later check (9, good: wm=2150.000000).
+SKIP_LINE='watch: skipping failure signatures logged before the last good check (already judged)'
+mk_sysfs
+klog_seq 0 1 1 1 2 8 8 9
+# L1 is watched and recovered; L2..L4 were judged by try 2 (L3 in the same
+# second as the wm, its micros with a leading zero; L4 equal to the wm);
+# L5, one microsecond after the wm, is watched; L6 was judged by L5's
+# check (a new wm, so a second skip line); L7, without a timestamp, is
+# watched.  L5's check passes only because the fake log does not show L5's
+# own line -- a shortcut of the fixture: what this proves is that L5 is
+# watched, not skipped.
+printf '%s\n' \
+ '[ 2000.100000] brcmfmac4358 PCIe 0000:01:00.0: brcmf_pcie_probe: failed err=-110' \
+ '[ 2005.200000] brcmfmac: MMIO read failed (0xffffffff) at 0x18002030' \
+ '[ 2040.089000] brcmfmac: brcmf_fwmem: Firmware has halted' \
+ '[ 2040.300000] brcmfmac: brcmf_pcie_get_mbdata: mailbox status reads all ones' \
+ '[ 2040.300001] brcmfmac: brcmf_fwmem: Firmware has halted' \
+ '[ 2120.600000] brcmfmac: MMIO read failed (0xffffffff) at 0x18002030' \
+ 'brcmfmac: MMIO read failed (0xffffffff) at 0x18002030' \
+ > "$t/kfollow.lines"
+wg run
+[ "$WG_RC" = 0 ] || fail "(k) run exits 0 (got $WG_RC)"
+want='watch: failure signature (probe_failed) in the kernel log
+watch: failure signature (fw_halted) in the kernel log
+watch: failure signature (mmio_read) in the kernel log'
+[ "$(grep 'watch: failure signature' "$t/log" || true)" = "$want" ] \
+    || fail "(k) L1, L5 and L7 watched, in order, and nothing else (log: $(cat "$t/log"))"
+[ "$(grep -cxF "$SKIP_LINE" "$t/log" || true)" = 2 ] \
+    || fail "(k) one skip line per wm, two in all (log: $(cat "$t/log"))"
+[ "$(grep -c '^10$' "$t/sleeps" || true)" = 3 ] \
+    || fail "(k) three debounce waits, for L1, L5 and L7 only (sleeps: $(tr '\n' ' ' < "$t/sleeps"))"
+[ "$(host_binds)" = 2 ] || fail "(k) two host binds, try 1's and try 2's (got $(host_binds))"
+[ "$(cat "$t/trace")" = "$CYCLE
+$CYCLE" ] || fail "(k) two whole-chip cycles, in order (trace: $(cat "$t/trace"))"
+grep -qF 'recovery try 1 of 6: failed: failure signature after the bind (mmio_read)' "$t/log" \
+    || fail "(k) try 1 fails on the MMIO read after its bind (log: $(cat "$t/log"))"
+grep -qF 'recovery try 2 of 6: the Wi-Fi came up' "$t/log" \
+    || fail "(k) try 2 brings the Wi-Fi up (log: $(cat "$t/log"))"
+[ "$(grep -c 'recovered: the Wi-Fi is up' "$t/log" || true)" = 1 ] \
+    || fail "(k) one recovery, logged once (log: $(cat "$t/log"))"
+[ "$(grep -c 'watch check: the Wi-Fi is up' "$t/log" || true)" = 2 ] \
+    || fail "(k) L5's and L7's checks pass (log: $(cat "$t/log"))"
+grep -qxF 'wm=2150.000000' "$t/run/guard.state" \
+    || fail "(k) the state holds the last good check's wm (state: $(cat "$t/run/guard.state" 2>/dev/null || true))"
+! grep -Eq '[0-9]+\.[0-9]{6}' "$t/log" \
+    || fail "(k) no kernel timestamp in any log line (log: $(cat "$t/log"))"
+echo "ok - backlog after a recovery: what the last good check judged is skipped, one line per check; the rest still watched"
+
+# --- (k2) no timestamps, nothing skipped ----------------------------------------------
+# A kernel log without timestamps gives the judgments no wm, so the state
+# has none: then no line is skipped, timestamped or not, and each one gets
+# its wait and its check, as before.
+mk_sysfs
+klog_seq 10
+printf '%s\n' \
+ '[ 2200.100000] brcmfmac: MMIO read failed (0xffffffff) at 0x18002030' \
+ '[ 2200.200000] brcmfmac: brcmf_fwmem: Firmware has halted' \
+ > "$t/kfollow.lines"
+wg run
+[ "$WG_RC" = 0 ] || fail "(k2) run exits 0 (got $WG_RC)"
+[ "$(grep -c 'watch: failure signature' "$t/log" || true)" = 2 ] \
+    || fail "(k2) both lines watched (log: $(cat "$t/log"))"
+! grep -qF "$SKIP_LINE" "$t/log" || fail "(k2) nothing skipped (log: $(cat "$t/log"))"
+[ "$(grep -c '^10$' "$t/sleeps" || true)" = 2 ] \
+    || fail "(k2) two debounce waits (sleeps: $(tr '\n' ' ' < "$t/sleeps"))"
+[ "$(host_binds)" = 0 ] || fail "(k2) no recovery, no host bind (got $(host_binds))"
+[ -f "$t/run/guard.state" ] || fail "(k2) the good checks saved a state"
+! grep -q '^wm=' "$t/run/guard.state" \
+    || fail "(k2) a log without timestamps saves no wm (state: $(cat "$t/run/guard.state"))"
+echo "ok - a log without timestamps: no wm in the state, nothing skipped, every line watched"
+
 # --- (h) no address, no SSID, no kernel line in anything the script says -------------
-# The fake log's bodies carry a MAC address; nothing the script printed
-# (log lines, the trace, check's reason, stderr) may match one.
+# The fake log's bodies carry a MAC address; nothing the script printed in
+# any scenario (log lines, the trace, check's reason, stderr) may match one.
 if grep -Eq '([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}' \
-        "$t/log" "$t/trace.all" "$t/out.all" "$t/err.all"; then
-    grep -En '([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}' "$t/log" "$t/trace.all" "$t/out.all" "$t/err.all" >&2 || true
+        "$t/log.all" "$t/trace.all" "$t/out.all" "$t/err.all"; then
+    grep -En '([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}' "$t/log.all" "$t/trace.all" "$t/out.all" "$t/err.all" >&2 || true
     fail "(h) something the script said matches a MAC address"
 fi
 echo "ok - privacy: no MAC address in any log line, trace write or reason"

@@ -43,6 +43,11 @@
 #                                           brought the Wi-Fi up while this
 #                                           one waited for it: then nothing
 #                                           is cycled and it does not count.
+#                                           A signature logged at or before
+#                                           the last good check (by its kernel
+#                                           timestamp) was judged by that
+#                                           check: it is skipped, with one log
+#                                           line for all that check judged.
 #                                           At most 3 recoveries in any 30
 #                                           minutes: past that it logs once
 #                                           and stops recovering until the
@@ -66,7 +71,9 @@
 #   T715_WG_STATE      /run/t715-wifi-guard.state, the signature counts at
 #                      the last good bind: check judges the log since then,
 #                      and since boot while there is no such file (the state
-#                      lives in /run, so a new boot starts with none)
+#                      lives in /run, so a new boot starts with none); it
+#                      also holds wm, the kernel timestamp of the last log
+#                      line that judgment saw (the watch skips up to it)
 #   T715_WG_TRACE      when set, every sysfs write is also appended there as
 #                      "<path relative to the root> <value>", so a test can
 #                      check the order of the writes
@@ -120,6 +127,12 @@ SIG_MBOX='mailbox status reads all ones'
 SIG_DEPTH='past its depth'
 SIG_QUERY='Timeout on response for query command'
 
+# A kernel log line from dmesg (and dmesg -W) starts with its timestamp:
+# "[", padding spaces, the seconds, "." and six digits, "]", as in
+# "[ 1200.100000] ...".  This matches that start and keeps the timestamp,
+# SECONDS.MICROS, without the padding (a sed basic regex).
+TS_RE='^\[ *\([0-9][0-9]*\.[0-9]\{6\}\)]'
+
 usage() {
     printf 'usage: t715-wifi-guard check\n' >&2
     printf '       t715-wifi-guard recover [TRIES]\n' >&2
@@ -160,7 +173,8 @@ write_sysfs() {
 }
 
 # save_state DIGEST / read_state: the signature counts at the last good
-# bind, in /run, so a later check judges the log since then.
+# bind, in /run, so a later check judges the log since then -- and the wm
+# of that judgment, so the watch skips the lines it already judged.
 save_state() {
     if ! printf '%s\n' "$1" > "$STATE" 2>/dev/null; then
         log "cannot write the state file $STATE"
@@ -176,8 +190,43 @@ sig_count() {
     printf '%s\n' "$1" | grep -cF -- "$2" || true
 }
 
+# line_ts LINE: the kernel timestamp LINE starts with, as SECONDS.MICROS,
+# or nothing when it starts with none in exactly that form.  sed runs in
+# the C locale, where no byte of the rest of the line can stop the match.
+line_ts() {
+    printf '%s\n' "$1" | LC_ALL=C sed -n "1s/$TS_RE.*/\\1/p"
+}
+
+# ts_valid TS: TS has the form line_ts prints (digits, "." and six
+# digits), as a wm read back from the state file must.
+ts_valid() {
+    case $1 in
+        *[!0-9.]*|*.*.*) return 1 ;;
+        [0-9]*.[0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+    esac
+    return 1
+}
+
+# ts_le A B: 0 when the timestamp A is at or before B.  test(1) only: the
+# seconds first, then the six-digit micros when the seconds are equal --
+# $(( )) would read a leading zero as octal, and 089000 is an error there.
+ts_le() {
+    wg_as=${1%.*}; wg_au=${1#*.}
+    wg_bs=${2%.*}; wg_bu=${2#*.}
+    [ "$wg_as" -lt "$wg_bs" ] 2>/dev/null && return 0
+    [ "$wg_as" -eq "$wg_bs" ] 2>/dev/null && [ "$wg_au" -le "$wg_bu" ] 2>/dev/null
+}
+
+# klog_wm TEXT: the timestamp of the last line of TEXT that has one, or
+# nothing when none has: how far in the kernel log a judgment of TEXT saw.
+klog_wm() {
+    printf '%s\n' "$1" | LC_ALL=C sed -n "s/$TS_RE.*/\\1/p" | tail -n 1
+}
+
 # sig_digest TEXT: the signature counts of TEXT, one name=N per line; the
-# query timeout counts only from its second occurrence.
+# query timeout counts only from its second occurrence.  Then wm=, TEXT's
+# klog_wm, when a line of TEXT has a timestamp: a saved digest also says
+# how far in the kernel log the judgment it records saw.
 sig_digest() {
     wg_text=$1
     printf 'probe_failed=%s\n' "$(sig_count "$wg_text" "$SIG_PROBE")"
@@ -188,6 +237,10 @@ sig_digest() {
     wg_n=$(sig_count "$wg_text" "$SIG_QUERY")
     [ "$wg_n" -ge 2 ] 2>/dev/null || wg_n=0
     printf 'query_timeout=%s\n' "$wg_n"
+    wg_dwm=$(klog_wm "$wg_text")
+    if [ -n "$wg_dwm" ]; then
+        printf 'wm=%s\n' "$wg_dwm"
+    fi
 }
 
 # sig_field DIGEST NAME: that field's value, 0 when the digest has none.
@@ -261,7 +314,8 @@ log_has_signature() {
 }
 
 # run_check: the Wi-Fi's state.  Sets wg_reason (why it is down, one line)
-# and wg_digest (the log's signature counts now); returns 0 when it is up.
+# and wg_digest (the log's signature counts now, and its wm); returns 0
+# when it is up.
 run_check() {
     wg_digest=$(sig_digest "$(klog_text)")
     wg_reason=$(sig_new "$(read_state)" "$wg_digest")
@@ -451,14 +505,34 @@ recover_maybe() {
 }
 
 # watch_loop: the follow mode.  A signature in a new kernel line starts a
-# DEBOUNCE_SECS wait, then the check and, when it failed, a recovery.  The
+# DEBOUNCE_SECS wait, then the check and, when it failed, a recovery --
+# unless the last good judgment already saw that line (see the skip).  The
 # query timeout needs two lines before it counts as a signature here too.
 # Raw kernel lines never leave this loop: only the signature's name does.
 watch_loop() {
     wg_qcount=0
+    wg_wm_said=""
     while IFS= read -r wg_line; do
         wg_hit=$(line_signature "$wg_line")
         [ -n "$wg_hit" ] || continue
+        # The skip: a line logged at or before the wm of the last good
+        # judgment was in the log that judgment read, so it is judged
+        # already -- the backlog a recovery leaves in the pipe, say.  No
+        # wait, no check, no query-timeout count; one fixed log line per
+        # wm, the first time, and nothing of the line in it.  A line
+        # without a timestamp, or a state without a valid wm (none yet, an
+        # older version's, a log without timestamps), skips nothing.
+        wg_lts=$(line_ts "$wg_line")
+        if [ -n "$wg_lts" ]; then
+            wg_wm=$(sig_field "$(read_state)" wm)
+            if ts_valid "$wg_wm" && ts_le "$wg_lts" "$wg_wm"; then
+                if [ "$wg_wm" != "$wg_wm_said" ]; then
+                    log "watch: skipping failure signatures logged before the last good check (already judged)"
+                    wg_wm_said=$wg_wm
+                fi
+                continue
+            fi
+        fi
         if [ "$wg_hit" = query_timeout ]; then
             wg_qcount=$((wg_qcount + 1))
             [ "$wg_qcount" -ge 2 ] || continue

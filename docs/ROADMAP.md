@@ -262,10 +262,11 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 - **The touch shell's crash while a Bluetooth mouse paired**, once (Quickshell 0.3.2,
   SIGSEGV, the shell back by itself after about 40 s): find what in the BlueZ property
   updates took it down (`docs/hardware/WIFI_BT_M5.md` section 7.8).
-- **The Wi-Fi guard's backlog after a recovery**: once a recovery with failed tries ends,
-  the service replays those tries' kernel lines, one check every 10 s (9 lines, about a
-  minute and a half, in the 1.0.3 test). Harmless, nothing is cycled, but it should skip
-  the lines older than its last check.
+- **The Wi-Fi guard's backlog after a recovery**: once a recovery with failed tries ended,
+  the service replayed those tries' kernel lines, one check every 10 s (9 lines, about a
+  minute and a half, in the 1.0.3 test). Harmless, nothing was cycled. Fixed on
+  2026-11-10: each good check also saves the kernel timestamp of the last line it saw,
+  and the watch skips the lines logged at or before it, with one log line.
 - **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
