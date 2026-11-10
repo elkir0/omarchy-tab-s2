@@ -324,9 +324,13 @@ for u in NetworkManager-wait-online.service systemd-networkd-wait-online.service
         test "$(linkto "/etc/systemd/system/$u" 2>/dev/null)" = /dev/null
 done
 check "plocate's updatedb prunes /run/t715 (USERDATA)" grep -q '^PRUNEPATHS.*/run/t715' <(cat_ /etc/updatedb.conf)
-for t in suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target sleep.target \
+for t in hibernate.target hybrid-sleep.target suspend-then-hibernate.target \
          plocate-updatedb.timer man-db.timer archlinux-keyring-wkd-sync.timer; do
     check "$t masked" test "$(linkto "/etc/systemd/system/$t" 2>/dev/null)" = /dev/null
+done
+for t in suspend.target sleep.target; do
+    check "$t not masked (t715-sleep masks it at run time on a kernel without system sleep)" \
+        sh -c '[ "$1" != /dev/null ]' _ "$(linkto "/etc/systemd/system/$t" 2>/dev/null || true)"
 done
 check "ConditionNeedsUpdate stamps (/etc/.updated, /var/.updated)" \
     sh -c 'exists() { debugfs -R "stat \"$1\"" "$2" 2>/dev/null | grep -q "^Inode:"; }
@@ -1086,6 +1090,39 @@ check "t715-wifi-guard.service: simple, runs run, after NetworkManager and bluet
            grep -qx "Restart=always" "$1" && grep -qx "WantedBy=multi-user.target" "$1"' _ "$W/wg.service"
 check "t715-wifi-guard: writes only the two drivers' bind and unbind files, never rfkill or NetworkManager's" \
     sh -c '! grep -v "^[[:space:]]*#" "$1" | grep -Eq "rfkill|nmcli|NetworkManager|ModemManager"' _ "$W/wg"
+echo "== Sleep =="
+SL=/usr/local/sbin/t715-sleep
+for f in usr/local/sbin/t715-sleep etc/systemd/system/t715-sleep.service \
+         etc/systemd/system/t715-sleep-prepare.service etc/systemd/system/t715-sleep-restore.service; do
+    get "/$f"
+    check "/$f identical to rootfs/overlay" cmp -s "$W/f" "/our-overlay/$f"
+done
+check "$SL mode 0755" test "$(fmode $SL)" = 0755
+t="$(resolve /etc/systemd/system/multi-user.target.wants/t715-sleep.service || true)"
+check "t715-sleep.service enabled (multi-user.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-sleep.service
+t="$(resolve /etc/systemd/system/sleep.target.wants/t715-sleep-prepare.service || true)"
+check "t715-sleep-prepare.service enabled (sleep.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/system/t715-sleep-prepare.service
+get /etc/systemd/system/t715-sleep.service; cp "$W/f" "$W/sl.service"
+check "t715-sleep.service: simple, runs run, after the Wi-Fi guard, restarts on failure" \
+    sh -c 'grep -qx "Type=simple" "$1" && grep -qx "ExecStart=/usr/local/sbin/t715-sleep run" "$1" &&
+           grep -qx "After=t715-wifi-guard.service" "$1" && grep -qx "Restart=on-failure" "$1" &&
+           grep -qx "WantedBy=multi-user.target" "$1"' _ "$W/sl.service"
+get /etc/systemd/system/t715-sleep-prepare.service; cp "$W/f" "$W/slp.service"
+check "t715-sleep-prepare.service: before sleep.target, oneshot kept active, prepare then resume" \
+    sh -c 'grep -qx "Before=sleep.target" "$1" && grep -qx "StopWhenUnneeded=yes" "$1" &&
+           grep -qx "Type=oneshot" "$1" && grep -qx "RemainAfterExit=yes" "$1" &&
+           grep -qx "ExecStart=/usr/local/sbin/t715-sleep prepare" "$1" &&
+           grep -qx "ExecStop=/usr/local/sbin/t715-sleep resume" "$1" &&
+           grep -qx "WantedBy=sleep.target" "$1"' _ "$W/slp.service"
+get /etc/systemd/system/t715-sleep-restore.service; cp "$W/f" "$W/slr.service"
+check "t715-sleep-restore.service: oneshot, runs restore, no Install section" \
+    sh -c 'grep -qx "Type=oneshot" "$1" && grep -qx "ExecStart=/usr/local/sbin/t715-sleep restore" "$1" &&
+           ! grep -q "^\[Install\]" "$1"' _ "$W/slr.service"
+get $SL; cp "$W/f" "$W/sl"
+check "t715-sleep: never writes rfkill, NetworkManager's settings or the modem's own switch" \
+    sh -c '! grep -v "^[[:space:]]*#" "$1" | grep -Eq "rfkill|t715-modem-power (on|off)|/etc/NetworkManager"' _ "$W/sl"
 check "t715-shutdown-log.service enabled (shutdown steps kept in pstore)" test "$(linkto /etc/systemd/system/sysinit.target.wants/t715-shutdown-log.service)" = /etc/systemd/system/t715-shutdown-log.service
 check "t715-stuck-procs: a system-shutdown hook, mode 0755, byte for byte" \
     sh -c '[ "$1" = 0755 ] && cmp -s "$2" "$3"' _ "$(fmode /usr/lib/systemd/system-shutdown/t715-stuck-procs)" \

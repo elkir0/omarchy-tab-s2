@@ -1,0 +1,21 @@
+# SM-T715: the tablet's own suspend to RAM -- sleep once the screen has
+# been dark long enough on battery, and bring the radios back when it
+# lights (the prepare and restore units do the work around the sleep
+# itself; docs/image/ROOTFS.md, "Sleep").  It sleeps for real only with a
+# kernel that has the 5433's system sleep, and arms each sleep itself: on
+# any other kernel it masks the sleep targets until the next boot, says so
+# once and exits.  Restarted on failure, so the dark screen is always
+# watched.
+[Unit]
+Description=Sleep the tablet to RAM once the screen has been dark long enough (SM-T715)
+Documentation=file:///usr/local/sbin/t715-sleep
+After=t715-wifi-guard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/t715-sleep run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -173,6 +173,13 @@ command -v wpa_supplicant >/dev/null || die "no wpa_supplicant (NetworkManager's
 [ -x /usr/local/sbin/t715-wifi-guard ] || die "no /usr/local/sbin/t715-wifi-guard"
 systemctl enable t715-wifi-guard.service
 
+# Suspend to RAM: t715-sleep sleeps the tablet once its screen has been dark
+# for a minute on battery; its prepare unit powers the CP and the
+# Wi-Fi/Bluetooth chip down and arms the kernel's sleep before each suspend,
+# and brings them back after it (docs/image/ROOTFS.md, "Sleep").
+[ -x /usr/local/sbin/t715-sleep ] || die "no /usr/local/sbin/t715-sleep"
+systemctl enable t715-sleep.service t715-sleep-prepare.service
+
 # ufw on, nothing in but SSH and DHCP on the USB cable: the rules are the
 # overlay's /etc/ufw/user*.rules, written by ufw itself on the tablet.
 # config/firewall.sh is skipped: it opens LocalSend and Docker, and it would
@@ -186,11 +193,13 @@ systemctl enable ufw.service
 rm -f /var/lib/omarchy/provisioning/pending
 ln -sfn /dev/null /etc/systemd/system/omarchy-provision-owner.service
 
-# No suspend or hibernation: resume is untested on this kernel, and a hang
-# that ends in a watchdog reset boot-loops the tablet into RECOVERY
-# (docs/journal/COORDINATION.md).
-systemctl mask sleep.target suspend.target hibernate.target \
-    hybrid-sleep.target suspend-then-hibernate.target
+# No hibernation: a resume through sboot and a whole boot, and gigabytes
+# written to the eMMC at every sleep (docs/ROADMAP.md, "Not planned").
+# Suspend to RAM is t715-sleep's (above): it sleeps for real only with a
+# kernel that has the 5433's system sleep, arms each sleep itself, and on
+# any other kernel masks sleep.target and suspend.target until the next
+# boot, the protection this line gave before.
+systemctl mask hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 
 # No Plymouth screen at shutdown: one hand-over of the display less while
 # Hyprland exits.  A DRM commit that never completes after such hand-overs
