@@ -968,18 +968,24 @@ unchanged), it went through 39 unbinds placed 0 to 3 s after the patch
 RAM had loaded, about 260 whole-chip cycles (each unbinds Bluetooth)
 and 52 suspend/resume restores, with no oops. Every `t715-wifi-guard
 off` (before each sleep) and every recovery unbinds Bluetooth, so the
-daily system can meet the race; it has not been seen in about 80
-sleeps.
+daily system could meet the race; it was not seen in about 80 sleeps.
 
 **A brcmfmac warning at a failed start.** When the firmware halts
 during brcmfmac's setup, the remove path's
-`brcmf_bus_cancel_reset_work()` (from the `t715-wifi-recovery` series)
-calls `cancel_work_sync()` on `bus_reset`, a work item
-`brcmf_bus_started()` never set up. `__flush_work()` then warns: a
-WARNING trace in the kernel log, and the kernel tainted, at every
-failed start. Harmless.
+`brcmf_bus_cancel_reset_work()` (6.12.114's own, not from this
+project's series) calls `cancel_work_sync()` on `bus_reset`, a work
+item `brcmf_bus_started()` never set up. `__flush_work()` then warns: a
+WARNING trace in the kernel log, and the kernel tainted, at the next
+unbind after each start that failed that way — nine times in the
+night's power cycles. Harmless.
 
-**Left.** Two fixes for the next kernel: the hci_serdev use-after-free
-(21139b3ac62a), and brcmfmac's `bus_reset` cancellation made
-conditional on the work having been set up. The A57 effect's cause is
-unknown.
+**In the kernel.** Both fixes are the series
+`kernel/patches/t715-radio-fixes/`: upstream's 21139b3ac62a unchanged,
+and brcmfmac's `bus_reset` cancelled only once `brcmf_bus_started()`
+has set it up. Kernel `#17`, the `#16` tree plus that series, has been
+the daily kernel since 2026-11-11, after a test from RECOVERY on the
+daily root: 39 Bluetooth unbinds in the crash's window without an
+oops, 45 whole-chip cycles with 14 failed starts and no warning (the
+kernel's tainted flag stayed 0), and 6 dry-run restores, the Wi-Fi up
+7.6 s after the wake in five and 20.9 s in the sixth. The A57 effect's
+cause is still unknown.

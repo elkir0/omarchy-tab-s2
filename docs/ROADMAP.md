@@ -37,6 +37,11 @@ Tested on the same tablet:
   the other four in 23 to 40 s, against 8 to 82 s for six with the old
   one. Bluetooth now comes back once, after the Wi-Fi's judgment: about
   19 s after the wake, against 13 s. Not yet in a night of real sleeps.
+- **Two kernel fixes** (series `t715-radio-fixes`, the daily kernel `#17`
+  since 2026-11-11, tested from RECOVERY first): upstream's fix of a
+  use-after-free at a Bluetooth unbind, which had oopsed the kernel once
+  in a bench, and the end of brcmfmac's warning at a failed Wi-Fi start
+  (`docs/hardware/WIFI_BT_M5.md` section 7.10).
 
 ## State at 1.0.3 (2026-11-10)
 
@@ -322,14 +327,15 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
   while the controller still talks (1.4 s after its patch RAM had loaded,
   in the bench that found it) oopsed the kernel (a
   use-after-free in 6.12.114's `hci_uart_unregister_device()`); upstream
-  fixed it on 2026-10-14, commit 21139b3ac62a — not in 6.12.114, it
-  applies cleanly and was tested as a module on the daily kernel (39
-  unbinds, about 260 whole-chip cycles, 52 restores, no oops). Left: into
-  the next kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
-- **brcmfmac's warning at a failed Wi-Fi start**: the remove path cancels
-  a reset work item the start path never set up, so every failed start
-  leaves a WARNING trace and taints the kernel. Harmless; a one-line fix
-  for the next kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
+  fixed it on 2026-10-14, commit 21139b3ac62a, not in 6.12.114. Fixed on
+  2026-11-11: that commit, unchanged, is in the series
+  `t715-radio-fixes` and the daily kernel `#17`
+  (`docs/hardware/WIFI_BT_M5.md` section 7.10).
+- **brcmfmac's warning at a failed Wi-Fi start**: 6.12.114's remove path
+  cancelled a reset work item that the start path had not set up when
+  the firmware halted during the setup, which left a WARNING trace and
+  tainted the kernel. Harmless. Fixed on 2026-11-11, in the same series
+  and kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
   never run end to end; a first-boot wizard; a TWRP zip; a USB link Windows can use (RNDIS or

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/2] wifi: brcmfmac: cancel bus_reset only once
+ brcmf_bus_started() set it up
+
+brcmf_bus_cancel_reset_work(), on the remove path of the PCIe, SDIO and
+USB buses, cancels drvr->bus_reset whenever bus_if->drvr is set.  The
+work item is set up by INIT_WORK() in brcmf_bus_started(); when the
+firmware halts during brcmfmac's setup, the start never reaches it and
+the item is still zeroed, so cancel_work_sync() warns from
+__flush_work() and taints the kernel.  Cancel it only when its function
+is set.
+
+On the SM-T715 (BCM4358 on PCIe), where a Wi-Fi start fails now and
+then and t715-wifi-guard power-cycles the chip by unbinding the PCIe
+host, 6.12.114 logged nine of these warnings in a night of power
+cycles (2026-11-11); with this patch, none in 45 cycles with 14 failed
+starts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+index 11fca83cb..71c6390d4 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+@@ -1181,7 +1181,12 @@ void brcmf_bus_cancel_reset_work(struct brcmf_bus *bus_if)
+ {
+ 	mutex_lock(&bus_if->bus_reset_lock);
+ 	bus_if->removing = true;
+-	if (bus_if->drvr)
++	/*
++	 * bus_reset is set up in brcmf_bus_started(): a firmware that halts
++	 * during the setup leaves it untouched, and cancel_work_sync() on it
++	 * would warn from __flush_work().
++	 */
++	if (bus_if->drvr && bus_if->drvr->bus_reset.func)
+ 		cancel_work_sync(&bus_if->drvr->bus_reset);
+ 	mutex_unlock(&bus_if->bus_reset_lock);
+ }
+-- 
+2.52.0
+
