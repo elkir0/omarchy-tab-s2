@@ -24,6 +24,19 @@ Tested on the same tablet:
   transfer is finished by polling. The display test failed 5 wakes in 6 on the first test
   kernel and 3 in 6 on the next, then none in 28 with the changes — the failure came in
   runs, so the count alone does not prove the fix (`docs/image/ROOTFS.md`, "Sleep").
+- **The Wi-Fi comes back faster after a failed start or a wake**: the
+  guard's recovery now judges each try every second from the bind
+  (a failure signature ends it at once), binds Bluetooth once at the end
+  instead of per try, makes up to ten tries (it was six), and boosts the
+  A57 cores for the length of a recovery — online and their policy on
+  `performance` — which cut the failed starts from 19 in 45 to 4 in 45
+  (`docs/image/ROOTFS.md`, `docs/hardware/WIFI_BT_M5.md` section 7.10).
+  In benches on the reference tablet, on the cable (dry-run suspends
+  woken by the RTC, the screen dark): 40 restores with the new recovery,
+  36 on the first try with the Wi-Fi up 7.1 to 7.7 s after the wake and
+  the other four in 23 to 40 s, against 8 to 82 s for six with the old
+  one. Bluetooth now comes back once, after the Wi-Fi's judgment: about
+  19 s after the wake, against 13 s. Not yet in a night of real sleeps.
 
 ## State at 1.0.3 (2026-11-10)
 
@@ -162,7 +175,9 @@ The steps, the riskiest last:
    day and in 1.0.3, bring a failed start back that way (20 simulated boots: 11 good at
    once, 8 brought back, 1 not), and brcmfmac no longer crashes on a halted firmware. Done:
    the Wi-Fi is powered down before each sleep (`t715-wifi-guard off`) and brought back
-   after it, in 20 to 120 s. Left: the chip's own failure as its radio starts (its supplies
+   after it, in 20 to 120 s. With the 2026-11-11 recovery (the A57 boost, §7.10 of the
+   Wi-Fi document): 7.1 to 7.7 s in 36 of 40 dry-run restores, 23 to 40 s in the other
+   four. Left: the chip's own failure as its radio starts (its supplies
    and crystal as stock powers it, the firmware's 37.4 MHz path), or keeping it powered
    through sleep (the D3 path). The test kernel has a run-time switch for each piece
    (stock's handshake, the chip kept powered), and the tests run unattended from RECOVERY
@@ -303,7 +318,18 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
   kernel log, which fall as its ring buffer turns over (about 1500 lines, some 4 hours, on
   the tablet), so a failure after an earlier one's lines had gone could pass for a good
   start; they now judge only the lines logged after the mark.
-- **NetworkManager at shutdown**: read what the shutdown hooks catch, then fix the wait.
+- **A kernel crash at a Bluetooth unbind**: an unbind of `hci_uart_bcm`
+  while the controller still talks (1.4 s after its patch RAM had loaded,
+  in the bench that found it) oopsed the kernel (a
+  use-after-free in 6.12.114's `hci_uart_unregister_device()`); upstream
+  fixed it on 2026-10-14, commit 21139b3ac62a — not in 6.12.114, it
+  applies cleanly and was tested as a module on the daily kernel (39
+  unbinds, about 260 whole-chip cycles, 52 restores, no oops). Left: into
+  the next kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
+- **brcmfmac's warning at a failed Wi-Fi start**: the remove path cancels
+  a reset work item the start path never set up, so every failed start
+  leaves a WARNING trace and taints the kernel. Harmless; a one-line fix
+  for the next kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
   never run end to end; a first-boot wizard; a TWRP zip; a USB link Windows can use (RNDIS or

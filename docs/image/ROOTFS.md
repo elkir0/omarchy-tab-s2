@@ -908,19 +908,39 @@ with one log line. A check judges only the lines logged since the last
 good one, and a recovery try only those since its bind: the kernel's ring
 buffer turns over within hours, so counts over the whole log would fall
 as old lines leave it. A failed check power-cycles
-the *whole* Wi-Fi/Bluetooth chip, six tries by default — unbind the PCIe
-host (which cuts the Wi-Fi enable line), unbind `hci_uart_bcm` (the
-Bluetooth enable), wait 2 s, bind the host, 1 s later bind Bluetooth
-again — because power-cycling the Wi-Fi alone recovers far less often:
-the chip's shared part stays powered while Bluetooth is on. A rebind needs
-nothing else from the script: the udev rules give the chip back its
-addresses and ASPM setting. The whole cycle kills a running Wi-Fi and
+the *whole* Wi-Fi/Bluetooth chip, ten tries by default — unbind the PCIe
+host (which cuts the Wi-Fi enable line; given 60 s), unbind
+`hci_uart_bcm` (the Bluetooth enable) when it is bound, wait 2 s, bind
+the host — because power-cycling the Wi-Fi alone recovers far less often:
+the chip's shared part stays powered while Bluetooth is on. Before the
+first try the guard brings the A57 cores (cpu4 to cpu7) online and puts
+their cpufreq policy on `performance`, and undoes it afterwards (the
+governor back, the cores offline again unless the screen is lit and
+`/run/t715-power/saver` is absent): good starts came 41 of 45 with the
+A57s online and every policy on `performance`, against 26 of 45 in the
+screen-off state, for a reason not known
+(`docs/hardware/WIFI_BT_M5.md` §7.10). Each try is judged every second
+from the bind: a failure signature ends it at once, no interface within
+20 s fails it, and a start is good only after the interface has been up,
+with no signature, for 5 seconds in a row — a failed start shows its
+signature 1 to 4 s after the bind and a good one creates its interface
+1 to 2 s after it, so a failed try now costs about 8 s instead of 15 s or more
+with the old fixed 12 s wait. Bluetooth is bound once, after the good try
+or the last failed one: its patch RAM loads for about 5.7 s after the
+bind, and unbinding it during that download blocks the next one for
+about 20 s — binding it after the Wi-Fi's judgment does not hurt the
+Wi-Fi (8 good starts of 20, none broken by Bluetooth's later bind). A
+rebind needs nothing else from the script: the udev rules give the
+chip back its addresses and ASPM setting. The whole cycle kills a
+running Wi-Fi and
 Bluetooth for a few seconds — the limits of the approach — and it stops at
 the first good start; at most 3 recoveries in any 30 minutes, past that it
 only logs, until the next boot; only the two drivers' bind/unbind files
-are ever written, never the modem, rfkill or NetworkManager. The
-subcommand `off` powers the whole chip down for the system's sleep
-("Sleep"): it takes the recovery lock (30 s at most), unbinds the PCIe
+are ever written, plus, for the length of a recovery, the A57 cores'
+`online` files and their governor — never the modem, rfkill or
+NetworkManager. The subcommand `off` powers the whole chip down for
+the system's sleep ("Sleep"): it takes the recovery lock (30 s at
+most), unbinds the PCIe
 host then Bluetooth, and leaves a marker in /run naming the Bluetooth
 device it unbound, so that `recover` binds it back; while the marker
 exists the watch judges nothing — the chip is down on purpose. Exit 0 when
@@ -993,9 +1013,15 @@ it sleeps there is no Wi-Fi, no Bluetooth, no calls and no SMS (the CP is
 off) and no notifications; the Wi-Fi still cannot wake it. Measured on the
 reference tablet, 2026-11-10: about 80 real sleeps, woken by the RTC,
 Power, Home and the cover, all clean; the CP comes back in about 13 s and
-the Wi-Fi in 20 to 120 s (median about 40 s — the BCM4358's start fails
-about one try in two after a long power-off, and the guard's `recover`
-retries, up to 6). The power drawn asleep is not measured yet.
+the Wi-Fi in 20 to 120 s (median about 40 s, before 2026-11-11 — the
+BCM4358's start fails about one try in two after a long power-off, and
+the guard's `recover` retries, up to 6 then, ten since). With the
+2026-11-11 recovery and its A57 boost, 40 dry-run restores on the
+cable: 36 came up on the first try, the Wi-Fi up 7.1 to 7.7 s after the
+wake, the other four after one to three failed tries, in 23 to 40 s;
+Bluetooth, bound once after the Wi-Fi's judgment, about 19 s after the
+wake (13 s before) (`docs/hardware/WIFI_BT_M5.md` §7.10). The power
+drawn asleep is not measured yet.
 
 `t715-sleep off` and `t715-sleep on` (root) switch it
 (`/var/lib/t715-sleep/mode`, read at every poll); `t715-sleep status`

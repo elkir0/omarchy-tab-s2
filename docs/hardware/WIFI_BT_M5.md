@@ -851,8 +851,10 @@ device, `image/tests/ondevice/wifi-guard-test.sh` (part `guard` of
 off 2 s, then on in the boot's order, the guard's check 15 s later):
 11 good at once, 8 recovered by the guard (1 to 3 tries, 18 to 60 s),
 1 not recovered after 4 tries — a try recovered 8 of 17 times, hence
-six tries by default. Its off-device test is
-`image/tests/test_t715_wifi_guard.sh`.
+six tries by default. Since 2026-11-11 a try is judged every second
+from the bind, Bluetooth is bound once at the end, and a recovery makes
+up to ten tries with the A57 cores boosted (§7.10). Its off-device test
+is `image/tests/test_t715_wifi_guard.sh`.
 
 **In use.** Kernel `#11` and the service have been the daily system's
 since 2026-11-09: on the first boot the Wi-Fi came up at once, the
@@ -870,4 +872,114 @@ try of two, so the plan is to power the chip off before sleeping and
 let the service bring it back after. The daily suspend has done so
 since 2026-11-10: `t715-wifi-guard off` powers the chip down
 before each sleep, and `recover` brings it back after it, in 20 to
-120 s (`docs/image/ROOTFS.md`, "Sleep").
+120 s (`docs/image/ROOTFS.md`, "Sleep"). What tips a start either way
+was narrowed on 2026-11-11: the state of the A57 cluster at the chip's
+start (§7.10).
+
+### 7.10 Faster recovery tries, the A57 cores and a Bluetooth crash (2026-11-11)
+
+Measured on the reference tablet on kernel `#16`, whole-chip power
+cycles alternated cycle by cycle within each run, the screen off
+throughout, on the cable. The changes it describes are in
+`t715-wifi-guard` and its test, `image/tests/test_t715_wifi_guard.sh`.
+
+**The judgment.** A failed start shows its signature 1 to 4 s after the
+host bind, and a good one creates its interface 1 to 2 s after it. The
+old fixed 12 s wait made every failed try cost about 15 s or more; a
+try is now judged every second from the bind: a failure signature ends
+it at once, no interface within 20 s fails it, and a start counts as
+good only when the interface has been up, with no signature, for 5
+seconds in a row (`T715_WG_GOOD_SECS`, 5). A failed try now costs about
+8 s on the tablet, which is why a recovery makes up to ten tries (it
+was six): at one start in two failing, ten consecutive failures are
+about one restore in a thousand, against one in sixty with six.
+
+**Bluetooth.** The patch RAM loads at 115200 baud for about 5.7 s after
+Bluetooth's bind. Unbinding `hci_uart_bcm` during that download blocks
+about 20 s: in a bench, the next bind came 26 s after a cycle that
+ended mid-download, against 7 s otherwise — a try that fails within 4 s
+would always hit it. Bluetooth is now bound once, after the good try or
+the last failed one, and that order does not hurt the Wi-Fi: 8 good
+starts of 20 in that order, and in all 8 the Wi-Fi stayed up through
+Bluetooth's later bind and download.
+
+**The A57 cores.** The CPU's state at the Wi-Fi's start moves the odds
+more than anything else measured:
+
+| CPU state at the Wi-Fi's start | Good starts |
+|---|---|
+| the screen-off state: A57 offline, A53 on schedutil | 26 of 45 |
+| A57 online, every policy on performance (A57 at 1.5 GHz) | 41 of 45 |
+| A57 online, schedutil (A57 idling at 0.8 to 1.1 GHz) | 11 of 15 |
+| A57 offline, only the A53 policy on performance | 8 of 15 |
+
+The boost removes the failures during the firmware's boot, 1 to 2 s
+after the bind: 1 of 45 against 13 of 45. Six suspend/resume restores
+(dry runs on the cable, woken by the RTC, the screen dark) with the A57
+cores held as in the second row all came up on the first try, the Wi-Fi
+up 6.3 to 6.6 s after the wake; six without took 8.1 to 82 s, with four
+failed tries in all. `t715-keys` takes the A57 cores offline whenever
+the screen is dark, so a restore after a dark wake, or a recovery from
+the watch with the screen off, started the chip in the bad state. A
+recovery now brings the A57 cores online and puts their policy on
+`performance` before the first try, and undoes it afterwards. Why the
+cluster's state matters is not known; a supply effect of the load is a
+suspect, not proven.
+
+**The new recovery, measured.** The same dry-run restores with the new
+guard installed on the daily system, the A57 cores left offline by
+`t715-keys` before each sleep, so that the guard's own boost does the
+work: 40 restores, 36 up on the first try with the Wi-Fi up 7.1 to
+7.7 s after the wake, the other four after one to three failed tries,
+in 23 to 40 s. A judged second costs more than a second on the tablet: each one
+reads the kernel log and counts the signatures in it, some fifty
+processes at first, about 2.2 s of wall time; counting only the lines
+after the try's wm, and the whole log only for the state a good start
+saves, brought it to about 1.4 s. A good start is therefore judged
+about 7 s after the bind, and Bluetooth, bound after that judgment,
+has its patch RAM loaded about 19 s after the wake, against 13 s when
+it was bound 1 s after the host.
+
+**What was ruled out**, by the same alternated benches:
+
+- the bring-up order: host then Bluetooth 1 s later, 7 of 15 good
+  starts, against Bluetooth first with its patch loaded, 10 of 15;
+- the 32 kHz LPO's timing (it comes with Bluetooth's bind): the same
+  Bluetooth-first runs;
+- PCIe ASPM at the probe: policy `default` at the bind against
+  `powersupersave` (what the udev rule leaves after the boot's first
+  start), 11 of 15 against 7 of 15, then 9 of 15 against 11 of 15 —
+  and with ASPM off at the probe, starts still failed 1 to 2 s after
+  the bind, before any interface existed.
+
+**A kernel crash at a Bluetooth unbind.** An unbind of `hci_uart_bcm`
+1.4 s after the patch RAM had loaded oopsed the kernel: a NULL pointer
+dereference in `h4_recv_buf()` called from `bcm_recv()`, in the tty's
+receive work (`flush_to_ldisc`). The tablet panicked and rebooted;
+pstore kept the record. The cause is a use-after-free in 6.12.114's
+`hci_uart_unregister_device()` (`drivers/bluetooth/hci_serdev.c`): it
+frees the `hci_dev` before it stops the serdev port, so late data from
+the controller reaches the protocol's receive with a freed device.
+Upstream fixed it on 2026-10-14: commit 21139b3ac62a, "Bluetooth:
+hci_serdev: Fix use-after-free in hci_uart_unregister_device()". It is
+not in 6.12.114 and applies cleanly. Built as a module against kernel
+`#16` and loaded on the tablet (the module only; the daily kernel
+unchanged), it went through 39 unbinds placed 0 to 3 s after the patch
+RAM had loaded, about 260 whole-chip cycles (each unbinds Bluetooth)
+and 52 suspend/resume restores, with no oops. Every `t715-wifi-guard
+off` (before each sleep) and every recovery unbinds Bluetooth, so the
+daily system can meet the race; it has not been seen in about 80
+sleeps.
+
+**A brcmfmac warning at a failed start.** When the firmware halts
+during brcmfmac's setup, the remove path's
+`brcmf_bus_cancel_reset_work()` (from the `t715-wifi-recovery` series)
+calls `cancel_work_sync()` on `bus_reset`, a work item
+`brcmf_bus_started()` never set up. `__flush_work()` then warns: a
+WARNING trace in the kernel log, and the kernel tainted, at every
+failed start. Harmless.
+
+**Left.** Two fixes for the next kernel: the hci_serdev use-after-free
+(21139b3ac62a), and brcmfmac's `bus_reset` cancellation made
+conditional on the work having been set up. The A57 effect's cause is
+unknown.
