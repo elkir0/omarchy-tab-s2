@@ -4,7 +4,9 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
-## Since 1.0.3 (main, not released yet)
+## State at 1.0.4 (2026-11-11)
+
+1.0.4 is what follows; everything else is 1.0.3's.
 
 Tested on the same tablet:
 
@@ -146,7 +148,7 @@ what it brings against what it costs. **Study** means a source study first, writ
 | 12 | Fingerprint reader | unlocking with a finger | one test decides; then very large | studied |
 | 13 | Calls without 2G and 3G (VoLTE) | calls once those networks are switched off | study; likely out of reach | not started |
 
-### 1. Sleep (daily on the reference tablet since 2026-11-10)
+### 1. Sleep (daily on the reference tablet since 2026-11-10, in 1.0.4)
 
 With the screen off the SoC stays awake: 754 mW, about 20 hours (`docs/hardware/BATTERY.md`
 section 11). Stock Android suspends to RAM: the PMU's sleep table, the wake masks, then one

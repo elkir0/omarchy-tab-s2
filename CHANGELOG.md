@@ -1,5 +1,124 @@
 # Changelog
 
+## 1.0.4, pre-release
+
+Everything since 1.0.3: the tablet suspends to RAM once its screen has been dark for a minute
+on battery, a Wi-Fi that fails to start comes back in seconds instead of a minute or more, and
+the kernel no longer crashes at a Bluetooth unbind. Also new, for developers: the on-device
+tests of the sleep.
+
+- **Sleep.** The tablet suspends to RAM. The root image's new service `t715-sleep` suspends it
+  once the screen has been dark for a minute on battery, unless a reason holds — external
+  power, audio playing, a call, the hotspot, a remote login, Omarchy's stay-awake, a pacman
+  transaction, a Wi-Fi recovery, a sleep inhibitor, the CP between states — and at 5 % of
+  battery or less it powers the tablet off instead of sleeping it. Power, Home, the cover and
+  a 12-hour battery check wake it. While it sleeps there is no Wi-Fi, no Bluetooth, no calls,
+  no SMS and no notifications (the CP is off), and the Wi-Fi cannot wake it; on external power
+  the radios still go down but the suspend stays a dry run, and the tablet does not really
+  sleep. `t715-sleep off` / `on` / `status` (root) switch it. The kernel series `t715-sleep`
+  (7 patches) registers the Exynos 5433's system sleep, and a suspend sleeps for real only
+  when `t715-sleep` armed it; the same series fixes a black screen at a key wake
+  (samsung-dsim's interrupt handled in hard interrupt context, a late transfer finished by
+  polling). On the reference tablet on 2026-11-10: about 80 real sleeps woke clean (the RTC,
+  Power, Home, the cover); the CP came back in about 13 s. The power drawn asleep is not
+  measured yet ([docs/image/ROOTFS.md](docs/image/ROOTFS.md), "Sleep").
+- **Wi-Fi.** The guard's recovery, which could take more than a minute, now judges each try
+  every second from the bind (a failure signature ends it at once), binds Bluetooth once at
+  the end instead of once per try, makes up to ten tries (six before), and brings the A57
+  cores online on `performance` for the length of a recovery: the chip started 41 times in 45
+  that way, against 26 in 45 in the screen-off state, where those cores sit offline; the cause
+  is not known. In 40 dry-run restores on the reference tablet (RTC wakes, the screen dark, on
+  the cable) the Wi-Fi was up 7.1 to 7.7 s after the wake in 36 of them, and in 23 to 40 s in
+  the other four, against 8 to 82 s with 1.0.3's recovery; Bluetooth comes back about 19 s
+  after the wake (13 s before). Also in the guard since 1.0.3: `off`, the whole chip powered
+  down for each sleep; the replay of a recovery's kernel lines after it ended, fixed; and a
+  blind spot of the checks, which counted over the whole kernel log while its ring buffer
+  turns over, fixed — they judge only the lines after the last good check
+  ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.10).
+- **Two kernel fixes.** The series `t715-radio-fixes` (2 patches): upstream's commit
+  21139b3ac62a, unchanged — a use-after-free in `hci_uart_unregister_device()` that oopsed
+  the kernel at a Bluetooth unbind while the controller still talked (once, in a bench); every
+  sleep and every Wi-Fi recovery unbinds Bluetooth — and brcmfmac's remove path no longer
+  warning and tainting the kernel after a start whose firmware halted during the setup. The
+  daily kernel of the reference tablet since 2026-11-11 (`#17`,
+  [docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.10).
+- **For developers.** The on-device tests `image/tests/ondevice/sleep-soak.sh` (real sleeps
+  woken by the RTC, each timed and checked) and `image/tests/ondevice/sleep-display.sh` (the
+  display at a key wake).
+- **Kernel.** Linux 6.12.114 with two new series on top of 1.0.3's fourteen, `t715-sleep` and
+  `t715-radio-fixes`. Sixteen in all, in this order: `bringup modem parity gps charger
+  camera-af cpufreq power camera-mc power-gpu turbo sdcard bluetooth wifi-recovery sleep
+  radio-fixes`. Built from the published patches with the fixed identity
+  ([kernel/README.md](kernel/README.md)). The optional `t715-linkpm` series is still not in
+  it.
+- **Software.** The packages are 1.0.3's, from the same package layers of its build: omamobile-shell 0.2.94-5, Omarchy 4.0.6 (pinned), Hyprland 0.57.2, Mesa 26.2.6, Qt 6.12.0, Quickshell 0.3.2, systemd 262.1, Firefox 157.0, Chromium 150. The image adds `t715-sleep` and its three units
+  (`t715-sleep.service`, `t715-sleep-prepare.service`, `t715-sleep-restore.service`), and it
+  masks only the three hibernation targets now: 1.0.3 masked `sleep.target` and
+  `suspend.target` too, and `t715-sleep` masks those two until the next boot on a kernel
+  without the Exynos 5433's system sleep. The root image is 5.3 GiB raw (5704253440
+  bytes); the published `rootfs-omarchy.img.xz` is 1237682648 bytes.
+- **From 1.0.3.** There is no update path yet, the same rule as 1.0.3 from 1.0.2: the first
+  boot copies the image only into a persistent root that does not exist yet. Flashing only
+  1.0.4's `boot.img` over a 1.0.3 install gives that system the new kernel and its modules
+  (the initramfs installs them into the root): the system sleep and the display fix, the two
+  radio fixes. It does not give the sleep itself or the new recovery, which live in the root
+  image (1.0.3's root keeps `sleep.target` and `suspend.target` masked, so it never
+  suspends); they can be added by hand, as the reference tablet's daily system got them, from
+  this repository's `image/rootfs/overlay/usr/local/sbin/` (`t715-sleep`, `t715-wifi-guard`)
+  and `image/rootfs/overlay/etc/systemd/system/` (the three `t715-sleep*.service` units):
+
+  ```bash
+  sudo install -m 755 t715-sleep t715-wifi-guard /usr/local/sbin/
+  sudo install -m 644 t715-sleep.service t715-sleep-prepare.service t715-sleep-restore.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl unmask sleep.target suspend.target
+  sudo systemctl enable --now t715-sleep.service
+  sudo systemctl enable t715-sleep-prepare.service
+  sudo systemctl restart t715-wifi-guard.service
+  ```
+
+  On 1.0.3's kernel `t715-sleep` masks the two targets again until the next boot, so the
+  service is harmless there.
+
+<!-- TESTED: the supervisor writes this paragraph -->
+
+Not tested: <!-- TESTED: the supervisor writes this paragraph -->
+
+Known issues:
+- **The Wi-Fi can still fail to start**, now and then, after a boot or a wake: the service
+  brings it back by itself — about 8 s after a wake in 36 restores of 40 on the reference
+  tablet, 23 to 40 s in the other four; the chip's own failure as its radio starts is not
+  fixed, and it fails more often with the A57 cores offline, which is why a recovery brings
+  them online ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.10).
+- **While the tablet sleeps** there is no Wi-Fi, no Bluetooth, no call, no SMS and no
+  notification (the CP is off), and the Wi-Fi cannot wake it; after a wake the Wi-Fi is back
+  in about 8 s, Bluetooth in about 19 s, the CP in about 13 s. The power drawn asleep is not
+  measured yet. The black screen at a key wake was fixed in the kernel, but it came in runs,
+  so the count that says so does not prove it.
+- **A Bluetooth mouse crashed the touch shell once, at its first pairing** (Quickshell 0.3.2,
+  SIGSEGV): the screen stayed black about 40 s while the crash was written, then the shell
+  came back by itself. Not seen again when the mouse reconnected.
+- **Omarchy's keyboard shortcuts did not answer** with the Bluetooth keyboard tried; not
+  investigated yet.
+- **The Camera app and the GPU.** While the Camera app runs, the kernel logs panfrost job
+  faults (`DATA_INVALID_FAULT`, `TILE_RANGE_FAULT`, `INSTR_TYPE_MISMATCH`, `JOB_BUS_FAULT`),
+  GPU page faults and now and then a `gpu sched timeout`, the GPU reset after a stuck job:
+  from none to a few dozen in a 45-second use, and once a burst of about 300. 1.0 Beta 1's
+  kernel, its GPU fixed at 266 MHz, does the same on this image (404 in one use, then 2, 0, 9
+  and 1), and so does this kernel with the GPU pinned at 266 MHz: it comes with the Camera
+  app's use of the GPU, not with the new frequencies. The app and the session kept running.
+- Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
+  when a new window appears (once during the app test).
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped
+  contiguously` lines per boot (70 at the check): the display rejects GPU buffers for direct
+  scanout and the compositor draws them instead.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive. On 2026-11-09 the reference tablet's USB link to a Mac stopped receiving after a
+  few frames and stayed so, through cable changes and replugs, until the end of the session
+  (the Mac was not restarted); the 1.0.3 and 1.0.4 tests went over Wi-Fi instead.
+
 ## 1.0.3, pre-release
 
 Everything since 1.0.2: a Wi-Fi start that fails is brought back by itself, without a

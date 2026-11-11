@@ -2,7 +2,7 @@
 
 The microSD slot, enabled by the series `kernel/patches/t715-sdcard/`
 (2 patches, section 6). Measured on the reference tablet on 2026-11-08,
-with a 16 GB SDHC card from 2018; not in a release yet.
+with a 16 GB SDHC card from 2018; in the 1.0.2 release and later.
 
 Path abbreviations:
 
@@ -143,8 +143,8 @@ gts28ltexx_cpufreq.config`:
 | the device tree | the node of section 2, its pins and pads, the two regulators renamed (section 3), the `mmc1` alias |
 | the file systems | vfat (UTF-8 names by default), exFAT and the code pages 437, iso8859-1 and utf8, built in: cards come FAT32 up to 32 GB, exFAT above |
 
-Not in a release yet; tested on 2026-11-08 from RECOVERY, on the daily
-root and on a test root.
+In the 1.0.2 release and later; tested on 2026-11-08 from RECOVERY, on the
+daily root and on a test root.
 
 **In BOOT since 2026-11-08, 16:43**, as the daily kernel `#9`: the 1.0.1
 release tree plus this series, the cpufreq fragment, `KBUILD_BUILD_VERSION=9`,

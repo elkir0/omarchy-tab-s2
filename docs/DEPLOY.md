@@ -1131,8 +1131,8 @@ From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` repor
   scaling**: the Mali-T760 stays at its 266 MHz boot clock (a design
   exists, not in the board).
 - **Suspend to RAM** needs the kernel of the `t715-sleep` series
-  (`kernel/README.md`; the daily kernel since 2026-11-10, not in a release
-  yet): `t715-sleep` sleeps the tablet once its screen has been dark for a
+  (`kernel/README.md`; in the 1.0.4 release kernel): `t715-sleep` sleeps
+  the tablet once its screen has been dark for a
   minute on battery, and on any other kernel it masks the sleep targets
   until the next boot, since a suspend there would freeze the system with
   the radios up (`docs/image/ROOTFS.md`, "Sleep"). Closing the cover

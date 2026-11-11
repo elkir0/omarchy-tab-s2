@@ -1,9 +1,9 @@
 # Installing Omarchy on the Samsung Galaxy Tab S2
 
 The install guide for the 1.0 releases, 1.0 Beta 1, then 1.0.1, then 1.0.2,
-then 1.0.3; the steps name 1.0.3's files. It takes a Samsung Galaxy Tab S2
-8.0 LTE (SM-T715) from stock Android, or from a tablet that already runs
-TWRP, to
+then 1.0.3, then 1.0.4; the steps name 1.0.4's files. It takes a Samsung
+Galaxy Tab S2 8.0 LTE (SM-T715) from stock Android, or from a tablet that
+already runs TWRP, to
 Omarchy: Hyprland and the Omarchy shell with the omarchy-mobile touch layer,
 on a mainline Linux 6.12 kernel, with LTE, calls and SMS. Android stops
 booting; its own data stays on the tablet, unused. An unofficial port, not
@@ -41,7 +41,7 @@ developer guide, [DEPLOY.md](DEPLOY.md).
 | A Samsung Galaxy Tab S2 8.0 LTE, model SM-T715, hardware revision 9 or later | the only tablet tested (revision 9); the release's board data covers revisions 9 and up. Other Tab S2 models are not covered |
 | Firmware `T715XXU2CRH1` (Android 7.0) | the modem accepts only that exact RADIO image, and the first boot reads the Wi-Fi and Bluetooth files from the tablet's own SYSTEM partition. On any other firmware, flash the stock `T715XXU2CRH1` with Odin first |
 | USERDATA as plain ext4, not encrypted | the boot stops with "no ext4 superblock" on an encrypted tablet |
-| About 11 GB free on internal storage | the image file (5.3 GiB in 1.0 Beta 1, 1.0.1, 1.0.2 and 1.0.3), plus the first boot's copy of its contents into the persistent root (4.3 GiB used, plus a 512 MiB margin) |
+| About 11 GB free on internal storage | the image file (5.3 GiB in 1.0 Beta 1, 1.0.1, 1.0.2, 1.0.3 and 1.0.4), plus the first boot's copy of its contents into the persistent root (4.3 GiB used, plus a 512 MiB margin) |
 | A computer with Odin or Heimdall | flashing BOOT and RECOVERY in Download mode |
 | The release files, checked | below |
 
@@ -52,8 +52,8 @@ The release files:
 | `boot.img` | the BOOT image (partition 9): the Linux kernel and initramfs that start Omarchy at power-on |
 | `recovery.img` | the RECOVERY image (partition 10): a rescue Linux that boots the image read-only |
 | `rootfs-omarchy.img.xz` | the Omarchy root file system, compressed |
-| `omarchy-tab-s2-1.0.3-AP.tar.md5` | the Odin package with `boot.img` and `recovery.img`: the "AP" file |
-| `omarchy-tab-s2-1.0.3-boot.tar.md5` | the Odin package with `boot.img` only, for a tablet that keeps TWRP in RECOVERY |
+| `omarchy-tab-s2-1.0.4-AP.tar.md5` | the Odin package with `boot.img` and `recovery.img`: the "AP" file |
+| `omarchy-tab-s2-1.0.4-boot.tar.md5` | the Odin package with `boot.img` only, for a tablet that keeps TWRP in RECOVERY |
 | `SHA256SUMS` | the checksum of every file |
 
 ## 2. Put the image on the tablet
@@ -135,7 +135,7 @@ edges, and report them.
    **Power + Volume down + Home** until the warning screen, then press
    **Volume up** to continue. With adb, `adb reboot download` does the same.
 3. Flash, with either tool:
-   - **Odin**: put `omarchy-tab-s2-1.0.3-AP.tar.md5` in the AP slot and
+   - **Odin**: put `omarchy-tab-s2-1.0.4-AP.tar.md5` in the AP slot and
      start;
    - **Heimdall**: `heimdall flash --BOOT boot.img --RECOVERY recovery.img`.
 4. After a Download-mode flash the bootloader may start RECOVERY first. That
@@ -161,16 +161,16 @@ work on this tablet.
 4. Either keep TWRP in Recovery, or install `recovery.img` there instead: then
    RECOVERY is the rescue Linux rather than TWRP. Keep TWRP, and only `boot.img`
    ever needs flashing again — that is what the
-   `omarchy-tab-s2-1.0.3-boot.tar.md5` package is for.
+   `omarchy-tab-s2-1.0.4-boot.tar.md5` package is for.
 5. Reboot, and continue with the first boot.
 
 ## 5. The first boot
 
 - The screen shows **"Setting up Omarchy (first boot)"** and a percentage about
   every ten seconds. This takes a few minutes (3 min 17 s for 1.0 Beta 1,
-  3 min 16 s for 1.0.1, 3 min 12 s for 1.0.2, 3 min 31 s for 1.0.3, on the
-  reference tablet): the tablet is copying the image into a persistent root
-  on the internal storage. Leave it alone.
+  3 min 16 s for 1.0.1, 3 min 12 s for 1.0.2, 3 min 31 s for 1.0.3, @SEED@ for
+  1.0.4, on the reference tablet): the tablet is copying the image into a
+  persistent root on the internal storage. Leave it alone.
 - The same boot takes the Wi-Fi and Bluetooth files from the tablet's own
   Android SYSTEM partition, read-only, and the system then makes the cameras'
   tables from the tablet's own camera firmware, also on SYSTEM.
@@ -250,6 +250,8 @@ Honesty about the testing, so you know where the surprises will be:
 - the TWRP path (B) is not yet tested end to end;
 - copying the image over MTP is not yet tested end to end;
 - one tablet ran this ROM, and no install by anyone else has been reported yet.
+
+<!-- TESTED: the supervisor writes this paragraph -->
 
 On that tablet, 1.0.3's published image was unpacked from its `.xz`, checked,
 and installed from RECOVERY with its own persistent root next to the owner's,
