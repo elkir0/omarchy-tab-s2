@@ -168,7 +168,7 @@ work on this tablet.
 
 - The screen shows **"Setting up Omarchy (first boot)"** and a percentage about
   every ten seconds. This takes a few minutes (3 min 17 s for 1.0 Beta 1,
-  3 min 16 s for 1.0.1, 3 min 12 s for 1.0.2, 3 min 31 s for 1.0.3, @SEED@ for
+  3 min 16 s for 1.0.1, 3 min 12 s for 1.0.2, 3 min 31 s for 1.0.3, 3 min 25 s for
   1.0.4, on the reference tablet): the tablet is copying the image into a
   persistent root on the internal storage. Leave it alone.
 - The same boot takes the Wi-Fi and Bluetooth files from the tablet's own
@@ -251,14 +251,20 @@ Honesty about the testing, so you know where the surprises will be:
 - copying the image over MTP is not yet tested end to end;
 - one tablet ran this ROM, and no install by anyone else has been reported yet.
 
-<!-- TESTED: the supervisor writes this paragraph -->
-
-On that tablet, 1.0.3's published image was unpacked from its `.xz`, checked,
+On that tablet, 1.0.4's published image was unpacked from its `.xz`, checked,
 and installed from RECOVERY with its own persistent root next to the owner's,
 then checked: the first boot and its copy, a second boot, the rescue, the
-session, the Wi-Fi and its recovery service, the microSD card, Bluetooth, the
-pointer settings in place, the Battery saver, the modem's switch, the speaker
-and microphone devices (`CHANGELOG.md`).
+session, the sleep (three suspends on the cable, each a dry run, and the
+radios back after each), the Wi-Fi and its recovery, the microSD card,
+Bluetooth, the pointer settings in place, the Battery saver, the modem's
+switch, the speaker and microphone devices (`CHANGELOG.md`).
+
+For 1.0.3, the published image went through the same first boot on that
+tablet, next to the owner's system, and was checked there: the first boot and
+its copy, a second boot, the rescue, the session, the Wi-Fi and its recovery
+service, the microSD card, Bluetooth, the pointer settings in place, the
+Battery saver, the modem's switch, the speaker and microphone devices
+(`CHANGELOG.md`).
 
 For 1.0.2, the published image went through the same first boot on that
 tablet, next to the owner's system, and was checked there: the first boot and

@@ -80,9 +80,43 @@ tests of the sleep.
   On 1.0.3's kernel `t715-sleep` masks the two targets again until the next boot, so the
   service is harmless there.
 
-<!-- TESTED: the supervisor writes this paragraph -->
+Tested on one tablet, the reference one, on 2026-11-11, booted from RECOVERY next to its owner's
+system with test boot images carrying the release's kernel and initramfs (the release's
+`boot.img` differs only by the knobs that name the image and the root; the test images also
+had `t715.autotest=1`, whose script gave the test system the daily system's Wi-Fi network and
+its SSH rule). The published `rootfs-omarchy.img.xz` was sent to the tablet over Wi-Fi,
+unpacked there (`xz -dk`, 141 s) and checked against `SHA256SUMS`, both lines OK, then got a
+persistent root of its own: the first boot copied it in 205 s (3 min 25 s; 1.0.3: 3 min 31 s),
+took the Wi-Fi and Bluetooth files from SYSTEM, made the cameras' seven tables, bound the
+sensors, and Omarchy's session came up by itself. On that boot: the release kernel (`#1`), not
+tainted, no oops and no GPU job fault, the GPU scaling from 160 to 700 MHz and the A57 cores up
+to 1.5 GHz, the Bluetooth driver with upstream's fix; `t715-sleep` active, the kernel able to
+suspend to RAM (`deep`), `sleep.target` and `suspend.target` no longer masked; `t715-wifi-guard`
+active, its boot check finding the Wi-Fi up, `pci_exynos.wifi_power_cycle` at Y, no failure
+signature in the kernel log; the Wi-Fi on the network (7 networks in a scan); a recovery asked
+by hand, the A57 cores brought online for it and the first try good after 5 s, 13 s in all;
+three suspends on the cable, woken by the RTC, each a dry run through `t715-sleep`'s prepare
+and restore (the CP off, the chip powered down and back): the Wi-Fi back 7.8, 22.7 (after one
+failed try) and 7.7 s after the wake, Bluetooth's patch loaded after 19.2, 28.1 and 19.2 s, the
+kernel still untainted; the microSD card mounted by itself (exFAT), no partition label from the
+card under `/dev/disk/by-partlabel`, no MMC error; Bluetooth powered with its generated
+address, `/dev/uhid` present; the pointer settings in place; the Battery saver switched through
+power-profiles-daemon, power-saver taking the A57 cores offline, the A53 cores to 1 GHz, the GPU
+to 266 MHz and the animations off within 3 s, balanced giving it all back within 4 s; the
+modem's switch (22 checks); Chromium, Phone, Messages, Réseau mobile and the terminal starting;
+the speaker and microphone devices. A second boot copied nothing and kept the data (a marker
+file), the cameras present from the start and the Wi-Fi up at once; the rescue's test image
+booted the image read-only, with no modem module, the session and the Wi-Fi up.
+`image/tests/verify-rootfs.sh` passes its 379 checks on the image, and two builds of the kernel
+from the published patches, in two trees, were identical byte for byte.
 
-Not tested: <!-- TESTED: the supervisor writes this paragraph -->
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), the GPS, a real sleep on the
+release image itself (on the cable a suspend stays a dry run; the daily system, with the
+`t715-sleep` series and service, slept for real about 80 times on 2026-11-10), the power drawn
+asleep and the power draw on this build, the Bluetooth devices on the release image itself (a
+keyboard, a mouse and a speaker were tested with 1.0.2), the SD card tile and the pointer by
+eye, the Camera app, the Stay awake tile by hand, the heat guard's caps, and the Odin, Heimdall
+and TWRP installs.
 
 Known issues:
 - **The Wi-Fi can still fail to start**, now and then, after a boot or a wake: the service
@@ -108,9 +142,9 @@ Known issues:
   and 1), and so does this kernel with the GPU pinned at 266 MHz: it comes with the Camera
   app's use of the GPU, not with the new frequencies. The app and the session kept running.
 - Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
-  when a new window appears (once during the app test).
+  when a new window appears (none in the 1.0.4 test).
 - Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped
-  contiguously` lines per boot (70 at the check): the display rejects GPU buffers for direct
+  contiguously` lines per boot (62 at the check): the display rejects GPU buffers for direct
   scanout and the compositor draws them instead.
 - Android's leftover data on USERDATA is readable by the desktop user, who has Android's
   `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
