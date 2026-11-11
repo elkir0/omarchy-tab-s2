@@ -16,25 +16,49 @@
 # nothing else from this script: the udev rules give the chip back its
 # addresses and ASPM setting (t715-bt-addr@, t715-wifi-addr, the ASPM rule).
 #
+# A recovery's try is the host unbind, the Bluetooth unbind when it is
+# bound, OFF_SECS off, the host bind and the judgment; Bluetooth is
+# bound back once, at the end of the recovery and never inside a try.
+# Its patch download runs about 6 s after its bind (115200 baud), and an
+# unbind of hci_uart_bcm while it runs blocks about 20 s -- the driver's
+# setup times out command by command before the unbind returns -- so a
+# bind inside a try whose start fails 2 s later hands the next try's
+# unbind that bill (measured 2026-11-11: a cycle that ends mid-download
+# leaves the next bind 26 s away, against 7 s).  Bound after the Wi-Fi's
+# judgment instead, the Wi-Fi stays up through the later bind and
+# download (8 of 8 good starts did), and the order costs the start rate
+# nothing.
+#
 # A start failed when the kernel log holds one of brcmfmac's failure
 # signatures (a probe failure, an MMIO read, a halted firmware, a mailbox
 # reading all ones, a ring past its depth, or the second timeout on a query
-# command), or when no 802.11 interface came within 20 s.  Only the lines
-# logged since the last good judgment count: those after the line stamped
-# with the state's wm, or after the snapshot taken before a try's bind.
+# command), or when no 802.11 interface came within 20 s.  A try judges
+# its start every second, as it runs: the second a signature appears the
+# start failed, and an interface alone is not a good start either -- a
+# halt can come a few seconds after it appears -- it must hold, up and
+# clear, five seconds.  Only the lines logged since the last good judgment
+# count: those after the line stamped with the state's wm, or after the
+# snapshot taken before a try's bind.
 # The kernel log is a ring buffer, about 1500 lines on the tablet, and it
 # turns over within hours: whole-log counts fall as the old lines leave,
 # far enough for a new failure to sit below the counts an old judgment
 # saved and pass for none.  The saved counts are only the fallback for a
 # judgment with no wm to mark where it stopped.  Only the two drivers'
-# bind and unbind files are ever written: never the modem, rfkill or
+# bind and unbind files are ever written -- plus, for the length of a
+# recovery and never elsewhere, the A57 cores' online files and their
+# cpufreq governor (see the boost below): never the modem, rfkill or
 # NetworkManager's settings.
 #
 # Usage: t715-wifi-guard check             0 when the Wi-Fi is up, else 1
 #                                           with one line on stdout saying why
 #        t715-wifi-guard recover [TRIES]    power-cycle the whole chip, up to
-#                                           TRIES times (6): 0 when a start
-#                                           came good, 1 when none did, 2 when
+#                                           TRIES times (10), each try the
+#                                           host unbind, the Bluetooth unbind
+#                                           when it is bound, the off wait,
+#                                           the host bind and the judgment --
+#                                           Bluetooth bound back once, at the
+#                                           end: 0 when a start came
+#                                           good, 1 when none did, 2 when
 #                                           the host unbind got stuck, 3 when
 #                                           the kernel cannot power-cycle the
 #                                           Wi-Fi (see below)
@@ -84,6 +108,18 @@
 # failed start every bind hangs for minutes: the script then recovers
 # nothing and says so once.
 #
+# A recovery boosts the CPU for its own length.  t715-keys takes the A57
+# cores (cpu4 to cpu7) offline when the screen goes dark, so a recovery
+# with the screen dark -- after a dark wake, say -- starts the chip in
+# the state that measured 26 good starts of 45 (and 13 of its failures
+# in the firmware's boot, 1 to 2 s after the bind); the same starts with
+# the cores online and every cpufreq policy on performance measured 41
+# of 45, and six suspend restores held that way all came up on the
+# first try.  So a recovery brings those cores online and writes
+# performance to their governor before its first try, and puts them
+# back as t715-keys keeps them once it ends, on every exit; `off`,
+# `check` and the watch never boost.
+#
 # Every path and command comes from the environment, for the off-device
 # test (tests/test_t715_wifi_guard.sh):
 #   T715_WG_SYS        /sys, the sysfs root
@@ -108,12 +144,20 @@
 #                      "<path relative to the root> <value>", so a test can
 #                      check the order of the writes
 #   T715_WG_UNBIND_MAX 60, seconds given to the host unbind before giving up
+#   T715_WG_GOOD_SECS  5, seconds a start must hold, interface up and no new
+#                      failure signature, before a try judges it good: a halt
+#                      can come a few seconds after the interface appears
 #   T715_WG_OFF_SECS   2, seconds the chip stays off
 #   T715_WG_OFF_LOCK   30, seconds `off` waits for the recovery lock before
 #                      giving up on powering the chip down
 #   T715_WG_OFF_MARK   /run/t715-wifi-guard.off, the marker that says the
 #                      chip is powered down for a sleep; the watch judges
 #                      nothing while it is there
+#   T715_WG_BOOST_CPUS "4 5 6 7", the A57 cores a recovery brings online on
+#                      performance for its own length
+#   T715_WG_SAVER      /run/t715-power/saver, the power saver's flag: the
+#                      boost puts the cores back offline after a recovery
+#                      when it exists or the screen is dark
 #
 # One log line per decision and per try, and never a raw kernel log line, a
 # MAC or Bluetooth address, an SSID, a network name or the kernel command
@@ -139,13 +183,18 @@ UNBIND_MAX=${T715_WG_UNBIND_MAX:-60}
 OFF_SECS=${T715_WG_OFF_SECS:-2}
 OFF_LOCK_SECS=${T715_WG_OFF_LOCK:-30}
 OFF_MARK=${T715_WG_OFF_MARK:-/run/t715-wifi-guard.off}
-JUDGE_SECS=12    # after the host's bind, when a start is judged
+# `-`, not `:-`: an empty T715_WG_BOOST_CPUS is the boost turned off, not
+# the default list back again.
+BOOST_CPUS=${T715_WG_BOOST_CPUS-4 5 6 7}
+SAVER=${T715_WG_SAVER:-/run/t715-power/saver}
+GOOD_SECS=${T715_WG_GOOD_SECS:-5}
 IFACE_SECS=20    # how long the interface has to come after the bind
 SETTLE_SECS=60   # at boot, how long the first start has to settle
 DEBOUNCE_SECS=10 # after a signature in the log, before checking again
 MAX_REC=3        # recoveries allowed...
 WINDOW_SECS=1800 # ...in any 30 minutes
-TRIES_DEFAULT=6  # a try recovers about one failed start in two (2026-11-09)
+TRIES_DEFAULT=10 # a try recovers about one failed start in two (2026-11-09);
+                 # a failed try costs about 8 s, judged as it runs
 
 PCIE_DRV=$SYS/bus/platform/drivers/exynos-pcie
 PCIE_HOST=15700000.pcie
@@ -321,6 +370,22 @@ sig_new() {
     printf '%s\n' "${wg_out% }"
 }
 
+# sig_names TEXT: the names of the failure signatures in TEXT, space
+# separated on one line, in sig_new's order -- what
+# sig_new "" "$(sig_digest TEXT)" says, without the digest's round trip.
+# A recovery's judgment asks it every second, and on the tablet that
+# round trip (twelve sed pipelines) was most of each second's processes.
+sig_names() {
+    wg_out=""
+    [ "$(sig_count "$1" "$SIG_PROBE")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}probe_failed "
+    [ "$(sig_count "$1" "$SIG_MMIO")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}mmio_read "
+    [ "$(sig_count "$1" "$SIG_HALT")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}fw_halted "
+    [ "$(sig_count "$1" "$SIG_MBOX")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}mailbox_ones "
+    [ "$(sig_count "$1" "$SIG_DEPTH")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}ring_depth "
+    [ "$(sig_count "$1" "$SIG_QUERY")" -ge 2 ] 2>/dev/null && wg_out="${wg_out}query_timeout "
+    printf '%s\n' "${wg_out% }"
+}
+
 # line_signature LINE: the name of the failure signature in LINE, or
 # nothing.  Only the name ever leaves this: never the line itself.
 line_signature() {
@@ -437,7 +502,8 @@ kernel_can_cycle() {
 # mark_off [BTDEV] / off_marked / off_bt: the marker that says the chip is
 # powered down for a sleep.  `off` writes it, with the name of the
 # Bluetooth device it unbound (serial0-0) when it unbound one: `recover`
-# binds that device back, since bt_dev finds only a bound one.  A marker
+# binds that device back, once at its end, since bt_dev finds only a
+# bound one.  A marker
 # that exists already keeps its name when there is none to write (a second
 # off finds Bluetooth unbound by the first).  `recover`'s cycles remove it
 # before their first bind, so a failed recovery leaves no marker either;
@@ -465,6 +531,89 @@ off_marked() {
     [ -e "$OFF_MARK" ]
 }
 
+# boost_on / boost_off: the A57 cores online and on performance for the
+# length of a recovery.  t715-keys owns those cores and takes them
+# offline when the screen goes dark, so a recovery with the screen dark
+# starts the chip in the worst state measured -- good starts whole-chip
+# cycles alternated cycle by cycle on the same tablet (2026-11-11):
+#   L: screen off, cpu4-7 offline, A53 on schedutil      26 of 45
+#   H: cpu4-7 online, every cpufreq policy on performance 41 of 45
+#   Q: cpu4-7 online, schedutil (A57 at 0.8-1.1 GHz)      11 of 15
+#   P: cpu4-7 offline, only the A53 policy on performance  8 of 15
+# The failures H removes come in the firmware's boot, 1 to 2 s after
+# the bind: 1 of 45 against 13 of 45 in L.  Six suspend restores with
+# the cores held as in H all came up on the first try, 6.3 to 6.6 s
+# after the wake; six without took 8 to 82 s, with four failed tries.
+# The boost writes only what a recovery's own length needs and puts it
+# back as t715-keys keeps it; it never touches the exit code.
+#
+# wg_boost_oned: the cores this boost brought online (space separated),
+# to take back offline at its end.  wg_boost_gov: the cpufreq file the
+# governor was written to and wg_boost_govv its saved value -- the
+# policy is per cluster, so one write covers the cluster.  wg_boost_did:
+# the boost wrote something, so its end says its line too.
+wg_boost_oned=""
+wg_boost_gov=""
+wg_boost_govv=""
+wg_boost_did=0
+
+boost_on() {
+    wg_boost_oned=""
+    wg_boost_gov=""
+    wg_boost_govv=""
+    wg_boost_did=0
+    [ -n "$BOOST_CPUS" ] || return 0
+    for wg_c in $BOOST_CPUS; do
+        wg_f=$SYS/devices/system/cpu/cpu$wg_c/online
+        if [ -e "$wg_f" ] && [ "$(cat "$wg_f" 2>/dev/null)" = 0 ]; then
+            write_sysfs 1 "$wg_f" || true
+            wg_boost_oned="$wg_boost_oned$wg_c "
+        fi
+    done
+    for wg_c in $BOOST_CPUS; do
+        wg_g=$SYS/devices/system/cpu/cpu$wg_c/cpufreq/scaling_governor
+        if [ -e "$wg_g" ]; then
+            wg_boost_gov=$wg_g
+            wg_boost_govv=$(cat "$wg_g" 2>/dev/null)
+            write_sysfs performance "$wg_g" || true
+            break
+        fi
+    done
+    [ -n "$wg_boost_oned$wg_boost_gov" ] || return 0
+    wg_boost_did=1
+    log 'boost: the A57 cores online on performance for the recovery'
+}
+
+# The screen is lit unless a card0-DSI-1 dpms file reads Off -- that is
+# t715-sleep's rule, and a missing file reads as lit.
+boost_screen_lit() {
+    for wg_d in "$SYS"/class/drm/card*-DSI-1/dpms; do
+        [ -e "$wg_d" ] || continue
+        [ "$(cat "$wg_d" 2>/dev/null)" = Off ] && return 1
+        return 0
+    done
+    return 0
+}
+
+boost_off() {
+    # The governor back first, so the cores leave performance before
+    # they go offline.
+    if [ -n "$wg_boost_gov" ] && [ -e "$wg_boost_gov" ]; then
+        write_sysfs "$wg_boost_govv" "$wg_boost_gov" || true
+    fi
+    # t715-keys wants the cores online with the screen lit and the
+    # saver off: leave them so.  Any other state, and they go back
+    # offline as it keeps them.
+    if boost_screen_lit && [ ! -e "$SAVER" ]; then
+        wg_boost_oned=""
+    fi
+    for wg_c in $wg_boost_oned; do
+        write_sysfs 0 "$SYS/devices/system/cpu/cpu$wg_c/online" || true
+    done
+    [ "$wg_boost_did" -eq 1 ] || return 0
+    log 'boost: the A57 cores back as t715-keys keeps them'
+}
+
 # recover_cycles TRIES: the whole-chip power cycles, one per try, each
 # stopping at the first good start.  0 one came good (the state file then
 # holds that start's counts), 1 none did, 2 the host unbind got stuck, 3 the
@@ -479,23 +628,41 @@ recover_cycles() {
     # The chip is no longer down for a sleep: the cycles that follow are
     # meant to bring it back, so the marker must not survive them -- a
     # failed recovery leaves none either.
-    # Bluetooth unbound by `off` is not found by bt_dev: the marker names
-    # it, so that the cycles bind it back with the Wi-Fi.
+    # Bluetooth comes back once, at the end of the recovery and never
+    # inside a try: bt_dev finds only a bound device, so it is found
+    # before the first try (falling back to the name the marker keeps
+    # when `off` unbound it) and kept for the whole recovery -- after the
+    # first try it is unbound and bt_dev would find nothing.
+    wg_bt=$(bt_dev)
     wg_btoff=$(off_bt)
+    wg_btbind=${wg_bt:-$wg_btoff}
+    wg_btund=0
     rm -f "$OFF_MARK" 2>/dev/null || true
     log "recover: up to $wg_tries whole-chip power cycles"
     while [ "$wg_try" -lt "$wg_tries" ]; do
         wg_try=$((wg_try + 1))
-        wg_bt=$(bt_dev)
-        wg_btbind=${wg_bt:-$wg_btoff}
         if host_bound; then
             if ! unbind_host; then
                 log "recovery try $wg_try of $wg_tries: the host unbind did not return within $UNBIND_MAX s: giving up"
+                # A stuck Wi-Fi must not cost the Bluetooth too: when a
+                # try of this recovery unbound it, or it is unbound now
+                # (`off` unbound it before the recovery, the marker
+                # naming it), bind it back before leaving.  A stuck first
+                # try of a recovery that found it bound never touched it.
+                if [ -n "$wg_btbind" ] && { [ "$wg_btund" -eq 1 ] || [ -z "$(bt_dev)" ]; }; then
+                    write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+                fi
                 return 2
             fi
         fi
+        # Only the first try finds Bluetooth bound (and a recovery after
+        # `off`, whose chip is down, finds none); unbinding it here --
+        # before its patch download starts, never during one -- keeps
+        # every try's cost the same few seconds.
         if [ -n "$wg_bt" ]; then
             write_sysfs "$wg_bt" "$BT_DRV/unbind" || true
+            wg_bt=""
+            wg_btund=1
         fi
         do_sleep "$OFF_SECS"
         # The snapshot before the bind: the wm of its last timestamped
@@ -509,38 +676,56 @@ recover_cycles() {
         wg_pre=$(sig_digest "$wg_pretext")
         wg_prewm=$(klog_wm "$wg_pretext")
         write_sysfs "$PCIE_HOST" "$PCIE_DRV/bind" || true
-        do_sleep 1
-        if [ -n "$wg_btbind" ]; then
-            write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
-        fi
-        # The judgment, JUDGE_SECS after the bind: a signature in the
-        # lines logged after the pre-bind wm fails the start, and the
-        # interface has until IFACE_SECS after it to come.
-        do_sleep "$JUDGE_SECS"
-        wg_curtext=$(klog_text)
-        wg_cur=$(sig_digest "$wg_curtext")
-        if ts_valid "$wg_prewm"; then
-            wg_newsig=$(sig_new "" "$(sig_digest "$(klog_since "$wg_curtext" "$wg_prewm")")")
-        else
-            wg_newsig=$(sig_new "$wg_pre" "$wg_cur")
-        fi
-        if [ -n "$wg_newsig" ]; then
-            log "recovery try $wg_try of $wg_tries: failed: failure signature after the bind ($wg_newsig)"
-            continue
-        fi
-        wg_waited=$JUDGE_SECS
+        # The judgment runs every second from the bind, ending the try as
+        # soon as its outcome is known: a failure signature in the lines
+        # after the pre-bind wm fails the start at once, while a start must
+        # hold -- interface up, no signature -- GOOD_SECS seconds before it
+        # is good, for a halt can come a few seconds after the interface
+        # appears; the interface has until IFACE_SECS to come.
+        # The whole log's counts are taken only where they are needed --
+        # the judgment with no wm, and the state a good start saves: on
+        # the tablet each second's reading spawns some fifty processes,
+        # and the whole-log counts were a quarter of them, every second.
+        wg_waited=0
+        wg_held=0
         while :; do
+            do_sleep 1
+            wg_waited=$((wg_waited + 1))
+            wg_curtext=$(klog_text)
+            if ts_valid "$wg_prewm"; then
+                wg_newsig=$(sig_names "$(klog_since "$wg_curtext" "$wg_prewm")")
+            else
+                wg_cur=$(sig_digest "$wg_curtext")
+                wg_newsig=$(sig_new "$wg_pre" "$wg_cur")
+            fi
+            if [ -n "$wg_newsig" ]; then
+                log "recovery try $wg_try of $wg_tries: failed: failure signature after the bind ($wg_newsig), after $wg_waited s"
+                continue 2
+            fi
             if wifi_up; then
-                log "recovery try $wg_try of $wg_tries: the Wi-Fi came up"
-                save_state "$wg_cur"
-                return 0
+                wg_held=$((wg_held + 1))
+                if [ "$wg_held" -ge "$GOOD_SECS" ]; then
+                    log "recovery try $wg_try of $wg_tries: the Wi-Fi came up after $wg_waited s"
+                    # Bluetooth back at last: the Wi-Fi is up and judged,
+                    # and its patch download now runs unwatched.
+                    if [ -n "$wg_btbind" ]; then
+                        write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+                    fi
+                    save_state "$(sig_digest "$wg_curtext")"
+                    return 0
+                fi
+            else
+                wg_held=0
             fi
             [ "$wg_waited" -ge "$IFACE_SECS" ] && break
-            do_sleep 2
-            wg_waited=$((wg_waited + 2))
         done
         log "recovery try $wg_try of $wg_tries: failed: no interface within $IFACE_SECS s"
     done
+    # No start came good; Bluetooth comes back anyway -- it never caused
+    # the failure and the chip is no longer being cycled.
+    if [ -n "$wg_btbind" ]; then
+        write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+    fi
     log "recover: $wg_tries tries, none brought the Wi-Fi up"
     return 1
 }
@@ -613,7 +798,12 @@ off_cmd() {
 # cycle would then only break a start that came good: 4 comes back in that
 # case, the good start's counts saved and nothing cycled.  With no flock
 # (a test without util-linux) it runs unlocked, with a log line, the
-# re-check kept.
+# re-check kept.  The cycles run under the boost: on once the lock and
+# any re-check are past, off on every exit, so both the service's
+# recoveries and a typed `recover` get it.  The boost never touches the
+# exit code it passes through.  A recovery stopped halfway (TERM or INT,
+# a service stop) undoes the boost before it goes, rather than leave the
+# A57 cores on performance until t715-keys next acts.
 locked() {
     if command -v flock >/dev/null 2>&1; then
         (
@@ -622,7 +812,13 @@ locked() {
                 save_state "$wg_digest"
                 exit 4
             fi
+            boost_on
+            trap 'boost_off; exit 143' TERM INT
             recover_cycles "$1"
+            wg_rc=$?
+            trap - TERM INT
+            boost_off
+            exit "$wg_rc"
         ) 9>"$LOCK"
     else
         log "no flock: recovering without the lock"
@@ -630,7 +826,13 @@ locked() {
             save_state "$wg_digest"
             return 4
         fi
+        boost_on
+        trap 'boost_off; exit 143' TERM INT
         recover_cycles "$1"
+        wg_rc=$?
+        trap - TERM INT
+        boost_off
+        return "$wg_rc"
     fi
 }
 
