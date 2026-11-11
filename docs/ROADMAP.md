@@ -39,11 +39,24 @@ Tested on the same tablet:
   the other four in 23 to 40 s, against 8 to 82 s for six with the old
   one. Bluetooth now comes back once, after the Wi-Fi's judgment: about
   19 s after the wake, against 13 s. Not yet in a night of real sleeps.
+  Two fixes of the guard's checks came first, on 2026-11-10: once a
+  recovery with failed tries ended, the service replayed those tries'
+  kernel lines, one check every 10 s (harmless, nothing was cycled); and
+  the checks counted the failure signatures over the whole kernel log,
+  which fall as its ring buffer turns over (about 1500 lines, some 4
+  hours, on the tablet), so a failure after an earlier one's lines had
+  gone could pass for a good start. Each good check now saves the
+  timestamp of the last kernel line it saw, and the checks judge only
+  the lines logged after it.
 - **Two kernel fixes** (series `t715-radio-fixes`, the daily kernel `#17`
   since 2026-11-11, tested from RECOVERY first): upstream's fix of a
-  use-after-free at a Bluetooth unbind, which had oopsed the kernel once
-  in a bench, and the end of brcmfmac's warning at a failed Wi-Fi start
-  (`docs/hardware/WIFI_BT_M5.md` section 7.10).
+  use-after-free in `hci_uart_unregister_device()` (commit 21139b3ac62a,
+  not in 6.12.114), whose Bluetooth unbind while the controller still
+  talked had oopsed the kernel once in a bench; and the end of a WARNING
+  that tainted the kernel after a Wi-Fi start whose firmware halted
+  during the setup, 6.12.114's remove path cancelling a reset work item
+  the start path had not set up (`docs/hardware/WIFI_BT_M5.md` section
+  7.10).
 
 ## State at 1.0.3 (2026-11-10)
 
@@ -125,16 +138,30 @@ Since 0.9.3, tested on one tablet (`CHANGELOG.md` has the release's own test not
 - **Coding agents**: Pi preinstalled; Claude Code as an opt-in installer with a signed manifest.
 - **Omarchy 4.0.6, pinned** (`docs/image/REPACK.md`): 4.5.0 breaks omarchy-mobile's touch patches.
 
-## Next: the roadmap after 1.0.2 (2026-11-09)
+## Next: the roadmap after 1.0.4 (2026-11-11)
+
+In short:
+
+- **Now:** what is left of the sleep (item 1): the power drawn asleep, measured over a night on
+  battery; then the Wi-Fi chip's own failure to start after a power-off, or the chip kept
+  powered through a sleep.
+- **Next:** a modem that sleeps (item 2: validated without a SIM, calls and SMS still to test
+  with one), automatic brightness (3), headphones and headsets (4).
+- **Later:** USB host (5), bus and memory clocks (6), deep CPU idle states (7), telephony
+  features (8), hardware video decoding (9).
+- **Studies first:** the grip sensors (10), MHL video out (11), the fingerprint reader (12),
+  calls without 2G and 3G (13).
+- **Alongside:** the fixes and the system below.
 
 Every function of the tablet that this port does not drive yet, or drives only in part, with what
-it would bring and what it would take. Sleep comes first and is under way; the rest is ranked by
-what it brings against what it costs. **Study** means a source study first, written up under
-`docs/hardware/`, then a decision: nothing goes in that does not earn its place.
+it would bring and what it would take. Sleep came first and is in 1.0.4, but for what is left of
+it; the rest is ranked by what it brings against what it costs. **Study** means a source study
+first, written up under `docs/hardware/`, then a decision: nothing goes in that does not earn its
+place.
 
 | # | Function | What it brings | What it takes | State |
 |---|---|---|---|---|
-| 1 | Sleep (suspend to RAM) | standby in days instead of about 20 hours | large: test kernels, then tests with the owner at the tablet | daily on the reference tablet since 2026-11-10 |
+| 1 | Sleep (suspend to RAM) | standby in days instead of about 20 hours | large: test kernels, then tests with the owner at the tablet | in 1.0.4; left: the power drawn asleep, the Wi-Fi's start after a power-off |
 | 2 | A modem that sleeps | about 150 mW less with the screen off and the modem on | small: calls and SMS with a SIM, then the release kernel | validated without a SIM |
 | 3 | Automatic brightness | the screen follows the room's light | medium: a new light sensor driver | not started |
 | 4 | Headphones and headsets | plug detection, the headset's microphone, headsets in calls | small to medium | not started |
@@ -316,28 +343,6 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 - **The touch shell's crash while a Bluetooth mouse paired**, once (Quickshell 0.3.2,
   SIGSEGV, the shell back by itself after about 40 s): find what in the BlueZ property
   updates took it down (`docs/hardware/WIFI_BT_M5.md` section 7.8).
-- **The Wi-Fi guard's backlog after a recovery**: once a recovery with failed tries ended,
-  the service replayed those tries' kernel lines, one check every 10 s (9 lines, about a
-  minute and a half, in the 1.0.3 test). Harmless, nothing was cycled. Fixed on
-  2026-11-10: each good check also saves the kernel timestamp of the last line it saw,
-  and the watch skips the lines logged at or before it, with one log line. The same mark
-  closed a blind spot found then: the checks compared the signature counts of the whole
-  kernel log, which fall as its ring buffer turns over (about 1500 lines, some 4 hours, on
-  the tablet), so a failure after an earlier one's lines had gone could pass for a good
-  start; they now judge only the lines logged after the mark.
-- **A kernel crash at a Bluetooth unbind**: an unbind of `hci_uart_bcm`
-  while the controller still talks (1.4 s after its patch RAM had loaded,
-  in the bench that found it) oopsed the kernel (a
-  use-after-free in 6.12.114's `hci_uart_unregister_device()`); upstream
-  fixed it on 2026-10-14, commit 21139b3ac62a, not in 6.12.114. Fixed on
-  2026-11-11: that commit, unchanged, is in the series
-  `t715-radio-fixes` and the daily kernel `#17`
-  (`docs/hardware/WIFI_BT_M5.md` section 7.10).
-- **brcmfmac's warning at a failed Wi-Fi start**: 6.12.114's remove path
-  cancelled a reset work item that the start path had not set up when
-  the firmware halted during the setup, which left a WARNING trace and
-  tainted the kernel. Harmless. Fixed on 2026-11-11, in the same series
-  and kernel (`docs/hardware/WIFI_BT_M5.md` section 7.10).
 - **Omarchy 4.5** once omarchy-mobile's touch patches follow it.
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
   never run end to end; a first-boot wizard; a TWRP zip; a USB link Windows can use (RNDIS or

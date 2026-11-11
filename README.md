@@ -50,6 +50,24 @@ Not yet: hardware video decoding, headphone detection, the fingerprint reader. T
 Only one tablet was tested: SM-T715, bootloader `T715XXU2CRH1`, hardware revision 9. Other Tab S2
 models are not covered.
 
+## Roadmap
+
+The sleep came in 1.0.4. What comes next, in this order; [the roadmap](docs/ROADMAP.md) has
+each step's details, measurements and cost, and [the changelog](CHANGELOG.md) what each
+release brought.
+
+- **Now:** the power drawn asleep, measured over a night on battery; the Wi-Fi chip's own
+  failure to start after a power-off, which the guard now brings back in seconds.
+- **Next:** a modem that sleeps (about 150 mW less with the screen off and the modem on;
+  validated without a SIM, calls and SMS still to test with one), automatic brightness,
+  headphone and headset detection.
+- **Later:** USB host (OTG), bus and memory clocks, deep CPU idle states, telephony features
+  (MMS, USSD, SIM PIN, network choice), hardware video decoding.
+- **Studies first:** the grip sensors, MHL video out, the fingerprint reader, calls without 2G
+  and 3G (VoLTE).
+- **Alongside:** the Camera app's GPU faults, Omarchy's shortcuts on a Bluetooth keyboard,
+  Omarchy 4.5 once omarchy-mobile's touch patches follow it, installs on other tablets.
+
 ## Install Omarchy
 
 Two ways: flash the prebuilt ROM ([the install guide](docs/INSTALL.md)), or build
