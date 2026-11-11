@@ -456,11 +456,11 @@ played at full width.
   54 frames/s from run to run; the 38-39 runs had Wi-Fi interrupts and
   Firefox at 250-350 % CPU, likely a new profile's first-run network traffic.
 - The kernels differ only by the modem: the config adds the modem, MIPI LLI and
-  SPI, the GPU node is the same, the GPU stays at 266 MHz. Since 2026-10-29 only
-  telephony packages changed on the persistent root.
+  SPI, the GPU node is the same, and the GPU stayed at 266 MHz in both. Since
+  2026-10-29 only telephony packages changed on the persistent root.
 - Not measured: YouTube itself, and page scrolling on it. Firefox renders on the
-  CPU (`docs/journal/ONDEVICE-2026-10-29.md`), which stays at 1.2 GHz: that is the
-  ceiling, with or without the modem.
+  CPU (`docs/journal/ONDEVICE-2026-10-29.md`), which stayed at 1.2 GHz on
+  those kernels: that was the ceiling, with or without the modem.
 - One `JOB_BUS_FAULT` panfrost job fault in the last modem run, none in the daily
   run. One sample: its cause is not known.
 

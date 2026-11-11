@@ -416,7 +416,8 @@ arm64 non-regression build. `--clean` rebuilds from scratch.
 Which commit: the daily kernel on 2026-10-29 is
 `6.12.114-00021-g9497112f2f9b-dirty`, whose content equals `9f6393b0e`
 (revert of the DECON System MMUs). The branch HEAD `dc1fc95fb` only adds a
-GPU devfreq design that the board does not include (`docs/journal/HANDOVER.md`).
+GPU devfreq design that the daily kernel of that day did not include
+(`docs/journal/HANDOVER.md`).
 The fragments that `boot/README.md` still names
 (`gts28ltexx_initramfs.config`, `gts28ltexx_m2.config`) no longer exist:
 `gts28ltexx_defconfig` holds what the initramfs needs (loop, overlayfs,
@@ -916,7 +917,7 @@ after step 3, and step 5 cannot be undone.
    `recovery.img` `fe94a7c3…` (kernel `00021`).
 
    **Since 2026-11-03 the rescue runs the daily kernel** (the camera and
-   charger kernel of `out/mainline-camaf`, the one in BOOT), with the same
+   charger kernel of `out/mainline-camaf`, then the one in BOOT), with the same
    knobs, minus its two modem modules. Without `sec_modem_v1.ko`,
    `shannon-modem-prepare.service` skips itself, so the CP never boots in
    the rescue, as with `00021`, which had no modem series:
@@ -1127,9 +1128,13 @@ From `docs/journal/HANDOVER.md`, `docs/image/ROOTFS.md` and the `ONDEVICE` repor
   contents take RAM (3 GB in all). The persistent root keeps them, on a
   tablet without Android. The screen lock is ready and off until the owner sets a
   PIN (`docs/image/ROOTFS.md`, "Screen lock").
-- **No cpufreq**: both clusters stay at 1.2 GHz. **No GPU frequency
-  scaling**: the Mali-T760 stays at its 266 MHz boot clock (a design
-  exists, not in the board).
+- **CPU and GPU frequencies**: the A53 cores scale from 400 MHz to
+  1.2 GHz, the A57 cores from 800 MHz to 1.5 GHz, and the A57 cores are
+  offline while the screen is dark or the Battery saver is on; the GPU
+  scales from 160 to 700 MHz at the vendor's eight Mali levels — all
+  since 1.0.1, with series `t715-cpufreq` and `t715-turbo`
+  (`docs/hardware/CPUFREQ.md`, `docs/hardware/GPU.md`). No deep CPU idle
+  states yet (`docs/ROADMAP.md`, item 7).
 - **Suspend to RAM** needs the kernel of the `t715-sleep` series
   (`kernel/README.md`; in the 1.0.4 release kernel): `t715-sleep` sleeps
   the tablet once its screen has been dark for a

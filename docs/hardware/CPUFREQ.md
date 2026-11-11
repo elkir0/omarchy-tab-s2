@@ -4,7 +4,7 @@ Paper study, 2026-10-30. **No device was touched and nothing was built.** No
 kernel file changed; this document is the only file added. Every step below
 waits for the owner's approval.
 
-Why: Firefox renders on the CPU (SWGL) and feels slow, and both clusters stay
+Why: Firefox renders on the CPU (SWGL) and felt slow, and both clusters stayed
 at the bootloader's 1.2 GHz.
 
 **Added after the study, same day.** Debian's Chromium 150, in its own root,
@@ -26,15 +26,15 @@ everything above 1.2 GHz until decision D7.
 throttle. Screen off, the gain is small: 60-90 mW of 1.48 W.
 
 **Stage 2 ran for the A57s on 2026-11-07, then a 2-hour soak: results in
-section 9. Kernel `#8` has been the daily kernel in BOOT since
+section 9. Kernel `#8` was the daily kernel in BOOT on
 2026-11-08.** The A57s scale from 800 MHz to 1.5 GHz in the vendor's body
 bias and EMA 3, and the GPU from 160 to 700 MHz; under 45 minutes of
 8-core stress the hottest sensor read 97 °C.
 
 Evidence tags, used wherever it matters:
 
-* **[M]** measured on this tablet under mainline (today's figures or a saved
-  on-device log);
+* **[M]** measured on this tablet under mainline (the figures of the day or a
+  saved on-device log);
 * **[Ms]** measured on this tablet under the stock Samsung kernel (the stock
   boot logs);
 * **[S]** read in source;
@@ -74,7 +74,7 @@ Path abbreviations:
 |---|---|---|
 | Both clusters scale at or below 1.2 GHz, with CPU cooling | **do it** | Adds the throttle this kernel lacks, adds no heat, lowers the idle rails. It also measures how much Firefox gains before any overclock risk is taken |
 | A57 cap **1.5 GHz** | **do it if the prechecks pass** | +25 % clock, the highest cluster bus clock below 1.9 GHz, and stock's own boot level. Estimated Firefox gain +14 to +22 % (section 10) |
-| A57 cap 1.7 GHz | only if section 9 shows it pays | About twice today's dynamic power for +42 % clock, and a slower cluster bus than 1.5 GHz |
+| A57 cap 1.7 GHz | only if section 9 shows it pays | About twice the baseline dynamic power for +42 % clock, and a slower cluster bus than 1.5 GHz |
 | A57 1.9 GHz as a daily cap | **no** | 6.4 W on four cores against stock's 3.5 W sustained budget. Short bursts at best |
 | A53 1.3 GHz | **no** | +8 % clock for +18 % power, on the cluster whose sensor is stock's emergency sensor |
 | DRAM, CCI, INT clocks | **do not touch** | Already at or within 3 % of stock's top level (section 6) |
@@ -122,7 +122,7 @@ Two risks in THERMAL.md section 9 also close, for the CPU sensors:
 
 ### 2.1 Kernel configuration
 
-None of these is set today (the `CONFIG_` check of 2026-10-30 [M], and the
+None of these was set at the study (the `CONFIG_` check of 2026-10-30 [M], and the
 defconfig [S]).
 
 | symbol | value | note |
@@ -240,7 +240,7 @@ proposed table is about 190 mV, or 16 µs [I, arithmetic].
 
 ## 3. Voltages
 
-### 3.1 The rails today
+### 3.1 The rails at the time of the study
 
 | rail | live [M] | stock at hand-over [Ms] | this chip's table [Ms] | meaning |
 |---|---|---|---|---|
@@ -282,8 +282,8 @@ column: `soc-dtsi:238-348` [S]. All values in µV.
 | 400 | | | | 875 000 | 900 000 | +25 000 |
 
 Loading mainline's table would take the A57s to 1.0375 V and the A53s to
-1.1125 V **at today's frequency**, and it is under stock by up to 75 mV. Group
-1 is near the slow end of 16 groups, which is why [I].
+1.1125 V **at the hand-over frequency**, and it is under stock by up to 75 mV.
+Group 1 is near the slow end of 16 groups, which is why [I].
 
 Notes:
 
@@ -389,8 +389,9 @@ is shared with the rescue (GPU.md section 10.11).
 
 ## 5. Thermal
 
-**CPU cooling goes in at stage 1, before anything exceeds 1.2 GHz.** Today the
-only protection is the 115 °C trip (THERMAL.md section 4).
+**CPU cooling goes in at stage 1, before anything exceeds 1.2 GHz.** At the
+time of this study the only protection was the 115 °C trip (THERMAL.md
+section 4).
 
 ### 5.1 Stock's throttling
 
@@ -550,8 +551,9 @@ MHz all are met at every proposed level.
 413), so sboot left the CCI on the bus PLL, where stock's first MIF change moves
 it (`bus.c:2298`) [I]. The 3 % is not worth a clock change on a live fabric.
 
-The narrowest clock on the A57's way to memory today is its own bridge. That is
-one more reason a modest raise helps, and a reason to stop at 1.5 GHz.
+The narrowest clock on the A57's way to memory at the study was its own
+bridge. That is one more reason a modest raise helps, and a reason to stop
+at 1.5 GHz.
 
 ### 6.3 Touching them
 
@@ -585,7 +587,7 @@ Stock's model is dynamic power only (`ps = 0`, `mp.c:704-708`): V²f with a
 per-core coefficient of 48 on the A57 and 9 on the A53 (`mp.c:51-52`), so the
 table in section 4 and the V²f ratios are the same model.
 
-| case | CPU power vs today | basis |
+| case | CPU power vs the baseline | basis |
 |---|---|---|
 | Firefox on 3 A57s, 1.5 GHz | +0.9 W (2.0 to 2.9 W), +1.1 W with margin | section 4 [I] |
 | Firefox on 3 A57s, 1.7 GHz | +1.8 W | section 4 [I] |
@@ -600,11 +602,12 @@ A task that finishes faster and sleeps gives some of this back, but a scrolling
 browser does not finish: at a fixed frame rate it uses what it is given. Expect
 energy per minute of browsing to rise roughly with the table [I].
 
-Stage 1 should help idle: today both CPU rails are at their 1.2 GHz voltages all
-the time, with no cpuidle driver and no DVFS (no `CPU_IDLE` in the defconfig). A
-big part of the mainline-stock idle gap, and the gauge's 44-48 °C at rest, stays
-out of reach, though: `vdd_mif` 1.0125 V and DRAM at the top level are permanent
-on this kernel, where stock falls to 78 MHz at 0.8125 V (`boot-log:764`) [Ms].
+Stage 1 should help idle: at the study both CPU rails sat at their 1.2 GHz
+voltages all the time, with no cpuidle driver and no DVFS (no `CPU_IDLE` in
+the defconfig). A big part of the mainline-stock idle gap, and the gauge's
+44-48 °C at rest, stays out of reach, though: `vdd_mif` 1.0125 V and DRAM at
+the top level are permanent on this kernel, where stock falls to 78 MHz at
+0.8125 V (`boot-log:764`) [Ms].
 
 Battery life in hours cannot be derived. The sources I read do not give the
 capacity, and there is no power figure for this kernel. `CURRENT_NOW` works
@@ -739,7 +742,7 @@ so the last sample before a freeze is kept; pstore read before anything reboots.
 
 The tablet is shared, so each stage needs a slot agreed with the other session.
 
-### P0: read-only prechecks, on the current kernel
+### P0: read-only prechecks, on the kernel of the study
 
 Nothing here writes. Use the `rd` reader of GPU.md section 10.12 and the regmap
 `reg()` of `gpufreq.sh`. **Run P0 from the rescue, not the persistent root**: a
@@ -789,9 +792,9 @@ What it means:
 
 Also seen: 64 °C on the hottest zone at the rescue's start, a minute after Chromium
 had been running on the tablet, 57-58 °C a minute later, gauge 45 °C. One sample, with
-no cooling device today.
+no cooling device at the time.
 
-### S0: baseline at fixed 1.2 GHz, current kernel
+### S0: baseline at fixed 1.2 GHz, the kernel of the study
 
 1. `sha256`, `ffmpeg` decode and Firefox scrolling, 5 runs each, Wi-Fi off, in
    the rescue (the 38-54 frames/s spread of MODEM.md section 6.8 is Wi-Fi noise).
@@ -974,14 +977,14 @@ average at the end, at 450 mA in.
 - **Heat**: the simulator's first headless cycle decoded on all eight cores at
   once, as fast as they could. In 90 s atlas1 reached 99 C. The A53 maps
   answered (state 4, 0.9 GHz), but the A57s have one level and nothing to
-  give, as in today's daily kernel, where nothing throttles at all; only the
+  give, as in that day's daily kernel, where nothing throttles at all; only the
   115 C trip stands behind them. The load was stopped by hand and the zones
   were back at 54-57 C within minutes. This is past the 85 C project rule. It
   was counted, and the soak was not stopped, because the load was synthetic
   and the A57s behaved exactly as under the daily kernel. **D7's lower A57
   levels are what gives them something to throttle to.**
 
-**BOOT since 2026-11-03**: `out/boot-cpufreq-daily/boot.img`
+**BOOT from 2026-11-03**: `out/boot-cpufreq-daily/boot.img`
 (`69b4e6c8bc8b`, one header byte away from the soaked image), the rescue back
 in RECOVERY (`058d0481b509`). Four clean reboots, 39 s each: persistent root,
 `cpufreq-dt` loaded, schedutil, CP online in 9.92-9.94 s, no kernel line on
@@ -1000,7 +1003,7 @@ above (decision D3); BUCK2 987 500 to 1 175 000 uV; A57 cooling maps
 (atlas 81 °C -> 1.2 GHz one level per poll, 95 °C -> 0.9 GHz, 100 °C ->
 0.8 GHz; apollo 81 °C -> 0.9 GHz, 86 °C -> 0.8 GHz), each zone cooling
 both clusters. Test RECOVERY, **image mode** (persistent root not
-mounted), CP off, no modem driver, 13:20-15:24, owner present (D8).
+mounted), CP off, no modem driver, about two hours, owner present (D8).
 Built with `--fragment gts28ltexx_turbo_test.config` (release
 6.12.114-turbo, userspace governor, `cpufreq_dt` loaded by hand).
 
@@ -1055,7 +1058,7 @@ product in 64 bits: A57 1024, A53 469 [M]. The stage 2 runs above had
 the wrapped values, which changed nothing there: every level was pinned
 by hand and every workload pinned to its CPU.
 
-**Soak of the daily candidate, 2026-11-07 15:59-18:00: pass** [M]. The
+**Soak of the daily candidate, 2026-11-07, two hours: pass** [M]. The
 same series built with `--fragment gts28ltexx_turbo_soak.config` and
 `KBUILD_BUILD_VERSION=8`, release `6.12.114-turbo #8` (patch 7, the
 capacity fix, included — the paragraph above), booted from RECOVERY on
@@ -1077,7 +1080,7 @@ atlas1 spent about 40 minutes at or above 90 °C and about 4 minutes
 (8 samples) at or above 95 °C, all during the stress; it never reached
 100 °C. Under the 8-core stress the cooling maps held it at 91-97 °C:
 the A57s mostly at 1.0 GHz (0.9 to 1.2 GHz), the A53s at 1.0-1.1 GHz,
-the GPU capped at 420 MHz (cooling states read at 16:15:
+the GPU capped at 420 MHz (cooling states read about 16 minutes in:
 GPU 4, cpufreq-cpu0 2, cpufreq-cpu4 5). Over the whole soak the A57s
 ran 0.8 to 1.5 GHz (1.5 GHz in 25 of the 236 samples, the bursts), the
 A53s 0.4 to 1.2 GHz. The battery ran 32.4 to 44.2 °C and 88 % to 62 %,
@@ -1102,7 +1105,7 @@ Two defects found by the soak, both fixed since:
    the journal kept every line). The routine transitions are debug lines
    in BOOT's kernel `#8`, patch 8 of `t715-turbo` (GPU.md section 10.12).
 
-**A57 hotplug after the soak, 18:06-18:08: pass** [M].
+**A57 hotplug after the soak, two minutes: pass** [M].
 `image/tests/ondevice/hotplug-a57.sh` with `N=10` and its default A57
 stages (core7, cores76, the cluster, the cluster under load on the
 A53s, then 120 s off), on the same boot: 40 cycles, 20 of them with
@@ -1116,7 +1119,7 @@ logs every write that changes the register — so **the EMA register
 keeps the value written at boot while the cluster is off**: the answer
 to the question the stage 2 runs left open.
 
-**In BOOT since 2026-11-08, 01:15.** Kernel `#8`: the same tree built
+**In BOOT on 2026-11-08.** Kernel `#8`: the same tree built
 with `--fragment gts28ltexx_cpufreq.config` and `KBUILD_BUILD_VERSION=8`
 (release `6.12.114 #8`, every module, the modem's included), with the
 G3D ABB log change, written to BOOT with the owner present
@@ -1139,7 +1142,7 @@ and a part that does not; speed-up = 1 / ((1 − c) + c / r), with r = f / 1.2 G
 goes to DRAM and the compositor, above 0.5 because the bridge clock rises with
 the core up to 1.5 GHz. `sha256` is c = 1 and is not the workload.
 
-| A57 | speed-up | scroll, from 38 frames/s | VP9 1080p drops, from 42 % | power vs today |
+| A57 | speed-up | scroll, from 38 frames/s | VP9 1080p drops, from 42 % | power vs the baseline |
 |---|---|---|---|---|
 | 1.4 GHz | +9 to +15 % | 42-44 | 33-37 % | ×1.28 |
 | **1.5 GHz** | **+14 to +22 %** | **43-46** | **29-34 %** | **×1.43** |

@@ -487,7 +487,7 @@ first four stages (80 cycles, 40 of them the whole cluster), the CP still
 online. The boot's one GPU fault (`DATA_INVALID_FAULT` on job slot 1) came at
 the session start, 40 s in, before the soak.
 
-**In BOOT since 2026-11-04** (`out/boot-power-daily/boot.img`,
+**In BOOT from 2026-11-04** (`out/boot-power-daily/boot.img`,
 `8a22c8c7e6cd`, the soak's image but for one header byte), the rescue back
 in RECOVERY (`058d0481b509`) first. First boot from BOOT: the CP and Wi-Fi up
 35 s after the restart, ASPM `powersupersave`, the NoC timeout at 1,
@@ -629,7 +629,7 @@ root image sets it: `/etc/modprobe.d/t715-brcmfmac.conf`,
 `options brcmfmac ps_timeout=100`. The gateway answers a ping in 8 ms with
 it, screen off.
 
-**`#6` in BOOT since 2026-11-05** (`out/boot-power6/boot.img`,
+**`#6` in BOOT from 2026-11-05** (`out/boot-power6/boot.img`,
 `1ecbdca02837`; `#5`'s image stays as the way back). Its 2-hour soak from
 RECOVERY was clean (the CP online and the Wi-Fi connected in all 239
 samples, 239 gateway pings of 239, no kernel line, no failed unit), and so
@@ -698,7 +698,7 @@ control while MAIN streams; the tablet's first boot that day had as many.
 The **Battery saver** tile in quick settings switches power-profiles-daemon
 (PPD) between `balanced` and `power-saver` through Omarchy's
 `omarchy-powerprofiles-set`. On this kernel PPD has only its `placeholder`
-driver — no platform driver, no cpufreq integration — so the switch changed
+driver (no platform driver for this board), so the switch alone changes
 nothing. `t715-power-profile` (`/usr/local/sbin/`, run as root by
 `t715-power-profile.service` at boot and by `t715-power-profile.path`
 whenever PPD rewrites `/var/lib/power-profiles-daemon/state.ini`, which it
@@ -748,9 +748,9 @@ are not measured yet; the A57 figure above is section 10's, with the
 screen off.
 
 Checked on the tablet on 2026-11-07, kernel #7: the tile on gave
-power-saver at 10:31:47 (A57s offline, A53s at 1 GHz at most, GPU at
+power-saver (A57s offline, A53s at 1 GHz at most, GPU at
 200 MHz at most), and the tile off gave balanced three seconds after the
-switch, at 10:36:10 (cpus 0-7 online, both clusters at 1.2 GHz at most,
+switch (cpus 0-7 online, both clusters at 1.2 GHz at most,
 GPU at 400 MHz at most, the flag gone).
 
 Off the device: `image/tests/test_t715_power_profile.sh` runs the script

@@ -9,7 +9,8 @@ of the pixman/llvmpipe fallback.
 There is no OPP table, so no devfreq; the GPU runs at whatever rate the G3D
 clock unit already has, on BUCK6 at whatever voltage the bootloader left.
 Whether that pair is inside the stock envelope is checked on the first boot
-with the table of section 3.3, before any GPU work is submitted.
+with the table of section 3.3, before any GPU work is submitted. (This is
+the state of sections 1-9; section 10 changed it.)
 
 Path abbreviations:
 
@@ -462,12 +463,14 @@ M3 display and M4 input merged by parallel work):
 
 ## 10. Frequency scaling (devfreq)
 
-Designed and build-checked on 2026-10-29. **Not in the daily kernel:**
+Designed and build-checked on 2026-10-29. **Not in the daily kernel then:**
 the candidate that includes the dtsi with a 420 MHz cap (section 10.11) is
 kernel commit `9510f7e46` on branch `t715-gpu420`; its validation was
 aborted on 2026-10-29 (the 266 MHz baseline under glmark2 hung the tablet,
-Omarchy repo `docs/journal/ONDEVICE-2026-10-29.md`), so `t715-bringup` stops at
-the design commit `dc1fc95fb` and the daily GPU stays at its boot clock. Sections 1-9 above describe the kernel
+Omarchy repo `docs/journal/ONDEVICE-2026-10-29.md`), so `t715-bringup` stopped at
+the design commit `dc1fc95fb` and the daily GPU stayed at its boot clock
+until the `t715-power-gpu` and `t715-turbo` series (sections 10.13 and
+10.14). Sections 1-9 above describe the kernel
 before that commit (no OPP table, Linux set neither the GPU voltage nor
 its clock).
 
@@ -683,8 +686,9 @@ also means stock allows 700 MHz on this chip (section 10.4).
   `:153-154`). This chip: version 8, not limited.
 * Stock also requests minimum bus/CPU levels per GPU level and caps the
   A57 cluster at 1.3 GHz at 600/700 MHz (last four columns,
-  `mali/gpu_exynos5433.c:45-55`). Mainline has no bus devfreq and no
-  cpufreq here; the A57s already run at 1.2 GHz (`docs/journal/PROGRESS.md:429`).
+  `mali/gpu_exynos5433.c:45-55`). At the time of this design mainline had
+  neither bus devfreq nor CPU frequency scaling here; the A57s already ran
+  at 1.2 GHz (`docs/journal/PROGRESS.md:429`).
 
 simple_ondemand has no notion of a boost level: it will use 700 MHz
 whenever the GPU is busy. Suggested for daily use until the G3D sensor
@@ -695,7 +699,8 @@ Superseded: the daily kernel caps at 420 MHz in the device tree
 Superseded again, 2026-11-07: the daily kernel runs devfreq on the bus
 clock, 100 to 400 MHz (section 10.13), and the qualified turbo kernel
 runs the full 160-700 MHz table on the G3D PLL (section 10.14).
-Since 2026-11-08 the daily kernel is that turbo kernel (`#8`).
+Since 2026-11-08 the daily kernel runs that turbo table (kernel `#8`
+first).
 
 ### 10.5 Thermal throttling
 
@@ -722,7 +727,7 @@ Since 2026-11-08 the daily kernel is that turbo kernel (`#8`).
    control 81 °C, TDP 3 500 mW, GPU max 3 110 mW, `live_fdt:1790-1813`)
    with a GPU max lock (`stock/drivers/thermal/ipa.c:256-263`,
    `mali/gpu_ipa.c:228-239`). **Not mirrored**: it needs power models of
-   the CPUs (no cpufreq here) and of the GPU (stock's coefficient 46,
+   the CPUs and of the GPU (stock's coefficient 46,
    `mali/gpu_exynos5433.c:99`, has no mainline unit mapping).
 
 **Mainline (new dtsi).** devfreq cooling states count from the fastest
@@ -1014,7 +1019,9 @@ shader, or Mesa's Midgard compiler (try another `gltestsrc` pattern, or
 kmscube/glmark2 on KMS), then repeat the stepping with a load that runs
 clean at 266 MHz. Until then the daily kernel keeps panfrost at its boot
 clock (no devfreq). A 420 MHz candidate exists (section 10.11), not yet
-validated.
+validated. Superseded: the daily kernel runs devfreq since the
+`t715-power-gpu` series (section 10.13) and the turbo kernel's table
+since `t715-turbo` (section 10.14, glmark2 on KMS among the passes).
 
 ### 10.11 Candidate daily kernel: devfreq capped at 420 MHz (2026-10-29)
 
@@ -1322,7 +1329,7 @@ the driver warns only when it finds a value it did not write
 Series `t715-power-gpu` (3 patches on `t715-power` `630bec1c7`,
 `kernel/README.md`): patch 1 is the G3D body bias driver of section
 10.12, patch 2 the clock flag, patch 3 the board. **The daily kernel in
-BOOT from 2026-11-07 10:28 to 2026-11-08 01:15** (kernel `#7`, built with
+BOOT from 2026-11-07 to 2026-11-08** (kernel `#7`, built with
 `--fragment gts28ltexx_cpufreq.config`, `KBUILD_BUILD_VERSION=7`; then
 kernel `#8`, section 10.14).
 
@@ -1420,7 +1427,7 @@ G3D caps:
 | atlas (A57) | 95 °C | 420 MHz |
 | atlas (A57) | 100 °C | 160 MHz |
 
-**Measured, 2026-11-07, 13:20-15:24, owner present.** Test kernel in
+**Measured, 2026-11-07, about two hours, owner present.** Test kernel in
 RECOVERY, image mode, CP off, no modem driver. Boot: the A57 driver's
 two writes (BB_CON0 `0x00000000` -> `0x80000088`, EMA `0x11810330`:
 `0x00210210` -> `0x00310310`), panfrost at 160 MHz on the PLL.
@@ -1460,14 +1467,15 @@ section 10.13). Under load the GPU spends most of its time at 700 MHz.
 
 **A57 side**: `docs/hardware/CPUFREQ.md` section 9, stage 2.
 
-**Soak (2026-11-07, 15:59-18:00).** The daily candidate (`--fragment
+**Soak (2026-11-07, two hours).** The daily candidate (`--fragment
 gts28ltexx_turbo_soak.config`, `KBUILD_BUILD_VERSION=8`, release
 `6.12.114-turbo #8`) from RECOVERY on the persistent root, CP online:
 236 samples in 2 hours, the CPU and thermal facts in
 `CPUFREQ.md` section 9. The GPU side: 700 MHz was seen (in 20 of the
 236 samples, the manual-use bursts; the full range was 160 to
 700 MHz), the cooling maps capped it at 420 MHz under the 8-core
-stress (cooling state 4 at 16:15) and never lower (the trips that send
+stress (cooling state 4 about 16 minutes in) and never lower (the trips
+that send
 it to 160 MHz, 86 °C on the A53 sensor and 100 °C on the A57 sensors,
 were never reached; the A53 sensor read 81 °C at most), the G3D domain
 powered off 9835 times on the parking mux with no hang, and the kernel
@@ -1475,7 +1483,7 @@ log held nothing but the known Mesa/Midgard fault family — 9
 `DATA_INVALID_FAULT`, and one page fault at VA 0 (a read) followed
 4 ms later by a `JOB_BUS_FAULT` on the same job (section 10.13).
 
-**In BOOT since 2026-11-08** as kernel `#8` (`CPUFREQ.md` section 9,
+**In BOOT on 2026-11-08** as kernel `#8` (`CPUFREQ.md` section 9,
 with the hotplug check after the soak): at the first boot devfreq
 offered the eight levels, 160 to 700 MHz, under simple_ondemand, and the
 ABB driver logged its probe line only (BB_CON4 `0x8000008d` →

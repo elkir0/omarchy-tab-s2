@@ -15,7 +15,8 @@ are loaded:
 **No throttling.** CPU frequency scaling (cpufreq-dt cooling) is left out:
 the mainline OPP voltages are below the stock voltages of the slowest ASV
 groups and the chip's ASV group is unknown (section 8.1). The CPUs keep
-running at whatever frequency sboot left them.
+running at whatever frequency sboot left them. (Superseded by the
+`t715-cpufreq` and `t715-turbo` series, `docs/hardware/CPUFREQ.md`.)
 
 Artifacts: `out/mainline-thermaltest/` (fragment
 `gts28ltexx_thermaltest.config`, board `exynos5433-gts28ltexx-thermaltest.dts`).
@@ -140,9 +141,12 @@ the last two trips of each zone and the polling.
 | `apollo-thermal` | 0x10078000, A53 | 65 … 95 °C (191-225) | 86 °C | 115 °C | 500 ms |
 | `isp-thermal` | 0x1007c000, ISP | 80 … 110 °C (267-301) | 110 °C | 115 °C | 500 ms |
 
-All added trips have 2 °C hysteresis. The inherited `active` trips and
-the cooling maps of atlas0 and apollo reference CPU cooling devices that
-do not exist (no cpufreq), so they bind nothing and do nothing.
+All added trips have 2 °C hysteresis. Before the `t715-cpufreq` series,
+the inherited `active` trips and the cooling maps of atlas0 and apollo
+referenced CPU cooling devices that did not exist, so they bound nothing
+and did nothing. What binds now is in `docs/hardware/CPUFREQ.md`
+(section 9: the series' own cooling maps, each zone cooling both
+clusters).
 
 ## 4. What happens at each trip on this board
 
@@ -330,6 +334,9 @@ not damage). Unblocking this needs the chip's ASV group (one stock boot
 log from t = 0, or reading the CHIPID ASV fuses) plus a mainline 5433 ASV
 table or a board OPP table built from the matching stock column.
 
+Superseded by the `t715-cpufreq` and `t715-turbo` series
+(`docs/hardware/CPUFREQ.md`).
+
 ### 8.2 `vtmu-supply`
 
 Section 2.4.
@@ -388,7 +395,8 @@ Would deliver the hot-trip notification to userspace; no consumer exists.
    (section 4); unflushed writes can be lost. Keep the root filesystem
    quiet during load tests.
 6. **Power-off is a halt** (section 4 / 8.4).
-7. **No throttling** (section 8.1).
+7. **No throttling** as written (section 8.1; superseded by the
+   `t715-cpufreq` and `t715-turbo` series, `docs/hardware/CPUFREQ.md`).
 8. **Apollo 86 °C**: taken from a stock code path (`stock-thermal:991-1000`)
    whose origin (Samsung or LineageOS) cannot be established from the
    shallow clone; it only sets a hot marker.

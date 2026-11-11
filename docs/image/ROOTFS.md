@@ -858,7 +858,8 @@ once per set of updates and opens `omarchy-update` when tapped.
 
 The quick settings' **Battery saver** tile switches power-profiles-daemon
 between `balanced` and `power-saver` (`omarchy-powerprofiles-set`), whose
-placeholder driver does nothing on this kernel. `t715-power-profile`
+placeholder driver does nothing on this board (there is no platform
+driver for it). `t715-power-profile`
 (`/usr/local/sbin/`, the overlay) applies the caps as root:
 `t715-power-profile.service` (`graphical.target`, after and wanting PPD;
 not `multi-user.target`, which PPD 0.30's unit starts after: that ordering
@@ -968,8 +969,8 @@ start. `configure-system.sh` enables the two units for every user;
 `t715-sleep` (`/usr/local/sbin/`, the overlay) suspends the tablet to RAM
 once its screen has been dark for 60 s (the panel's DPMS file reading
 `Off`), on battery, and brings the radios back on the wake. It needs a
-kernel with the Exynos5433's system sleep (the `t715-sleep` series, the
-daily kernel `#16` since 2026-11-10 — the daily `#11` tree plus the
+kernel with the Exynos5433's system sleep (the `t715-sleep` series, in
+the daily kernel from `#16` on 2026-11-10 — the daily `#11` tree plus the
 series, tested from RECOVERY first; `kernel/README.md`): booted with
 `exynos5433_sleep=dryrun`, such a kernel
 runs the whole sleep path but sleeps for real only when
@@ -1232,7 +1233,7 @@ They come with `pacman -U` or a new image.
 3. NetworkManager (Wi-Fi through wpa_supplicant on brcmfmac, with the
    generated address, "Wi-Fi"), systemd-resolved, avahi, bluetoothd (`hci0`
    with the patch RAM and its generated address, "Bluetooth"), power-profiles-daemon
-   (no cpufreq: placeholder profile) and systemd-oomd start; no unit waits
+   (its placeholder driver: no platform driver for this board) and systemd-oomd start; no unit waits
    for a network. `t715-power-profile.service` then applies PPD's profile
    to the hardware ("Battery saver"), and the `.path` unit keeps it
    following every switch.

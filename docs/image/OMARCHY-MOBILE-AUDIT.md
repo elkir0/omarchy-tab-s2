@@ -55,7 +55,7 @@ The first persistent-root builds kept the test image's defaults; section 9 says 
 | Wayvnc mirror | "Needs a persistent root" | It has one | small |
 | Update notice | "An update is gone at the next boot" | Not on the persistent root. Nothing tells the owner updates exist | small |
 | `omamobile-setup-user.service` masked | "The image is the same at every boot" | False on the persistent root: a new package's steps are run by hand. Keep it masked, for boot time, and fix the sentence | small |
-| Suspend, `omamobile-sleepd` | Boot loop, resume untested | The boot loop is gone, since RECOVERY is the rescue. Resume is still untested, and it needs a lock and a modem wake source. The biggest battery lever | large |
+| Suspend, `omamobile-sleepd` | Boot loop, resume untested | The boot loop is gone, since RECOVERY is the rescue. Resume was still untested at the audit, and it needs a lock and a modem wake source. The biggest battery lever | large |
 
 Patch 0014, the lock's emergency button, was dropped with "no modem", which is now
 false. It only shows a warning, so it matters only with a lock.
@@ -78,7 +78,7 @@ false. It only shows a warning, so it matters only with a lock.
 | **Packages of this image** | `t715-modem` and the `omamobile-*` packages have no repository: `pacman -U` or a new image | medium |
 | **GPS** | Done: a BCM4752 on a serial port, Samsung's `gpsd` offline, GeoClue, the Location tile (`docs/hardware/GPS.md`) | done |
 | **Charging** | Linux cannot limit or stop charging: there is no charger driver, so no guard and no limit | large |
-| **Waydroid** | Android apps. ARM images exist, binder and much else is missing from the kernel, GPU at 266 MHz. Nothing was run | large, uncertain |
+| **Waydroid** | Android apps. ARM images exist, binder and much else is missing from the kernel, GPU at 266 MHz then. Nothing was run | large, uncertain |
 
 Lower value, for the record: Hyprland's DPMS retry patch, not seen failing at 60 Hz;
 `tools/power-ab`; a check of `omarchy-update-orphan-pkgs`. Wi-Fi power save is **off**
@@ -168,5 +168,7 @@ waiting for the owner.
 | Cameras | `docs/hardware/CAMERA.md`: a photo from the front, frames from the rear | seen; a rear photo in the light waits for the owner |
 | Fingerprint | `docs/hardware/FINGERPRINT.md`: feasible under a condition not met, the bus test not run | written |
 
-Left as they were: Wayvnc mirror, suspend, Packages of this image, charging, Waydroid, and
+Left as they were: Wayvnc mirror, suspend (since then, `t715-sleep`
+suspends to RAM daily; `docs/image/ROOTFS.md`, "Sleep"), Packages of this
+image, charging, Waydroid, and
 section 7.

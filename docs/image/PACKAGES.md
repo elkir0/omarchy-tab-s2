@@ -444,8 +444,9 @@ rewrites an existing table; `--force` does, and `--fw FILE --out DIR` works on a
 On the reference tablet's firmware it reproduces the seven tables in use there, byte for byte.
 Since the media-controller kernel it also carries the system-wide camera
 configuration: `/etc/libcamera/configuration.yaml` puts libcamera's software ISP on
-the CPU for every application (the Mali-T760 runs at a fixed 266 MHz: measured on
-the front camera, the GPU path gives 3 to 6 frames per second, the CPU path 30;
+the CPU for every application (measured on the front camera when the
+Mali-T760 ran at a fixed 266 MHz, before the GPU's frequency scaling of
+1.0.1: the GPU path gave 3 to 6 frames per second, the CPU path 30;
 `LIBCAMERA_SOFTISP_MODE=gpu` overrides it), the udev rule `71-t715-dma-heap.rules`
 opens the dma-buf heaps the software ISP allocates from to the video group, and
 `/etc/omacam/lenses.toml` is omacam's lens table for this tablet: the rear's 2x2

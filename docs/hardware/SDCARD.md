@@ -146,7 +146,8 @@ gts28ltexx_cpufreq.config`:
 In the 1.0.2 release and later; tested on 2026-11-08 from RECOVERY, on the
 daily root and on a test root.
 
-**In BOOT since 2026-11-08, 16:43**, as the daily kernel `#9`: the 1.0.1
+**In BOOT on 2026-11-08**, as the daily kernel `#9`, until `#10` replaced
+it the same day: the 1.0.1
 release tree plus this series, the cpufreq fragment, `KBUILD_BUILD_VERSION=9`,
 the boot image packed with the daily knobs and the initramfs that reads
 partition names from the eMMC only. The daily root got the partlabel udev

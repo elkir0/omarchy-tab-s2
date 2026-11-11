@@ -198,7 +198,8 @@ Left for the owner: whether the image should ship with rotation on.
    eval sets both, the daemon reapplies after a reload, and the default
    stays locked.
 3. **Cost**: each turn reallocates every buffer of the shell and apps, and
-   six plugins re-lay out on a Mali at 266 MHz. The GEM_CLOSE leak fix was
+   six plugins re-lay out on a Mali at the then fixed 266 MHz (the GPU has
+   scaled since 1.0.1, `docs/hardware/GPU.md`). The GEM_CLOSE leak fix was
    only validated on drawer cycles; step 3 measures this.
 
 Also: the landscape layouts were checked at Pixel sizes only.

@@ -676,7 +676,7 @@ tries again, at most 10 times. Proofs:
   public-addr) inside the same window lost the controller: `hci0` still in
   sysfs, absent from mgmt.
 - Then 8 consecutive reboots of the daily system on kernel `#10` with the
-  fixed script (18:01 to 18:13): the adapter came up powered with its
+  fixed script (twelve minutes): the adapter came up powered with its
   generated address every time, and the journal shows "generated address
   set" each boot.
 - `image/tests/test_t715_bt_addr.sh` models the window off the device
@@ -705,8 +705,8 @@ tries again, at most 10 times. Proofs:
   stays powered, so normal use never does this.
 
 **Devices tested (2026-11-08).** Each device was paired from the quick
-settings' Bluetooth panel (which pairs, trusts and connects), about 18:30
-to 19:00, on the daily system booted from RECOVERY.
+settings' Bluetooth panel (which pairs, trusts and connects), for about
+half an hour, on the daily system booted from RECOVERY.
 
 - A keyboard (Bluetooth LE, HID over GATT, through `/dev/uhid`): pairs,
   trusts, types and reconnects after sleeping. A classic keyboard
@@ -740,8 +740,8 @@ to 19:00, on the daily system booted from RECOVERY.
 
 Kernel `#11`: the `t715-wifi-recovery` series on the daily `#10` tree
 (the patch-series table, `kernel/README.md`), tested on the tablet from
-RECOVERY, then the daily kernel, in BOOT with the `t715-wifi-guard`
-service since 2026-11-09. In the 1.0.3 release.
+RECOVERY, then the daily kernel from 2026-11-09 to 2026-11-10, in BOOT
+with the `t715-wifi-guard` service. In the 1.0.3 release.
 
 **The symptom.** On some boots the Wi-Fi never comes up: the shell shows
 "no wifi radio", and only a reboot brought it back — 1 boot in 14 on
