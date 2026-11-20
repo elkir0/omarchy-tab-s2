@@ -3,16 +3,19 @@
 # (rootfs/overlay/usr/local/sbin/t715-android-setup).
 #
 # Runs the script on this machine against temporary fake sysfs, /dev,
-# /var/lib/pacman/local, /var/tmp, home and waydroid.cfg fixtures, with PATH
-# stand-ins for pacman, waydroid, ufw, systemctl, getent, setfacl, chown
-# and ln.  Tests the safe temporary-dbpath pacman installation (and temp
-# cleanup on both success and failure), init's kernel binder check and
-# --gapps option, configure's panfrost render-node discovery, configparser
-# preservation (including mixed case keys), idempotency and optional
-# density, ufw rule installation, service enablement, shared-storage ACLs
-# and ~/Android symlink handling, all's stop-on-failure behaviour (without
-# calling share), status output order, non-root refusal, and usage/exit
-# codes.
+# /var/lib/pacman/local, /var/tmp, home, vendor image, overlay and
+# waydroid.cfg fixtures, with PATH stand-ins for pacman, waydroid, mount,
+# umount, ufw, systemctl, getent, setfacl, chown and ln.  Tests the safe
+# temporary-dbpath pacman installation (and temp cleanup on both success and
+# failure), init's kernel binder check and --gapps option, mesa-fix's
+# verified patching, idempotency, mismatch safety, stale overlay removal,
+# foreign overlay preservation and guaranteed umount, configure's panfrost
+# render-node discovery, configparser preservation (including mixed case
+# keys), idempotency and optional density, ufw rule installation, service
+# enablement, shared-storage ACLs and ~/Android symlink handling, all's
+# stage order and stop-on-failure behaviour (without calling share), status
+# output order (including mesa= without mounting), non-root refusal, and
+# usage/exit codes.
 #
 # Usage: image/tests/test_t715_android_setup.sh
 # Prints "ok - ..." per group, "PASS" at the end; exit 1 on the first
@@ -34,12 +37,15 @@ fail() {
     echo "--- stderr" >&2; cat "$t/err" 2>/dev/null || true
     echo "--- pacman" >&2; cat "$t/pacman.log" 2>/dev/null || true
     echo "--- waydroid" >&2; cat "$t/waydroid.log" 2>/dev/null || true
+    echo "--- mount" >&2; cat "$t/mount.log" 2>/dev/null || true
+    echo "--- umount" >&2; cat "$t/umount.log" 2>/dev/null || true
     echo "--- ufw" >&2; cat "$t/ufw.log" 2>/dev/null || true
     echo "--- systemctl" >&2; cat "$t/systemctl.log" 2>/dev/null || true
     echo "--- getent" >&2; cat "$t/getent.log" 2>/dev/null || true
     echo "--- setfacl" >&2; cat "$t/setfacl.log" 2>/dev/null || true
     echo "--- chown" >&2; cat "$t/chown.log" 2>/dev/null || true
     echo "--- ln" >&2; cat "$t/ln.log" 2>/dev/null || true
+    echo "--- order" >&2; cat "$t/order.log" 2>/dev/null || true
     exit 1
 }
 
@@ -49,6 +55,7 @@ mkdir -p "$t/bin"
 cat > "$t/bin/pacman" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$T715_TEST_PACMAN_LOG"
+printf 'pacman %s\n' "${1:-}" >> "$T715_TEST_ORDER_LOG"
 case "${1:-}" in
     -Q)
         if [ "${2:-}" = "waydroid" ] && [ -f "$T715_TEST_PACMAN_INSTALLED" ]; then
@@ -118,6 +125,7 @@ STUB
 cat > "$t/bin/waydroid" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$T715_TEST_WAYDROID_LOG"
+printf 'waydroid %s\n' "$*" >> "$T715_TEST_ORDER_LOG"
 [ -f "$T715_TEST_WAYDROID_FAIL" ] && exit 1
 if [ "${1:-}" = "init" ] && [ -n "${T715_TEST_WAYDROID_CREATE_CFG:-}" ]; then
     mkdir -p "$(dirname "$T715_TEST_WAYDROID_CREATE_CFG")"
@@ -130,12 +138,46 @@ drm_device = /dev/dri/renderD128
 ro.product.brand = Generic
 CFG
 fi
+if [ "${1:-}" = "init" ] && [ -n "${T715_TEST_WAYDROID_CREATE_VENDOR:-}" ] && [ -n "${T715_TEST_WAYDROID_VENDOR_SRC:-}" ]; then
+    mkdir -p "$T715_TEST_WAYDROID_CREATE_VENDOR/lib"
+    cp "$T715_TEST_WAYDROID_VENDOR_SRC" "$T715_TEST_WAYDROID_CREATE_VENDOR/lib/libgallium_dri.so"
+fi
+exit 0
+STUB
+
+cat > "$t/bin/mount" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$T715_TEST_MOUNT_LOG"
+printf 'mount\n' >> "$T715_TEST_ORDER_LOG"
+[ -f "$T715_TEST_MOUNT_FAIL" ] && exit 1
+if [ "${1:-}" != "-o" ] || [ "${2:-}" != "ro,loop" ] || [ -z "${3:-}" ] || [ -z "${4:-}" ]; then
+    printf 'stub mount: unexpected args: %s\n' "$*" >&2
+    exit 1
+fi
+src=$3
+dst=$4
+if [ ! -d "$src" ] || [ ! -d "$dst" ]; then
+    printf 'stub mount: bad src (%s) or dst (%s)\n' "$src" "$dst" >&2
+    exit 1
+fi
+cp -R "$src/." "$dst/"
+exit 0
+STUB
+
+cat > "$t/bin/umount" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$T715_TEST_UMOUNT_LOG"
+printf 'umount\n' >> "$T715_TEST_ORDER_LOG"
+if [ -n "${1:-}" ] && [ -d "$1" ]; then
+    rm -rf "$1"/*
+fi
 exit 0
 STUB
 
 cat > "$t/bin/ufw" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$T715_TEST_UFW_LOG"
+printf 'ufw %s\n' "${1:-}" >> "$T715_TEST_ORDER_LOG"
 if [ "${1:-}" = "status" ]; then
     cat "$T715_TEST_UFW_STATUS"
     exit 0
@@ -151,6 +193,7 @@ STUB
 cat > "$t/bin/systemctl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$T715_TEST_SYSTEMCTL_LOG"
+printf 'systemctl %s\n' "${1:-}" >> "$T715_TEST_ORDER_LOG"
 case "${1:-}" in
     is-active)
         if [ -f "$T715_TEST_SYSTEMCTL_ACTIVE" ]; then
@@ -211,8 +254,9 @@ printf '%s\n' "$*" >> "$T715_TEST_LN_LOG"
 exec "$T715_TEST_REAL_LN" "$@"
 STUB
 
-chmod +x "$t/bin/pacman" "$t/bin/waydroid" "$t/bin/ufw" "$t/bin/systemctl" \
-         "$t/bin/getent" "$t/bin/setfacl" "$t/bin/chown" "$t/bin/ln"
+chmod +x "$t/bin/pacman" "$t/bin/waydroid" "$t/bin/mount" "$t/bin/umount" \
+         "$t/bin/ufw" "$t/bin/systemctl" "$t/bin/getent" "$t/bin/setfacl" \
+         "$t/bin/chown" "$t/bin/ln"
 
 export T715_TEST_PACMAN_LOG="$t/pacman.log"
 export T715_TEST_PACMAN_INSTALLED="$t/pacman.installed"
@@ -222,6 +266,10 @@ export T715_TEST_PACMAN_FAIL_U="$t/pacman.fail_u"
 export T715_TEST_PACMAN_MARK_ON_U="$t/pacman.mark_on_u"
 export T715_TEST_WAYDROID_LOG="$t/waydroid.log"
 export T715_TEST_WAYDROID_FAIL="$t/waydroid.fail"
+export T715_TEST_MOUNT_LOG="$t/mount.log"
+export T715_TEST_MOUNT_FAIL="$t/mount.fail"
+export T715_TEST_UMOUNT_LOG="$t/umount.log"
+export T715_TEST_ORDER_LOG="$t/order.log"
 export T715_TEST_UFW_LOG="$t/ufw.log"
 export T715_TEST_UFW_STATUS="$t/ufw.status"
 export T715_TEST_UFW_SKIP="$t/ufw.skip"
@@ -237,11 +285,36 @@ export T715_TEST_CHOWN_FAIL="$t/chown.fail"
 export T715_TEST_LN_LOG="$t/ln.log"
 export T715_TEST_REAL_LN="$REAL_LN"
 
+# --- Mesa fixture binaries ------------------------------------------------------
+TEST_MESA_OFFSET="0x20"
+python3 - "$t" <<'PY'
+import os, sys
+
+base = sys.argv[1]
+prefix = bytes(range(0x20))
+suffix = bytes(range(0x24, 0x80))
+with open(os.path.join(base, "mesa.bad"), "wb") as fh:
+    fh.write(prefix + bytes.fromhex("01f0eaff") + suffix)
+with open(os.path.join(base, "mesa.fixed"), "wb") as fh:
+    fh.write(prefix + bytes.fromhex("aff30080") + suffix)
+with open(os.path.join(base, "mesa.wrong_bytes"), "wb") as fh:
+    fh.write(prefix + bytes.fromhex("deadbeef") + suffix)
+with open(os.path.join(base, "mesa.other"), "wb") as fh:
+    fh.write(b"Mesa-26.1.0-fixed-upstream" + bytes(range(102)))
+PY
+TEST_BAD_SHA=$(sha256sum "$t/mesa.bad" | awk '{print $1}')
+TEST_FIXED_SHA=$(sha256sum "$t/mesa.fixed" | awk '{print $1}')
+TEST_WRONG_BYTES_SHA=$(sha256sum "$t/mesa.wrong_bytes" | awk '{print $1}')
+TEST_OTHER_SHA=$(sha256sum "$t/mesa.other" | awk '{print $1}')
+TEST_OTHER_SHORT=${TEST_OTHER_SHA:0:12}
+
 # --- fixture helpers ------------------------------------------------------------
 S="$t/sys"
 D="$t/dev"
 TMP="$t/tmp"
 CFG="$t/waydroid/waydroid.cfg"
+VENDOR_IMG="$t/waydroid/images/vendor.img"
+OVERLAY="$t/waydroid/overlay"
 PLOCAL="$t/pacman-local"
 HOMES="$t/homes"
 
@@ -249,8 +322,8 @@ reset_env() {
     rm -rf "$S" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES" \
            "$t/pacman.installed" "$t/pacman.fail_sy" "$t/pacman.fail_sw" \
            "$t/pacman.fail_u" "$t/pacman.mark_on_u" "$t/waydroid.fail" \
-           "$t/ufw.skip" "$t/systemctl.active" "$t/systemctl.fail" \
-           "$t/passwd" "$t/setfacl.fail" "$t/chown.fail"
+           "$t/mount.fail" "$t/ufw.skip" "$t/systemctl.active" \
+           "$t/systemctl.fail" "$t/passwd" "$t/setfacl.fail" "$t/chown.fail"
     mkdir -p "$S/class/drm" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES/alarm" "$HOMES/alice"
     printf 'ok\n' > "$PLOCAL/sentinel"
     printf 'Status: inactive\n' > "$t/ufw.status"
@@ -264,6 +337,9 @@ EOF
 clear_logs() {
     : > "$t/pacman.log"
     : > "$t/waydroid.log"
+    : > "$t/mount.log"
+    : > "$t/umount.log"
+    : > "$t/order.log"
     : > "$t/ufw.log"
     : > "$t/systemctl.log"
     : > "$t/getent.log"
@@ -272,6 +348,12 @@ clear_logs() {
     : > "$t/ln.log"
     : > "$t/out"
     : > "$t/err"
+}
+
+write_vendor_fixture() {
+    rm -rf "$VENDOR_IMG"
+    mkdir -p "$VENDOR_IMG/lib"
+    cp "$1" "$VENDOR_IMG/lib/libgallium_dri.so"
 }
 
 mk_drm_nodes() {
@@ -305,6 +387,11 @@ run_as() {
     clear_logs
     RC=0
     env T715_ANDROID_CFG="$CFG" \
+        T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+        T715_ANDROID_OVERLAY="$OVERLAY" \
+        T715_ANDROID_MESA_BAD_SHA="$TEST_BAD_SHA" \
+        T715_ANDROID_MESA_FIXED_SHA="$TEST_FIXED_SHA" \
+        T715_ANDROID_MESA_OFFSET="$TEST_MESA_OFFSET" \
         T715_ANDROID_SYSFS="$S" \
         T715_ANDROID_DEV="$D" \
         T715_ANDROID_TMP="$TMP" \
@@ -392,6 +479,140 @@ run_as init --gapps
 [ "$RC" = 0 ] || fail "(d) fresh init --gapps exits 0 (got $RC)"
 [ "$(cat "$t/waydroid.log")" = "init -s GAPPS" ] || fail "(d) waydroid init -s GAPPS called"
 echo "ok - init: exit 3 without binder, skipped with cfg, fresh and --gapps"
+
+# --- (d2) mesa-fix --------------------------------------------------------------
+OVERLAY_LIB="$OVERLAY/vendor/lib/libgallium_dri.so"
+
+# No vendor image -> exit 1, message mentions init, no mount/umount
+reset_env
+run_as mesa-fix
+[ "$RC" = 1 ] || fail "(d2) mesa-fix without vendor.img exits 1 (got $RC)"
+grep -qi 'init' "$t/err" || fail "(d2) stderr tells user to run init first"
+[ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
+    || fail "(d2) mount/umount not called when vendor.img missing"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) no temp leftovers when vendor.img missing"
+
+# Known bad build -> applied, mode 0644, sha256 matches fixed, umount called
+write_vendor_fixture "$t/mesa.bad"
+run_as mesa-fix
+[ "$RC" = 0 ] || fail "(d2) mesa-fix applied exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "mesa-fix: applied" ] \
+    || fail "(d2) stdout is 'mesa-fix: applied' (got: $(cat "$t/out"))"
+[ ! -s "$t/err" ] || fail "(d2) applied writes nothing to stderr"
+[ -f "$OVERLAY_LIB" ] || fail "(d2) overlay library installed"
+cmp -s "$t/mesa.fixed" "$OVERLAY_LIB" || fail "(d2) overlay library bytes match patched build"
+python3 - "$OVERLAY_LIB" <<'PY' || fail "(d2) overlay library mode is not 0644"
+import os, sys
+mode = os.stat(sys.argv[1]).st_mode & 0o777
+assert mode == 0o644, oct(mode)
+PY
+[ "$(wc -l < "$t/mount.log" | tr -d ' ')" = 1 ] || fail "(d2) mount called once"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called once"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned after apply"
+
+# Second run -> nothing to do, overlay untouched, umount called
+run_as mesa-fix
+[ "$RC" = 0 ] || fail "(d2) second mesa-fix exits 0 (got $RC)"
+grep -qi 'nothing to do' "$t/out" || fail "(d2) second run says nothing to do (got: $(cat "$t/out"))"
+[ ! -s "$t/err" ] || fail "(d2) second run writes nothing to stderr"
+cmp -s "$t/mesa.fixed" "$OVERLAY_LIB" || fail "(d2) overlay library unchanged on second run"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called on second run"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned on second run"
+
+# Old bytes not as expected -> exit 1, existing overlay untouched, umount called
+reset_env
+write_vendor_fixture "$t/mesa.wrong_bytes"
+mkdir -p "$(dirname "$OVERLAY_LIB")"
+printf 'keep-existing-overlay\n' > "$OVERLAY_LIB"
+clear_logs
+RC=0
+env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
+    T715_ANDROID_MESA_BAD_SHA="$TEST_WRONG_BYTES_SHA" \
+    T715_ANDROID_MESA_FIXED_SHA="$TEST_FIXED_SHA" \
+    T715_ANDROID_MESA_OFFSET="$TEST_MESA_OFFSET" \
+    T715_ANDROID_SYSFS="$S" \
+    T715_ANDROID_DEV="$D" \
+    T715_ANDROID_TMP="$TMP" \
+    T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
+    T715_ANDROID_ASSUME_ROOT=1 \
+    PATH="$t/bin:$PATH" \
+    "$AS" mesa-fix > "$t/out" 2> "$t/err" || RC=$?
+[ "$RC" = 1 ] || fail "(d2) wrong old bytes exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(d2) wrong old bytes reports error on stderr"
+[ "$(cat "$OVERLAY_LIB")" = "keep-existing-overlay" ] \
+    || fail "(d2) overlay untouched on wrong old bytes"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called on wrong old bytes"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned on wrong old bytes"
+
+# Result sha mismatch -> exit 1, overlay untouched, umount called
+reset_env
+write_vendor_fixture "$t/mesa.bad"
+mkdir -p "$(dirname "$OVERLAY_LIB")"
+printf 'keep-before-sha-fail\n' > "$OVERLAY_LIB"
+clear_logs
+RC=0
+env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
+    T715_ANDROID_MESA_BAD_SHA="$TEST_BAD_SHA" \
+    T715_ANDROID_MESA_FIXED_SHA="0000000000000000000000000000000000000000000000000000000000000000" \
+    T715_ANDROID_MESA_OFFSET="$TEST_MESA_OFFSET" \
+    T715_ANDROID_SYSFS="$S" \
+    T715_ANDROID_DEV="$D" \
+    T715_ANDROID_TMP="$TMP" \
+    T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
+    T715_ANDROID_ASSUME_ROOT=1 \
+    PATH="$t/bin:$PATH" \
+    "$AS" mesa-fix > "$t/out" 2> "$t/err" || RC=$?
+[ "$RC" = 1 ] || fail "(d2) result sha mismatch exits 1 (got $RC)"
+grep -qi 'mismatch' "$t/err" || fail "(d2) result sha mismatch reports mismatch on stderr"
+[ "$(cat "$OVERLAY_LIB")" = "keep-before-sha-fail" ] \
+    || fail "(d2) overlay untouched on result sha mismatch"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called on result sha mismatch"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned on result sha mismatch"
+
+# Missing lib/libgallium_dri.so inside vendor.img -> exit 1, umount still called
+reset_env
+mkdir -p "$VENDOR_IMG"
+run_as mesa-fix
+[ "$RC" = 1 ] || fail "(d2) missing libgallium_dri.so exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(d2) missing libgallium_dri.so prints error"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called when lib missing"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned when lib missing"
+
+# Unknown vendor build with our patched file in overlay -> removed, exit 0
+reset_env
+write_vendor_fixture "$t/mesa.other"
+mkdir -p "$(dirname "$OVERLAY_LIB")"
+cp "$t/mesa.fixed" "$OVERLAY_LIB"
+run_as mesa-fix
+[ "$RC" = 0 ] || fail "(d2) unknown build with our patched overlay exits 0 (got $RC)"
+[ ! -e "$OVERLAY_LIB" ] || fail "(d2) stale patched overlay removed on unknown build"
+grep -qi 'removed' "$t/out" || fail "(d2) stdout reports removal of stale patched overlay"
+grep -qx "mesa-fix: unknown Mesa build $TEST_OTHER_SHORT, nothing applied" "$t/out" \
+    || fail "(d2) stdout prints unknown Mesa build line (got: $(cat "$t/out"))"
+[ ! -s "$t/err" ] || fail "(d2) removing our stale overlay writes nothing to stderr"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called on unknown build"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned on unknown build"
+
+# Unknown vendor build with foreign file in overlay -> kept, warning on stderr, exit 0
+reset_env
+write_vendor_fixture "$t/mesa.other"
+mkdir -p "$(dirname "$OVERLAY_LIB")"
+printf 'foreign-mesa-lib\n' > "$OVERLAY_LIB"
+run_as mesa-fix
+[ "$RC" = 0 ] || fail "(d2) unknown build with foreign overlay exits 0 (got $RC)"
+[ -f "$OVERLAY_LIB" ] && [ "$(cat "$OVERLAY_LIB")" = "foreign-mesa-lib" ] \
+    || fail "(d2) foreign overlay file kept untouched"
+grep -qi 'warning' "$t/err" || fail "(d2) warning printed on stderr for foreign overlay"
+[ "$(cat "$t/out")" = "mesa-fix: unknown Mesa build $TEST_OTHER_SHORT, nothing applied" ] \
+    || fail "(d2) stdout prints unknown Mesa build line (got: $(cat "$t/out"))"
+[ "$(wc -l < "$t/umount.log" | tr -d ' ')" = 1 ] || fail "(d2) umount called with foreign overlay"
+[ "$(tmp_leftovers)" = 0 ] || fail "(d2) temp dirs cleaned with foreign overlay"
+
+echo "ok - mesa-fix: applied, idempotent, byte/sha mismatch safe, unknown build cleanup/warning, missing image, umount always called"
 
 # --- (e) configure --------------------------------------------------------------
 reset_env
@@ -535,10 +756,38 @@ run_as all
 [ "$RC" = 3 ] || fail "(h) all stops with init exit code 3 (got $RC)"
 [ "$(cat "$t/pacman.log")" = "-Q waydroid" ] || fail "(h) packages ran before init"
 [ ! -s "$t/waydroid.log" ] || fail "(h) waydroid not called after binder check failed"
+[ ! -s "$t/mount.log" ] || fail "(h) mesa-fix not called after init failed"
 [ ! -s "$t/ufw.log" ] || fail "(h) firewall not called after init failed"
 [ ! -s "$t/systemctl.log" ] || fail "(h) enable not called after init failed"
 
-# Happy path: all --gapps runs all five stages in order
+# Stop at failing mesa-fix (vendor.img absent after init)
+reset_env
+mk_drm_nodes
+: > "$D/binder"
+printf 'waydroid 1.6.3-1\n' > "$t/pacman.installed"
+printf 'Status: active\n' > "$t/ufw.status"
+clear_logs
+RC=0
+env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
+    T715_ANDROID_MESA_BAD_SHA="$TEST_BAD_SHA" \
+    T715_ANDROID_MESA_FIXED_SHA="$TEST_FIXED_SHA" \
+    T715_ANDROID_MESA_OFFSET="$TEST_MESA_OFFSET" \
+    T715_ANDROID_SYSFS="$S" \
+    T715_ANDROID_DEV="$D" \
+    T715_ANDROID_TMP="$TMP" \
+    T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
+    T715_ANDROID_ASSUME_ROOT=1 \
+    T715_TEST_WAYDROID_CREATE_CFG="$CFG" \
+    PATH="$t/bin:$PATH" \
+    "$AS" all > "$t/out" 2> "$t/err" || RC=$?
+[ "$RC" = 1 ] || fail "(h) all stops with exit 1 when mesa-fix fails (got $RC)"
+[ "$(cat "$t/waydroid.log")" = "init" ] || fail "(h) configure not called after mesa-fix failed"
+[ ! -s "$t/ufw.log" ] || fail "(h) firewall not called after mesa-fix failed"
+[ ! -s "$t/systemctl.log" ] || fail "(h) enable not called after mesa-fix failed"
+
+# Happy path: all --gapps runs all six stages in order
 reset_env
 mk_drm_nodes
 : > "$D/binder"
@@ -547,12 +796,19 @@ printf 'Status: active\n' > "$t/ufw.status"
 clear_logs
 RC=0
 env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
+    T715_ANDROID_MESA_BAD_SHA="$TEST_BAD_SHA" \
+    T715_ANDROID_MESA_FIXED_SHA="$TEST_FIXED_SHA" \
+    T715_ANDROID_MESA_OFFSET="$TEST_MESA_OFFSET" \
     T715_ANDROID_SYSFS="$S" \
     T715_ANDROID_DEV="$D" \
     T715_ANDROID_TMP="$TMP" \
     T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
     T715_ANDROID_ASSUME_ROOT=1 \
     T715_TEST_WAYDROID_CREATE_CFG="$CFG" \
+    T715_TEST_WAYDROID_CREATE_VENDOR="$VENDOR_IMG" \
+    T715_TEST_WAYDROID_VENDOR_SRC="$t/mesa.bad" \
     PATH="$t/bin:$PATH" \
     "$AS" all --gapps > "$t/out" 2> "$t/err" || RC=$?
 [ "$RC" = 0 ] || fail "(h) all --gapps happy path exits 0 (got $RC)"
@@ -560,12 +816,29 @@ env T715_ANDROID_CFG="$CFG" \
 want_wd='init -s GAPPS
 upgrade --offline'
 [ "$(cat "$t/waydroid.log")" = "$want_wd" ] || fail "(h) all ran init -s GAPPS then upgrade --offline"
+cmp -s "$t/mesa.fixed" "$OVERLAY_LIB" || fail "(h) all applied mesa-fix"
 [ "$(cat "$t/ufw.log")" = "$want_ufw" ] || fail "(h) all ran firewall"
 [ "$(cat "$t/systemctl.log")" = "enable --now waydroid-container.service" ] \
     || fail "(h) all ran enable"
+want_order='pacman -Q
+pacman -Sy
+pacman -Sw
+pacman -U
+waydroid init -s GAPPS
+mount
+umount
+waydroid upgrade --offline
+ufw status
+ufw allow
+ufw allow
+ufw route
+ufw route
+systemctl enable'
+[ "$(cat "$t/order.log")" = "$want_order" ] \
+    || fail "(h) all stage order mismatch (got: $(cat "$t/order.log"))"
 [ ! -s "$t/setfacl.log" ] && [ ! -s "$t/getent.log" ] \
     || fail "(h) all must not call share"
-echo "ok - all: stops at first failing step with its exit code; happy path runs all five stages (not share)"
+echo "ok - all: stops at first failing step with its exit code; happy path runs all six stages in order (not share)"
 
 # --- (h2) share -----------------------------------------------------------------
 # Unknown user -> exit 1, no setfacl call
@@ -699,9 +972,12 @@ package=none
 initialised=no
 gpu=
 gles=
-container=inactive'
+container=inactive
+mesa=none'
 [ "$(cat "$t/out")" = "$want_status_empty" ] \
     || fail "(i) uninitialised status lines and order mismatch"
+[ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
+    || fail "(i) status (uninitialised) must not mount anything"
 
 : > "$D/binder"
 printf 'waydroid 1.6.3-1\n' > "$t/pacman.installed"
@@ -711,24 +987,60 @@ run_as configure
 [ "$RC" = 0 ] || fail "(i) setup configure failed"
 : > "$t/systemctl.active"
 run_as status
-[ "$RC" = 0 ] || fail "(i) status (configured) exits 0 (got $RC)"
-want_status_full='kernel=yes
+[ "$RC" = 0 ] || fail "(i) status (configured, vendor) exits 0 (got $RC)"
+want_status_vendor='kernel=yes
 package=1.6.3-1
 initialised=yes
 gpu=/dev/dri/renderD129
 gles=196609
-container=active'
-[ "$(cat "$t/out")" = "$want_status_full" ] \
-    || fail "(i) configured status lines and order mismatch"
-echo "ok - status: exact six key=value lines in order, both empty and configured"
+container=active
+mesa=vendor'
+[ "$(cat "$t/out")" = "$want_status_vendor" ] \
+    || fail "(i) configured status (mesa=vendor) lines and order mismatch"
+[ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
+    || fail "(i) status (vendor) must not mount anything"
+
+mkdir -p "$(dirname "$OVERLAY_LIB")"
+cp "$t/mesa.fixed" "$OVERLAY_LIB"
+run_as status
+[ "$RC" = 0 ] || fail "(i) status (configured, fixed) exits 0 (got $RC)"
+want_status_fixed='kernel=yes
+package=1.6.3-1
+initialised=yes
+gpu=/dev/dri/renderD129
+gles=196609
+container=active
+mesa=fixed'
+[ "$(cat "$t/out")" = "$want_status_fixed" ] \
+    || fail "(i) configured status (mesa=fixed) lines and order mismatch"
+[ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
+    || fail "(i) status (fixed) must not mount anything"
+
+printf 'some-other-overlay\n' > "$OVERLAY_LIB"
+run_as status
+[ "$RC" = 0 ] || fail "(i) status (configured, unknown) exits 0 (got $RC)"
+want_status_unknown='kernel=yes
+package=1.6.3-1
+initialised=yes
+gpu=/dev/dri/renderD129
+gles=196609
+container=active
+mesa=unknown'
+[ "$(cat "$t/out")" = "$want_status_unknown" ] \
+    || fail "(i) configured status (mesa=unknown) lines and order mismatch"
+[ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
+    || fail "(i) status (unknown) must not mount anything"
+echo "ok - status: exact seven key=value lines in order, all four mesa states, never mounts"
 
 # --- (j) non-root refusal -------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
     reset_env
-    for sub in packages init configure firewall enable share all; do
+    for sub in packages init mesa-fix configure firewall enable share all; do
         clear_logs
         RC=0
         env T715_ANDROID_CFG="$CFG" \
+            T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+            T715_ANDROID_OVERLAY="$OVERLAY" \
             T715_ANDROID_SYSFS="$S" \
             T715_ANDROID_DEV="$D" \
             T715_ANDROID_TMP="$TMP" \
@@ -738,6 +1050,7 @@ if [ "$(id -u)" -ne 0 ]; then
         [ "$RC" = 1 ] || fail "(j) non-root $sub exits 1 (got $RC)"
         grep -qi 'root' "$t/err" || fail "(j) non-root $sub error mentions root"
         [ ! -s "$t/pacman.log" ] && [ ! -s "$t/waydroid.log" ] \
+            && [ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
             && [ ! -s "$t/ufw.log" ] && [ ! -s "$t/systemctl.log" ] \
             && [ ! -s "$t/getent.log" ] && [ ! -s "$t/setfacl.log" ] \
             && [ ! -s "$t/chown.log" ] && [ ! -s "$t/ln.log" ] \
@@ -747,6 +1060,8 @@ if [ "$(id -u)" -ne 0 ]; then
     clear_logs
     RC=0
     env T715_ANDROID_CFG="$CFG" \
+        T715_ANDROID_VENDOR_IMG="$VENDOR_IMG" \
+        T715_ANDROID_OVERLAY="$OVERLAY" \
         T715_ANDROID_SYSFS="$S" \
         T715_ANDROID_DEV="$D" \
         T715_ANDROID_TMP="$TMP" \
@@ -764,6 +1079,7 @@ reset_env
 run_as --help
 [ "$RC" = 0 ] || fail "(k) --help exits 0 (got $RC)"
 grep -q '^usage: t715-android-setup ' "$t/out" || fail "(k) --help prints usage on stdout"
+grep -q 't715-android-setup mesa-fix' "$t/out" || fail "(k) --help usage lists mesa-fix"
 grep -q 't715-android-setup share' "$t/out" || fail "(k) --help usage lists share"
 [ ! -s "$t/err" ] || fail "(k) --help writes nothing to stderr"
 
@@ -778,6 +1094,9 @@ grep -q '^usage: t715-android-setup ' "$t/err" || fail "(k) unknown subcommand p
 
 run_as init --bogus
 [ "$RC" = 2 ] || fail "(k) init --bogus exits 2 (got $RC)"
+
+run_as mesa-fix extra
+[ "$RC" = 2 ] || fail "(k) mesa-fix extra exits 2 (got $RC)"
 
 run_as all --bogus
 [ "$RC" = 2 ] || fail "(k) all --bogus exits 2 (got $RC)"

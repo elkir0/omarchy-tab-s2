@@ -63,3 +63,6 @@ pipewire-alsa           # ALSA-only clients go through PipeWire
 modemmanager            # mmcli only (configuration, SIM PIN): the daemon is masked, shannond's facade owns the bus name
 feedbackd               # ring and vibration for omatel-agent
 sound-theme-freedesktop # ring tone for omatel-agent
+
+# --- Android (Waydroid; docs/image/ROOTFS.md "Android (Waydroid)") ---
+waydroid                # containerised Android (pulls lxc, python-gbinder, libgbinder, libglibutil, rsync, wget); images fetched on-device by t715-android-setup all

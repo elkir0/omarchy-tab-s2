@@ -3,8 +3,9 @@
 # the SM-T715.
 #
 # Installs Waydroid without risking a partial system upgrade, initialises
-# its Android images, points it at the Mali-T760 GPU render node and
-# compatible OpenGL ES / windowing properties, opens the ufw firewall for
+# its Android images, applies the verified Mesa workaround when the vendor
+# image ships the crashing build, points it at the Mali-T760 GPU render node
+# and compatible OpenGL ES / windowing properties, opens the ufw firewall for
 # the waydroid0 bridge, enables waydroid-container.service, and exposes
 # Android's shared storage to the session user once Android has booted.
 #
@@ -51,10 +52,25 @@
 # because Android has not booted once yet at that point (`media/0` only
 # exists after Android's first boot).
 #
+# Mesa 26.0.8 workaround (`mesa-fix`):
+# Waydroid's 32-bit ARM vendor image (`/var/lib/waydroid/images/vendor.img`)
+# ships `lib/libgallium_dri.so` from Mesa 26.0.8, which crashes Android's
+# surfaceflinger (use-after-free in `_mesa_hash_table_u64`).  `mesa-fix`
+# mounts `vendor.img` read-only, verifies the exact sha256 of the known bad
+# library and the 4 bytes at offset `0xd4f86a` (the `bl ralloc_set_destructor`
+# call in `_mesa_hash_table_u64_create`), replaces them with `nop.w`
+# (`af f3 00 80`), verifies the resulting sha256, and installs the patched
+# library into `/var/lib/waydroid/overlay/vendor/lib/libgallium_dri.so`
+# (mode 644, root).  On any other vendor build it refuses to patch and removes
+# our previously patched overlay file if present so it cannot shadow a newer
+# Mesa library.
+#
 # Usage:
 #   t715-android-setup packages        install waydroid safely if absent
 #   t715-android-setup init [--gapps]  initialise Waydroid images (requires
 #                                      /dev/binder; -s GAPPS with --gapps)
+#   t715-android-setup mesa-fix        apply or clean up the verified Mesa
+#                                      libgallium_dri.so overlay workaround
 #   t715-android-setup configure       set panfrost DRM node and properties
 #                                      in waydroid.cfg; apply offline upgrade
 #                                      when changed
@@ -65,9 +81,9 @@
 #   t715-android-setup share [USER]    grant USER (default: alarm) read/write
 #                                      ACL access to Android shared storage
 #                                      and link ~/Android (after first boot)
-#   t715-android-setup all [--gapps]   run packages, init, configure,
-#                                      firewall, enable in order (does not
-#                                      run share)
+#   t715-android-setup all [--gapps]   run packages, init, mesa-fix,
+#                                      configure, firewall, enable in order
+#                                      (does not run share)
 #   t715-android-setup status          print key=value status lines
 #   t715-android-setup --help          print usage on stdout and exit 0
 #
@@ -80,17 +96,25 @@
 #   3  running kernel lacks Android binder ($T715_ANDROID_DEV/binder missing)
 #
 # Test hooks (environment variables; all external commands resolve via PATH):
-#   T715_ANDROID_CFG          /var/lib/waydroid/waydroid.cfg
-#   T715_ANDROID_SYSFS        /sys
-#   T715_ANDROID_DEV          /dev
-#   T715_ANDROID_TMP          /var/tmp (parent for temporary pacman dirs)
-#   T715_ANDROID_ASSUME_ROOT  set to 1 to skip the root check
-#   T715_ANDROID_PACMAN_LOCAL /var/lib/pacman/local
-#   T715_ANDROID_DENSITY      optional; when non-empty, sets ro.sf.lcd_density
-#   T715_ANDROID_USER         default user for share (default: alarm)
+#   T715_ANDROID_CFG             /var/lib/waydroid/waydroid.cfg
+#   T715_ANDROID_VENDOR_IMG      /var/lib/waydroid/images/vendor.img
+#   T715_ANDROID_OVERLAY         /var/lib/waydroid/overlay
+#   T715_ANDROID_SYSFS           /sys
+#   T715_ANDROID_DEV             /dev
+#   T715_ANDROID_TMP             /var/tmp (parent for temporary dirs)
+#   T715_ANDROID_ASSUME_ROOT     set to 1 to skip the root check
+#   T715_ANDROID_PACMAN_LOCAL    /var/lib/pacman/local
+#   T715_ANDROID_DENSITY         optional; when non-empty, sets ro.sf.lcd_density
+#   T715_ANDROID_USER            default user for share (default: alarm)
+#   T715_ANDROID_MESA_BAD_SHA    override known bad libgallium_dri.so sha256
+#   T715_ANDROID_MESA_FIXED_SHA  override expected patched sha256
+#   T715_ANDROID_MESA_OFFSET     override patch file offset (hex or decimal)
 set -u
 
 CFG_FILE=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+VENDOR_IMG=${T715_ANDROID_VENDOR_IMG:-/var/lib/waydroid/images/vendor.img}
+OVERLAY_DIR=${T715_ANDROID_OVERLAY:-/var/lib/waydroid/overlay}
+OVERLAY_DIR=${OVERLAY_DIR%/}
 SYSFS=${T715_ANDROID_SYSFS:-/sys}
 SYSFS=${SYSFS%/}
 DEV_DIR=${T715_ANDROID_DEV:-/dev}
@@ -103,10 +127,38 @@ PACMAN_LOCAL=${PACMAN_LOCAL%/}
 DENSITY=${T715_ANDROID_DENSITY:-}
 DEFAULT_USER=${T715_ANDROID_USER:-alarm}
 
+# Known Mesa 26.0.8 libgallium_dri.so build in Waydroid's 32-bit ARM vendor
+# image that crashes surfaceflinger (use-after-free in _mesa_hash_table_u64).
+# File offset 0xd4f86a is the `bl ralloc_set_destructor` in
+# `_mesa_hash_table_u64_create`, replaced by `nop.w` (`af f3 00 80`); this
+# avoids the use-after-free at the cost that the 8-byte keys of those tables
+# leak.
+MESA_BAD_SHA=${T715_ANDROID_MESA_BAD_SHA:-a7523a1a41b54d0362df00b4db8195e9a909fc3df1a4eb7e8edb43d93d5836e7}
+MESA_FIXED_SHA=${T715_ANDROID_MESA_FIXED_SHA:-57ffc8aff962f5feb08c3d25f662da052026f3c7199b7b456857c8c8d1d9112b}
+MESA_PATCH_OFFSET=${T715_ANDROID_MESA_OFFSET:-0xd4f86a}
+MESA_OLD_BYTES="01f0eaff"
+MESA_NEW_BYTES="aff30080"
+
 PKG_TMP_DB=""
 PKG_TMP_CACHE=""
+MESA_MNT=""
+MESA_MOUNTED=0
+MESA_TMP_DIR=""
 
 cleanup_tmp() {
+    if [ "$MESA_MOUNTED" -eq 1 ] && [ -n "$MESA_MNT" ]; then
+        if umount "$MESA_MNT" >/dev/null 2>&1; then
+            MESA_MOUNTED=0
+        fi
+    fi
+    if [ "$MESA_MOUNTED" -eq 0 ] && [ -n "$MESA_MNT" ]; then
+        rm -rf "$MESA_MNT"
+        MESA_MNT=""
+    fi
+    if [ -n "$MESA_TMP_DIR" ]; then
+        rm -rf "$MESA_TMP_DIR"
+        MESA_TMP_DIR=""
+    fi
     if [ -n "$PKG_TMP_DB" ]; then
         rm -rf "$PKG_TMP_DB"
         PKG_TMP_DB=""
@@ -124,6 +176,7 @@ trap 'cleanup_tmp; exit 143' TERM
 usage() {
     printf 'usage: t715-android-setup packages\n'
     printf '       t715-android-setup init [--gapps]\n'
+    printf '       t715-android-setup mesa-fix\n'
     printf '       t715-android-setup configure\n'
     printf '       t715-android-setup firewall\n'
     printf '       t715-android-setup enable\n'
@@ -237,6 +290,152 @@ cmd_init() {
         fi
     fi
 
+    return 0
+}
+
+cmd_mesa_fix() {
+    local vendor_lib overlay_lib tmp_lib vendor_sha overlay_sha patched_sha short_sha
+
+    if [ ! -e "$VENDOR_IMG" ]; then
+        printf 'mesa-fix: %s does not exist (run init first)\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+
+    if ! MESA_MNT=$(mktemp -d "${TMP_DIR}/t715-android-mnt.XXXXXX"); then
+        MESA_MNT=""
+        printf 'mesa-fix: failed to create temporary mount directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    if ! mount -o ro,loop "$VENDOR_IMG" "$MESA_MNT"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to mount %s\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+    MESA_MOUNTED=1
+
+    vendor_lib="$MESA_MNT/lib/libgallium_dri.so"
+    if [ ! -f "$vendor_lib" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: lib/libgallium_dri.so not found in %s\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+
+    if ! vendor_sha=$(sha256sum "$vendor_lib"); then
+        cleanup_tmp
+        printf 'mesa-fix: failed to hash %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+    vendor_sha=${vendor_sha%%[[:space:]]*}
+    if [ -z "$vendor_sha" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: empty sha256 for %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+
+    overlay_lib="$OVERLAY_DIR/vendor/lib/libgallium_dri.so"
+
+    if [ "$vendor_sha" != "$MESA_BAD_SHA" ]; then
+        short_sha=${vendor_sha:0:12}
+        if [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+            overlay_sha=${overlay_sha%%[[:space:]]*}
+            if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+                if ! rm -f "$overlay_lib"; then
+                    cleanup_tmp
+                    printf 'mesa-fix: failed to remove stale patched overlay %s\n' "$overlay_lib" >&2
+                    return 1
+                fi
+                printf 'mesa-fix: removed stale patched overlay %s\n' "$overlay_lib"
+            else
+                printf 'mesa-fix: warning: %s does not match known patched build, leaving it untouched\n' "$overlay_lib" >&2
+            fi
+        elif [ -e "$overlay_lib" ] || [ -L "$overlay_lib" ]; then
+            printf 'mesa-fix: warning: %s does not match known patched build, leaving it untouched\n' "$overlay_lib" >&2
+        fi
+        cleanup_tmp
+        printf 'mesa-fix: unknown Mesa build %s, nothing applied\n' "$short_sha"
+        return 0
+    fi
+
+    if [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+        overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+        overlay_sha=${overlay_sha%%[[:space:]]*}
+        if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+            cleanup_tmp
+            printf 'mesa-fix: already applied, nothing to do\n'
+            return 0
+        fi
+    fi
+
+    if ! MESA_TMP_DIR=$(mktemp -d "${TMP_DIR}/t715-android-mesa.XXXXXX"); then
+        MESA_TMP_DIR=""
+        cleanup_tmp
+        printf 'mesa-fix: failed to create temporary working directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    tmp_lib="$MESA_TMP_DIR/libgallium_dri.so"
+    if ! cp "$vendor_lib" "$tmp_lib" || ! chmod u+w "$tmp_lib"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to copy %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+
+    if ! python3 - "$tmp_lib" "$MESA_PATCH_OFFSET" "$MESA_OLD_BYTES" "$MESA_NEW_BYTES" <<'PY'
+import sys
+
+path = sys.argv[1]
+offset = int(sys.argv[2], 0)
+old_bytes = bytes.fromhex(sys.argv[3])
+new_bytes = bytes.fromhex(sys.argv[4])
+
+if len(old_bytes) != len(new_bytes):
+    print("mesa-fix: old and new byte lengths differ", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, "r+b") as fh:
+    fh.seek(0, 2)
+    size = fh.tell()
+    if offset < 0 or offset + len(old_bytes) > size:
+        print(f"mesa-fix: offset 0x{offset:x} out of range (size {size})", file=sys.stderr)
+        sys.exit(1)
+    fh.seek(offset)
+    actual = fh.read(len(old_bytes))
+    if actual != old_bytes:
+        print(
+            f"mesa-fix: unexpected bytes at 0x{offset:x}: got {actual.hex()}, expected {old_bytes.hex()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    fh.seek(offset)
+    fh.write(new_bytes)
+PY
+    then
+        cleanup_tmp
+        return 1
+    fi
+
+    if ! patched_sha=$(sha256sum "$tmp_lib"); then
+        cleanup_tmp
+        printf 'mesa-fix: failed to hash patched library\n' >&2
+        return 1
+    fi
+    patched_sha=${patched_sha%%[[:space:]]*}
+    if [ "$patched_sha" != "$MESA_FIXED_SHA" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: patched sha256 mismatch (got %s, expected %s)\n' "$patched_sha" "$MESA_FIXED_SHA" >&2
+        return 1
+    fi
+
+    if ! install -d -m 0755 "$OVERLAY_DIR/vendor/lib" || ! install -m 0644 "$tmp_lib" "$overlay_lib"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to install %s\n' "$overlay_lib" >&2
+        return 1
+    fi
+
+    cleanup_tmp
+    printf 'mesa-fix: applied\n'
     return 0
 }
 
@@ -503,6 +702,7 @@ cmd_all() {
     local gapps=${1:-}
     cmd_packages || return $?
     cmd_init "$gapps" || return $?
+    cmd_mesa_fix || return $?
     cmd_configure || return $?
     cmd_firewall || return $?
     cmd_enable || return $?
@@ -510,8 +710,8 @@ cmd_all() {
 }
 
 cmd_status() {
-    local kernel="no" package="none" initialised="no" gpu="" gles="" container="inactive"
-    local pkg_line pkg_ver line
+    local kernel="no" package="none" initialised="no" gpu="" gles="" container="inactive" mesa="none"
+    local pkg_line pkg_ver line overlay_lib overlay_sha
 
     if [ -e "$DEV_DIR/binder" ]; then
         kernel="yes"
@@ -542,6 +742,21 @@ print("gpu=" + cfg.get("waydroid", "drm_device", fallback=""))
 print("gles=" + cfg.get("properties", "ro.opengles.version", fallback=""))
 PY
         )
+
+        overlay_lib="$OVERLAY_DIR/vendor/lib/libgallium_dri.so"
+        if [ ! -e "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            mesa="vendor"
+        elif [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+            overlay_sha=${overlay_sha%%[[:space:]]*}
+            if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+                mesa="fixed"
+            else
+                mesa="unknown"
+            fi
+        else
+            mesa="unknown"
+        fi
     fi
 
     if systemctl is-active waydroid-container.service >/dev/null 2>&1; then
@@ -554,6 +769,7 @@ PY
     printf 'gpu=%s\n' "$gpu"
     printf 'gles=%s\n' "$gles"
     printf 'container=%s\n' "$container"
+    printf 'mesa=%s\n' "$mesa"
     return 0
 }
 
@@ -594,6 +810,15 @@ case ${1:-} in
         fi
         require_root || exit 1
         cmd_init "${2:-}"
+        exit $?
+        ;;
+    mesa-fix)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_mesa_fix
         exit $?
         ;;
     configure)

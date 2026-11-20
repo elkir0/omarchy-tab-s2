@@ -1135,6 +1135,44 @@ check "systemd: ShowStatus=auto (no status lines before the splash)" grep -qx 'S
 for u in plymouth-reboot plymouth-poweroff plymouth-halt plymouth-kexec; do
     check "plymouth: $u.service masked (shutdown race with Hyprland)" test "$(linkto /etc/systemd/system/$u.service)" = /dev/null
 done
+
+echo "== Android (Waydroid; docs/image/ROOTFS.md \"Android (Waydroid)\") =="
+check "waydroid installed ($(pkg_ver waydroid))" has_pkg waydroid
+check "/usr/bin/waydroid present" exists /usr/bin/waydroid
+check "python-pyclip installed ($(pkg_ver python-pyclip))" has_pkg python-pyclip
+pyclip_init=""
+if has_pkg python-pyclip; then
+    get "/var/lib/pacman/local/python-pyclip-$(pkg_ver python-pyclip)/files"
+    pyclip_init="$(grep -m1 '^usr/lib/python3\.[^/]*/site-packages/pyclip/__init__\.py$' "$W/f" || true)"
+fi
+check "  pyclip module present (${pyclip_init:+/$pyclip_init})" \
+    sh -c '[ -n "$1" ] && debugfs -R "stat \"/$1\"" /img/rootfs.img 2>/dev/null | grep -q "^Inode:"' _ "$pyclip_init"
+check "/usr/local/bin/t715-android present, mode 0755, identical to rootfs/overlay" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" /our-overlay/usr/local/bin/t715-android' _ \
+    "$(fmode /usr/local/bin/t715-android)" \
+    "$(get /usr/local/bin/t715-android; cp "$W/f" "$W/t715-android"; echo "$W/t715-android")"
+check "/usr/local/sbin/t715-android-setup present, mode 0755, identical to rootfs/overlay" \
+    sh -c '[ "$1" = 0755 ] && cmp -s "$2" /our-overlay/usr/local/sbin/t715-android-setup' _ \
+    "$(fmode /usr/local/sbin/t715-android-setup)" \
+    "$(get /usr/local/sbin/t715-android-setup; cp "$W/f" "$W/t715-android-setup"; echo "$W/t715-android-setup")"
+t="$(resolve /etc/systemd/user/graphical-session.target.wants/t715-android.service || true)"
+check "t715-android.service enabled for every user (graphical-session.target.wants -> ${t:-missing})" \
+    test "$t" = /etc/systemd/user/t715-android.service
+wd_on=""
+for d in $wants; do
+    dfs "ls -p /etc/systemd/system/$d" | awk -F/ '{print $6}' \
+        | grep -qx waydroid-container.service && wd_on="$wd_on $d"
+done
+check "waydroid-container.service not enabled${wd_on:+ (found in$wd_on)}" test -z "$wd_on"
+wd_imgs=""
+if exists /var/lib/waydroid; then
+    wd_imgs="$(dfs "ls -p /var/lib/waydroid" | awk -F/ '$6 ~ /\.img$|^waydroid\.cfg$/ {print $6}' | tr '\n' ' ')"
+    if exists /var/lib/waydroid/images; then
+        wd_imgs="$wd_imgs$(dfs "ls -p /var/lib/waydroid/images" | awk -F/ '$6 != "" && $6 != "." && $6 != ".." {print "images/" $6}' | tr '\n' ' ')"
+    fi
+fi
+check "no Android image or config in /var/lib/waydroid${wd_imgs:+ (found: $wd_imgs)}" test -z "$wd_imgs"
+
 check "nothing in the image refers to USERDATA's mount point in fstab" \
     sh -c '! grep -q "/run/t715" "$1"' _ "$(get /etc/fstab; cp "$W/f" "$W/fstab"; echo "$W/fstab")"
 check "smoke check installed (/usr/lib/t715-omarchy/smoke-check, 0755)" \

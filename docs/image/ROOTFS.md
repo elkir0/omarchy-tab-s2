@@ -1199,6 +1199,38 @@ without a measurement. Firefox stays installed.
 The sandbox is on: no `--no-sandbox`, renderers under seccomp in their own PID
 namespaces. The GPU process runs without seccomp.
 
+## Android (Waydroid)
+
+The image ships everything needed to run Android apps through Waydroid except
+Android itself, with nothing enabled or initialised at build time. It requires
+a kernel built with the `kernel/patches/t715-waydroid/` series (Android binder,
+`/dev/binder`, and container support); on any other kernel `t715-android.service`
+skips itself through its `ConditionPathExists=` checks and
+`t715-android-setup init` exits 3.
+
+| Piece | Source | Role |
+|---|---|---|
+| `waydroid` | `image/rootfs/packages.extra` (ALARM) | Waydroid and its dependencies (`lxc`, `python-gbinder`, `libgbinder`, `libglibutil`, `rsync`, `wget`); `waydroid-container.service` stays disabled at build time (`configure-system.sh`) |
+| `python-pyclip` | `image/rootfs/packages.mobile` (`image/pkg/python-pyclip`, `[t715-omarchy]`) | Waydroid's shared clipboard over Wayland through `wl-clipboard`, not packaged by ALARM |
+| `/usr/local/sbin/t715-android-setup` | overlay | root-side setup (`packages`, `init`, `mesa-fix`, `configure`, `firewall`, `enable`, `share`, `all`, `status`) |
+| `/usr/local/bin/t715-android`, `t715-android.service` | overlay | session switch for the quick settings tile and user unit enabled globally (dormant until `/var/lib/waydroid/waydroid.cfg` and `/dev/binder` exist) |
+
+What the image does not ship: Android itself (Waydroid's LineageOS system and
+vendor images, about 760 MB) and `/var/lib/waydroid/waydroid.cfg`. On a
+persistent root, `sudo t715-android-setup all` (or `all --gapps`) downloads
+the images, applies the verified Mesa 26.0.8 `libgallium_dri.so` overlay
+workaround (`mesa-fix`) when the known bad vendor build is present, points
+Waydroid at the `panfrost` DRM render node and Mali-T760 OpenGL ES 3.1
+properties, opens `waydroid0` in `ufw`, and enables and starts
+`waydroid-container.service`. Once Android has booted,
+`sudo t715-android-setup share` grants the session user POSIX ACL access to
+Android's shared storage and links `~/Android`.
+
+`image/tests/test_t715_android_setup.sh` and `image/tests/test_t715_android.sh`
+test both tools off the device, and `verify-rootfs.sh` checks the packages,
+tools, enabled user unit, disabled container service and empty
+`/var/lib/waydroid`.
+
 ## Installing software
 
 `sudo pacman -S <package>` works on the persistent root, with pacman's download

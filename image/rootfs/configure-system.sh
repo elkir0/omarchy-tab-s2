@@ -129,7 +129,10 @@ systemctl enable t715-power-profile.service t715-power-profile.path t715-power-g
 systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service t715-update-check.timer t715-animations.path t715-animations.service t715-sdcard.service
 # Android (Waydroid) session: does nothing on a system without Waydroid because of its ConditionPathExists= checks.
 [ -x /usr/local/bin/t715-android ] || die "no /usr/local/bin/t715-android"
+[ -x /usr/local/sbin/t715-android-setup ] || die "no /usr/local/sbin/t715-android-setup"
 systemctl --global enable t715-android.service
+# Keep waydroid-container.service disabled until the user runs `sudo t715-android-setup all`.
+systemctl disable waydroid-container.service || true
 
 # Touch layer P2: omamobile-setup-user runs once, at build time, as alarm
 # (omarchy-user-setup.sh). omamobile-shell also starts it at every login,
