@@ -120,7 +120,7 @@ When ALARM ships a newer version of a package we rebuild, ours still wins
 (`[t715-omarchy]` comes first), so check whether the new version carries the
 fix, then rebase the PKGBUILD on it or drop ours.
 
-## hyprgraphics 0.6.0-1.1
+## hyprgraphics 0.6.0-2.1
 
 - **Why:** Hyprland 0.56.2 froze on the tablet as soon as it drew text
   (`debug:overlay`; also the error bar, `hyprctl notify`, group bars), see
@@ -132,23 +132,26 @@ fix, then rebase the PKGBUILD on it or drop ours.
   forever. Upstream: [hyprwm/hyprgraphics#53](https://github.com/hyprwm/hyprgraphics/issues/53)
   (PR #52, still open), not fixed in 0.6.0: its `AsyncResourceGatherer.cpp`
   is unchanged from 0.5.1.
-- **Package:** `image/pkg/hyprgraphics/`, Arch's 0.6.0-1 PKGBUILD (which ALARM
-  builds unchanged) with `pkgrel=1.1`, `armv7h` in `arch=()`, and
+- **Package:** `image/pkg/hyprgraphics/`, Arch's 0.6.0-2 PKGBUILD (which ALARM
+  builds unchanged, rebuilt for `libjxl` 0.13 / `libjxl.so=0.13-32`) with
+  `pkgrel=2.1`, `armv7h` in `arch=()`, and
   `hyprgraphics-0.6.0-fix-await-lost-wakeup.patch`, the 0.5.1 patch with the
   same hunks: `awaitingEvent` is set and checked under `awaitingMtx`,
   `await()` returns at once when the resource is already done, and
   `needsToProcess`/`exit` are set under `requestMutex`. Only
   `src/resource/AsyncResourceGatherer.cpp` changes. The SONAME moved with the
-  version to `libhyprgraphics.so.5`, which ALARM's Hyprland 0.57.0-3 requires
-  (the 0.5.1 rebuild made the image's dependency gate fail from 2026-11-02).
+  version to `libhyprgraphics.so.5`, which ALARM's Hyprland 0.57.0-3 (and
+  0.57.2-1) and `hyprtoolkit` 0.6.0-3 require (the 0.5.1 rebuild made the
+  image's dependency gate fail from 2026-11-02).
 - **Test:** `image/tests/test_hyprgraphics.sh` checks that pacman takes
-  hyprgraphics 0.6.0-1.1 from `[t715-omarchy]`, including for
+  hyprgraphics 0.6.0-2.1 from `[t715-omarchy]`, including for
   `pacman -Sp hyprland`, installs it and runs the reproducer
   `image/tests/hyprgraphics-repro/repro.cpp` (Hyprland's `renderText` pattern:
   `enqueue()` then `await()` on the same thread, 20000 rounds, a watchdog
   reports a hang after 12 s) against the installed library, unpinned and
   pinned to one CPU. As a negative control it installs ALARM's stock
-  0.6.0-1 and expects the pinned run to hang: it did on 2026-11-03.
+  0.6.0-2 and expects the pinned run to hang: it did on 2026-11-20 (as 0.6.0-1
+  had on 2026-11-03).
 
 ## omarchy-mobile: the touch shell (touch layer P2)
 
@@ -170,7 +173,7 @@ targets Omarchy 4.0.6.
   The tarball's two package directories were compared with a clone at
   5f7ba48: identical.
 - **Version**: upstream's `version` file (checked in `prepare()`) and
-  upstream's pkgrel 1 plus `.N`: `0.1.27-1.2`; the shell is `0.2.94-2`.
+  upstream's pkgrel 1 plus `.N`: `0.1.27-1.2`; the shell is `0.2.94-6`.
 - **`arch = any`**, no compiled file (checked by `image/tools/build-pkg`).
 - **Build order**: `omamobile-omarchy` first: `omamobile-shell` depends on
   it, and `image/tools/build-pkg` checks that every runtime depend resolves.
@@ -236,10 +239,11 @@ targets Omarchy 4.0.6.
   ours, none found upstream, and the 19 patched QML and JS files parse
   (`qmlformat`).
 
-### omamobile-shell 0.2.94-2
+### omamobile-shell 0.2.94-6
 
 Moved from 0.2.32-1.15 on 2026-11-03 (the owner's yes); 0.2.94-2 (2026-11-05)
-adds the Modem tile, 0.2.94-5 (2026-11-08) the SD card tile. What the tablet
+adds the Modem tile, 0.2.94-5 (2026-11-08) the SD card tile, 0.2.94-6
+(2026-11-20) the Android tile. What the tablet
 gains from upstream: the drawer swiped up from anywhere and following the
 finger, with no keyboard and no icon rescan; the home pill in a 44 px bottom
 bar that apps no longer draw under; recents named by app; a media card in the
@@ -253,7 +257,7 @@ is what lets the widgets idle while the panel is off.
   `omamobile-setup-user`, `-launch`, `-osk-watch`, `-bt-agent`,
   `-screenrecord`, `-widget`; `omamobile-setup-user.service` (masked in the
   image); the polkit rule that asks a wheel member for their own password.
-- **Changed for the tablet**, twelve patches against 87b8395:
+- **Changed for the tablet**, thirteen patches against 87b8395:
   `0001-tablet-quick-settings-tiles.patch`
   (`TilesModel.js`: no mobile data, hotspot, torch, location, NFC,
   fingerprint or rotation-lock tile; the tablet's default layout;
@@ -276,7 +280,10 @@ is what lets the widgets idle while the panel is off.
   standby setting; "Modem off" on the Mobile data tile meanwhile),
   `0012-tablet-sdcard-tile.patch` (the SD card tile over `t715-sdcard`: on
   while the card is mounted, a tap mounts or ejects, a long press opens the
-  card in Files, dimmed without the command or the slot). Upstream
+  card in Files, dimmed without the command or the slot),
+  `0013-tablet-android-tile.patch` (the Android tile over `t715-android`: on
+  while Waydroid's session is running, a tap starts or stops it, a long press
+  opens Android Settings, dimmed when not installed). Upstream
   now has what 0.2.32's 0003 (the light drawer), 0009 and 0010 (the bottom
   strip, app names in recents) did, so they are gone. `tablet-shell.json` as `profile/shell.json` (the eight
   plugins, the watchers on, the drawer at 6 columns, Omarchy's idle timers at 0,
