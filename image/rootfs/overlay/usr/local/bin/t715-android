@@ -1,0 +1,271 @@
+#!/bin/bash
+# t715-android: the Android (Waydroid) session switch in the Omarchy session.
+#
+# Waydroid runs Android apps beside Linux apps in multi-window mode: each
+# Android app is a Wayland window whose Hyprland class is
+# `waydroid.<package>`.  Its container freezes by itself when no Android
+# window is shown, so leaving the session up costs little at idle, while
+# stopping it tears the session down cleanly.  The quick settings tile
+# reads `t715-android state` and switches the session or opens Android
+# Settings through this command.
+#
+# An off marker in the user's state directory
+# ($T715_ANDROID_STATE_DIR/off, default ~/.local/state/t715-android/off)
+# keeps t715-android.service from starting automatically at the next
+# login (ConditionPathExists=!%h/.local/state/t715-android/off): `stop`
+# creates the marker and `start` removes it.
+#
+#   state     the session as key=value lines, in this order: installed,
+#             session, container, apps.  The quick settings tile parses
+#             them: the keys and their order are an interface.
+#   start     remove the off marker, start t715-android.service, and
+#             poll `waydroid status` once a second (at most
+#             T715_ANDROID_WAIT seconds, default 30) until Session is
+#             RUNNING; exit 0 when already running without starting
+#             anything; on timeout or when Waydroid is not installed,
+#             report on stderr, notify, and exit 1.
+#   stop      create the off marker and stop t715-android.service; exit
+#             0 also when the session was not running.
+#   toggle    stop when the session is running, start otherwise.
+#   settings  start the session first when stopped (stopping on
+#             failure), then launch com.android.settings.
+#
+# One log line per start/stop transition (logger -t t715-android).
+# Everything is quoted; nothing is ever eval'd.
+#
+# Usage: t715-android state|start|stop|toggle|settings|--help
+# No argument or an unknown one: the usage on stderr, exit 2.
+#
+# Test hooks (image/tests/test_t715_android.sh): T715_ANDROID_CFG
+# (/var/lib/waydroid/waydroid.cfg) for Waydroid's initialisation file,
+# T715_ANDROID_DEV (/dev) for the binder device ($T715_ANDROID_DEV/binder),
+# T715_ANDROID_STATE_DIR (${XDG_STATE_HOME:-$HOME/.local/state}/t715-android)
+# for the off marker and notification id, T715_ANDROID_WAIT (30) for the
+# start wait window, and every external command through PATH.
+set -u
+
+CFG=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+DEV=${T715_ANDROID_DEV:-/dev}
+STATE_DIR=${T715_ANDROID_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/t715-android}
+OFF_MARKER=$STATE_DIR/off
+WAIT=${T715_ANDROID_WAIT:-30}
+case $WAIT in '' | *[!0-9]*) WAIT=30 ;; esac
+UNIT=t715-android.service
+GLYPH_ANDROID=󰀲
+
+usage() {
+    printf 'usage: t715-android state\n' >&2
+    printf '       t715-android start\n' >&2
+    printf '       t715-android stop\n' >&2
+    printf '       t715-android toggle\n' >&2
+    printf '       t715-android settings\n' >&2
+}
+
+# log TEXT: to the journal, or to stderr where there is no logger (the
+# test's stub collects what the script has to say).
+log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t t715-android "$*"
+    else
+        printf 't715-android: %s\n' "$*" >&2
+    fi
+}
+
+# notify_android ARGS...: replace the previous Android notification when
+# omarchy-notification-send is available, keeping its id in STATE_DIR.
+notify_android() {
+    command -v omarchy-notification-send >/dev/null 2>&1 || return 0
+    _na_id=$(cat "$STATE_DIR/notify-id" 2>/dev/null) || _na_id=
+    case $_na_id in '' | *[!0-9]*) _na_id=0 ;; esac
+    _na_out=$(omarchy-notification-send -p -r "$_na_id" "$@") || return 0
+    case $_na_out in
+    '' | *[!0-9]*) ;;
+    *) mkdir -p "$STATE_DIR" && printf '%s\n' "$_na_out" >"$STATE_DIR/notify-id" 2>/dev/null ;;
+    esac
+    return 0
+}
+
+# is_installed: waydroid in PATH, waydroid.cfg present, binder device present.
+is_installed() {
+    command -v waydroid >/dev/null 2>&1 &&
+        [ -f "$CFG" ] &&
+        [ -e "$DEV/binder" ]
+}
+
+# waydroid_status: one bounded `waydroid status` call.
+waydroid_status() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 waydroid status 2>/dev/null
+    else
+        waydroid status 2>/dev/null
+    fi
+}
+
+# parse_status: set S_SESSION (running|stopped) and S_CONTAINER
+# (running|frozen|stopped) from one `waydroid status` call; any failure
+# leaves both stopped.
+parse_status() {
+    S_SESSION=stopped
+    S_CONTAINER=stopped
+    _ps_out=$(waydroid_status) || return 0
+    while IFS= read -r _ps_line; do
+        case $_ps_line in
+        Session:*)
+            _ps_val=$(printf '%s' "${_ps_line#Session:}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+            case $_ps_val in
+            running) S_SESSION=running ;;
+            *) S_SESSION=stopped ;;
+            esac
+            ;;
+        Container:*)
+            _ps_val=$(printf '%s' "${_ps_line#Container:}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+            case $_ps_val in
+            running | frozen | stopped) S_CONTAINER=$_ps_val ;;
+            *) S_CONTAINER=stopped ;;
+            esac
+            ;;
+        esac
+    done <<< "$_ps_out"
+    return 0
+}
+
+# count_apps: number of Hyprland clients whose class starts with
+# "waydroid."; empty when the session is stopped or either tool fails.
+count_apps() {
+    S_APPS=''
+    [ "$S_SESSION" = running ] || return 0
+    command -v hyprctl >/dev/null 2>&1 || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    _ca_json=$(hyprctl clients -j 2>/dev/null) || return 0
+    _ca_n=$(printf '%s\n' "$_ca_json" | jq -r '
+        if type == "array" then
+            [.[] | select(type == "object" and ((.class // "") | type == "string") and ((.class // "") | startswith("waydroid.")))] | length
+        else
+            empty
+        end
+    ' 2>/dev/null) || return 0
+    case $_ca_n in
+    '' | *[!0-9]*) S_APPS='' ;;
+    *) S_APPS=$_ca_n ;;
+    esac
+    return 0
+}
+
+compute_state() {
+    S_INSTALLED=no
+    S_SESSION=stopped
+    S_CONTAINER=stopped
+    S_APPS=''
+    is_installed || return 0
+    S_INSTALLED=yes
+    parse_status
+    count_apps
+    return 0
+}
+
+cmd_state() {
+    compute_state
+    printf 'installed=%s\nsession=%s\ncontainer=%s\napps=%s\n' \
+        "$S_INSTALLED" "$S_SESSION" "$S_CONTAINER" "$S_APPS"
+}
+
+# start_unit: clear the off marker, start the user unit, poll until
+# Session is RUNNING (up to WAIT seconds).
+start_unit() {
+    rm -f "$OFF_MARKER"
+    if ! systemctl --user start "$UNIT"; then
+        printf 't715-android: failed to start %s\n' "$UNIT" >&2
+        notify_android -u normal -g "$GLYPH_ANDROID" "Android did not start" \
+            "Could not start $UNIT."
+        log "start failed: systemctl --user start $UNIT failed"
+        return 1
+    fi
+    _st_left=$WAIT
+    while :; do
+        parse_status
+        if [ "$S_SESSION" = running ]; then
+            log "Android session started"
+            return 0
+        fi
+        [ "$_st_left" -gt 0 ] || break
+        sleep 1
+        _st_left=$((_st_left - 1))
+    done
+    printf 't715-android: Android session did not start within %s s\n' "$WAIT" >&2
+    notify_android -u normal -g "$GLYPH_ANDROID" "Android did not start" \
+        "Waydroid did not come up within ${WAIT} s."
+    log "start timed out after ${WAIT} s"
+    return 1
+}
+
+# do_start: `start` -- start the session when installed and stopped.
+do_start() {
+    if ! is_installed; then
+        printf 't715-android: Waydroid is not installed or not initialised\n' >&2
+        notify_android -u normal -g "$GLYPH_ANDROID" "Android unavailable" \
+            "Waydroid is not installed or not initialised on this system."
+        return 1
+    fi
+    parse_status
+    if [ "$S_SESSION" = running ]; then
+        rm -f "$OFF_MARKER"
+        return 0
+    fi
+    start_unit
+}
+
+# do_stop: `stop` -- write the off marker and stop the user unit.
+do_stop() {
+    mkdir -p "$STATE_DIR" || {
+        printf 't715-android: cannot create %s\n' "$STATE_DIR" >&2
+        return 1
+    }
+    : >"$OFF_MARKER" || {
+        printf 't715-android: cannot write %s\n' "$OFF_MARKER" >&2
+        return 1
+    }
+    systemctl --user stop "$UNIT" || true
+    log "Android session stopped"
+    return 0
+}
+
+# do_toggle: `toggle` -- stop when running, start otherwise.
+do_toggle() {
+    if ! is_installed; then
+        do_start
+        return $?
+    fi
+    parse_status
+    if [ "$S_SESSION" = running ]; then
+        do_stop
+    else
+        start_unit
+    fi
+}
+
+# do_settings: `settings` -- start when stopped, then open Android Settings.
+do_settings() {
+    do_start || return 1
+    waydroid app launch com.android.settings
+}
+
+if [ $# -ne 1 ]; then
+    usage >&2
+    exit 2
+fi
+
+case ${1:-} in
+state) cmd_state ;;
+start) do_start ;;
+stop) do_stop ;;
+toggle) do_toggle ;;
+settings) do_settings ;;
+--help | -h)
+    usage 2>&1
+    exit 0
+    ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,26 @@
+# t715-android.service — the Android (Waydroid) session in the Omarchy
+# session (omarchy-tab-s2; controlled by /usr/local/bin/t715-android,
+# and read by the quick settings tile via `t715-android state`). Runs
+# Waydroid's multi-window session so Android apps sit beside Linux apps;
+# the container freezes on its own when no Android window is shown.
+# Started with the graphical session for every user (systemctl --global
+# enable), guarded by conditions so it does nothing on a system without
+# Waydroid or binder, or when the user switched Android off
+# (~/.local/state/t715-android/off).
+# Its log: journalctl --user -u t715-android
+[Unit]
+Description=SM-T715 Android (Waydroid) session
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
+ConditionPathExists=/dev/binder
+ConditionPathExists=!%h/.local/state/t715-android/off
+
+[Service]
+ExecStart=/usr/bin/waydroid session start
+ExecStop=/usr/bin/waydroid session stop
+Restart=no
+TimeoutStopSec=30
+
+[Install]
+WantedBy=graphical-session.target
