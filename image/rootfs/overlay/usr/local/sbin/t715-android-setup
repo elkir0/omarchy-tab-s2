@@ -1,0 +1,660 @@
+#!/bin/bash
+# t715-android-setup: root-side installer and configurator of Waydroid on
+# the SM-T715.
+#
+# Installs Waydroid without risking a partial system upgrade, initialises
+# its Android images, points it at the Mali-T760 GPU render node and
+# compatible OpenGL ES / windowing properties, opens the ufw firewall for
+# the waydroid0 bridge, enables waydroid-container.service, and exposes
+# Android's shared storage to the session user once Android has booted.
+#
+# Why the pacman method:
+# The tablet's Arch Linux ARM package database is deliberately kept at a
+# known-good snapshot.  Refreshing it in place (`pacman -Sy` followed by an
+# install) produces a partial upgrade, and `pacman -Syu` would overwrite
+# patched system packages.  `packages` instead copies the local database
+# (`/var/lib/pacman/local`) into a temporary `--dbpath`, refreshes only that
+# temporary database (`pacman -Sy --dbpath D`), downloads `waydroid` and its
+# dependencies into a temporary `--cachedir` (`pacman -Sw --noconfirm
+# --dbpath D --cachedir C waydroid`), and installs the downloaded archives
+# with `pacman -U --noconfirm --needed`.  `/var/lib/pacman/sync` is never
+# touched, and both temporary directories are removed on exit and on error.
+#
+# DRM render nodes and Waydroid properties:
+# The SM-T715 exposes two DRM render nodes, one for the display driver
+# (`exynos-drm`) and one for the GPU (`panfrost`), whose numbering is not
+# fixed across boots.  `configure` inspects
+# `/sys/class/drm/renderD<N>/device/driver` to locate `panfrost`, writes
+# `drm_device = /dev/dri/renderD<N>` under `[waydroid]`, sets Mali-T760's
+# OpenGL ES 3.1 property (`ro.opengles.version = 196609`) and
+# `persist.waydroid.multi_windows = false` under `[properties]` (plus
+# `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set), preserving every
+# other section, key and key case, and runs `waydroid upgrade --offline`
+# only when the configuration changed.  Multi-window stays off on purpose:
+# `waydroid app launch` still gives each app its own Wayland window (class
+# `waydroid.<package>`), full size and without Android's caption bar, and
+# the shell puts each on its own screen; with multi-window on, Android opens
+# small freeform tasks, a task covered by another loses its window, and
+# surfaceflinger crashed under the resizes needed to fill the screen.
+#
+# Shared storage (`share`) and why POSIX ACLs:
+# Waydroid stores Android's `/sdcard` under
+# `<home>/.local/share/waydroid/data/media/0`, owned by Android uids and
+# gid 1023 (`media_rw`) with POSIX ACLs.  `share` grants the session user
+# (by numeric uid) traverse access down to `media/0` and recursive + default
+# `rwX` ACLs on `Download`, `Pictures`, `Documents`, `DCIM`, `Movies` and
+# `Music` (keeping `g:1023:rwX` and `m::rwx` in the default ACL), then
+# creates `<home>/Android` -> `media/0`.  Using POSIX ACLs means the
+# storage stays owned by Android, nothing is bind-mounted, and Android's
+# own permissions are kept so files created on either side are readable,
+# writable and deletable on the other.  `all` does NOT call `share`
+# because Android has not booted once yet at that point (`media/0` only
+# exists after Android's first boot).
+#
+# Usage:
+#   t715-android-setup packages        install waydroid safely if absent
+#   t715-android-setup init [--gapps]  initialise Waydroid images (requires
+#                                      /dev/binder; -s GAPPS with --gapps)
+#   t715-android-setup configure       set panfrost DRM node and properties
+#                                      in waydroid.cfg; apply offline upgrade
+#                                      when changed
+#   t715-android-setup firewall        allow waydroid0 DNS/DHCP/routing in
+#                                      ufw when ufw is installed and active
+#   t715-android-setup enable          enable and start
+#                                      waydroid-container.service
+#   t715-android-setup share [USER]    grant USER (default: alarm) read/write
+#                                      ACL access to Android shared storage
+#                                      and link ~/Android (after first boot)
+#   t715-android-setup all [--gapps]   run packages, init, configure,
+#                                      firewall, enable in order (does not
+#                                      run share)
+#   t715-android-setup status          print key=value status lines
+#   t715-android-setup --help          print usage on stdout and exit 0
+#
+# Every subcommand except `status` and `--help` requires root (`id -u` == 0).
+#
+# Exit codes:
+#   0  success (or --help)
+#   1  runtime failure (not root, command failure, missing cfg or panfrost)
+#   2  usage error (missing/unknown subcommand or invalid arguments)
+#   3  running kernel lacks Android binder ($T715_ANDROID_DEV/binder missing)
+#
+# Test hooks (environment variables; all external commands resolve via PATH):
+#   T715_ANDROID_CFG          /var/lib/waydroid/waydroid.cfg
+#   T715_ANDROID_SYSFS        /sys
+#   T715_ANDROID_DEV          /dev
+#   T715_ANDROID_TMP          /var/tmp (parent for temporary pacman dirs)
+#   T715_ANDROID_ASSUME_ROOT  set to 1 to skip the root check
+#   T715_ANDROID_PACMAN_LOCAL /var/lib/pacman/local
+#   T715_ANDROID_DENSITY      optional; when non-empty, sets ro.sf.lcd_density
+#   T715_ANDROID_USER         default user for share (default: alarm)
+set -u
+
+CFG_FILE=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+SYSFS=${T715_ANDROID_SYSFS:-/sys}
+SYSFS=${SYSFS%/}
+DEV_DIR=${T715_ANDROID_DEV:-/dev}
+DEV_DIR=${DEV_DIR%/}
+TMP_DIR=${T715_ANDROID_TMP:-/var/tmp}
+TMP_DIR=${TMP_DIR%/}
+ASSUME_ROOT=${T715_ANDROID_ASSUME_ROOT:-0}
+PACMAN_LOCAL=${T715_ANDROID_PACMAN_LOCAL:-/var/lib/pacman/local}
+PACMAN_LOCAL=${PACMAN_LOCAL%/}
+DENSITY=${T715_ANDROID_DENSITY:-}
+DEFAULT_USER=${T715_ANDROID_USER:-alarm}
+
+PKG_TMP_DB=""
+PKG_TMP_CACHE=""
+
+cleanup_tmp() {
+    if [ -n "$PKG_TMP_DB" ]; then
+        rm -rf "$PKG_TMP_DB"
+        PKG_TMP_DB=""
+    fi
+    if [ -n "$PKG_TMP_CACHE" ]; then
+        rm -rf "$PKG_TMP_CACHE"
+        PKG_TMP_CACHE=""
+    fi
+}
+
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT
+trap 'cleanup_tmp; exit 143' TERM
+
+usage() {
+    printf 'usage: t715-android-setup packages\n'
+    printf '       t715-android-setup init [--gapps]\n'
+    printf '       t715-android-setup configure\n'
+    printf '       t715-android-setup firewall\n'
+    printf '       t715-android-setup enable\n'
+    printf '       t715-android-setup share [USER]\n'
+    printf '       t715-android-setup all [--gapps]\n'
+    printf '       t715-android-setup status\n'
+    printf '       t715-android-setup --help\n'
+}
+
+require_root() {
+    if [ "$ASSUME_ROOT" = "1" ]; then
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        printf 't715-android-setup: must be run as root\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_packages() {
+    local pkgs=() pkg_count=0 f
+
+    if pacman -Q waydroid >/dev/null 2>&1; then
+        printf 'packages: waydroid is already installed, nothing to do\n'
+        return 0
+    fi
+
+    if [ ! -d "$PACMAN_LOCAL" ]; then
+        printf 'packages: pacman local database not found at %s\n' "$PACMAN_LOCAL" >&2
+        return 1
+    fi
+
+    if ! PKG_TMP_DB=$(mktemp -d "${TMP_DIR}/t715-android-db.XXXXXX"); then
+        PKG_TMP_DB=""
+        printf 'packages: failed to create temporary dbpath directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+    if ! PKG_TMP_CACHE=$(mktemp -d "${TMP_DIR}/t715-android-pkg.XXXXXX"); then
+        PKG_TMP_CACHE=""
+        cleanup_tmp
+        printf 'packages: failed to create temporary cachedir directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    if ! mkdir -p "$PKG_TMP_DB/local" || ! cp -a "$PACMAN_LOCAL/." "$PKG_TMP_DB/local/"; then
+        cleanup_tmp
+        printf 'packages: failed to copy pacman local database from %s\n' "$PACMAN_LOCAL" >&2
+        return 1
+    fi
+
+    if ! pacman -Sy --dbpath "$PKG_TMP_DB"; then
+        cleanup_tmp
+        printf 'packages: pacman -Sy with temporary dbpath failed\n' >&2
+        return 1
+    fi
+
+    if ! pacman -Sw --noconfirm --dbpath "$PKG_TMP_DB" --cachedir "$PKG_TMP_CACHE" waydroid; then
+        cleanup_tmp
+        printf 'packages: pacman -Sw waydroid failed\n' >&2
+        return 1
+    fi
+
+    for f in "$PKG_TMP_CACHE"/*.pkg.tar.*; do
+        [ -e "$f" ] || continue
+        case "$f" in
+            *.sig) continue ;;
+        esac
+        pkgs+=("$f")
+        pkg_count=$((pkg_count + 1))
+    done
+
+    if [ "$pkg_count" -eq 0 ]; then
+        cleanup_tmp
+        printf 'packages: no downloaded packages found in cache\n' >&2
+        return 1
+    fi
+
+    if ! pacman -U --noconfirm --needed "${pkgs[@]}"; then
+        cleanup_tmp
+        printf 'packages: pacman -U failed\n' >&2
+        return 1
+    fi
+
+    cleanup_tmp
+    return 0
+}
+
+cmd_init() {
+    local gapps=${1:-}
+
+    if [ ! -e "$DEV_DIR/binder" ]; then
+        printf 'init: %s/binder is missing: this kernel does not provide Android binder support\n' "$DEV_DIR" >&2
+        return 3
+    fi
+
+    if [ -f "$CFG_FILE" ]; then
+        printf 'init: %s already exists, nothing to do\n' "$CFG_FILE"
+        return 0
+    fi
+
+    if [ "$gapps" = "--gapps" ]; then
+        if ! waydroid init -s GAPPS; then
+            printf 'init: waydroid init -s GAPPS failed\n' >&2
+            return 1
+        fi
+    else
+        if ! waydroid init; then
+            printf 'init: waydroid init failed\n' >&2
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+find_panfrost_node() {
+    local node target drv
+    for node in "$SYSFS"/class/drm/renderD[0-9]*; do
+        [ -e "$node" ] || continue
+        target=$(readlink "$node/device/driver" 2>/dev/null) || continue
+        target=${target%/}
+        drv=${target##*/}
+        if [ "$drv" = "panfrost" ]; then
+            printf '/dev/dri/%s\n' "${node##*/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+cmd_configure() {
+    local drm_dev rc=0
+
+    if [ ! -f "$CFG_FILE" ]; then
+        printf 'configure: %s does not exist (run init first)\n' "$CFG_FILE" >&2
+        return 1
+    fi
+
+    if ! drm_dev=$(find_panfrost_node); then
+        printf 'configure: no panfrost DRM render node found under %s/class/drm\n' "$SYSFS" >&2
+        return 1
+    fi
+
+    python3 - "$CFG_FILE" "$drm_dev" "$DENSITY" <<'PY' || rc=$?
+import configparser
+import io
+import os
+import sys
+import tempfile
+
+cfg_path = sys.argv[1]
+drm_device = sys.argv[2]
+density = sys.argv[3]
+
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+with open(cfg_path, "r", encoding="utf-8") as fh:
+    cfg.read_file(fh)
+
+desired = [
+    ("waydroid", "drm_device", drm_device),
+    ("properties", "ro.opengles.version", "196609"),
+    ("properties", "persist.waydroid.multi_windows", "false"),
+]
+if density:
+    desired.append(("properties", "ro.sf.lcd_density", density))
+
+changes = []
+for section, key, value in desired:
+    if not cfg.has_section(section):
+        cfg.add_section(section)
+    if cfg.get(section, key, fallback=None) != value:
+        cfg.set(section, key, value)
+        changes.append((section, key, value))
+
+if not changes:
+    print("nothing to change")
+    sys.exit(10)
+
+buf = io.StringIO()
+cfg.write(buf)
+content = buf.getvalue()
+
+parent = os.path.dirname(os.path.abspath(cfg_path))
+fd, tmp_path = tempfile.mkstemp(prefix=".waydroid.cfg.", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(content)
+    try:
+        st = os.stat(cfg_path)
+        os.chmod(tmp_path, st.st_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp_path, cfg_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+
+for section, key, value in changes:
+    print(f"[{section}] {key} = {value}")
+PY
+
+    if [ "$rc" -eq 10 ]; then
+        return 0
+    elif [ "$rc" -ne 0 ]; then
+        printf 'configure: failed to update %s\n' "$CFG_FILE" >&2
+        return 1
+    fi
+
+    if ! waydroid upgrade --offline; then
+        printf 'configure: waydroid upgrade --offline failed\n' >&2
+        return 1
+    fi
+
+    return 0
+}
+
+ufw_rule() {
+    local out rc=0
+    out=$(ufw "$@" 2>&1) || rc=$?
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+    fi
+    if [ "$rc" -ne 0 ]; then
+        case "$out" in
+            *Skipping*) return 0 ;;
+        esac
+        printf 'firewall: ufw %s failed\n' "$*" >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_firewall() {
+    local status_out
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        printf 'firewall: ufw is not installed, nothing to do\n'
+        return 0
+    fi
+
+    status_out=$(ufw status 2>/dev/null || true)
+    case "$status_out" in
+        "Status: active"*) ;;
+        *)
+            printf 'firewall: ufw is not active, nothing to do\n'
+            return 0
+            ;;
+    esac
+
+    ufw_rule allow in on waydroid0 to any port 53 || return 1
+    ufw_rule allow in on waydroid0 to any port 67 proto udp || return 1
+    ufw_rule route allow in on waydroid0 || return 1
+    ufw_rule route allow out on waydroid0 || return 1
+    return 0
+}
+
+cmd_enable() {
+    if ! systemctl enable --now waydroid-container.service; then
+        printf 'enable: failed to enable waydroid-container.service\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_share() {
+    local user=$1
+    local passwd_line="" uid="" gid="" home=""
+    local data_dir media_dir media0 link_path current_target
+    local dirs=() dir_count=0 d
+
+    if ! passwd_line=$(getent passwd "$user" 2>/dev/null) || [ -z "$passwd_line" ]; then
+        printf 'share: user %s does not exist\n' "$user" >&2
+        return 1
+    fi
+
+    IFS=: read -r _ _ uid gid _ home _ <<< "$passwd_line"
+    case "$uid" in
+        ""|*[!0-9]*)
+            printf 'share: invalid uid in passwd entry for %s\n' "$user" >&2
+            return 1
+            ;;
+    esac
+    case "$gid" in
+        ""|*[!0-9]*)
+            printf 'share: invalid gid in passwd entry for %s\n' "$user" >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$home" ]; then
+        printf 'share: empty home directory for %s\n' "$user" >&2
+        return 1
+    fi
+    home=${home%/}
+
+    data_dir="$home/.local/share/waydroid/data"
+    media_dir="$data_dir/media"
+    media0="$media_dir/0"
+
+    if [ ! -d "$media0" ]; then
+        printf 'share: %s does not exist (Android has not booted once yet)\n' "$media0" >&2
+        return 1
+    fi
+
+    if ! command -v setfacl >/dev/null 2>&1; then
+        printf 'share: setfacl is not installed (install package acl)\n' >&2
+        return 1
+    fi
+
+    for d in Download Pictures Documents DCIM Movies Music; do
+        if [ -d "$media0/$d" ]; then
+            dirs+=("$media0/$d")
+            dir_count=$((dir_count + 1))
+        fi
+    done
+
+    if [ "$dir_count" -eq 0 ]; then
+        printf 'share: none of the shared storage directories exist under %s\n' "$media0" >&2
+        return 1
+    fi
+
+    if ! setfacl -m "u:${uid}:x" "$data_dir" "$media_dir"; then
+        printf 'share: setfacl failed on %s and %s\n' "$data_dir" "$media_dir" >&2
+        return 1
+    fi
+    if ! setfacl -m "u:${uid}:rx" "$media0"; then
+        printf 'share: setfacl failed on %s\n' "$media0" >&2
+        return 1
+    fi
+    if ! setfacl -R -m "u:${uid}:rwX" "${dirs[@]}"; then
+        printf 'share: setfacl -R failed on shared directories\n' >&2
+        return 1
+    fi
+    if ! setfacl -R -d -m "u:${uid}:rwX,g:1023:rwX,m::rwx" "${dirs[@]}"; then
+        printf 'share: setfacl -R -d failed on shared directories\n' >&2
+        return 1
+    fi
+
+    for d in Download Pictures Documents DCIM Movies Music; do
+        if [ -d "$media0/$d" ]; then
+            printf 'share: shared %s\n' "$media0/$d"
+        else
+            printf 'share: skipping missing %s\n' "$media0/$d"
+        fi
+    done
+
+    link_path="$home/Android"
+    if [ -L "$link_path" ]; then
+        current_target=$(readlink "$link_path" 2>/dev/null || true)
+        if [ "$current_target" = "$media0" ]; then
+            printf 'share: %s already links to %s\n' "$link_path" "$media0"
+        else
+            printf 'share: warning: %s already exists (links to %s), leaving it untouched\n' "$link_path" "$current_target" >&2
+        fi
+    elif [ -e "$link_path" ]; then
+        printf 'share: warning: %s already exists and is not a symlink to %s, leaving it untouched\n' "$link_path" "$media0" >&2
+    else
+        if ! ln -s "$media0" "$link_path"; then
+            printf 'share: failed to create symlink %s -> %s\n' "$link_path" "$media0" >&2
+            return 1
+        fi
+        if ! chown -h "${uid}:${gid}" "$link_path"; then
+            printf 'share: failed to chown symlink %s to %s:%s\n' "$link_path" "$uid" "$gid" >&2
+            return 1
+        fi
+        printf 'share: linked %s -> %s\n' "$link_path" "$media0"
+    fi
+
+    return 0
+}
+
+cmd_all() {
+    local gapps=${1:-}
+    cmd_packages || return $?
+    cmd_init "$gapps" || return $?
+    cmd_configure || return $?
+    cmd_firewall || return $?
+    cmd_enable || return $?
+    return 0
+}
+
+cmd_status() {
+    local kernel="no" package="none" initialised="no" gpu="" gles="" container="inactive"
+    local pkg_line pkg_ver line
+
+    if [ -e "$DEV_DIR/binder" ]; then
+        kernel="yes"
+    fi
+
+    if pkg_line=$(pacman -Q waydroid 2>/dev/null); then
+        read -r _ pkg_ver _ <<< "$pkg_line"
+        if [ -n "${pkg_ver:-}" ]; then
+            package=$pkg_ver
+        fi
+    fi
+
+    if [ -f "$CFG_FILE" ]; then
+        initialised="yes"
+        while IFS= read -r line; do
+            case "$line" in
+                gpu=*) gpu=${line#gpu=} ;;
+                gles=*) gles=${line#gles=} ;;
+            esac
+        done < <(python3 - "$CFG_FILE" <<'PY' 2>/dev/null
+import configparser
+import sys
+
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+cfg.read(sys.argv[1], encoding="utf-8")
+print("gpu=" + cfg.get("waydroid", "drm_device", fallback=""))
+print("gles=" + cfg.get("properties", "ro.opengles.version", fallback=""))
+PY
+        )
+    fi
+
+    if systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        container="active"
+    fi
+
+    printf 'kernel=%s\n' "$kernel"
+    printf 'package=%s\n' "$package"
+    printf 'initialised=%s\n' "$initialised"
+    printf 'gpu=%s\n' "$gpu"
+    printf 'gles=%s\n' "$gles"
+    printf 'container=%s\n' "$container"
+    return 0
+}
+
+case ${1:-} in
+    --help)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        usage
+        exit 0
+        ;;
+    status)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        cmd_status
+        exit $?
+        ;;
+    packages)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_packages
+        exit $?
+        ;;
+    init)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--gapps" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_init "${2:-}"
+        exit $?
+        ;;
+    configure)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_configure
+        exit $?
+        ;;
+    firewall)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_firewall
+        exit $?
+        ;;
+    enable)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_enable
+        exit $?
+        ;;
+    share)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ]; then
+            case "$2" in
+                ""|-*)
+                    usage >&2
+                    exit 2
+                    ;;
+            esac
+        fi
+        require_root || exit 1
+        cmd_share "${2:-$DEFAULT_USER}"
+        exit $?
+        ;;
+    all)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--gapps" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_all "${2:-}"
+        exit $?
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
