@@ -1339,5 +1339,6 @@ Most important first.
 | `boot/initramfs/init`, `boot/README.md` | the initramfs, its knobs, `rootfs.select` |
 | `docs/image/ROOTFS.md` | what the image contains and how it is checked |
 | `docs/image/REPACK.md`, `docs/image/PACKAGES.md` | Omarchy repack, `image/pkg/` rebuilds |
+| `docs/image/ANDROID.md` | Android apps through Waydroid (opt-in, not in a release yet) |
 | `image/tools/repack-omarchy`, `image/tools/build-pkg`, `image/tools/build-rootfs` | the image's build |
 | `image/tests/verify-rootfs.sh`, `image/tests/ondevice/omarchy-probe.sh` | offline and on-device checks |

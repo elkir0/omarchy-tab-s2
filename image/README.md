@@ -2,7 +2,8 @@
 
 Builds `image/out/rootfs-omarchy.img` (raw ext4, `armv7h`) in Docker; the
 Mac only moves whole files. Steps and commands: `docs/DEPLOY.md` section 8;
-what the image contains and why: `docs/image/ROOTFS.md`.
+what the image contains and why: `docs/image/ROOTFS.md`; Android apps through
+Waydroid: `docs/image/ANDROID.md`.
 
 | Path | What |
 |---|---|
