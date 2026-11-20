@@ -17,13 +17,18 @@
 #
 #   state     the session as key=value lines, in this order: installed,
 #             session, container, apps.  The quick settings tile parses
-#             them: the keys and their order are an interface.
+#             them: the keys and their order are an interface.  Starts
+#             no Python or `waydroid` process (only `busctl`, `hyprctl`,
+#             `jq` and `timeout`), because `waydroid status` takes
+#             ~2.4 s to start on the tablet against the quick settings
+#             probe's 3 s timeout.
 #   start     remove the off marker, start t715-android.service, and
-#             poll `waydroid status` once a second (at most
-#             T715_ANDROID_WAIT seconds, default 30) until Session is
-#             RUNNING; exit 0 when already running without starting
-#             anything; on timeout or when Waydroid is not installed,
-#             report on stderr, notify, and exit 1.
+#             poll the user session bus (`id.waydro.Session`) once a
+#             second (at most T715_ANDROID_WAIT seconds, default 30)
+#             until the session is running; exit 0 when already
+#             running without starting anything; on timeout or when
+#             Waydroid is not installed, report on stderr, notify,
+#             and exit 1.
 #   stop      create the off marker and stop t715-android.service; exit
 #             0 also when the session was not running.
 #   toggle    stop when the session is running, start otherwise.
@@ -39,6 +44,8 @@
 # Test hooks (image/tests/test_t715_android.sh): T715_ANDROID_CFG
 # (/var/lib/waydroid/waydroid.cfg) for Waydroid's initialisation file,
 # T715_ANDROID_DEV (/dev) for the binder device ($T715_ANDROID_DEV/binder),
+# T715_ANDROID_CGROUP (/sys/fs/cgroup/lxc.payload.waydroid) for the
+# container's cgroup directory ($T715_ANDROID_CGROUP/cgroup.events),
 # T715_ANDROID_STATE_DIR (${XDG_STATE_HOME:-$HOME/.local/state}/t715-android)
 # for the off marker and notification id, T715_ANDROID_WAIT (30) for the
 # start wait window, and every external command through PATH.
@@ -46,6 +53,7 @@ set -u
 
 CFG=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
 DEV=${T715_ANDROID_DEV:-/dev}
+CGROUP=${T715_ANDROID_CGROUP:-/sys/fs/cgroup/lxc.payload.waydroid}
 STATE_DIR=${T715_ANDROID_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/t715-android}
 OFF_MARKER=$STATE_DIR/off
 WAIT=${T715_ANDROID_WAIT:-30}
@@ -92,40 +100,41 @@ is_installed() {
         [ -e "$DEV/binder" ]
 }
 
-# waydroid_status: one bounded `waydroid status` call.
-waydroid_status() {
+# session_running: true when id.waydro.Session is owned on the user
+# session bus (bounded with timeout 2 when available).
+session_running() {
+    command -v busctl >/dev/null 2>&1 || return 1
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 waydroid status 2>/dev/null
+        timeout 2 busctl --user status id.waydro.Session >/dev/null 2>&1
     else
-        waydroid status 2>/dev/null
+        busctl --user status id.waydro.Session >/dev/null 2>&1
     fi
 }
 
 # parse_status: set S_SESSION (running|stopped) and S_CONTAINER
-# (running|frozen|stopped) from one `waydroid status` call; any failure
-# leaves both stopped.
+# (running|frozen|stopped) from the user D-Bus name and cgroup.events;
+# any failure or stopped session leaves both stopped.
 parse_status() {
     S_SESSION=stopped
     S_CONTAINER=stopped
-    _ps_out=$(waydroid_status) || return 0
-    while IFS= read -r _ps_line; do
-        case $_ps_line in
-        Session:*)
-            _ps_val=$(printf '%s' "${_ps_line#Session:}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-            case $_ps_val in
-            running) S_SESSION=running ;;
-            *) S_SESSION=stopped ;;
-            esac
-            ;;
-        Container:*)
-            _ps_val=$(printf '%s' "${_ps_line#Container:}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-            case $_ps_val in
-            running | frozen | stopped) S_CONTAINER=$_ps_val ;;
-            *) S_CONTAINER=stopped ;;
-            esac
-            ;;
+    session_running || return 0
+    S_SESSION=running
+    [ -d "$CGROUP" ] && [ -r "$CGROUP/cgroup.events" ] || return 0
+    _ps_pop=0
+    _ps_frz=0
+    while read -r _ps_key _ps_val _ || [ -n "$_ps_key" ]; do
+        case $_ps_key in
+        populated) _ps_pop=$_ps_val ;;
+        frozen) _ps_frz=$_ps_val ;;
         esac
-    done <<< "$_ps_out"
+    done < "$CGROUP/cgroup.events"
+    if [ "$_ps_pop" = 1 ]; then
+        if [ "$_ps_frz" = 1 ]; then
+            S_CONTAINER=frozen
+        else
+            S_CONTAINER=running
+        fi
+    fi
     return 0
 }
 
@@ -170,7 +179,7 @@ cmd_state() {
 }
 
 # start_unit: clear the off marker, start the user unit, poll until
-# Session is RUNNING (up to WAIT seconds).
+# the session is running (up to WAIT seconds).
 start_unit() {
     rm -f "$OFF_MARKER"
     if ! systemctl --user start "$UNIT"; then

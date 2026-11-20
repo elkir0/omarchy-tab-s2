@@ -4,13 +4,14 @@
 # enable line in rootfs/configure-system.sh).
 #
 # The script runs on this machine against fake Waydroid config/binder
-# paths and a temporary state directory with stand-ins first in PATH:
-# waydroid (status answered from a file the test fills, or flipping to
-# RUNNING after N calls; other calls logged), systemctl, hyprctl,
-# omarchy-notification-send, logger and timeout. Host jq is used when
-# available (apps count assertions skip cleanly when jq is missing).
-# The user unit's keys and the global enable line in configure-system.sh
-# are checked statically.
+# paths, a fake cgroup directory ($T715_ANDROID_CGROUP), and a temporary
+# state directory with stand-ins first in PATH: busctl (exit code read
+# from a file the test fills, or flipping to 0 after N calls), waydroid
+# (fails the test if ever called with status; other calls logged),
+# systemctl, hyprctl, omarchy-notification-send, logger and timeout.
+# Host jq is used when available (apps count assertions skip cleanly
+# when jq is missing). The user unit's keys and the global enable line
+# in configure-system.sh are checked statically.
 #
 # Usage: tests/test_t715_android.sh
 # Prints "ok - ..." per group, "PASS" at the end; exit 1 on the first
@@ -35,15 +36,18 @@ fail() {
     echo "--- notifications" >&2; cat "$t/notify" 2>/dev/null || true
     echo "--- log" >&2; cat "$t/log" 2>/dev/null || true
     echo "--- systemctl" >&2; cat "$t/systemctl" 2>/dev/null || true
+    echo "--- busctl" >&2; cat "$t/busctl-log" 2>/dev/null || true
+    echo "--- busctl calls" >&2; cat "$t/busctl-count" 2>/dev/null || true
+    echo "--- cgroup.events" >&2; cat "$t/cgroup/cgroup.events" 2>/dev/null || true
     echo "--- waydroid" >&2; cat "$t/wd-log" 2>/dev/null || true
-    echo "--- waydroid status calls" >&2; cat "$t/wd-count" 2>/dev/null || true
+    echo "--- waydroid forbidden" >&2; cat "$t/wd-forbidden" 2>/dev/null || true
     echo "--- hyprctl" >&2; cat "$t/hyprctl" 2>/dev/null || true
     echo "--- timeout" >&2; cat "$t/timeout" 2>/dev/null || true
     exit 1
 }
 
 # --- stand-ins -----------------------------------------------------------------
-mkdir -p "$t/bin" "$t/wd-bin" "$t/hostbin" "$t/dev" "$t/state"
+mkdir -p "$t/bin" "$t/bus-bin" "$t/wd-bin" "$t/hostbin" "$t/dev" "$t/state" "$t/cgroup"
 
 JQ_BIN=$(command -v jq 2>/dev/null || true)
 if [ -n "$JQ_BIN" ]; then
@@ -85,28 +89,32 @@ shift
 exec "$@"
 STUB
 
+cat > "$t/bus-bin/busctl" <<'STUB'
+#!/bin/sh
+printf 'busctl %s\n' "$*" >> "$T715_TEST_BUSCTL_LOG"
+c=$(cat "$T715_TEST_BUSCTL_COUNT" 2>/dev/null || echo 0)
+c=$((c + 1))
+printf '%s\n' "$c" > "$T715_TEST_BUSCTL_COUNT"
+if [ -n "${T715_TEST_BUSCTL_AFTER:-}" ] && [ "$c" -ge "$T715_TEST_BUSCTL_AFTER" ]; then
+    exit 0
+fi
+rc=$(cat "$T715_TEST_BUSCTL_RC" 2>/dev/null || echo 1)
+exit "${rc:-1}"
+STUB
+
 cat > "$t/wd-bin/waydroid" <<'STUB'
 #!/bin/sh
 if [ "${1:-}" = "status" ]; then
-    c=$(cat "$T715_TEST_WD_COUNT" 2>/dev/null || echo 0)
-    c=$((c + 1))
-    printf '%s\n' "$c" > "$T715_TEST_WD_COUNT"
-    if [ -n "${T715_TEST_WD_AFTER:-}" ] && [ "$c" -ge "$T715_TEST_WD_AFTER" ]; then
-        printf 'Session:\tRUNNING\nContainer:\tRUNNING\nVendor type:\tMAINLINE\n'
-        exit 0
-    fi
-    if [ -n "${T715_TEST_WD_RC:-}" ]; then
-        printf 'ERROR: Waydroid is not initialized, run "waydroid init"\n' >&2
-        exit "$T715_TEST_WD_RC"
-    fi
-    cat "$T715_TEST_WD_STATUS"
-    exit 0
+    printf 'FAIL: waydroid status must not be called\n' >&2
+    printf 'waydroid %s\n' "$*" >> "$T715_TEST_WD_FORBIDDEN"
+    printf 'waydroid %s\n' "$*" >> "$T715_TEST_WD_LOG"
+    exit 99
 fi
 printf 'waydroid %s\n' "$*" >> "$T715_TEST_WD_LOG"
 exit 0
 STUB
 
-chmod +x "$t/bin/"* "$t/wd-bin/waydroid"
+chmod +x "$t/bin/"* "$t/bus-bin/busctl" "$t/wd-bin/waydroid"
 
 export T715_TEST_LOG="$t/log" \
        T715_TEST_NOTIFY="$t/notify" \
@@ -116,31 +124,33 @@ export T715_TEST_LOG="$t/log" \
        T715_TEST_HYPRCTL_RC="" \
        T715_TEST_CLIENTS="$t/clients.json" \
        T715_TEST_TIMEOUT="$t/timeout" \
+       T715_TEST_BUSCTL_LOG="$t/busctl-log" \
+       T715_TEST_BUSCTL_RC="$t/busctl-rc" \
+       T715_TEST_BUSCTL_COUNT="$t/busctl-count" \
+       T715_TEST_BUSCTL_AFTER="" \
        T715_TEST_WD_LOG="$t/wd-log" \
-       T715_TEST_WD_STATUS="$t/wd-status" \
-       T715_TEST_WD_COUNT="$t/wd-count" \
-       T715_TEST_WD_AFTER="" \
-       T715_TEST_WD_RC=""
+       T715_TEST_WD_FORBIDDEN="$t/wd-forbidden"
 
 clear_files() {
+    [ ! -s "$t/wd-forbidden" ] || fail "waydroid status was called"
     : > "$t/log"
     : > "$t/notify"
     : > "$t/systemctl"
     : > "$t/hyprctl"
     : > "$t/timeout"
+    : > "$t/busctl-log"
+    printf '0\n' > "$t/busctl-count"
     : > "$t/wd-log"
-    printf '0\n' > "$t/wd-count"
     T715_TEST_SYSTEMCTL_RC=""
     T715_TEST_HYPRCTL_RC=""
-    T715_TEST_WD_AFTER=""
-    T715_TEST_WD_RC=""
+    T715_TEST_BUSCTL_AFTER=""
 }
 
 nlines() { [ "$(wc -l < "$1" | tr -d ' ')" = "$2" ]; }
-wd_calls() { cat "$t/wd-count" | tr -d ' \n'; }
+busctl_calls() { cat "$t/busctl-count" | tr -d ' \n'; }
 
 setup_installed() {
-    rm -rf "${t:?}/dev" "${t:?}/state" "${t:?}/waydroid.cfg"
+    rm -rf "${t:?}/dev" "${t:?}/state" "${t:?}/cgroup" "${t:?}/waydroid.cfg"
     mkdir -p "$t/dev" "$t/state"
     : > "$t/waydroid.cfg"
     : > "$t/dev/binder"
@@ -149,24 +159,30 @@ setup_installed() {
 }
 
 set_status_stopped() {
-    printf 'Session:\tSTOPPED\nVendor type:\tMAINLINE\n' > "$t/wd-status"
+    printf '1\n' > "$t/busctl-rc"
+    rm -rf "${t:?}/cgroup"
 }
 
 set_status_running() {
-    printf 'Session:\tRUNNING\nContainer:\tRUNNING\nVendor type:\tMAINLINE\nWayland display:\twayland-1\n' > "$t/wd-status"
+    printf '0\n' > "$t/busctl-rc"
+    mkdir -p "$t/cgroup"
+    printf 'populated 1\nfrozen 0\n' > "$t/cgroup/cgroup.events"
 }
 
 set_status_frozen() {
-    printf 'Session:\tRUNNING\nContainer:\tFROZEN\nVendor type:\tMAINLINE\n' > "$t/wd-status"
+    printf '0\n' > "$t/busctl-rc"
+    mkdir -p "$t/cgroup"
+    printf 'populated 1\nfrozen 1\n' > "$t/cgroup/cgroup.events"
 }
 
-# run_and [args...]: run t715-android with stubs first in PATH (including waydroid).
+# run_and [args...]: run t715-android with stubs first in PATH (including busctl and waydroid).
 run_and() {
     env T715_ANDROID_CFG="$t/waydroid.cfg" \
         T715_ANDROID_DEV="$t/dev" \
+        T715_ANDROID_CGROUP="$t/cgroup" \
         T715_ANDROID_STATE_DIR="$t/state" \
         T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
-        PATH="$t/bin:$t/wd-bin:$t/hostbin:/usr/bin:/bin" \
+        PATH="$t/bin:$t/bus-bin:$t/wd-bin:$t/hostbin:/usr/bin:/bin" \
         "$AND" "$@"
 }
 
@@ -174,9 +190,21 @@ run_and() {
 run_and_no_wd() {
     env T715_ANDROID_CFG="$t/waydroid.cfg" \
         T715_ANDROID_DEV="$t/dev" \
+        T715_ANDROID_CGROUP="$t/cgroup" \
         T715_ANDROID_STATE_DIR="$t/state" \
         T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
-        PATH="$t/bin:$t/hostbin:/usr/bin:/bin" \
+        PATH="$t/bin:$t/bus-bin:$t/hostbin:/usr/bin:/bin" \
+        "$AND" "$@"
+}
+
+# run_and_no_busctl [args...]: run t715-android without busctl in PATH.
+run_and_no_busctl() {
+    env T715_ANDROID_CFG="$t/waydroid.cfg" \
+        T715_ANDROID_DEV="$t/dev" \
+        T715_ANDROID_CGROUP="$t/cgroup" \
+        T715_ANDROID_STATE_DIR="$t/state" \
+        T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
+        PATH="$t/bin:$t/wd-bin:$t/hostbin" \
         "$AND" "$@"
 }
 
@@ -192,9 +220,10 @@ set_status_running
 out=$(run_and_no_wd state) || fail "(a1) state without waydroid exits 0"
 [ "$out" = "$NOT_INSTALLED_OUT" ] || fail "(a1) missing waydroid state (got:
 $out)"
-[ "$(wd_calls)" = 0 ] || fail "(a1) waydroid not called when missing"
+[ "$(busctl_calls)" = 0 ] || fail "(a1) busctl not called when missing waydroid"
 nlines "$t/timeout" 0 || fail "(a1) timeout not called when missing waydroid"
 nlines "$t/hyprctl" 0 || fail "(a1) hyprctl not called when missing waydroid"
+nlines "$t/wd-log" 0 || fail "(a1) waydroid not called"
 
 # (a2) missing waydroid.cfg
 setup_installed
@@ -203,9 +232,10 @@ set_status_running
 out=$(run_and state) || fail "(a2) state without waydroid.cfg exits 0"
 [ "$out" = "$NOT_INSTALLED_OUT" ] || fail "(a2) missing cfg state (got:
 $out)"
-[ "$(wd_calls)" = 0 ] || fail "(a2) waydroid not called without cfg"
+[ "$(busctl_calls)" = 0 ] || fail "(a2) busctl not called without cfg"
 nlines "$t/timeout" 0 || fail "(a2) timeout not called without cfg"
 nlines "$t/hyprctl" 0 || fail "(a2) hyprctl not called without cfg"
+nlines "$t/wd-log" 0 || fail "(a2) waydroid not called without cfg"
 
 # (a3) missing /dev/binder
 setup_installed
@@ -214,12 +244,13 @@ set_status_running
 out=$(run_and state) || fail "(a3) state without binder exits 0"
 [ "$out" = "$NOT_INSTALLED_OUT" ] || fail "(a3) missing binder state (got:
 $out)"
-[ "$(wd_calls)" = 0 ] || fail "(a3) waydroid not called without binder"
+[ "$(busctl_calls)" = 0 ] || fail "(a3) busctl not called without binder"
 nlines "$t/timeout" 0 || fail "(a3) timeout not called without binder"
 nlines "$t/hyprctl" 0 || fail "(a3) hyprctl not called without binder"
+nlines "$t/wd-log" 0 || fail "(a3) waydroid not called without binder"
 echo "ok - state: not installed for each of the three reasons, nothing called"
 
-# --- (b) state: stopped, running, frozen, status failure -----------------------
+# --- (b) state: stopped, running, frozen, busctl/cgroup edge cases -------------
 setup_installed
 set_status_stopped
 out=$(run_and state) || fail "(b1) state when stopped exits 0"
@@ -228,9 +259,13 @@ session=stopped
 container=stopped
 apps=" ] || fail "(b1) stopped state (got:
 $out)"
-[ "$(wd_calls)" = 1 ] || fail "(b1) exactly one waydroid status call (got: $(wd_calls))"
-grep -qx 'timeout 5 waydroid status' "$t/timeout" || fail "(b1) waydroid status bounded with timeout 5"
+[ "$(busctl_calls)" = 1 ] || fail "(b1) exactly one busctl call (got: $(busctl_calls))"
+grep -qx 'busctl --user status id.waydro.Session' "$t/busctl-log" \
+    || fail "(b1) busctl queried id.waydro.Session on user bus"
+grep -qx 'timeout 2 busctl --user status id.waydro.Session' "$t/timeout" \
+    || fail "(b1) busctl bounded with timeout 2"
 nlines "$t/hyprctl" 0 || fail "(b1) hyprctl not called when stopped"
+nlines "$t/wd-log" 0 || fail "(b1) state ran no waydroid process"
 
 setup_installed
 set_status_running
@@ -239,7 +274,8 @@ out=$(run_and state) || fail "(b2) state when running exits 0"
 session=running
 container=running" ] || fail "(b2) running state (got:
 $out)"
-[ "$(wd_calls)" = 1 ] || fail "(b2) exactly one waydroid status call"
+[ "$(busctl_calls)" = 1 ] || fail "(b2) exactly one busctl call"
+nlines "$t/wd-log" 0 || fail "(b2) state ran no waydroid process"
 
 setup_installed
 set_status_frozen
@@ -248,16 +284,57 @@ out=$(run_and state) || fail "(b3) state when frozen exits 0"
 session=running
 container=frozen" ] || fail "(b3) frozen state (got:
 $out)"
+nlines "$t/wd-log" 0 || fail "(b3) state ran no waydroid process"
 
 setup_installed
-T715_TEST_WD_RC=1
-out=$(run_and state) || fail "(b4) state when waydroid status fails exits 0"
+set_status_frozen
+printf '2\n' > "$t/busctl-rc"
+out=$(run_and state) || fail "(b4) state when busctl fails exits 0"
 [ "$out" = "installed=yes
 session=stopped
 container=stopped
-apps=" ] || fail "(b4) failed status treated as stopped (got:
+apps=" ] || fail "(b4) failed busctl treated as stopped even with populated cgroup (got:
 $out)"
-echo "ok - state: stopped, running, frozen, and waydroid status failure"
+nlines "$t/wd-log" 0 || fail "(b4) state ran no waydroid process"
+
+setup_installed
+set_status_running
+rm -rf "${t:?}/cgroup"
+out=$(run_and state) || fail "(b5) state with missing cgroup dir exits 0"
+[ "$(printf '%s\n' "$out" | sed -n '1,3p')" = "installed=yes
+session=running
+container=stopped" ] || fail "(b5) missing cgroup dir gives container=stopped (got:
+$out)"
+nlines "$t/wd-log" 0 || fail "(b5) state ran no waydroid process"
+
+setup_installed
+set_status_running
+printf 'populated 0\nfrozen 0\n' > "$t/cgroup/cgroup.events"
+out=$(run_and state) || fail "(b6a) state with populated 0 exits 0"
+[ "$(printf '%s\n' "$out" | sed -n '1,3p')" = "installed=yes
+session=running
+container=stopped" ] || fail "(b6a) populated 0 gives container=stopped (got:
+$out)"
+printf 'populated 0\nfrozen 1\n' > "$t/cgroup/cgroup.events"
+out=$(run_and state) || fail "(b6b) state with populated 0 and frozen 1 exits 0"
+[ "$(printf '%s\n' "$out" | sed -n '1,3p')" = "installed=yes
+session=running
+container=stopped" ] || fail "(b6b) populated 0 and frozen 1 gives container=stopped (got:
+$out)"
+nlines "$t/wd-log" 0 || fail "(b6) state ran no waydroid process"
+
+setup_installed
+set_status_running
+out=$(run_and_no_busctl state) || fail "(b7) state without busctl exits 0"
+[ "$out" = "installed=yes
+session=stopped
+container=stopped
+apps=" ] || fail "(b7) missing busctl gives session=stopped container=stopped (got:
+$out)"
+nlines "$t/timeout" 0 || fail "(b7) timeout not called when busctl is missing"
+nlines "$t/hyprctl" 0 || fail "(b7) hyprctl not called when busctl is missing"
+nlines "$t/wd-log" 0 || fail "(b7) state ran no waydroid process"
+echo "ok - state: stopped, running, frozen, busctl failure/missing, and cgroup edge cases (no waydroid)"
 
 # --- (c) state: apps count -----------------------------------------------------
 if [ -n "$JQ_BIN" ]; then
@@ -279,12 +356,14 @@ container=running
 apps=2" ] || fail "(c1) two waydroid.* clients counted (got:
 $out)"
     grep -qx 'hyprctl clients -j' "$t/hyprctl" || fail "(c1) hyprctl clients -j called"
+    nlines "$t/wd-log" 0 || fail "(c1) state ran no waydroid process"
 
     clear_files
     T715_TEST_HYPRCTL_RC=1
     out=$(run_and state) || fail "(c2) state when hyprctl fails exits 0"
     [ "$(printf '%s\n' "$out" | sed -n '4p')" = "apps=" ] || fail "(c2) apps empty on hyprctl failure (got:
 $out)"
+    nlines "$t/wd-log" 0 || fail "(c2) state ran no waydroid process"
     echo "ok - state: apps count with two waydroid.* clients, empty on hyprctl failure"
 else
     echo "skip - state: apps count assertions (jq not installed on host)"
@@ -294,13 +373,13 @@ fi
 setup_installed
 set_status_stopped
 : > "$t/state/off"
-T715_TEST_WD_AFTER=3
+T715_TEST_BUSCTL_AFTER=3
 T715_ANDROID_WAIT=3 run_and start >/dev/null 2>&1 || fail "(d) start from stopped exits 0"
 [ ! -e "$t/state/off" ] || fail "(d) off marker removed by start"
 grep -qx 'systemctl --user start t715-android.service' "$t/systemctl" \
     || fail "(d) systemctl --user start called"
 nlines "$t/systemctl" 1 || fail "(d) exactly one systemctl call"
-[ "$(wd_calls)" = 3 ] || fail "(d) polled waydroid status until RUNNING (calls: $(wd_calls))"
+[ "$(busctl_calls)" = 3 ] || fail "(d) polled busctl until running (calls: $(busctl_calls))"
 grep -q -- '-t t715-android' "$t/log" || fail "(d) logger called with -t t715-android"
 nlines "$t/log" 1 || fail "(d) one log line for start transition"
 nlines "$t/notify" 0 || fail "(d) no error notification on successful start"
@@ -369,7 +448,7 @@ grep -qx 'systemctl --user stop t715-android.service' "$t/systemctl" \
 setup_installed
 set_status_stopped
 : > "$t/state/off"
-T715_TEST_WD_AFTER=2
+T715_TEST_BUSCTL_AFTER=2
 T715_ANDROID_WAIT=3 run_and toggle >/dev/null 2>&1 || fail "(h2) toggle from stopped exits 0"
 [ ! -e "$t/state/off" ] || fail "(h2) toggle from stopped removes off marker"
 grep -qx 'systemctl --user start t715-android.service' "$t/systemctl" \
@@ -386,7 +465,7 @@ grep -qx 'waydroid app launch com.android.settings' "$t/wd-log" \
 
 setup_installed
 set_status_stopped
-T715_TEST_WD_AFTER=2
+T715_TEST_BUSCTL_AFTER=2
 T715_ANDROID_WAIT=3 run_and settings >/dev/null 2>&1 || fail "(i2) settings when stopped starts then launches"
 grep -qx 'systemctl --user start t715-android.service' "$t/systemctl" \
     || fail "(i2) settings started the session first"
@@ -443,4 +522,5 @@ grep -qx 'systemctl --global enable t715-android.service' "$CONF" \
     || fail "(k) configure-system.sh enables t715-android.service globally"
 echo "ok - user unit keys and configure-system.sh global enable"
 
+[ ! -s "$t/wd-forbidden" ] || fail "waydroid status was called"
 echo "PASS"
