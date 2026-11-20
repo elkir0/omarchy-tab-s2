@@ -1,0 +1,40 @@
+# SM-T715 (armv7h): python-pyclip (spyoungtech/pyclip, Apache-2.0).
+#
+# Why: Waydroid's clipboard manager imports pyclip (pyclip.copy / pyclip.paste)
+# and skips itself without it. On this tablet's Wayland session it talks to
+# the clipboard through wl-clipboard. Arch Linux ARM does not package pyclip,
+# so it is built here into [t715-omarchy].
+#
+# Upstream: https://github.com/spyoungtech/pyclip (PyPI: pyclip).
+# Source: the GitHub v0.7.0 tag tarball rather than the PyPI sdist, because
+# the PyPI sdist omits docs/README.md which setup.py reads at build time.
+#
+# Build: tools/build-pkg python-pyclip. Notes: docs/image/PACKAGES.md.
+
+pkgname=python-pyclip
+pkgver=0.7.0
+pkgrel=1
+pkgdesc='Cross-platform clipboard utilities supporting both binary and text data'
+arch=(any)
+url='https://github.com/spyoungtech/pyclip'
+license=('Apache-2.0')
+depends=(python wl-clipboard)
+makedepends=(python-build python-installer python-setuptools python-wheel)
+source=("pyclip-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('6fd5e0eaa40ff349959d1cee2872eee90ae32065cc5df9714b1066981535acde')
+
+build() {
+  cd "pyclip-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "pyclip-$pkgver"
+  python -c "import pyclip; assert callable(pyclip.copy) and callable(pyclip.paste)"
+}
+
+package() {
+  cd "pyclip-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

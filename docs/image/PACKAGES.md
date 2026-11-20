@@ -569,3 +569,7 @@ prompt.
   signature check), `ripgrep`, `xz`, `python` (the JavaScript extractor and the manifest
   check), `curl`, `util-linux` (`taskset`), `coreutils`, `gcc-libs` (`libatomic.so.1` for
   Node), `tar`, `diffutils`, `findutils`, `grep`. In `image/rootfs/packages.mobile`.
+
+## python-pyclip 0.7.0
+
+[`pyclip`](https://github.com/spyoungtech/pyclip) 0.7.0 (Apache-2.0, `arch = any`, built from the GitHub `v0.7.0` tarball because the PyPI sdist omits `docs/README.md`): Waydroid's shared clipboard over Wayland (`depends`: `python`, `wl-clipboard`), not packaged by ALARM.
