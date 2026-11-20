@@ -1,0 +1,150 @@
+The Android tile, over t715-android
+
+Waydroid's own tile, after the SD card one: on while the Android session is
+running ("Asleep" while the container is frozen), off when it is stopped. A tap
+starts or stops the session in the background (t715-android start / stop) and
+probes again 5 s later; a long press opens Android's Settings app (t715-android
+settings). Without the command or when Waydroid is not installed no android key
+is probed and the tile stays dimmed, so an image without t715-android or a
+kernel without binder never fails. Against omarchy-mobile 87b8395
+(omamobile-shell 0.2.94) and the patches before it, packages/omamobile-shell.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -222,7 +222,7 @@
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+     "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane, "modem": modem,
+-    "sdcard": sdcard, "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
++    "sdcard": sdcard, "android": android, "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+     "screen-record": screenRecord, "fingerprint": fingerprint, "keyboard": keyboard,
+@@ -1084,6 +1084,42 @@
+   Timer {
+     id: sdcardProbeLater
+     interval: 2000
++    onTriggered: root.refreshProbe()
++  }
++
++  // SM-T715 tablet: Waydroid's Android session (t715-android, in the root
++  // image's overlay). A tap starts or stops the session; starting boots
++  // Android in the background, and the sheet probes again 5 s later. A long
++  // press opens Android's Settings app. No "android" key without the command
++  // or when Waydroid is not installed: the tile stays dimmed.
++  QtObject {
++    id: android
++    readonly property bool available: root.probedHas("android")
++    readonly property bool enabled: available && root.probedOn("android", "android")
++    readonly property string icon: "󰀲"
++    readonly property string status: {
++      if (!available) return "Not installed"
++      if (root.optimistic["android"] !== undefined)
++        return root.optimistic["android"] ? "Starting…" : "Stopping…"
++      if (enabled)
++        return root.probed.android_container === "frozen" ? "Asleep" : "On"
++      return "Off"
++    }
++    readonly property bool longPress: true
++    function toggle() {
++      if (!available) return
++      root.runTileAction("android", !enabled)
++      androidProbeLater.restart()
++    }
++    function openDetails() {
++      root.dismiss()
++      Quickshell.execDetached(["t715-android", "settings"])
++    }
++  }
++
++  Timer {
++    id: androidProbeLater
++    interval: 5000
+     onTriggered: root.refreshProbe()
+   }
+ 
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -20,7 +20,8 @@
+ // takes the Wi-Fi radio off the client network while it is on. Modem is the
+ // modem's own switch, t715-modem-power (docs/hardware/MODEM.md §5.4). SD card
+ // is the microSD slot's mount, t715-sdcard (udiskie mounts a card that goes
+-// in; the tile shows and changes the state).
++// in; the tile shows and changes the state). Android is Waydroid's session,
++// t715-android (on while running, dimmed when not installed).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+@@ -28,6 +29,7 @@
+   { id: "airplane", label: "Airplane mode" },
+   { id: "modem", label: "Modem" },
+   { id: "sdcard", label: "SD card" },
++  { id: "android", label: "Android" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
+@@ -57,7 +59,7 @@
+   "wifi", "bluetooth", "mobile-data", "dnd",
+   "airplane", "rotation-lock", "rotate", "battery-saver",
+   "dark-theme", "night-light", "keyboard", "clipboard",
+-  "screenshot", "location", "modem", "sdcard"
++  "screenshot", "location", "modem", "sdcard", "android"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -111,6 +111,11 @@
+     # second; ejecting unmounts and says so.
+     if [ "$want" = on ]; then exec t715-sdcard mount; else exec t715-sdcard eject; fi
+     ;;
++  android)
++    # SM-T715: Waydroid's Android session (t715-android). Starting boots the
++    # container in the background; stopping shuts the session down.
++    if [ "$want" = on ]; then exec t715-android start; else exec t715-android stop; fi
++    ;;
+   mobile-data)
+     # The first gsm connection (t715-mobile on the SM-T715).
+     con=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2 == "gsm" { print $1; exit }')
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -35,6 +35,11 @@
+ #   sdcard_card   a card in the slot: yes or no
+ #   sdcard_fs     its file system, empty when none can be read
+ #   sdcard_free   its free space while it is mounted, empty otherwise
++#   android       SM-T715: Waydroid's Android session (t715-android): on while
++#                 the session is running, off when stopped; no line without the
++#                 command or when Waydroid is not installed
++#   android_container  the container's state while installed: running, frozen or
++#                      stopped
+ 
+ t() { timeout 3 "$@" 2>/dev/null; }
+ have() { command -v "$1" >/dev/null 2>&1; }
+@@ -155,6 +160,23 @@
+   esac
+ fi
+ 
++# android: Waydroid's Android session through t715-android's state, one call;
++# no key at all without the command or when not installed, so the tile stays
++# dimmed.
++if have t715-android; then
++  and=$(t t715-android state)
++  case $(printf '%s\n' "$and" | sed -n 's/^installed=//p') in
++    yes)
++      if [ "$(printf '%s\n' "$and" | sed -n 's/^session=//p')" = running ]; then
++        echo "android=on"
++      else
++        echo "android=off"
++      fi
++      echo "android_container=$(printf '%s\n' "$and" | sed -n 's/^container=//p')"
++      ;;
++  esac
++fi
++
+ # data: the NetworkManager gsm connection on the modem (SM-T715: the modem is
+ # served by shannond's ModemManager facade, not omamobile-sit). None without a
+ # gsm device or connection.

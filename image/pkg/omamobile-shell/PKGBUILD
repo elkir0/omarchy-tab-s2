@@ -60,6 +60,9 @@
 #   - 0012-tablet-sdcard-tile.patch: the SD card tile over t715-sdcard (on
 #     while mounted, a tap mounts or ejects, a long press opens the card in
 #     Files; dimmed without the command or the slot).
+#   - 0013-tablet-android-tile.patch: the Android tile over t715-android (on
+#     while Waydroid's session is running, a tap starts or stops it, a long
+#     press opens Android Settings; dimmed when not installed).
 # Upstream now does what three of our old patches did, so they are gone:
 #   - 0003-tablet-drawer-opens-light: since 0.2.56/0.2.62 the drawer opens
 #     with no icon rescan (refreshIcons moved after the slide, in settled())
@@ -109,7 +112,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.94
-pkgrel=5
+pkgrel=6
 pkgdesc="Omarchy Mobile's touch shell for Omarchy's shell: status bar, quick settings, launcher, recents, home, back swipe (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omarchy-mobile"
@@ -139,6 +142,7 @@ source=("$_tarball::https://github.com/derekross/omarchy-mobile/archive/$_commit
         0010-tablet-location-tile.patch
         0011-tablet-modem-tile.patch
         0012-tablet-sdcard-tile.patch
+        0013-tablet-android-tile.patch
         tablet-shell.json
         tablet-home.json)
 sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
@@ -154,6 +158,7 @@ sha256sums=('e9b0f0522b56fe8575cb8f559081f51cf2b182b6ad9a6bdf9eee69def0fe1a73'
             '7f5a49ea2d46b0e7523f97cbc401e2af806c7cb3dffbe3f057d44ec3e5fe02ec'
             'dc8db0711566e1463938c5bc4ea725e08e05e2853100903447ff2eaa9c664cd1'
             '5e27a1f0c4606633d64bdbc3dbe40c55fdee6efb0303f0aaa401e3a8e835b6d9'
+            '2c8b841fb6537c6b165c9a0b38375ff4c521b07c125f51b9a8312a1b30f430d5'
             '47b8da8ea8316c36222de6fdd9a7076d343a0e291506ac1de153589127dd5d66'
             '7643f6faa8ed82e31f01ecc3a0767684c68df009318c02d1ae1158f497ce1450')
 noextract=("$_tarball")
@@ -180,6 +185,7 @@ prepare() {
   patch -Np1 -i "$srcdir/0010-tablet-location-tile.patch"
   patch -Np1 -i "$srcdir/0011-tablet-modem-tile.patch"
   patch -Np1 -i "$srcdir/0012-tablet-sdcard-tile.patch"
+  patch -Np1 -i "$srcdir/0013-tablet-android-tile.patch"
   cp "$srcdir/tablet-shell.json" profile/shell.json
   cp "$srcdir/tablet-home.json" profile/home.json
 }
@@ -267,6 +273,11 @@ PY
   grep -q 'exec t715-sdcard mount; else exec t715-sdcard eject' plugins/omamobile.quicksettings/tile-action.sh
   grep -q '"sdcard": sdcard' plugins/omamobile.quicksettings/QuickSettings.qml
   grep -q 'have t715-sdcard' plugins/omamobile.quicksettings/tile-state.sh
+  # The Android tile over t715-android (0013).
+  grep -q '{ id: "android", label: "Android" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'exec t715-android start; else exec t715-android stop' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q '"android": android' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'have t715-android' plugins/omamobile.quicksettings/tile-state.sh
   # The edge swipe goes through t715-keys (0009).
   grep -q 'signal=SIGHUP' plugins/omamobile.back/BackModel.js
   # Airplane mode reaches the modem (0007).
