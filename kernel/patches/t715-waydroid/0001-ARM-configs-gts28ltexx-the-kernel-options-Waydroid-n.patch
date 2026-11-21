@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: elkir0 <elkir0@users.noreply.github.com>
 Date: Fri, 20 Nov 2026 12:00:00 +0000
-Subject: [PATCH] ARM: configs: gts28ltexx: the kernel options Waydroid needs
+Subject: [PATCH 1/2] ARM: configs: gts28ltexx: the kernel options Waydroid needs
 
 The C binder with the static devices binder, hwbinder and vndbinder (no
 binderfs), the iptables-legacy NAT, MASQUERADE, mangle and CHECKSUM

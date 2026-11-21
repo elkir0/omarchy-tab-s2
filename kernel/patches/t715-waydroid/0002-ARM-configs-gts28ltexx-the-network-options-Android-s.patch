@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elkir0 <elkir0@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 12:00:00 +0000
+Subject: [PATCH 2/2] ARM: configs: gts28ltexx: the network options Android's netd
+ needs
+
+Inside the Waydroid container Android's netd gives each network its own
+routing table and steers traffic with fwmarks: without policy routing
+(IP_MULTIPLE_TABLES) "ip rule" is refused, the network gets an address but
+no route out and no resolver, and Google's services cannot even check in
+("Unable to resolve host"). Adds policy routing for IPv4 and IPv6, the
+mark and connmark matches and targets, the raw, security and IPv6 mangle
+and NAT tables, the netlink queue and log, and the traffic control pieces
+netd configures (HTB, ingress, u32 and BPF classifiers, IFB).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ arch/arm/configs/gts28ltexx_defconfig | 71 +++++++++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/arch/arm/configs/gts28ltexx_defconfig b/arch/arm/configs/gts28ltexx_defconfig
+index 5d04c41a9..e2fd6b9ae 100644
+--- a/arch/arm/configs/gts28ltexx_defconfig
++++ b/arch/arm/configs/gts28ltexx_defconfig
+@@ -385,3 +385,74 @@ CONFIG_SQUASHFS_XZ=y
+ CONFIG_TUN=y
+ CONFIG_VLAN_8021Q=y
+ CONFIG_BRIDGE_VLAN_FILTERING=y
++
++# Android's own network stack inside the Waydroid container: netd routes each
++# network through its own table (policy routing, fwmarks) and builds its
++# firewall, accounting and tethering chains from these matches and targets;
++# without them the container gets an address but no route out and no DNS.
++CONFIG_IP_ADVANCED_ROUTER=y
++CONFIG_IP_MULTIPLE_TABLES=y
++CONFIG_IPV6_ROUTER_PREF=y
++CONFIG_IPV6_ROUTE_INFO=y
++CONFIG_IPV6_OPTIMISTIC_DAD=y
++CONFIG_IPV6_MULTIPLE_TABLES=y
++CONFIG_INET_ESP=y
++CONFIG_INET6_ESP=y
++CONFIG_INET_UDP_DIAG=y
++CONFIG_INET_DIAG_DESTROY=y
++CONFIG_UNIX_DIAG=y
++CONFIG_PACKET_DIAG=y
++CONFIG_XFRM_USER=y
++CONFIG_NF_CONNTRACK_MARK=y
++CONFIG_NF_CT_NETLINK=y
++CONFIG_NETFILTER_NETLINK_QUEUE=y
++CONFIG_NETFILTER_NETLINK_LOG=y
++CONFIG_NETFILTER_XT_MARK=y
++CONFIG_NETFILTER_XT_CONNMARK=y
++CONFIG_NETFILTER_XT_TARGET_CLASSIFY=y
++CONFIG_NETFILTER_XT_TARGET_CONNMARK=y
++CONFIG_NETFILTER_XT_TARGET_CT=y
++CONFIG_NETFILTER_XT_TARGET_IDLETIMER=y
++CONFIG_NETFILTER_XT_TARGET_MARK=y
++CONFIG_NETFILTER_XT_TARGET_NFLOG=y
++CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
++CONFIG_NETFILTER_XT_TARGET_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
++CONFIG_NETFILTER_XT_MATCH_BPF=y
++CONFIG_NETFILTER_XT_MATCH_CONNMARK=y
++CONFIG_NETFILTER_XT_MATCH_HELPER=y
++CONFIG_NETFILTER_XT_MATCH_IPRANGE=y
++CONFIG_NETFILTER_XT_MATCH_LENGTH=y
++CONFIG_NETFILTER_XT_MATCH_MAC=y
++CONFIG_NETFILTER_XT_MATCH_MARK=y
++CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
++CONFIG_NETFILTER_XT_MATCH_POLICY=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA=y
++CONFIG_NETFILTER_XT_MATCH_SOCKET=y
++CONFIG_NETFILTER_XT_MATCH_STATISTIC=y
++CONFIG_NETFILTER_XT_MATCH_STRING=y
++CONFIG_NETFILTER_XT_MATCH_TIME=y
++CONFIG_NETFILTER_XT_MATCH_U32=y
++CONFIG_IP_NF_MATCH_RPFILTER=y
++CONFIG_IP_NF_MATCH_TTL=y
++CONFIG_IP_NF_RAW=y
++CONFIG_IP_NF_SECURITY=y
++CONFIG_IP_NF_ARPTABLES=y
++CONFIG_IP_NF_ARPFILTER=y
++CONFIG_IP_NF_ARP_MANGLE=y
++CONFIG_IP6_NF_MATCH_RPFILTER=y
++CONFIG_IP6_NF_MANGLE=y
++CONFIG_IP6_NF_RAW=y
++CONFIG_IP6_NF_NAT=y
++CONFIG_IP6_NF_TARGET_MASQUERADE=y
++CONFIG_NET_SCHED=y
++CONFIG_NET_SCH_HTB=y
++CONFIG_NET_SCH_INGRESS=y
++CONFIG_NET_CLS_U32=y
++CONFIG_NET_CLS_BPF=y
++CONFIG_NET_CLS_ACT=y
++CONFIG_NET_ACT_POLICE=y
++CONFIG_NET_ACT_GACT=y
++CONFIG_NET_ACT_MIRRED=y
++CONFIG_NET_ACT_BPF=y
++CONFIG_IFB=y
+-- 
+2.52.0
+
