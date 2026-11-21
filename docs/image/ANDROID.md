@@ -1,8 +1,11 @@
 # Android apps (Waydroid) — SM-T715
 
-Status: working on the reference tablet on 2026-11-21; **not in a release yet**.
-The root image ships Waydroid and the tools below but not Android itself: the
-Android images are downloaded when the owner asks for them (section 3).
+Status: working on the reference tablet on 2026-11-21, Google Play and
+WhatsApp included; **not in a release yet**: it takes the kernel series
+`t715-waydroid` and a root image built from this tree (section 2). The root
+image ships Waydroid and the tools below but not Android itself: the Android
+images are downloaded when the owner asks for them (section 3, which has the
+download links).
 
 ## 1. What you get and its limits
 
@@ -120,6 +123,35 @@ sudo t715-android-setup optimize   # optional; AOT-compile apps (10-20 min after
 `t715-android-setup all` runs none of `share`, `trim`, or `optimize` because
 Android must have booted once first.
 
+### Android images: the official downloads
+
+Nothing of Android is in this repository or in its releases: the images are
+Waydroid's own builds of LineageOS 20, hosted by the Waydroid project on
+SourceForge, and `waydroid init` downloads them by itself. The Google apps come
+inside Waydroid's `GAPPS` system image; there is no separate GApps package to
+flash. What the reference tablet runs (read from Waydroid's OTA indexes on
+2026-11-21):
+
+| Image | File | Size | SHA-256 |
+|---|---|---|---|
+| System with Google apps (`GAPPS`) | [lineage-20.0-20260926-GAPPS-waydroid_arm-system.zip](https://sourceforge.net/projects/waydroid/files/images/system/lineage/waydroid_arm/lineage-20.0-20260926-GAPPS-waydroid_arm-system.zip/download) | 1.1 GB | `97df844650a19089c33936b1e2d1c79a9443118d75c7cc22dce1d6ef160d788c` |
+| System without Google apps (`VANILLA`) | [lineage-20.0-20260927-VANILLA-waydroid_arm-system.zip](https://sourceforge.net/projects/waydroid/files/images/system/lineage/waydroid_arm/lineage-20.0-20260927-VANILLA-waydroid_arm-system.zip/download) | 689 MB | `c36f1298165c572c803c0d76ed6086d37e7639dbb3d8bcec0f5e16984e494152` |
+| Vendor (`MAINLINE`), needed with either system | [lineage-20.0-20261022-MAINLINE-waydroid_arm-vendor.zip](https://sourceforge.net/projects/waydroid/files/images/vendor/waydroid_arm/lineage-20.0-20261022-MAINLINE-waydroid_arm-vendor.zip/download) | 73 MB | `c3e903a28f5e42c48a6e9bd6af5f70d9762a635cdddde1608e10c2622e6a78d5` |
+
+The OTA indexes list every build with its link, size and hash (`id`):
+[GAPPS](https://ota.waydro.id/system/lineage/waydroid_arm/GAPPS.json),
+[VANILLA](https://ota.waydro.id/system/lineage/waydroid_arm/VANILLA.json) and
+[vendor](https://ota.waydro.id/vendor/waydroid_arm/MAINLINE.json); all the
+files are under
+[SourceForge's waydroid project](https://sourceforge.net/projects/waydroid/files/images/).
+Take the vendor image of 2026-10-22 named above: the `mesa-fix` step applies
+to that exact library and refuses any other (section 7).
+
+Two things to know about the Google apps: Google's terms apply to them, and
+Google may ask an uncertified device to be registered before the Play Store
+signs in (`sudo t715-android-setup google-id`, section 5); the reference
+tablet signed in without it.
+
 ## 4. Daily use
 
 - **Launcher**: Android apps appear as `waydroid.<package>.desktop` entries in
@@ -187,7 +219,8 @@ To install additional apps, there are three ways:
    `sudo t715-android-setup all --gapps` (or `init --gapps`; official
    `lineage-20.0-20260926`, 1.1 GB download, 2.26 GB unpacked). With kernel
    `#20`, Google sign-in in the Play Store and installing apps from it worked
-   on the reference tablet on 2026-11-20/21 (three user apps installed).
+   on the reference tablet on 2026-11-20/21 (three user apps installed;
+   WhatsApp runs).
    Device registration (`sudo t715-android-setup google-id`, then registering
    at `https://www.google.com/android/uncertified` and restarting Android) was
    not needed for that sign-in, though Google may still require it.

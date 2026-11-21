@@ -4,6 +4,15 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
+## Since 1.0.4, not released yet
+
+- **Android apps beside Linux apps**, through Waydroid (LineageOS 20, Android 13) on the GPU,
+  Google Play included: working on the reference tablet since 2026-11-20 on the optional
+  kernel series `t715-waydroid`, opt-in (`docs/image/ANDROID.md`, with the Android images'
+  download links). Left before a release: a release kernel with the series and a root image
+  rebuilt and tested from RECOVERY, the sleep with Android running, the rotation, and a
+  report upstream of the Mesa bug the setup works around.
+
 ## State at 1.0.4 (2026-11-11)
 
 1.0.4 is what follows; everything else is 1.0.3's.

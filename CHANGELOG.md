@@ -1,5 +1,26 @@
 # Changelog
 
+## Not released yet
+
+In the tree since 1.0.4, built and used on the reference tablet, in no release image yet.
+
+- **Android apps.** Android apps open beside Linux apps, each in its own window, from the app
+  drawer: LineageOS 20 (Android 13) in a Waydroid container, drawn by the GPU through
+  Panfrost, with an Android tile in quick settings. With Waydroid's `GAPPS` image the Play
+  Store signs in and installs apps; WhatsApp runs. Only 32-bit apps (`armeabi-v7a`) or apps
+  without native code install. It is opt-in: the root image ships Waydroid dormant and no
+  Android image, `sudo t715-android-setup all` (or `all --gapps`) downloads Waydroid's
+  official images and sets everything up, and it needs the optional kernel series
+  `t715-waydroid` (binder, NAT, the policy routing Android's network daemon needs, a 3G/1G
+  memory split). Inside Android there are no cameras, no sensors and no telephony; the sleep
+  with Android running and the rotation are not tested. On the reference tablet on
+  2026-11-21, `GAPPS` image, low-RAM mode: Android boots in 40 s
+  ([docs/image/ANDROID.md](docs/image/ANDROID.md), with the images' download links and
+  hashes).
+- **Android after a start with a cable in.** The bootloader then marks the boot as a charger
+  boot and Android stopped right after its first processes, so no app opened; an init file in
+  Waydroid's overlay starts it anyway.
+
 ## 1.0.4, pre-release
 
 Everything since 1.0.3: the tablet suspends to RAM once its screen has been dark for a minute

@@ -58,6 +58,9 @@ release brought.
 
 - **Now:** the power drawn asleep, measured over a night on battery; the Wi-Fi chip's own
   failure to start after a power-off, which the guard now brings back in seconds.
+- **In the tree, for the next release:** Android apps beside Linux apps, through Waydroid
+  (LineageOS 20, Android 13) on the GPU, with Google Play; they work on the reference tablet
+  ([how, and the downloads](docs/image/ANDROID.md)).
 - **Next:** a modem that sleeps (about 150 mW less with the screen off and the modem on;
   validated without a SIM, calls and SMS still to test with one), automatic brightness,
   headphone and headset detection.
@@ -343,7 +346,7 @@ Everything we learned about this hardware is public, register addresses included
 | Audio, Wi-Fi and Bluetooth, input, sensors | [AUDIO_M6](docs/hardware/AUDIO_M6.md), [WIFI_BT_M5](docs/hardware/WIFI_BT_M5.md), [INPUT_M4](docs/hardware/INPUT_M4.md), [SENSORS_M7](docs/hardware/SENSORS_M7.md) |
 | GPS: the BCM4752, its boot protocol, Samsung's `gpsd` offline | [GPS](docs/hardware/GPS.md) |
 | Power: battery, CPU, thermal, watchdog, SMP | [BATTERY](docs/hardware/BATTERY.md), [CPUFREQ](docs/hardware/CPUFREQ.md), [THERMAL](docs/hardware/THERMAL.md), [WATCHDOG](docs/hardware/WATCHDOG.md), [SMP_BRINGUP](docs/hardware/SMP_BRINGUP.md) |
-| Android apps: LineageOS 20 in Waydroid on Panfrost (opt-in, not in a release yet) | [ANDROID](docs/image/ANDROID.md) |
+| Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, from source, not in a release yet) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
 
 ### Drivers
 
