@@ -4,20 +4,19 @@ Where the port stands and what comes next. The dated working journals behind it 
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.
 
-## Since 1.0.4, not released yet
+## State at 1.0.5 (2026-11-21)
+
+1.0.5 is 1.0.4 plus Android apps (`CHANGELOG.md` has the release's own test notes):
 
 - **Android apps beside Linux apps**, through Waydroid (LineageOS 20, Android 13) on the GPU,
-  Google Play included: working on the reference tablet since 2026-11-20 on the optional
-  kernel series `t715-waydroid`, opt-in (`docs/image/ANDROID.md`, with the Android images'
-  download links). Left before a release: a release kernel with the series and a root image
-  rebuilt and tested from RECOVERY, the sleep with Android running, the rotation, and a
+  Google Play included: working on the reference tablet since 2026-11-20 on the `t715-waydroid`
+  kernel series (now part of the release kernel), opt-in (`docs/image/ANDROID.md`, with the
+  Android images' download links). Left: the sleep with Android running, the rotation, and a
   report upstream of the Mesa bug the setup works around.
 
 ## State at 1.0.4 (2026-11-11)
 
-1.0.4 is what follows; everything else is 1.0.3's.
-
-Tested on the same tablet:
+Since 1.0.3, tested on the same tablet (`CHANGELOG.md` has the release's own test notes):
 
 - **The tablet suspends to RAM daily**: once its screen has been dark for a minute, on
   battery, the service `t715-sleep` in the root image powers the modem's CP and the
@@ -147,7 +146,7 @@ Since 0.9.3, tested on one tablet (`CHANGELOG.md` has the release's own test not
 - **Coding agents**: Pi preinstalled; Claude Code as an opt-in installer with a signed manifest.
 - **Omarchy 4.0.6, pinned** (`docs/image/REPACK.md`): 4.5.0 breaks omarchy-mobile's touch patches.
 
-## Next: the roadmap after 1.0.4 (2026-11-11)
+## Next: the roadmap after 1.0.5 (2026-11-21)
 
 In short:
 
@@ -342,6 +341,10 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 
 ### Fixes and the system, alongside
 
+- **Android apps (Waydroid)**: sleep (`t715-sleep`) with Android running and screen rotation
+  with Android windows are not tested yet, and the 32-bit Mesa `hash_table_u64` bug that
+  `t715-android-setup mesa-fix` works around (`docs/image/ANDROID.md` section 7) is not
+  reported upstream yet.
 - **The Camera app's GPU faults**: job faults, page faults and GPU resets while it runs, with
   1.0 Beta 1's kernel and 1.0.1's alike (`CHANGELOG.md`, 1.0.1's known issues); find whether
   Mesa's Midgard driver, the preview's buffers or the kernel's import path makes them

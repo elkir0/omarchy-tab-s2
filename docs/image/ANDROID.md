@@ -1,11 +1,10 @@
 # Android apps (Waydroid) — SM-T715
 
-Status: working on the reference tablet on 2026-11-21, Google Play and
-WhatsApp included; **not in a release yet**: it takes the kernel series
-`t715-waydroid` and a root image built from this tree (section 2). The root
-image ships Waydroid and the tools below but not Android itself: the Android
-images are downloaded when the owner asks for them (section 3, which has the
-download links).
+Status: **in 1.0.5 (opt-in)**; working on the reference tablet on 2026-11-21,
+Google Play and WhatsApp included. The 1.0.5 release kernel includes the
+`t715-waydroid` series (section 2). The root image ships Waydroid dormant and
+the tools below, but not Android itself: the Android images are downloaded when
+the owner asks for them (section 3, which has the download links).
 
 ## 1. What you get and its limits
 
@@ -24,11 +23,10 @@ native code install. 64-bit-only Android builds such as Denial/Droidloom
 
 ## 2. Requirements
 
-- **Optional kernel series `kernel/patches/t715-waydroid/`**: two defconfig
-  patches on top of the 1.0.4 release tree (built as `#20` on the reference
-  tablet since 2026-11-20; `#19` was the first patch alone; see
-  [kernel/README.md](../../kernel/README.md)). The series is optional — systems
-  without Android stay on the standard 1.0.4 kernel.
+- **Kernel series `kernel/patches/t715-waydroid/`**: two defconfig patches on
+  top of the 1.0.4 release tree, part of the release kernel since 1.0.5 (built
+  as `#20` on the reference tablet since 2026-11-20; `#19` was the first patch
+  alone; see [kernel/README.md](../../kernel/README.md)).
   - Patch 1 enables `ANDROID_BINDER_IPC` with static devices
     `binder,hwbinder,vndbinder` (no binderfs; Linux 6.12's C binder is used
     because upstream's Rust binder is 64-bit only), `IP_NF_NAT`,

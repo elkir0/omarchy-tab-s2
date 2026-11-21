@@ -5,7 +5,7 @@
 desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
 calls and SMS included.
 
-**Version 1.0.4.** It runs daily on one tablet. The published image went through its first boot on
+**Version 1.0.5.** It runs daily on one tablet. The published image went through its first boot on
 that tablet, on a persistent root of its own next to its owner's system, and was checked there
 before publication. No install by anyone else has been reported yet, and the install from stock
 Android or TWRP has never been run end to end: see [the install guide](docs/INSTALL.md).
@@ -43,6 +43,7 @@ An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 | Security | ufw on, only SSH and DHCP on the USB cable come in; a screen lock you turn on by choosing a password |
 | Browsers | Chromium on the GPU by default, Firefox beside it |
 | Coding agents | Pi preinstalled; Claude Code through an opt-in installer in the app drawer (unofficial, 2.1.270 at most on 32-bit ARM) |
+| Android apps | opt-in through Waydroid (LineageOS 20, Android 13) on the GPU, Google Play with the GAPPS image; 32-bit apps only, no cameras, sensors or telephony inside Android ([setup](docs/image/ANDROID.md)) |
 
 Not yet: hardware video decoding, headphone detection, the fingerprint reader. The tablet runs a
 32-bit userland: its bootloader starts the CPU in AArch32.
@@ -52,15 +53,12 @@ models are not covered.
 
 ## Roadmap
 
-The sleep came in 1.0.4. What comes next, in this order; [the roadmap](docs/ROADMAP.md) has
-each step's details, measurements and cost, and [the changelog](CHANGELOG.md) what each
-release brought.
+Sleep came in 1.0.4, and Android apps in 1.0.5. What comes next, in this order;
+[the roadmap](docs/ROADMAP.md) has each step's details, measurements and cost, and
+[the changelog](CHANGELOG.md) what each release brought.
 
 - **Now:** the power drawn asleep, measured over a night on battery; the Wi-Fi chip's own
   failure to start after a power-off, which the guard now brings back in seconds.
-- **In the tree, for the next release:** Android apps beside Linux apps, through Waydroid
-  (LineageOS 20, Android 13) on the GPU, with Google Play; they work on the reference tablet
-  ([how, and the downloads](docs/image/ANDROID.md)).
 - **Next:** a modem that sleeps (about 150 mW less with the screen off and the modem on;
   validated without a SIM, calls and SMS still to test with one), automatic brightness,
   headphone and headset detection.
@@ -118,7 +116,7 @@ expect rough edges, and report them.
    On Windows, follow [the install guide](docs/INSTALL.md#2-put-the-image-on-the-tablet) instead.
 3. Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
    public key as `linux/authorized_keys` if you want to log in over SSH: the image has none.
-4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.4-AP.tar.md5`, or Heimdall:
+4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.5-AP.tar.md5`, or Heimdall:
 
    ```bash
    heimdall flash --BOOT boot.img --RECOVERY recovery.img
@@ -346,7 +344,7 @@ Everything we learned about this hardware is public, register addresses included
 | Audio, Wi-Fi and Bluetooth, input, sensors | [AUDIO_M6](docs/hardware/AUDIO_M6.md), [WIFI_BT_M5](docs/hardware/WIFI_BT_M5.md), [INPUT_M4](docs/hardware/INPUT_M4.md), [SENSORS_M7](docs/hardware/SENSORS_M7.md) |
 | GPS: the BCM4752, its boot protocol, Samsung's `gpsd` offline | [GPS](docs/hardware/GPS.md) |
 | Power: battery, CPU, thermal, watchdog, SMP | [BATTERY](docs/hardware/BATTERY.md), [CPUFREQ](docs/hardware/CPUFREQ.md), [THERMAL](docs/hardware/THERMAL.md), [WATCHDOG](docs/hardware/WATCHDOG.md), [SMP_BRINGUP](docs/hardware/SMP_BRINGUP.md) |
-| Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, from source, not in a release yet) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
+| Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, since 1.0.5) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
 
 ### Drivers
 

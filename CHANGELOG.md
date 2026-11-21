@@ -1,25 +1,131 @@
 # Changelog
 
-## Not released yet
+## 1.0.5, pre-release
 
-In the tree since 1.0.4, built and used on the reference tablet, in no release image yet.
+Everything since 1.0.4: Android apps beside Linux apps through Waydroid (LineageOS 20, Android 13,
+on the GPU, with Google Play opt-in), and the fix for Android after a start with a cable in.
 
 - **Android apps.** Android apps open beside Linux apps, each in its own window, from the app
   drawer: LineageOS 20 (Android 13) in a Waydroid container, drawn by the GPU through
   Panfrost, with an Android tile in quick settings. With Waydroid's `GAPPS` image the Play
   Store signs in and installs apps; WhatsApp runs. Only 32-bit apps (`armeabi-v7a`) or apps
   without native code install. It is opt-in: the root image ships Waydroid dormant and no
-  Android image, `sudo t715-android-setup all` (or `all --gapps`) downloads Waydroid's
-  official images and sets everything up, and it needs the optional kernel series
-  `t715-waydroid` (binder, NAT, the policy routing Android's network daemon needs, a 3G/1G
-  memory split). Inside Android there are no cameras, no sensors and no telephony; the sleep
-  with Android running and the rotation are not tested. On the reference tablet on
-  2026-11-21, `GAPPS` image, low-RAM mode: Android boots in 40 s
+  Android image; `sudo t715-android-setup all` (or `all --gapps`) downloads Waydroid's
+  official images (about 760 MB without Google apps, 1.2 GB with) and sets everything up.
+  Inside Android there are no cameras, no sensors and no telephony; the sleep with Android
+  running and the rotation are not tested. On the reference tablet on 2026-11-21, `GAPPS`
+  image, low-RAM mode: Android boots in 40 s
   ([docs/image/ANDROID.md](docs/image/ANDROID.md), with the images' download links and
   hashes).
 - **Android after a start with a cable in.** The bootloader then marks the boot as a charger
   boot and Android stopped right after its first processes, so no app opened; an init file in
   Waydroid's overlay starts it anyway.
+- **Kernel.** Linux 6.12.114 with one new series on top of 1.0.4's sixteen, `t715-waydroid`
+  (binder, NAT, the policy routing Android's network daemon needs, and a 3G/1G memory split),
+  which is no longer optional. Seventeen in all, in this order: `bringup modem parity gps
+  charger camera-af cpufreq power camera-mc power-gpu turbo sdcard bluetooth wifi-recovery
+  sleep radio-fixes waydroid`. Built from the published patches with the fixed identity
+  ([kernel/README.md](kernel/README.md)); the release tree is the daily kernel `#20`'s tree.
+  The 3G/1G memory split applies to everyone, Android used or not, and lowers the kernel's low
+  memory from about 1.6 GiB to about 590 MiB (the rest is high memory); no ill effect seen on
+  the reference tablet, in daily use since 2026-11-20. The optional `t715-linkpm` series is
+  still not in it.
+- **Software.** A fresh package sync: Mesa 26.3.1 (26.2.6 in 1.0.4), systemd 262.2,
+  omamobile-shell 0.2.94-6 (the Android tile), hyprgraphics 0.6.0-2.1 (rebuilt for libjxl
+  0.13), Waydroid 1.6.3 with LXC and python-pyclip 0.7.0; unchanged: Omarchy 4.0.6 (pinned),
+  Hyprland 0.57.2, Quickshell 0.3.2, Qt 6.12.0, Firefox 157.0, Chromium 150. The root image
+  is 5.3 GiB raw (5704253440 bytes); the published `rootfs-omarchy.img.xz` is 1241391564
+  bytes.
+- **From 1.0.4.** There is no update path yet, the same rule as 1.0.4 from 1.0.3: the first
+  boot copies the image only into a persistent root that does not exist yet. Flashing only
+  1.0.5's `boot.img` over a 1.0.4 install gives that system the new kernel and its modules
+  (the initramfs installs them into the root), including `t715-waydroid`, but not Waydroid,
+  `t715-android-setup`, `t715-android`, the launcher daemon or the Android tile, which live in
+  the root image.
+
+Tested on one tablet, the reference one, on 2026-11-21, booted from RECOVERY next to its owner's
+system with test boot images carrying the release's kernel and initramfs (the release's
+`boot.img` differs only by the knobs that name the image and the root; the test images also
+had `t715.autotest=1`, whose script gave the test system the daily system's Wi-Fi network and
+its SSH rule). The published `rootfs-omarchy.img.xz` was sent to the tablet over Wi-Fi and
+unpacked there, and the image's checksum matched its line in `SHA256SUMS`; it then got a
+persistent root of its own: the first boot copied it in 211 s (1.0.4: 205 s) and Omarchy's
+session came up by itself. On that boot: the release kernel (`#1`), not tainted, no oops; the
+three binder devices, policy routing accepted, 589 MiB of low memory (the 3G/1G split); the
+GPU scaling from 160 to 700 MHz and the A57 cores up to 1.5 GHz; `t715-sleep` and
+`t715-wifi-guard` active, the kernel able to suspend to RAM (`deep`),
+`pci_exynos.wifi_power_cycle` at Y; the Wi-Fi on the network, Bluetooth powered, the microSD
+card mounted by itself (exFAT); Waydroid installed with its container service disabled and no
+Android image in the root. **Android:** `waydroid init`, run by hand, downloaded Waydroid's
+official `VANILLA` system and `MAINLINE` vendor images, so `t715-android-setup all` skipped its
+own init step and did the rest: the Mesa fix applied, the configuration, the charger init
+file, the firewall rules, the container enabled. `image/tests/ondevice/android-smoke.sh`: the
+first Android boot completed in 125 s, drawn by Panfrost (OpenGL ES 3.1, the vendor image's
+Mesa 26.0.8), no native crash, a cold app launch in 2.8 s and a warm one in 0.24 s, and one
+panfrost job fault, which makes the script's verdict a fail (the known fault below). On the
+second boot Android's Settings opened in its own window beside the terminal, Chromium, Phone
+and Messages. **The rest:** the modem's switch (22 checks); a recovery asked by hand, good at
+the third try, 31 s in all; three suspends on the cable, each a dry run through `t715-sleep`'s
+prepare and restore (the CP off, the chip powered down and back), the Wi-Fi on the network
+19.6 s (after one failed try), 11.8 s and 11.9 s after the suspend's exit, the kernel still
+untainted; the Battery saver through power-profiles-daemon, power-saver taking the A53 cores
+to 1 GHz and the GPU to 266 MHz, balanced giving both back. A second boot copied nothing and
+kept the data (a marker file, Android's setup); the rescue's test image booted the image
+read-only, with no modem module, the session and the Wi-Fi up.
+`image/tests/verify-rootfs.sh` passes its 388 checks on the image, and two builds of the kernel
+from the published patches, in two trees, were identical byte for byte.
+
+Not tested: a call, an SMS or mobile data (no SIM in the tablet), the GPS, a real sleep on the
+release image itself (on the cable a suspend stays a dry run; the daily system slept for real
+about 80 times on 2026-11-10), the power drawn asleep and the power draw on this build, sleep
+with Android running, screen rotation with Android windows, clipboard from Linux to Android,
+Waydroid's `GAPPS` image and the Play Store on the release image itself (they run on the daily
+system, which has the same kernel tree and tools), `t715-android-setup`'s own download step,
+Bluetooth's return after a suspend (not timed), the animations under the Battery saver,
+the Bluetooth devices on the release image itself (a keyboard, a mouse and a speaker were
+tested with 1.0.2), the SD card tile and the pointer by eye, the Camera app, the Stay awake
+tile by hand, the heat guard's caps, and the Odin, Heimdall and TWRP installs.
+
+Known issues:
+- **Android apps (Waydroid):** only 32-bit apps (`armeabi-v7a`) or apps without native code
+  install; inside Android there are no cameras, no sensors and no telephony; Android apps
+  cannot draw while the screen is off or locked; sleep with Android running and screen rotation
+  with Android windows are not tested; Android posts a "Configure physical keyboard"
+  notification at every session start ([docs/image/ANDROID.md](docs/image/ANDROID.md) section
+  11).
+- **The Wi-Fi can still fail to start**, now and then, after a boot or a wake: the service
+  brings it back by itself — about 8 s after a wake in 36 restores of 40 on the reference
+  tablet, 23 to 40 s in the other four; the chip's own failure as its radio starts is not
+  fixed, and it fails more often with the A57 cores offline, which is why a recovery brings
+  them online ([docs/hardware/WIFI_BT_M5.md](docs/hardware/WIFI_BT_M5.md) section 7.10).
+- **While the tablet sleeps** there is no Wi-Fi, no Bluetooth, no call, no SMS and no
+  notification (the CP is off), and the Wi-Fi cannot wake it; after a wake the Wi-Fi is back
+  in about 8 s, Bluetooth in about 19 s, the CP in about 13 s. The power drawn asleep is not
+  measured yet. The black screen at a key wake was fixed in the kernel, but it came in runs,
+  so the count that says so does not prove it.
+- **A Bluetooth mouse crashed the touch shell once, at its first pairing** (Quickshell 0.3.2,
+  SIGSEGV): the screen stayed black about 40 s while the crash was written, then the shell
+  came back by itself. Not seen again when the mouse reconnected.
+- **Omarchy's keyboard shortcuts did not answer** with the Bluetooth keyboard tried; not
+  investigated yet.
+- **The Camera app and the GPU.** While the Camera app runs, the kernel logs panfrost job
+  faults (`DATA_INVALID_FAULT`, `TILE_RANGE_FAULT`, `INSTR_TYPE_MISMATCH`, `JOB_BUS_FAULT`),
+  GPU page faults and now and then a `gpu sched timeout`, the GPU reset after a stuck job:
+  from none to a few dozen in a 45-second use, and once a burst of about 300. 1.0 Beta 1's
+  kernel, its GPU fixed at 266 MHz, does the same on this image (404 in one use, then 2, 0, 9
+  and 1), and so does this kernel with the GPU pinned at 266 MHz: it comes with the Camera
+  app's use of the GPU, not with the new frequencies. The app and the session kept running.
+- Outside the Camera app, `panfrost: js fault ... DATA_INVALID_FAULT` once or twice a boot,
+  when a new window appears (two in the 1.0.5 test, with Android running).
+- Dozens of `exynos_drm_gem_prime_import_sg_table ... buffer chunks must be mapped
+  contiguously` lines per boot: the display rejects GPU buffers for direct scanout and the
+  compositor draws them instead.
+- Android's leftover data on USERDATA is readable by the desktop user, who has Android's
+  `system` UID (1000): wipe Android's data first if that matters (`docs/INSTALL.md`).
+- The USB gadget borrows Apple's vendor ID, and its link is CDC-ECM, which Windows does not
+  drive. On 2026-11-09 the reference tablet's USB link to a Mac stopped receiving after a few
+  frames and stayed so, through cable changes and replugs, until the end of the session (the
+  Mac was not restarted); the 1.0.3, 1.0.4 and 1.0.5 tests went over Wi-Fi instead.
 
 ## 1.0.4, pre-release
 
