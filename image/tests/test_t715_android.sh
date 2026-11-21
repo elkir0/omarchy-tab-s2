@@ -497,7 +497,25 @@ setup_installed
 set_status_stopped
 T715_ANDROID_WAIT=1 run_and settings >/dev/null 2>&1 && fail "(i3) settings fails if start fails"
 nlines "$t/wd-log" 0 || fail "(i3) app launch not called when start fails"
-echo "ok - settings: launches com.android.settings, starting first when stopped"
+
+# (i4) settings routed through the real /usr/local/bin/waydroid wrapper in PATH
+setup_installed
+set_status_running
+mkdir -p "$t/wrap-bin"
+ln -sf "$here/rootfs/overlay/usr/local/bin/waydroid" "$t/wrap-bin/waydroid"
+env T715_ANDROID_CFG="$t/waydroid.cfg" \
+    T715_ANDROID_DEV="$t/dev" \
+    T715_ANDROID_CGROUP="$t/cgroup" \
+    T715_ANDROID_STATE_DIR="$t/state" \
+    T715_ANDROID_ETC="$t/etc" \
+    XDG_DATA_HOME="$t/xdg-data" \
+    XDG_RUNTIME_DIR="$t/rt-none" \
+    T715_ANDROID_REAL_WAYDROID="$t/wd-bin/waydroid" \
+    PATH="$t/wrap-bin:$t/bin:$t/bus-bin:$t/hostbin:/usr/bin:/bin" \
+    "$AND" settings >/dev/null 2>&1 || fail "(i4) settings through waydroid wrapper exits 0"
+grep -qx 'waydroid app launch com.android.settings' "$t/wd-log" \
+    || fail "(i4) settings through wrapper reaches waydroid app launch com.android.settings"
+echo "ok - settings: launches com.android.settings, starting first when stopped, works through wrapper"
 
 # --- (j) apps: visibility apply, list, overrides, start integration ------------
 APPS="$t/xdg-data/applications"

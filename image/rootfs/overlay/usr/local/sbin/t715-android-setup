@@ -27,11 +27,13 @@
 # fixed across boots.  `configure` inspects
 # `/sys/class/drm/renderD<N>/device/driver` to locate `panfrost`, writes
 # `drm_device = /dev/dri/renderD<N>` under `[waydroid]`, sets Mali-T760's
-# OpenGL ES 3.1 property (`ro.opengles.version = 196609`) and
-# `persist.waydroid.multi_windows = false` under `[properties]` (plus
-# `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set), preserving every
-# other section, key and key case, and runs `waydroid upgrade --offline`
-# only when the configuration changed.  Multi-window stays off on purpose:
+# OpenGL ES 3.1 property (`ro.opengles.version = 196609`),
+# `persist.waydroid.multi_windows = false`, `ro.lmk.use_minfree_levels = false`,
+# and `ro.config.low_ram = true` (opt-out via `T715_ANDROID_LOW_RAM=0`) under
+# `[properties]` (plus `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set),
+# preserving every other section, key and key case, and runs `waydroid upgrade
+# --offline` only when the configuration changed.  Multi-window stays off on
+# purpose:
 # `waydroid app launch` still gives each app its own Wayland window (class
 # `waydroid.<package>`), full size and without Android's caption bar, and
 # the shell puts each on its own screen; with multi-window on, Android opens
@@ -86,6 +88,20 @@
 # packages and deletes `activity_manager_constants`.  `all` does NOT call
 # `trim` because Android must have booted once first.
 #
+# Ahead-of-time compilation (`optimize`):
+# Apps updated or installed from the Play Store stay at dexopt status `verify`
+# (interpreted/JIT), and Android's idle background optimisation never runs
+# because Waydroid freezes the idle container.  `optimize` queries `dumpsys
+# package dexopt` inside the running container and compiles every package whose
+# dexopt status is not `speed`, `speed-profile`, or `everything` (or only the
+# packages passed as arguments) with `cmd package compile -m speed -f PKG`
+# (bounded by `timeout 900`).  On the reference tablet (2026-11-21) compiling
+# took 3-15 s for small system apps, ~2 min each for the Play Store and a large
+# user app, and 7 min for Google Play services; Settings cold start dropped
+# from 3.4 s to 1.7-2.7 s and Files from 3.2 s to 1.6-1.9 s.  This can take
+# 10-20 minutes after many installs.  `all` does NOT call `optimize` because
+# Android must have booted and apps must be installed first.
+#
 # Usage:
 #   t715-android-setup packages        install waydroid safely if absent
 #   t715-android-setup init [--gapps]  initialise Waydroid images (requires
@@ -107,9 +123,13 @@
 #   t715-android-setup trim [--undo]   disable heavy/unused GAPPS packages and
 #                                      cap cached processes (after boot; --undo
 #                                      reverses)
+#   t715-android-setup optimize [PKG...]
+#                                      AOT-compile packages not yet compiled
+#                                      (or only the given packages; after boot)
 #   t715-android-setup all [--gapps]   run packages, init, mesa-fix,
 #                                      configure, firewall, enable in order
-#                                      (does not run share, google-id or trim)
+#                                      (does not run share, google-id, trim or
+#                                      optimize)
 #   t715-android-setup status          print key=value status lines
 #   t715-android-setup --help          print usage on stdout and exit 0
 #
@@ -132,6 +152,9 @@
 #   T715_ANDROID_ASSUME_ROOT     set to 1 to skip the root check
 #   T715_ANDROID_PACMAN_LOCAL    /var/lib/pacman/local
 #   T715_ANDROID_DENSITY         optional; when non-empty, sets ro.sf.lcd_density
+#   T715_ANDROID_LOW_RAM         set to 0 to leave ro.config.low_ram untouched
+#   T715_ANDROID_SIZE            Android's fixed display size, WxH in logical
+#                                pixels (default 744x1000); 0 leaves it alone
 #   T715_ANDROID_USER            default user for share (default: alarm)
 #   T715_ANDROID_MESA_BAD_SHA    override known bad libgallium_dri.so sha256
 #   T715_ANDROID_MESA_FIXED_SHA  override expected patched sha256
@@ -154,6 +177,8 @@ ASSUME_ROOT=${T715_ANDROID_ASSUME_ROOT:-0}
 PACMAN_LOCAL=${T715_ANDROID_PACMAN_LOCAL:-/var/lib/pacman/local}
 PACMAN_LOCAL=${PACMAN_LOCAL%/}
 DENSITY=${T715_ANDROID_DENSITY:-}
+LOW_RAM=${T715_ANDROID_LOW_RAM:-1}
+DISPLAY_SIZE=${T715_ANDROID_SIZE:-744x1000}
 DEFAULT_USER=${T715_ANDROID_USER:-alarm}
 
 # Heavy or unused Google-apps packages disabled by `trim` for user 0.
@@ -222,6 +247,7 @@ usage() {
     printf '       t715-android-setup share [USER]\n'
     printf '       t715-android-setup google-id\n'
     printf '       t715-android-setup trim [--undo]\n'
+    printf '       t715-android-setup optimize [PKG...]\n'
     printf '       t715-android-setup all [--gapps]\n'
     printf '       t715-android-setup status\n'
     printf '       t715-android-setup --help\n'
@@ -508,7 +534,7 @@ cmd_configure() {
         return 1
     fi
 
-    python3 - "$CFG_FILE" "$drm_dev" "$DENSITY" <<'PY' || rc=$?
+    python3 - "$CFG_FILE" "$drm_dev" "$DENSITY" "$LOW_RAM" "$DISPLAY_SIZE" <<'PY' || rc=$?
 import configparser
 import io
 import os
@@ -518,6 +544,8 @@ import tempfile
 cfg_path = sys.argv[1]
 drm_device = sys.argv[2]
 density = sys.argv[3]
+low_ram = sys.argv[4]
+display_size = sys.argv[5]
 
 cfg = configparser.ConfigParser(interpolation=None)
 cfg.optionxform = str
@@ -535,8 +563,31 @@ desired = [
     # killed the home app in a loop: Android never finished booting.
     ("properties", "ro.lmk.use_minfree_levels", "false"),
 ]
+if low_ram != "0":
+    # Android's low-RAM mode. Measured on the tablet with the Google-apps
+    # image (2026-11-21): Android boots in 40 s instead of 73 s, zram swap in
+    # use drops from 740-920 MB to 449 MB, Settings cold start 1.5-1.7 s
+    # (was 1.7-2.7 s), Files 1.0-1.5 s; no crash seen. Opt out with
+    # T715_ANDROID_LOW_RAM=0.
+    desired.append(("properties", "ro.config.low_ram", "true"))
 if density:
     desired.append(("properties", "ro.sf.lcd_density", density))
+# A fixed size for Android's display, in the compositor's logical pixels
+# (Waydroid multiplies by the output scale): the size of an app window under
+# the tablet's shell. Left to follow the window, Waydroid's composer re-plugs
+# the virtual display at every size change, and a call landing in the gap
+# kills surfaceflinger (DisplayDevice::getId, presentAndGetReleaseFences,
+# onComposerHalVsync on a null display), which restarts all of Android. With
+# the fixed size: no hotplug event and no restart over six open/close cycles
+# (2026-11-21). A smaller size is not upscaled. T715_ANDROID_SIZE=WxH
+# overrides, T715_ANDROID_SIZE=0 leaves the keys alone.
+if display_size not in ("", "0"):
+    w, sep, h = display_size.partition("x")
+    if not (sep and w.isdigit() and h.isdigit() and int(w) > 0 and int(h) > 0):
+        print("configure: T715_ANDROID_SIZE must be WxH or 0", file=sys.stderr)
+        sys.exit(2)
+    desired.append(("properties", "persist.waydroid.width", w))
+    desired.append(("properties", "persist.waydroid.height", h))
 
 changes = []
 for section, key, value in desired:
@@ -904,6 +955,127 @@ cmd_trim() {
     return 0
 }
 
+cmd_optimize() {
+    local target_pkgs=() target_count=0
+    local dexopt_out="" parsed_pkgs="" out="" detail="" rc=0 pkg start_s elapsed failed=0
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'optimize: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    if [ $# -gt 0 ]; then
+        for pkg in "$@"; do
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done
+    else
+        dexopt_out=$(timeout 30 waydroid shell -- dumpsys package dexopt 2>/dev/null) || rc=$?
+        if [ "$rc" -eq 124 ]; then
+            printf 'optimize: timed out after 30 s querying dumpsys package dexopt\n' >&2
+            return 1
+        fi
+        if [ "$rc" -ne 0 ]; then
+            printf 'optimize: waydroid shell dumpsys package dexopt failed (exit %d)\n' "$rc" >&2
+            return 1
+        fi
+
+        if ! parsed_pkgs=$(printf '%s\n' "$dexopt_out" | python3 -c '
+import re
+import sys
+
+GOOD = {"speed", "speed-profile", "everything"}
+pkg_re = re.compile(r"^\s+\[([A-Za-z0-9_.-]+)\]\s*$")
+status_re = re.compile(r"\[status=([^\]]+)\]")
+
+in_dexopt = True
+cur_pkg = None
+order = []
+statuses = {}
+
+for raw in sys.stdin:
+    line = raw.rstrip("\r\n")
+    if line and not line[0].isspace():
+        if line.strip() == "Dexopt state:":
+            in_dexopt = True
+        else:
+            in_dexopt = False
+        cur_pkg = None
+        continue
+    if not in_dexopt:
+        continue
+    m = pkg_re.match(line)
+    if m:
+        cur_pkg = m.group(1)
+        if cur_pkg not in statuses:
+            statuses[cur_pkg] = []
+            order.append(cur_pkg)
+        continue
+    if cur_pkg is not None:
+        for sm in status_re.finditer(line):
+            statuses[cur_pkg].append(sm.group(1).strip())
+
+for pkg in order:
+    st = statuses[pkg]
+    if st and any(s not in GOOD for s in st):
+        print(pkg)
+'
+        ); then
+            printf 'optimize: failed to parse dumpsys package dexopt output\n' >&2
+            return 1
+        fi
+
+        while IFS= read -r pkg; do
+            pkg=${pkg%$'\r'}
+            [ -n "$pkg" ] || continue
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done <<< "$parsed_pkgs"
+    fi
+
+    if [ "$target_count" -eq 0 ]; then
+        printf 'optimize: 0 packages to compile\n'
+        return 0
+    fi
+
+    if [ "$target_count" -eq 1 ]; then
+        printf 'optimize: compiling 1 package\n'
+    else
+        printf 'optimize: compiling %d packages\n' "$target_count"
+    fi
+
+    for pkg in "${target_pkgs[@]}"; do
+        start_s=$SECONDS
+        rc=0
+        out=$(timeout 900 waydroid shell -- cmd package compile -m speed -f "$pkg" 2>&1) || rc=$?
+        elapsed=$((SECONDS - start_s))
+        detail=$(printf '%s' "$out" | tr '\r\n' '  ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+        if [ "$rc" -eq 124 ]; then
+            printf 'optimize: %s timed out after 900 s (%d s)\n' "$pkg" "$elapsed" >&2
+            failed=$((failed + 1))
+        elif [ "$rc" -ne 0 ]; then
+            printf 'optimize: %s failed (exit %d)%s (%d s)\n' "$pkg" "$rc" "${detail:+: $detail}" "$elapsed" >&2
+            failed=$((failed + 1))
+        else
+            case "$detail" in
+                Failure*|Error:*)
+                    printf 'optimize: %s failed: %s (%d s)\n' "$pkg" "$detail" "$elapsed" >&2
+                    failed=$((failed + 1))
+                    ;;
+                *)
+                    printf 'optimize: %s Success (%d s)\n' "$pkg" "$elapsed"
+                    ;;
+            esac
+        fi
+    done
+
+    if [ "$failed" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 cmd_all() {
     local gapps=${1:-}
     cmd_packages || return $?
@@ -1091,6 +1263,26 @@ case ${1:-} in
         fi
         require_root || exit 1
         cmd_trim "${2:-}"
+        exit $?
+        ;;
+    optimize)
+        shift
+        if [ $# -gt 0 ]; then
+            for _arg in "$@"; do
+                case "$_arg" in
+                    ""|-*)
+                        usage >&2
+                        exit 2
+                        ;;
+                esac
+            done
+        fi
+        require_root || exit 1
+        if [ $# -gt 0 ]; then
+            cmd_optimize "$@"
+        else
+            cmd_optimize
+        fi
         exit $?
         ;;
     all)

@@ -142,6 +142,16 @@ if [ "${1:-}" = "shell" ]; then
         rc=$(cat "$T715_TEST_WAYDROID_SHELL_RC")
         exit "${rc:-1}"
     fi
+    case "$*" in
+        *"cmd package compile"*)
+            if [ -f "$T715_TEST_WAYDROID_COMPILE_OUT" ]; then
+                cat "$T715_TEST_WAYDROID_COMPILE_OUT"
+            else
+                printf 'Success\n'
+            fi
+            exit 0
+            ;;
+    esac
     if [ -f "$T715_TEST_WAYDROID_SHELL_OUT" ]; then
         cat "$T715_TEST_WAYDROID_SHELL_OUT"
     fi
@@ -297,6 +307,7 @@ export T715_TEST_PACMAN_MARK_ON_U="$t/pacman.mark_on_u"
 export T715_TEST_WAYDROID_LOG="$t/waydroid.log"
 export T715_TEST_WAYDROID_FAIL="$t/waydroid.fail"
 export T715_TEST_WAYDROID_SHELL_OUT="$t/waydroid.shell_out"
+export T715_TEST_WAYDROID_COMPILE_OUT="$t/waydroid.compile_out"
 export T715_TEST_WAYDROID_SHELL_RC="$t/waydroid.shell_rc"
 export T715_TEST_WAYDROID_SHELL_FAIL_MATCH="$t/waydroid.shell_fail_match"
 export T715_TEST_TIMEOUT_LOG="$t/timeout.log"
@@ -358,7 +369,7 @@ reset_env() {
     rm -rf "$S" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES" "$ETC" \
            "$t/pacman.installed" "$t/pacman.fail_sy" "$t/pacman.fail_sw" \
            "$t/pacman.fail_u" "$t/pacman.mark_on_u" "$t/waydroid.fail" \
-           "$t/waydroid.shell_out" "$t/waydroid.shell_rc" \
+           "$t/waydroid.shell_out" "$t/waydroid.compile_out" "$t/waydroid.shell_rc" \
            "$t/waydroid.shell_fail_match" "$t/timeout.expire" \
            "$t/mount.fail" "$t/ufw.skip" "$t/systemctl.active" \
            "$t/systemctl.fail" "$t/passwd" "$t/setfacl.fail" "$t/chown.fail"
@@ -667,7 +678,7 @@ run_as configure
 [ "$RC" = 0 ] || fail "(e) configure exits 0 (got $RC)"
 [ "$(cat "$t/waydroid.log")" = "upgrade --offline" ] \
     || fail "(e) waydroid upgrade --offline called once"
-[ "$(wc -l < "$t/out" | tr -d ' ')" = 4 ] \
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 7 ] \
     || fail "(e) prints one line per key changed (got $(wc -l < "$t/out" | tr -d ' '))"
 
 python3 - "$CFG" <<'PY' || fail "(e) configparser assertions failed"
@@ -685,6 +696,9 @@ assert cfg.get("waydroid", "vendor_type") == "MAINLINE"
 assert cfg.get("properties", "ro.opengles.version") == "196609"
 assert cfg.get("properties", "persist.waydroid.multi_windows") == "false"
 assert cfg.get("properties", "ro.lmk.use_minfree_levels") == "false"
+assert cfg.get("properties", "persist.waydroid.width") == "744"
+assert cfg.get("properties", "persist.waydroid.height") == "1000"
+assert cfg.get("properties", "ro.config.low_ram") == "true"
 assert cfg.get("properties", "ro.product.brand") == "Generic"
 assert "SomeMixedCaseKey" in cfg["properties"], list(cfg["properties"].keys())
 assert cfg.get("properties", "SomeMixedCaseKey") == "KeepMe%20Literal"
@@ -697,6 +711,65 @@ run_as configure
 [ "$RC" = 0 ] || fail "(e) second configure exits 0 (got $RC)"
 [ "$(cat "$t/out")" = "nothing to change" ] || fail "(e) second run says nothing to change"
 [ ! -s "$t/waydroid.log" ] || fail "(e) second run does not call waydroid upgrade"
+
+# T715_ANDROID_LOW_RAM=0 leaves ro.config.low_ram alone (absent or existing)
+write_cfg_fixture
+clear_logs
+RC=0
+env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_SYSFS="$S" \
+    T715_ANDROID_DEV="$D" \
+    T715_ANDROID_TMP="$TMP" \
+    T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
+    T715_ANDROID_ASSUME_ROOT=1 \
+    T715_ANDROID_LOW_RAM=0 \
+    PATH="$t/bin:$PATH" \
+    "$AS" configure > "$t/out" 2> "$t/err" || RC=$?
+[ "$RC" = 0 ] || fail "(e) configure with LOW_RAM=0 exits 0 (got $RC)"
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 6 ] \
+    || fail "(e) LOW_RAM=0 changes 6 keys (got $(wc -l < "$t/out" | tr -d ' '))"
+python3 - "$CFG" <<'PY' || fail "(e) LOW_RAM=0 should leave ro.config.low_ram absent"
+import configparser, sys
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+cfg.read(sys.argv[1], encoding="utf-8")
+assert not cfg.has_option("properties", "ro.config.low_ram")
+PY
+
+python3 - "$CFG" <<'PY'
+import configparser, sys
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+cfg.read(sys.argv[1], encoding="utf-8")
+cfg.set("properties", "ro.config.low_ram", "false")
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    cfg.write(fh)
+PY
+clear_logs
+RC=0
+env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_SYSFS="$S" \
+    T715_ANDROID_DEV="$D" \
+    T715_ANDROID_TMP="$TMP" \
+    T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
+    T715_ANDROID_ASSUME_ROOT=1 \
+    T715_ANDROID_LOW_RAM=0 \
+    PATH="$t/bin:$PATH" \
+    "$AS" configure > "$t/out" 2> "$t/err" || RC=$?
+[ "$RC" = 0 ] || fail "(e) configure with LOW_RAM=0 and existing false exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "nothing to change" ] || fail "(e) LOW_RAM=0 leaves existing value alone"
+python3 - "$CFG" <<'PY' || fail "(e) LOW_RAM=0 altered existing ro.config.low_ram"
+import configparser, sys
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+cfg.read(sys.argv[1], encoding="utf-8")
+assert cfg.get("properties", "ro.config.low_ram") == "false"
+PY
+
+# Restore low_ram=true before density test
+run_as configure
+[ "$RC" = 0 ] || fail "(e) configure restoring low_ram exits 0 (got $RC)"
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 1 ] || fail "(e) restoring low_ram changes 1 key"
 
 # Density set only with T715_ANDROID_DENSITY
 clear_logs
@@ -1241,6 +1314,136 @@ grep -qi 'timed out' "$t/err" || fail "(h4) trim timeout reports timeout on stde
 rm -f "$t/timeout.expire"
 echo "ok - trim: inactive container, none/subset/all installed, settings, --undo, override file, shell error, and timeout"
 
+# --- (h5) optimize --------------------------------------------------------------
+# Container inactive -> exit 1, message names waydroid-container.service, no shell call
+reset_env
+run_as optimize
+[ "$RC" = 1 ] || fail "(h5) optimize with inactive container exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h5) optimize with inactive container writes nothing to stdout"
+grep -qi 'waydroid-container.service' "$t/err" \
+    || fail "(h5) optimize inactive container error names waydroid-container.service"
+[ ! -s "$t/timeout.log" ] && [ ! -s "$t/waydroid.log" ] \
+    || fail "(h5) optimize with inactive container does not call timeout or waydroid"
+
+# Without arguments: realistic dumpsys package dexopt excerpt
+reset_env
+: > "$t/systemctl.active"
+cat > "$t/waydroid.shell_out" <<'DEXOPT'
+Dexopt state:
+  [com.android.settings]
+    path: /system/priv-app/Settings/Settings.apk
+      arm: [status=verify] [reason=prebuilt]
+  [com.android.documentsui]
+    path: /system/priv-app/DocumentsUI/DocumentsUI.apk
+      arm: [status=speed] [reason=cmdline]
+  [org.lineageos.jelly]
+    path: /system/product/app/Jelly/Jelly.apk
+      arm: [status=speed-profile] [reason=bg-dexopt]
+  [com.example.full]
+    path: /data/app/~~aaa==/com.example.full-bbb==/base.apk
+      arm: [status=everything] [reason=cmdline]
+  [com.example.split]
+    path: /data/app/~~ccc==/com.example.split-ddd==/base.apk
+      arm: [status=speed-profile] [reason=install]
+    path: /data/app/~~ccc==/com.example.split-ddd==/split_config.arm.apk
+      arm: [status=verify] [reason=install]
+  [com.example.quicken]
+    path: /data/app/~~eee==/com.example.quicken-fff==/base.apk
+      arm: [status=quicken] [reason=first-boot]
+  [com.example.overlay]
+    path: /vendor/overlay/ThemeOverlay.apk
+Compiler stats:
+  [com.android.documentsui]
+     DocumentsUI.apk - 120
+  [com.example.statsonly]
+     StatsOnly.apk - 50
+DEXOPT
+run_as optimize
+[ "$RC" = 0 ] || fail "(h5) optimize auto exits 0 (got $RC)"
+[ ! -s "$t/err" ] || fail "(h5) optimize auto writes nothing to stderr"
+want_opt_wd='shell -- dumpsys package dexopt
+shell -- cmd package compile -m speed -f com.android.settings
+shell -- cmd package compile -m speed -f com.example.split
+shell -- cmd package compile -m speed -f com.example.quicken'
+[ "$(cat "$t/waydroid.log")" = "$want_opt_wd" ] \
+    || fail "(h5) optimize auto waydroid calls mismatch (got: $(cat "$t/waydroid.log"))"
+grep -qx '30 waydroid shell -- dumpsys package dexopt' "$t/timeout.log" \
+    || fail "(h5) dumpsys wrapped in timeout 30"
+grep -qx '900 waydroid shell -- cmd package compile -m speed -f com.android.settings' "$t/timeout.log" \
+    || fail "(h5) compile settings wrapped in timeout 900"
+grep -qx '900 waydroid shell -- cmd package compile -m speed -f com.example.split' "$t/timeout.log" \
+    || fail "(h5) compile split wrapped in timeout 900"
+grep -qx '900 waydroid shell -- cmd package compile -m speed -f com.example.quicken' "$t/timeout.log" \
+    || fail "(h5) compile quicken wrapped in timeout 900"
+[ "$(sed -n '1p' "$t/out")" = "optimize: compiling 3 packages" ] \
+    || fail "(h5) prints count before starting (got: $(sed -n '1p' "$t/out"))"
+grep -Eq '^optimize: com\.android\.settings Success \([0-9]+ s\)$' "$t/out" \
+    || fail "(h5) prints Success line for settings (got: $(cat "$t/out"))"
+grep -Eq '^optimize: com\.example\.split Success \([0-9]+ s\)$' "$t/out" \
+    || fail "(h5) prints Success line for split"
+grep -Eq '^optimize: com\.example\.quicken Success \([0-9]+ s\)$' "$t/out" \
+    || fail "(h5) prints Success line for quicken"
+
+# All packages already compiled -> 0 packages, exit 0, no compile call
+cat > "$t/waydroid.shell_out" <<'DEXOPT'
+Dexopt state:
+  [com.android.settings]
+    path: /system/priv-app/Settings/Settings.apk
+      arm: [status=speed] [reason=cmdline]
+  [org.lineageos.jelly]
+    path: /system/product/app/Jelly/Jelly.apk
+      arm: [status=speed-profile] [reason=bg-dexopt]
+DEXOPT
+run_as optimize
+[ "$RC" = 0 ] || fail "(h5) optimize when all compiled exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "optimize: 0 packages to compile" ] \
+    || fail "(h5) prints 0 packages to compile (got: $(cat "$t/out"))"
+[ "$(cat "$t/waydroid.log")" = "shell -- dumpsys package dexopt" ] \
+    || fail "(h5) no compile call when all compiled"
+
+# Explicit package arguments -> does not call dumpsys, compiles only given packages
+run_as optimize com.android.deskclock com.android.documentsui
+[ "$RC" = 0 ] || fail "(h5) optimize explicit pkgs exits 0 (got $RC)"
+[ ! -s "$t/err" ] || fail "(h5) optimize explicit pkgs writes nothing to stderr"
+want_opt_exp='shell -- cmd package compile -m speed -f com.android.deskclock
+shell -- cmd package compile -m speed -f com.android.documentsui'
+[ "$(cat "$t/waydroid.log")" = "$want_opt_exp" ] \
+    || fail "(h5) optimize explicit pkgs calls mismatch (got: $(cat "$t/waydroid.log"))"
+[ "$(sed -n '1p' "$t/out")" = "optimize: compiling 2 packages" ] \
+    || fail "(h5) explicit pkgs prints count before starting"
+
+# Partial failure: one package fails, remaining package still compiled, exit 1
+printf 'com.example.bad' > "$t/waydroid.shell_fail_match"
+run_as optimize com.example.bad com.example.good
+[ "$RC" = 1 ] || fail "(h5) optimize partial failure exits 1 (got $RC)"
+grep -q 'com.example.bad' "$t/err" || fail "(h5) failure reported on stderr"
+grep -Eq '^optimize: com\.example\.good Success \([0-9]+ s\)$' "$t/out" \
+    || fail "(h5) remaining package still compiled after earlier failure"
+rm -f "$t/waydroid.shell_fail_match"
+
+# Android `Failure` output with exit 0 -> treated as failure, exit 1
+printf 'Failure\n' > "$t/waydroid.compile_out"
+run_as optimize com.example.missing
+[ "$RC" = 1 ] || fail "(h5) optimize Failure output exits 1 (got $RC)"
+grep -q 'com.example.missing' "$t/err" || fail "(h5) Failure output reported on stderr"
+rm -f "$t/waydroid.compile_out"
+
+# Compile timeout (exit 124) -> exit 1, reports timed out
+: > "$t/timeout.expire"
+run_as optimize com.example.slow
+[ "$RC" = 1 ] || fail "(h5) optimize compile timeout exits 1 (got $RC)"
+grep -qi 'timed out' "$t/err" || fail "(h5) compile timeout reported on stderr"
+rm -f "$t/timeout.expire"
+
+# dumpsys failure -> exit 1, no compile calls
+printf '1\n' > "$t/waydroid.shell_rc"
+run_as optimize
+[ "$RC" = 1 ] || fail "(h5) optimize dumpsys failure exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(h5) optimize dumpsys failure writes stderr"
+! grep -q 'cmd package compile' "$t/waydroid.log" || fail "(h5) no compile on dumpsys failure"
+rm -f "$t/waydroid.shell_rc"
+echo "ok - optimize: inactive container, dexopt parsing (multi-status/good/overlay/stats), explicit pkgs, partial failure, timeout"
+
 # --- (i) status -----------------------------------------------------------------
 reset_env
 run_as status
@@ -1313,7 +1516,7 @@ echo "ok - status: exact seven key=value lines in order, all four mesa states, n
 # --- (j) non-root refusal -------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
     reset_env
-    for sub in packages init mesa-fix configure firewall enable share google-id trim all; do
+    for sub in packages init mesa-fix configure firewall enable share google-id trim optimize all; do
         clear_logs
         RC=0
         env T715_ANDROID_CFG="$CFG" \
@@ -1364,6 +1567,7 @@ grep -q 't715-android-setup mesa-fix' "$t/out" || fail "(k) --help usage lists m
 grep -q 't715-android-setup share' "$t/out" || fail "(k) --help usage lists share"
 grep -q 't715-android-setup google-id' "$t/out" || fail "(k) --help usage lists google-id"
 grep -q 't715-android-setup trim' "$t/out" || fail "(k) --help usage lists trim"
+grep -q 't715-android-setup optimize' "$t/out" || fail "(k) --help usage lists optimize"
 [ ! -s "$t/err" ] || fail "(k) --help writes nothing to stderr"
 
 run_as
@@ -1407,6 +1611,9 @@ run_as trim --bogus
 
 run_as trim --undo extra
 [ "$RC" = 2 ] || fail "(k) trim --undo extra exits 2 (got $RC)"
+
+run_as optimize --bogus
+[ "$RC" = 2 ] || fail "(k) optimize --bogus exits 2 (got $RC)"
 echo "ok - usage and exit codes: --help on stdout (0), bad usage on stderr (2)"
 
 echo "PASS"

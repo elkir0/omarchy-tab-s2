@@ -67,8 +67,9 @@
 # for the off marker and notification id, T715_ANDROID_ETC
 # (/etc/t715-android) for `apps-show` and `apps-hide` override files,
 # XDG_DATA_HOME (${HOME}/.local/share) for `applications/`,
-# T715_ANDROID_WAIT (30) for the start wait window, and every external
-# command through PATH.
+# T715_ANDROID_WAIT (30) for the start wait window,
+# T715_ANDROID_WAYDROID_WRAPPER (/usr/local/bin/waydroid) for the fast-path
+# launcher wrapper used by `settings`, and every external command through PATH.
 set -u
 
 CFG=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
@@ -80,6 +81,7 @@ APPS_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/applications
 OFF_MARKER=$STATE_DIR/off
 WAIT=${T715_ANDROID_WAIT:-30}
 case $WAIT in '' | *[!0-9]*) WAIT=30 ;; esac
+WAYDROID_WRAPPER=${T715_ANDROID_WAYDROID_WRAPPER:-/usr/local/bin/waydroid}
 UNIT=t715-android.service
 GLYPH_ANDROID=󰀲
 
@@ -592,10 +594,16 @@ do_toggle() {
     fi
 }
 
-# do_settings: `settings` -- start when stopped, then open Android Settings.
+# do_settings: `settings` -- start when stopped, then open Android Settings
+# through the fast-path launcher wrapper when available.
 do_settings() {
     do_start || return 1
-    waydroid app launch com.android.settings
+    _ds_wd=$(command -v waydroid 2>/dev/null || true)
+    if [ "$_ds_wd" = "/usr/bin/waydroid" ] && [ -x "$WAYDROID_WRAPPER" ]; then
+        "$WAYDROID_WRAPPER" app launch com.android.settings
+    else
+        waydroid app launch com.android.settings
+    fi
 }
 
 if [ $# -lt 1 ]; then

@@ -1,0 +1,24 @@
+# t715-android-launchd.service — preloaded Python launcher daemon for
+# Waydroid (omarchy-tab-s2; paired with /usr/local/bin/waydroid). Keeps
+# Waydroid's Python modules imported in memory and forks per launch
+# request from $XDG_RUNTIME_DIR/t715-android/launch.fifo, avoiding the
+# 1.1-2.3 s Python start-up cost on every app tap.
+# Started with the graphical session for every user (systemctl --global
+# enable), guarded by conditions so it does nothing on a system without
+# Waydroid or binder.
+# Its log: journalctl --user -u t715-android-launchd
+[Unit]
+Description=SM-T715 Android (Waydroid) preloaded launcher daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
+ConditionPathExists=/dev/binder
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/t715-android/launchd.py
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=graphical-session.target

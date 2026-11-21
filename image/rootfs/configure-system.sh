@@ -130,7 +130,10 @@ systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.s
 # Android (Waydroid) session: does nothing on a system without Waydroid because of its ConditionPathExists= checks.
 [ -x /usr/local/bin/t715-android ] || die "no /usr/local/bin/t715-android"
 [ -x /usr/local/sbin/t715-android-setup ] || die "no /usr/local/sbin/t715-android-setup"
+[ -x /usr/local/bin/waydroid ] || die "no /usr/local/bin/waydroid"
+[ -f /usr/local/lib/t715-android/launchd.py ] || die "no /usr/local/lib/t715-android/launchd.py"
 systemctl --global enable t715-android.service
+systemctl --global enable t715-android-launchd.service
 # Keep waydroid-container.service disabled until the user runs `sudo t715-android-setup all`.
 systemctl disable waydroid-container.service || true
 
