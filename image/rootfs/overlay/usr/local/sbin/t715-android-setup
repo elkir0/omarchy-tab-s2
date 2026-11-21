@@ -65,6 +65,27 @@
 # our previously patched overlay file if present so it cannot shadow a newer
 # Mesa library.
 #
+# Google Services Framework Android ID (`google-id`):
+# With the Google-apps image (`init --gapps`), Google refuses sign-in until
+# the owner registers the container's GSF Android ID at
+# `https://www.google.com/android/uncertified`.  `google-id` checks that
+# `waydroid-container.service` is active, queries `gservices.db` inside the
+# container via `timeout 30 waydroid shell`, prints the numeric ID alone on
+# stdout (with registration instructions on stderr), and never stores or
+# logs it.
+#
+# Trimming the Google-apps image (`trim`):
+# The Google-apps image (`init --gapps`) is heavy for 2.7 GB of RAM.  `trim`
+# checks that `waydroid-container.service` is active, disables five heavy or
+# unused Google packages for user 0 (overridable via `/etc/t715-android/trim`,
+# one package per line with `#` comments), and caps cached background
+# processes (`settings put global activity_manager_constants
+# max_cached_processes=6`).  On the reference tablet this raised available
+# memory from 576 to 873 MB, lowered zram swap in use from 932 to 671 MB, and
+# brought memory pressure back to 0.  `trim --undo` re-enables the installed
+# packages and deletes `activity_manager_constants`.  `all` does NOT call
+# `trim` because Android must have booted once first.
+#
 # Usage:
 #   t715-android-setup packages        install waydroid safely if absent
 #   t715-android-setup init [--gapps]  initialise Waydroid images (requires
@@ -81,9 +102,14 @@
 #   t715-android-setup share [USER]    grant USER (default: alarm) read/write
 #                                      ACL access to Android shared storage
 #                                      and link ~/Android (after first boot)
+#   t715-android-setup google-id       print the Google Services Framework
+#                                      Android ID (GAPPS image, after boot)
+#   t715-android-setup trim [--undo]   disable heavy/unused GAPPS packages and
+#                                      cap cached processes (after boot; --undo
+#                                      reverses)
 #   t715-android-setup all [--gapps]   run packages, init, mesa-fix,
 #                                      configure, firewall, enable in order
-#                                      (does not run share)
+#                                      (does not run share, google-id or trim)
 #   t715-android-setup status          print key=value status lines
 #   t715-android-setup --help          print usage on stdout and exit 0
 #
@@ -102,6 +128,7 @@
 #   T715_ANDROID_SYSFS           /sys
 #   T715_ANDROID_DEV             /dev
 #   T715_ANDROID_TMP             /var/tmp (parent for temporary dirs)
+#   T715_ANDROID_ETC             /etc/t715-android (override dir for trim)
 #   T715_ANDROID_ASSUME_ROOT     set to 1 to skip the root check
 #   T715_ANDROID_PACMAN_LOCAL    /var/lib/pacman/local
 #   T715_ANDROID_DENSITY         optional; when non-empty, sets ro.sf.lcd_density
@@ -121,11 +148,23 @@ DEV_DIR=${T715_ANDROID_DEV:-/dev}
 DEV_DIR=${DEV_DIR%/}
 TMP_DIR=${T715_ANDROID_TMP:-/var/tmp}
 TMP_DIR=${TMP_DIR%/}
+ETC_DIR=${T715_ANDROID_ETC:-/etc/t715-android}
+ETC_DIR=${ETC_DIR%/}
 ASSUME_ROOT=${T715_ANDROID_ASSUME_ROOT:-0}
 PACMAN_LOCAL=${T715_ANDROID_PACMAN_LOCAL:-/var/lib/pacman/local}
 PACMAN_LOCAL=${PACMAN_LOCAL%/}
 DENSITY=${T715_ANDROID_DENSITY:-}
 DEFAULT_USER=${T715_ANDROID_USER:-alarm}
+
+# Heavy or unused Google-apps packages disabled by `trim` for user 0.
+# Overridable by $ETC_DIR/trim (one package per line, '#' comments).
+TRIM_PKGS_DEFAULT=(
+    com.google.android.googlequicksearchbox # Google app (~170 MB)
+    com.google.android.apps.messaging       # Messages
+    com.google.android.ims                  # Carrier Services (IMS)
+    com.google.android.dialer               # Phone
+    com.google.android.as                   # Android System Intelligence
+)
 
 # Known Mesa 26.0.8 libgallium_dri.so build in Waydroid's 32-bit ARM vendor
 # image that crashes surfaceflinger (use-after-free in _mesa_hash_table_u64).
@@ -181,6 +220,8 @@ usage() {
     printf '       t715-android-setup firewall\n'
     printf '       t715-android-setup enable\n'
     printf '       t715-android-setup share [USER]\n'
+    printf '       t715-android-setup google-id\n'
+    printf '       t715-android-setup trim [--undo]\n'
     printf '       t715-android-setup all [--gapps]\n'
     printf '       t715-android-setup status\n'
     printf '       t715-android-setup --help\n'
@@ -487,6 +528,12 @@ desired = [
     ("waydroid", "drm_device", drm_device),
     ("properties", "ro.opengles.version", "196609"),
     ("properties", "persist.waydroid.multi_windows", "false"),
+    # Android's low memory killer in its pressure (PSI) mode. In the "minfree
+    # levels" mode Waydroid selects, lmkd subtracts both the shmem and the
+    # unevictable pages from the file cache; the GPU's and Wayland's buffers
+    # are both at once (950 MB seen), so it read the cache as empty and
+    # killed the home app in a loop: Android never finished booting.
+    ("properties", "ro.lmk.use_minfree_levels", "false"),
 ]
 if density:
     desired.append(("properties", "ro.sf.lcd_density", density))
@@ -698,6 +745,165 @@ cmd_share() {
     return 0
 }
 
+cmd_google_id() {
+    local out="" rc=0 id=""
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'google-id: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    out=$(timeout 30 waydroid shell -- sh -c \
+        'ANDROID_RUNTIME_ROOT=/apex/com.android.runtime ANDROID_DATA=/data ANDROID_TZDATA_ROOT=/apex/com.android.tzdata ANDROID_I18N_ROOT=/apex/com.android.i18n sqlite3 /data/data/com.google.android.gsf/databases/gservices.db "select value from main where name = \"android_id\";"' \
+        2>/dev/null) || rc=$?
+
+    if [ "$rc" -eq 124 ]; then
+        printf 'google-id: timed out after 30 s querying waydroid shell\n' >&2
+        return 1
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        printf 'google-id: Google services have not created the Android ID yet (start the session, wait a few minutes, and retry)\n' >&2
+        return 1
+    fi
+
+    id=${out%$'\r'}
+    case "$id" in
+        ""|*[!0-9]*)
+            printf 'google-id: Google services have not created the Android ID yet (start the session, wait a few minutes, and retry)\n' >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$id"
+    printf 'Register this ID at: https://www.google.com/android/uncertified\n' >&2
+    printf 'Then restart Android: t715-android stop, then t715-android start\n' >&2
+    return 0
+}
+
+parse_trim_file() {
+    awk '{
+        sub(/\r$/, "")
+        sub(/#.*/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        if ($0 != "") print $0
+    }' "$1"
+}
+
+cmd_trim() {
+    local mode=${1:-}
+    local target_pkgs=() target_count=0
+    local matched_pkgs=() matched_count=0
+    local pm_out="" out="" rc=0 nl line pkg installed_list seen_list
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'trim: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    if [ -f "$ETC_DIR/trim" ]; then
+        while IFS= read -r pkg; do
+            pkg=${pkg%$'\r'}
+            [ -n "$pkg" ] || continue
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done < <(parse_trim_file "$ETC_DIR/trim")
+    else
+        for pkg in "${TRIM_PKGS_DEFAULT[@]}"; do
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done
+    fi
+
+    pm_out=$(timeout 30 waydroid shell -- pm list packages 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        printf 'trim: timed out after 30 s querying waydroid shell\n' >&2
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf 'trim: waydroid shell pm list packages failed (exit %d)\n' "$rc" >&2
+        return 1
+    fi
+
+    nl=$'\n'
+    installed_list=$nl
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        case "$line" in
+            package:*)
+                pkg=${line#package:}
+                pkg=${pkg%%[[:space:]]*}
+                [ -n "$pkg" ] && installed_list="${installed_list}${pkg}${nl}"
+                ;;
+        esac
+    done <<< "$pm_out"
+
+    seen_list=$nl
+    if [ "$target_count" -gt 0 ]; then
+        for pkg in "${target_pkgs[@]}"; do
+            case "$seen_list" in
+                *"${nl}${pkg}${nl}"*) continue ;;
+            esac
+            seen_list="${seen_list}${pkg}${nl}"
+            case "$installed_list" in
+                *"${nl}${pkg}${nl}"*)
+                    matched_pkgs+=("$pkg")
+                    matched_count=$((matched_count + 1))
+                    ;;
+            esac
+        done
+    fi
+
+    if [ "$matched_count" -eq 0 ]; then
+        printf 'trim: nothing to trim\n'
+        return 0
+    fi
+
+    for pkg in "${matched_pkgs[@]}"; do
+        rc=0
+        if [ "$mode" = "--undo" ]; then
+            out=$(timeout 30 waydroid shell -- pm enable "$pkg" 2>&1) || rc=$?
+            if [ "$rc" -eq 124 ]; then
+                printf 'trim: timed out after 30 s enabling %s\n' "$pkg" >&2
+                return 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+                printf 'trim: failed to enable %s (exit %d)%s\n' "$pkg" "$rc" "${out:+: $out}" >&2
+                return 1
+            fi
+            printf 'trim: enabled %s\n' "$pkg"
+        else
+            out=$(timeout 30 waydroid shell -- pm disable-user --user 0 "$pkg" 2>&1) || rc=$?
+            if [ "$rc" -eq 124 ]; then
+                printf 'trim: timed out after 30 s disabling %s\n' "$pkg" >&2
+                return 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+                printf 'trim: failed to disable %s (exit %d)%s\n' "$pkg" "$rc" "${out:+: $out}" >&2
+                return 1
+            fi
+            printf 'trim: disabled %s\n' "$pkg"
+        fi
+    done
+
+    rc=0
+    if [ "$mode" = "--undo" ]; then
+        out=$(timeout 30 waydroid shell -- settings delete global activity_manager_constants 2>&1) || rc=$?
+    else
+        out=$(timeout 30 waydroid shell -- settings put global activity_manager_constants max_cached_processes=6 2>&1) || rc=$?
+    fi
+    if [ "$rc" -eq 124 ]; then
+        printf 'trim: timed out after 30 s updating activity_manager_constants\n' >&2
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf 'trim: failed to update activity_manager_constants (exit %d)%s\n' "$rc" "${out:+: $out}" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 cmd_all() {
     local gapps=${1:-}
     cmd_packages || return $?
@@ -863,6 +1069,28 @@ case ${1:-} in
         fi
         require_root || exit 1
         cmd_share "${2:-$DEFAULT_USER}"
+        exit $?
+        ;;
+    google-id)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_google_id
+        exit $?
+        ;;
+    trim)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--undo" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_trim "${2:-}"
         exit $?
         ;;
     all)

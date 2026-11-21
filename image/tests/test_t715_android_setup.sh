@@ -45,6 +45,7 @@ fail() {
     echo "--- setfacl" >&2; cat "$t/setfacl.log" 2>/dev/null || true
     echo "--- chown" >&2; cat "$t/chown.log" 2>/dev/null || true
     echo "--- ln" >&2; cat "$t/ln.log" 2>/dev/null || true
+    echo "--- timeout" >&2; cat "$t/timeout.log" 2>/dev/null || true
     echo "--- order" >&2; cat "$t/order.log" 2>/dev/null || true
     exit 1
 }
@@ -127,6 +128,25 @@ cat > "$t/bin/waydroid" <<'STUB'
 printf '%s\n' "$*" >> "$T715_TEST_WAYDROID_LOG"
 printf 'waydroid %s\n' "$*" >> "$T715_TEST_ORDER_LOG"
 [ -f "$T715_TEST_WAYDROID_FAIL" ] && exit 1
+if [ "${1:-}" = "shell" ]; then
+    if [ -f "$T715_TEST_WAYDROID_SHELL_FAIL_MATCH" ]; then
+        pat=$(cat "$T715_TEST_WAYDROID_SHELL_FAIL_MATCH")
+        case "$*" in
+            *"$pat"*)
+                printf 'simulated shell error on %s\n' "$pat" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    if [ -f "$T715_TEST_WAYDROID_SHELL_RC" ]; then
+        rc=$(cat "$T715_TEST_WAYDROID_SHELL_RC")
+        exit "${rc:-1}"
+    fi
+    if [ -f "$T715_TEST_WAYDROID_SHELL_OUT" ]; then
+        cat "$T715_TEST_WAYDROID_SHELL_OUT"
+    fi
+    exit 0
+fi
 if [ "${1:-}" = "init" ] && [ -n "${T715_TEST_WAYDROID_CREATE_CFG:-}" ]; then
     mkdir -p "$(dirname "$T715_TEST_WAYDROID_CREATE_CFG")"
     cat > "$T715_TEST_WAYDROID_CREATE_CFG" <<'CFG'
@@ -143,6 +163,16 @@ if [ "${1:-}" = "init" ] && [ -n "${T715_TEST_WAYDROID_CREATE_VENDOR:-}" ] && [ 
     cp "$T715_TEST_WAYDROID_VENDOR_SRC" "$T715_TEST_WAYDROID_CREATE_VENDOR/lib/libgallium_dri.so"
 fi
 exit 0
+STUB
+
+cat > "$t/bin/timeout" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$T715_TEST_TIMEOUT_LOG"
+if [ -f "$T715_TEST_TIMEOUT_EXPIRE" ]; then
+    exit 124
+fi
+shift
+exec "$@"
 STUB
 
 cat > "$t/bin/mount" <<'STUB'
@@ -254,7 +284,7 @@ printf '%s\n' "$*" >> "$T715_TEST_LN_LOG"
 exec "$T715_TEST_REAL_LN" "$@"
 STUB
 
-chmod +x "$t/bin/pacman" "$t/bin/waydroid" "$t/bin/mount" "$t/bin/umount" \
+chmod +x "$t/bin/pacman" "$t/bin/waydroid" "$t/bin/timeout" "$t/bin/mount" "$t/bin/umount" \
          "$t/bin/ufw" "$t/bin/systemctl" "$t/bin/getent" "$t/bin/setfacl" \
          "$t/bin/chown" "$t/bin/ln"
 
@@ -266,6 +296,11 @@ export T715_TEST_PACMAN_FAIL_U="$t/pacman.fail_u"
 export T715_TEST_PACMAN_MARK_ON_U="$t/pacman.mark_on_u"
 export T715_TEST_WAYDROID_LOG="$t/waydroid.log"
 export T715_TEST_WAYDROID_FAIL="$t/waydroid.fail"
+export T715_TEST_WAYDROID_SHELL_OUT="$t/waydroid.shell_out"
+export T715_TEST_WAYDROID_SHELL_RC="$t/waydroid.shell_rc"
+export T715_TEST_WAYDROID_SHELL_FAIL_MATCH="$t/waydroid.shell_fail_match"
+export T715_TEST_TIMEOUT_LOG="$t/timeout.log"
+export T715_TEST_TIMEOUT_EXPIRE="$t/timeout.expire"
 export T715_TEST_MOUNT_LOG="$t/mount.log"
 export T715_TEST_MOUNT_FAIL="$t/mount.fail"
 export T715_TEST_UMOUNT_LOG="$t/umount.log"
@@ -317,14 +352,17 @@ VENDOR_IMG="$t/waydroid/images/vendor.img"
 OVERLAY="$t/waydroid/overlay"
 PLOCAL="$t/pacman-local"
 HOMES="$t/homes"
+ETC="$t/etc"
 
 reset_env() {
-    rm -rf "$S" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES" \
+    rm -rf "$S" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES" "$ETC" \
            "$t/pacman.installed" "$t/pacman.fail_sy" "$t/pacman.fail_sw" \
            "$t/pacman.fail_u" "$t/pacman.mark_on_u" "$t/waydroid.fail" \
+           "$t/waydroid.shell_out" "$t/waydroid.shell_rc" \
+           "$t/waydroid.shell_fail_match" "$t/timeout.expire" \
            "$t/mount.fail" "$t/ufw.skip" "$t/systemctl.active" \
            "$t/systemctl.fail" "$t/passwd" "$t/setfacl.fail" "$t/chown.fail"
-    mkdir -p "$S/class/drm" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES/alarm" "$HOMES/alice"
+    mkdir -p "$S/class/drm" "$D" "$TMP" "$t/waydroid" "$PLOCAL" "$HOMES/alarm" "$HOMES/alice" "$ETC"
     printf 'ok\n' > "$PLOCAL/sentinel"
     printf 'Status: inactive\n' > "$t/ufw.status"
     cat > "$t/passwd" <<EOF
@@ -337,6 +375,7 @@ EOF
 clear_logs() {
     : > "$t/pacman.log"
     : > "$t/waydroid.log"
+    : > "$t/timeout.log"
     : > "$t/mount.log"
     : > "$t/umount.log"
     : > "$t/order.log"
@@ -395,6 +434,7 @@ run_as() {
         T715_ANDROID_SYSFS="$S" \
         T715_ANDROID_DEV="$D" \
         T715_ANDROID_TMP="$TMP" \
+        T715_ANDROID_ETC="$ETC" \
         T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
         T715_ANDROID_ASSUME_ROOT=1 \
         PATH="$t/bin:$PATH" \
@@ -627,7 +667,7 @@ run_as configure
 [ "$RC" = 0 ] || fail "(e) configure exits 0 (got $RC)"
 [ "$(cat "$t/waydroid.log")" = "upgrade --offline" ] \
     || fail "(e) waydroid upgrade --offline called once"
-[ "$(wc -l < "$t/out" | tr -d ' ')" = 3 ] \
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 4 ] \
     || fail "(e) prints one line per key changed (got $(wc -l < "$t/out" | tr -d ' '))"
 
 python3 - "$CFG" <<'PY' || fail "(e) configparser assertions failed"
@@ -644,6 +684,7 @@ assert cfg.get("waydroid", "system_ota") == "https://ota.waydro.id/system/lineag
 assert cfg.get("waydroid", "vendor_type") == "MAINLINE"
 assert cfg.get("properties", "ro.opengles.version") == "196609"
 assert cfg.get("properties", "persist.waydroid.multi_windows") == "false"
+assert cfg.get("properties", "ro.lmk.use_minfree_levels") == "false"
 assert cfg.get("properties", "ro.product.brand") == "Generic"
 assert "SomeMixedCaseKey" in cfg["properties"], list(cfg["properties"].keys())
 assert cfg.get("properties", "SomeMixedCaseKey") == "KeepMe%20Literal"
@@ -963,6 +1004,243 @@ env T715_ANDROID_CFG="$CFG" \
 grep -qi 'setfacl' "$t/err" || fail "(h2) missing setfacl error mentions setfacl"
 echo "ok - share: unknown user, missing media/0, 4-of-6 dirs exact setfacl + link, idempotent, conflict warning, setfacl failure/missing"
 
+# --- (h3) google-id -------------------------------------------------------------
+# Container inactive -> exit 1, message on stderr, neither timeout nor waydroid called
+reset_env
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id with inactive container exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id with inactive container writes nothing to stdout"
+grep -qi 'waydroid-container.service' "$t/err" \
+    || fail "(h3) google-id inactive container error names waydroid-container.service"
+[ ! -s "$t/timeout.log" ] && [ ! -s "$t/waydroid.log" ] \
+    || fail "(h3) google-id with inactive container does not call timeout or waydroid"
+
+# Numeric answer (synthetic dummy ID) -> exit 0, ID alone on stdout, 2 lines on stderr
+reset_env
+: > "$t/systemctl.active"
+printf '1234567890123456789\n' > "$t/waydroid.shell_out"
+run_as google-id
+[ "$RC" = 0 ] || fail "(h3) google-id numeric answer exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "1234567890123456789" ] \
+    || fail "(h3) google-id prints ID alone on stdout (got: $(cat "$t/out"))"
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 1 ] || fail "(h3) google-id stdout is exactly 1 line"
+[ "$(wc -l < "$t/err" | tr -d ' ')" = 2 ] \
+    || fail "(h3) google-id stderr is exactly 2 lines (got $(wc -l < "$t/err" | tr -d ' '))"
+grep -Fq 'https://www.google.com/android/uncertified' "$t/err" \
+    || fail "(h3) google-id stderr includes uncertified registration URL"
+grep -Fq 't715-android stop' "$t/err" && grep -Fq 'start' "$t/err" \
+    || fail "(h3) google-id stderr tells user to stop then start Android"
+! grep -Fq '1234567890123456789' "$t/err" \
+    || fail "(h3) google-id does not repeat the ID on stderr"
+grep -Fq '30 waydroid shell -- sh -c ' "$t/timeout.log" \
+    || fail "(h3) google-id runs waydroid shell bounded with timeout 30"
+grep -Fq 'gservices.db' "$t/waydroid.log" && grep -Fq 'android_id' "$t/waydroid.log" \
+    || fail "(h3) google-id queries gservices.db for android_id"
+[ "$(tmp_leftovers)" = 0 ] || fail "(h3) google-id stores no temporary files"
+
+# Numeric answer with trailing CR -> still accepted cleanly
+printf '9876543210987654321\r\n' > "$t/waydroid.shell_out"
+run_as google-id
+[ "$RC" = 0 ] || fail "(h3) google-id numeric answer with CR exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "9876543210987654321" ] \
+    || fail "(h3) google-id strips trailing CR cleanly"
+
+# Empty answer -> exit 1, nothing on stdout, message says not created yet
+: > "$t/waydroid.shell_out"
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id empty answer exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id empty answer writes nothing to stdout"
+grep -qi 'not created' "$t/err" || fail "(h3) google-id empty answer explains ID not created yet"
+
+# Garbage (non-numeric) answer -> exit 1, nothing on stdout
+printf 'not-a-valid-id\n' > "$t/waydroid.shell_out"
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id garbage answer exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id garbage answer writes nothing to stdout"
+grep -qi 'not created' "$t/err" || fail "(h3) google-id garbage answer explains ID not created yet"
+
+# Multi-line numeric garbage -> exit 1
+printf '12345\n67890\n' > "$t/waydroid.shell_out"
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id multi-line output exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id multi-line output writes nothing to stdout"
+
+# waydroid shell non-zero exit (e.g., gservices.db missing) -> exit 1
+printf '1\n' > "$t/waydroid.shell_rc"
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id shell failure exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id shell failure writes nothing to stdout"
+grep -qi 'not created' "$t/err" || fail "(h3) google-id shell failure explains ID not created yet"
+rm -f "$t/waydroid.shell_rc"
+
+# Timeout (exit 124) -> exit 1, nothing on stdout, message mentions timed out
+: > "$t/timeout.expire"
+run_as google-id
+[ "$RC" = 1 ] || fail "(h3) google-id timeout exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h3) google-id timeout writes nothing to stdout"
+grep -qi 'timed out' "$t/err" || fail "(h3) google-id timeout reports timeout on stderr"
+rm -f "$t/timeout.expire"
+echo "ok - google-id: inactive container, numeric (+CR), empty, garbage, shell error, and timeout"
+
+# --- (h4) trim ------------------------------------------------------------------
+# Container inactive -> exit 1, message names waydroid-container.service, no shell call
+reset_env
+run_as trim
+[ "$RC" = 1 ] || fail "(h4) trim with inactive container exits 1 (got $RC)"
+[ ! -s "$t/out" ] || fail "(h4) trim with inactive container writes nothing to stdout"
+grep -qi 'waydroid-container.service' "$t/err" \
+    || fail "(h4) trim inactive container error names waydroid-container.service"
+[ ! -s "$t/timeout.log" ] && [ ! -s "$t/waydroid.log" ] \
+    || fail "(h4) trim with inactive container does not call timeout or waydroid"
+
+# None of the trim packages installed (e.g. VANILLA image) -> nothing to trim, exit 0
+reset_env
+: > "$t/systemctl.active"
+cat > "$t/waydroid.shell_out" <<'PKGS'
+package:com.android.settings
+package:org.lineageos.jelly
+package:com.android.documentsui
+PKGS
+run_as trim
+[ "$RC" = 0 ] || fail "(h4) trim when none installed exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "trim: nothing to trim" ] \
+    || fail "(h4) trim prints 'trim: nothing to trim' (got: $(cat "$t/out"))"
+[ ! -s "$t/err" ] || fail "(h4) trim nothing to trim writes nothing to stderr"
+[ "$(cat "$t/waydroid.log")" = "shell -- pm list packages" ] \
+    || fail "(h4) trim queries pm list packages once and stops when none match (got: $(cat "$t/waydroid.log"))"
+
+# Subset installed (3 of 5, with CRLF) -> skips absent silently, disables 3, sets activity_manager_constants
+reset_env
+: > "$t/systemctl.active"
+printf 'package:com.android.settings\r\npackage:com.google.android.googlequicksearchbox\r\npackage:com.google.android.dialer\r\npackage:com.google.android.as\r\n' \
+    > "$t/waydroid.shell_out"
+run_as trim
+[ "$RC" = 0 ] || fail "(h4) trim subset exits 0 (got $RC)"
+[ ! -s "$t/err" ] || fail "(h4) trim subset writes nothing to stderr"
+want_trim_out='trim: disabled com.google.android.googlequicksearchbox
+trim: disabled com.google.android.dialer
+trim: disabled com.google.android.as'
+[ "$(cat "$t/out")" = "$want_trim_out" ] \
+    || fail "(h4) trim subset prints one line per package acted on (got: $(cat "$t/out"))"
+want_trim_wd='shell -- pm list packages
+shell -- pm disable-user --user 0 com.google.android.googlequicksearchbox
+shell -- pm disable-user --user 0 com.google.android.dialer
+shell -- pm disable-user --user 0 com.google.android.as
+shell -- settings put global activity_manager_constants max_cached_processes=6'
+[ "$(cat "$t/waydroid.log")" = "$want_trim_wd" ] \
+    || fail "(h4) trim subset waydroid calls mismatch (got: $(cat "$t/waydroid.log"))"
+[ "$(wc -l < "$t/timeout.log" | tr -d ' ')" = 5 ] \
+    || fail "(h4) all 5 trim waydroid shell calls wrapped in timeout 30"
+! grep -qv '^30 waydroid shell -- ' "$t/timeout.log" \
+    || fail "(h4) every trim call uses timeout 30 waydroid shell --"
+
+# All 5 default packages installed -> acts on all 5 + settings put
+reset_env
+: > "$t/systemctl.active"
+cat > "$t/waydroid.shell_out" <<'PKGS'
+package:com.google.android.googlequicksearchbox
+package:com.google.android.apps.messaging
+package:com.google.android.ims
+package:com.google.android.dialer
+package:com.google.android.as
+PKGS
+run_as trim
+[ "$RC" = 0 ] || fail "(h4) trim all 5 exits 0 (got $RC)"
+[ "$(wc -l < "$t/out" | tr -d ' ')" = 5 ] || fail "(h4) trim all 5 prints 5 lines"
+grep -qx 'shell -- pm disable-user --user 0 com.google.android.apps.messaging' "$t/waydroid.log" \
+    || fail "(h4) trim disables messaging"
+grep -qx 'shell -- pm disable-user --user 0 com.google.android.ims' "$t/waydroid.log" \
+    || fail "(h4) trim disables ims"
+grep -qx 'shell -- settings put global activity_manager_constants max_cached_processes=6' "$t/waydroid.log" \
+    || fail "(h4) trim sets max_cached_processes=6"
+
+# --undo on subset installed -> pm enable for each installed, settings delete activity_manager_constants
+reset_env
+: > "$t/systemctl.active"
+cat > "$t/waydroid.shell_out" <<'PKGS'
+package:com.google.android.googlequicksearchbox
+package:com.google.android.ims
+package:com.android.settings
+PKGS
+run_as trim --undo
+[ "$RC" = 0 ] || fail "(h4) trim --undo exits 0 (got $RC)"
+[ ! -s "$t/err" ] || fail "(h4) trim --undo writes nothing to stderr"
+want_undo_out='trim: enabled com.google.android.googlequicksearchbox
+trim: enabled com.google.android.ims'
+[ "$(cat "$t/out")" = "$want_undo_out" ] \
+    || fail "(h4) trim --undo prints one line per package acted on (got: $(cat "$t/out"))"
+want_undo_wd='shell -- pm list packages
+shell -- pm enable com.google.android.googlequicksearchbox
+shell -- pm enable com.google.android.ims
+shell -- settings delete global activity_manager_constants'
+[ "$(cat "$t/waydroid.log")" = "$want_undo_wd" ] \
+    || fail "(h4) trim --undo waydroid calls mismatch (got: $(cat "$t/waydroid.log"))"
+
+# --undo when none installed -> nothing to trim, exit 0
+printf 'package:com.android.settings\n' > "$t/waydroid.shell_out"
+run_as trim --undo
+[ "$RC" = 0 ] || fail "(h4) trim --undo when none installed exits 0 (got $RC)"
+[ "$(cat "$t/out")" = "trim: nothing to trim" ] \
+    || fail "(h4) trim --undo prints nothing to trim when none installed"
+[ "$(cat "$t/waydroid.log")" = "shell -- pm list packages" ] \
+    || fail "(h4) trim --undo makes no pm/settings call when none installed"
+
+# Override file $ETC/trim (comments, inline comments, blank lines, whitespace)
+reset_env
+: > "$t/systemctl.active"
+cat > "$ETC/trim" <<'OVR'
+# Custom trim list
+  com.example.heavy   # inline comment
+
+com.example.absent
+com.example.second
+com.example.heavy
+OVR
+cat > "$t/waydroid.shell_out" <<'PKGS'
+package:com.google.android.googlequicksearchbox
+package:com.example.heavy
+package:com.example.second
+PKGS
+run_as trim
+[ "$RC" = 0 ] || fail "(h4) trim with override exits 0 (got $RC)"
+want_ovr_out='trim: disabled com.example.heavy
+trim: disabled com.example.second'
+[ "$(cat "$t/out")" = "$want_ovr_out" ] \
+    || fail "(h4) trim override acts only on installed override pkgs (got: $(cat "$t/out"))"
+! grep -q 'googlequicksearchbox' "$t/waydroid.log" \
+    || fail "(h4) override file replaces default list"
+grep -qx 'shell -- settings put global activity_manager_constants max_cached_processes=6' "$t/waydroid.log" \
+    || fail "(h4) trim override still applies settings put"
+
+# waydroid shell failure on pm list packages -> exit 1
+printf '1\n' > "$t/waydroid.shell_rc"
+run_as trim
+[ "$RC" = 1 ] || fail "(h4) trim pm list failure exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(h4) trim pm list failure reports error on stderr"
+rm -f "$t/waydroid.shell_rc"
+
+# waydroid shell failure on pm disable-user -> exit 1, stops before settings
+printf 'pm disable-user' > "$t/waydroid.shell_fail_match"
+run_as trim
+[ "$RC" = 1 ] || fail "(h4) trim pm disable failure exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(h4) trim pm disable failure reports error on stderr"
+! grep -q 'settings put' "$t/waydroid.log" || fail "(h4) settings not called after pm disable fails"
+
+# waydroid shell failure on settings put -> exit 1
+printf 'settings put' > "$t/waydroid.shell_fail_match"
+run_as trim
+[ "$RC" = 1 ] || fail "(h4) trim settings put failure exits 1 (got $RC)"
+[ -s "$t/err" ] || fail "(h4) trim settings put failure reports error on stderr"
+rm -f "$t/waydroid.shell_fail_match"
+
+# Timeout (exit 124) -> exit 1, message mentions timed out
+: > "$t/timeout.expire"
+run_as trim
+[ "$RC" = 1 ] || fail "(h4) trim timeout exits 1 (got $RC)"
+grep -qi 'timed out' "$t/err" || fail "(h4) trim timeout reports timeout on stderr"
+rm -f "$t/timeout.expire"
+echo "ok - trim: inactive container, none/subset/all installed, settings, --undo, override file, shell error, and timeout"
+
 # --- (i) status -----------------------------------------------------------------
 reset_env
 run_as status
@@ -1035,7 +1313,7 @@ echo "ok - status: exact seven key=value lines in order, all four mesa states, n
 # --- (j) non-root refusal -------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
     reset_env
-    for sub in packages init mesa-fix configure firewall enable share all; do
+    for sub in packages init mesa-fix configure firewall enable share google-id trim all; do
         clear_logs
         RC=0
         env T715_ANDROID_CFG="$CFG" \
@@ -1044,12 +1322,14 @@ if [ "$(id -u)" -ne 0 ]; then
             T715_ANDROID_SYSFS="$S" \
             T715_ANDROID_DEV="$D" \
             T715_ANDROID_TMP="$TMP" \
+            T715_ANDROID_ETC="$ETC" \
             T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
             PATH="$t/bin:$PATH" \
             "$AS" "$sub" > "$t/out" 2> "$t/err" || RC=$?
         [ "$RC" = 1 ] || fail "(j) non-root $sub exits 1 (got $RC)"
         grep -qi 'root' "$t/err" || fail "(j) non-root $sub error mentions root"
         [ ! -s "$t/pacman.log" ] && [ ! -s "$t/waydroid.log" ] \
+            && [ ! -s "$t/timeout.log" ] \
             && [ ! -s "$t/mount.log" ] && [ ! -s "$t/umount.log" ] \
             && [ ! -s "$t/ufw.log" ] && [ ! -s "$t/systemctl.log" ] \
             && [ ! -s "$t/getent.log" ] && [ ! -s "$t/setfacl.log" ] \
@@ -1065,6 +1345,7 @@ if [ "$(id -u)" -ne 0 ]; then
         T715_ANDROID_SYSFS="$S" \
         T715_ANDROID_DEV="$D" \
         T715_ANDROID_TMP="$TMP" \
+        T715_ANDROID_ETC="$ETC" \
         T715_ANDROID_PACMAN_LOCAL="$PLOCAL" \
         PATH="$t/bin:$PATH" \
         "$AS" status > "$t/out" 2> "$t/err" || RC=$?
@@ -1081,6 +1362,8 @@ run_as --help
 grep -q '^usage: t715-android-setup ' "$t/out" || fail "(k) --help prints usage on stdout"
 grep -q 't715-android-setup mesa-fix' "$t/out" || fail "(k) --help usage lists mesa-fix"
 grep -q 't715-android-setup share' "$t/out" || fail "(k) --help usage lists share"
+grep -q 't715-android-setup google-id' "$t/out" || fail "(k) --help usage lists google-id"
+grep -q 't715-android-setup trim' "$t/out" || fail "(k) --help usage lists trim"
 [ ! -s "$t/err" ] || fail "(k) --help writes nothing to stderr"
 
 run_as
@@ -1115,6 +1398,15 @@ run_as share a b
 
 run_as share --bogus
 [ "$RC" = 2 ] || fail "(k) share --bogus exits 2 (got $RC)"
+
+run_as google-id extra
+[ "$RC" = 2 ] || fail "(k) google-id extra exits 2 (got $RC)"
+
+run_as trim --bogus
+[ "$RC" = 2 ] || fail "(k) trim --bogus exits 2 (got $RC)"
+
+run_as trim --undo extra
+[ "$RC" = 2 ] || fail "(k) trim --undo extra exits 2 (got $RC)"
 echo "ok - usage and exit codes: --help on stdout (0), bad usage on stderr (2)"
 
 echo "PASS"

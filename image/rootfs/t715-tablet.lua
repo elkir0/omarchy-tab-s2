@@ -77,4 +77,10 @@ o.launch_on_start("bash -c 'omarchy-toggle-enabled lock-on-start || exit 0; "
 -- not need: it tiles two windows at a usable size). A later rule wins.
 o.window({ tag = "floating-window" }, { size = { "(monitor_w*0.94)", "(monitor_h*0.6)" } })
 o.window("org.omarchy.about", { size = { "(monitor_w*0.94)", "(monitor_h*0.47)" } })
+
+-- Android (Waydroid) windows. Two Android windows tiled on one screen shrink
+-- Android's single display to the smaller window (e.g. Play Store opening a
+-- second window, or an app opened from another). Put every Android window on
+-- its own empty workspace so the display stays full size.
+o.window("^waydroid[.].*$", { workspace = "empty" })
 -- SM-T715 tablet end

@@ -69,6 +69,12 @@ STUB
 cat > "$t/bin/systemctl" <<'STUB'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$T715_TEST_SYSTEMCTL"
+if [ -n "${T715_TEST_SYSTEMCTL_CHECK_FILE:-}" ] && [ -f "$T715_TEST_SYSTEMCTL_CHECK_FILE" ]; then
+    cp "$T715_TEST_SYSTEMCTL_CHECK_FILE" "$T715_TEST_SYSTEMCTL_SNAPSHOT"
+fi
+if [ -n "${T715_TEST_SYSTEMCTL_DROP_FILE:-}" ] && [ -n "${T715_TEST_SYSTEMCTL_DROP_SRC:-}" ]; then
+    cp "$T715_TEST_SYSTEMCTL_DROP_SRC" "$T715_TEST_SYSTEMCTL_DROP_FILE"
+fi
 exit "${T715_TEST_SYSTEMCTL_RC:-0}"
 STUB
 
@@ -120,6 +126,10 @@ export T715_TEST_LOG="$t/log" \
        T715_TEST_NOTIFY="$t/notify" \
        T715_TEST_SYSTEMCTL="$t/systemctl" \
        T715_TEST_SYSTEMCTL_RC="" \
+       T715_TEST_SYSTEMCTL_CHECK_FILE="" \
+       T715_TEST_SYSTEMCTL_SNAPSHOT="$t/systemctl-snapshot" \
+       T715_TEST_SYSTEMCTL_DROP_FILE="" \
+       T715_TEST_SYSTEMCTL_DROP_SRC="" \
        T715_TEST_HYPRCTL="$t/hyprctl" \
        T715_TEST_HYPRCTL_RC="" \
        T715_TEST_CLIENTS="$t/clients.json" \
@@ -136,12 +146,16 @@ clear_files() {
     : > "$t/log"
     : > "$t/notify"
     : > "$t/systemctl"
+    rm -f "$t/systemctl-snapshot"
     : > "$t/hyprctl"
     : > "$t/timeout"
     : > "$t/busctl-log"
     printf '0\n' > "$t/busctl-count"
     : > "$t/wd-log"
     T715_TEST_SYSTEMCTL_RC=""
+    T715_TEST_SYSTEMCTL_CHECK_FILE=""
+    T715_TEST_SYSTEMCTL_DROP_FILE=""
+    T715_TEST_SYSTEMCTL_DROP_SRC=""
     T715_TEST_HYPRCTL_RC=""
     T715_TEST_BUSCTL_AFTER=""
 }
@@ -150,7 +164,8 @@ nlines() { [ "$(wc -l < "$1" | tr -d ' ')" = "$2" ]; }
 busctl_calls() { cat "$t/busctl-count" | tr -d ' \n'; }
 
 setup_installed() {
-    rm -rf "${t:?}/dev" "${t:?}/state" "${t:?}/cgroup" "${t:?}/waydroid.cfg"
+    rm -rf "${t:?}/dev" "${t:?}/state" "${t:?}/cgroup" "${t:?}/waydroid.cfg" \
+           "${t:?}/xdg-data" "${t:?}/etc"
     mkdir -p "$t/dev" "$t/state"
     : > "$t/waydroid.cfg"
     : > "$t/dev/binder"
@@ -181,6 +196,8 @@ run_and() {
         T715_ANDROID_DEV="$t/dev" \
         T715_ANDROID_CGROUP="$t/cgroup" \
         T715_ANDROID_STATE_DIR="$t/state" \
+        T715_ANDROID_ETC="$t/etc" \
+        XDG_DATA_HOME="$t/xdg-data" \
         T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
         PATH="$t/bin:$t/bus-bin:$t/wd-bin:$t/hostbin:/usr/bin:/bin" \
         "$AND" "$@"
@@ -192,6 +209,8 @@ run_and_no_wd() {
         T715_ANDROID_DEV="$t/dev" \
         T715_ANDROID_CGROUP="$t/cgroup" \
         T715_ANDROID_STATE_DIR="$t/state" \
+        T715_ANDROID_ETC="$t/etc" \
+        XDG_DATA_HOME="$t/xdg-data" \
         T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
         PATH="$t/bin:$t/bus-bin:$t/hostbin:/usr/bin:/bin" \
         "$AND" "$@"
@@ -203,6 +222,8 @@ run_and_no_busctl() {
         T715_ANDROID_DEV="$t/dev" \
         T715_ANDROID_CGROUP="$t/cgroup" \
         T715_ANDROID_STATE_DIR="$t/state" \
+        T715_ANDROID_ETC="$t/etc" \
+        XDG_DATA_HOME="$t/xdg-data" \
         T715_ANDROID_WAIT="${T715_ANDROID_WAIT:-3}" \
         PATH="$t/bin:$t/wd-bin:$t/hostbin" \
         "$AND" "$@"
@@ -478,28 +499,292 @@ T715_ANDROID_WAIT=1 run_and settings >/dev/null 2>&1 && fail "(i3) settings fail
 nlines "$t/wd-log" 0 || fail "(i3) app launch not called when start fails"
 echo "ok - settings: launches com.android.settings, starting first when stopped"
 
-# --- (j) usage and exit codes --------------------------------------------------
-run_and frobnicate >/dev/null 2>&1 && fail "(j1) unknown verb exits nonzero"
-[ "$(run_and frobnicate >/dev/null 2>&1; echo $?)" = 2 ] || fail "(j1) unknown verb exits 2"
-run_and >/dev/null 2>&1 && fail "(j2) no argument exits nonzero"
-[ "$(run_and 2>/dev/null; echo $?)" = 2 ] || fail "(j2) no argument exits 2"
+# --- (j) apps: visibility apply, list, overrides, start integration ------------
+APPS="$t/xdg-data/applications"
+
+# (j0) no applications directory
+setup_installed
+out=$(run_and apps 2>"$t/apps-err") || fail "(j0a) apps without applications dir exits 0"
+[ ! -s "$t/apps-err" ] || fail "(j0a) apps without applications dir writes nothing to stderr"
+[ -n "$out" ] || fail "(j0a) apps without applications dir prints a message"
+[ ! -d "$APPS" ] || fail "(j0a) apps does not create missing applications dir"
+list_out=$(run_and apps list 2>"$t/apps-err") || fail "(j0b) apps list without dir exits 0"
+[ -z "$list_out" ] || fail "(j0b) apps list without dir prints nothing (got: $list_out)"
+
+# Empty applications directory with only a non-waydroid desktop file
+mkdir -p "$APPS"
+cat > "$APPS/org.gnome.Nautilus.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Linux Files
+NoDisplay=true
+DESKTOP
+cp "$APPS/org.gnome.Nautilus.desktop" "$t/nautilus.orig"
+out=$(run_and apps apply 2>"$t/apps-err") || fail "(j0c) apps with no waydroid files exits 0"
+[ -n "$out" ] || fail "(j0c) apps with no waydroid files prints a message"
+cmp -s "$t/nautilus.orig" "$APPS/org.gnome.Nautilus.desktop" || fail "(j0c) non-waydroid file untouched"
+
+# (j1) fixture desktop files covering all editing edge cases
+# 1. SHOW package with existing NoDisplay=true
+cat > "$APPS/waydroid.com.android.documentsui.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Files
+Exec=waydroid app launch com.android.documentsui
+Icon=/var/lib/waydroid/data/icons/com.android.documentsui.png
+NoDisplay=true
+Categories=X-WayDroid-App;
+DESKTOP
+
+# 2. SHOW package with two groups and NoDisplay=true ONLY in the action group
+cat > "$APPS/waydroid.org.lineageos.jelly.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Browser
+Exec=waydroid app launch org.lineageos.jelly
+
+[Desktop Action new-tab]
+Name=New Tab
+NoDisplay=true
+Exec=waydroid app launch org.lineageos.jelly
+DESKTOP
+
+# 3. HIDE package with NO NoDisplay key at all
+cat > "$APPS/waydroid.org.lineageos.aperture.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Camera
+Exec=waydroid app launch org.lineageos.aperture
+DESKTOP
+
+# 4. HIDE package (Google) with NoDisplay=false
+cat > "$APPS/waydroid.com.google.android.dialer.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Phone
+NoDisplay=false
+Exec=waydroid app launch com.google.android.dialer
+DESKTOP
+
+# 5. SHOW package already correct -> mtime must stay unchanged
+cat > "$APPS/waydroid.com.android.settings.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Settings
+NoDisplay=false
+Exec=waydroid app launch com.android.settings
+DESKTOP
+cp "$APPS/waydroid.com.android.settings.desktop" "$t/settings.orig"
+touch -t 202001010000 "$APPS/waydroid.com.android.settings.desktop" "$t/ref-mtime"
+
+# 6. Non-listed package -> completely untouched (content and mtime)
+cat > "$APPS/waydroid.org.fdroid.fdroid.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=F-Droid
+Exec=waydroid app launch org.fdroid.fdroid
+DESKTOP
+cp "$APPS/waydroid.org.fdroid.fdroid.desktop" "$t/fdroid.orig"
+touch -t 202001010000 "$APPS/waydroid.org.fdroid.fdroid.desktop"
+
+out=$(run_and apps 2>"$t/apps-err") || fail "(j1) apps exits 0"
+[ ! -s "$t/apps-err" ] || fail "(j1) apps writes nothing to stderr (got: $(cat "$t/apps-err"))"
+printf '%s\n' "$out" > "$t/apps-out"
+nlines "$t/apps-out" 4 || fail "(j1) four changed lines printed (got:
+$out)"
+grep -Fqx 'shown Files (com.android.documentsui)' "$t/apps-out" \
+    || fail "(j1) reported shown Files (got: $out)"
+grep -Fqx 'shown Browser (org.lineageos.jelly)' "$t/apps-out" \
+    || fail "(j1) reported shown Browser (got: $out)"
+grep -Fqx 'hidden Camera (org.lineageos.aperture)' "$t/apps-out" \
+    || fail "(j1) reported hidden Camera (got: $out)"
+grep -Fqx 'hidden Phone (com.google.android.dialer)' "$t/apps-out" \
+    || fail "(j1) reported hidden Phone (got: $out)"
+
+# Verify documentsui: NoDisplay replaced in place, other keys preserved
+want_docs='[Desktop Entry]
+Type=Application
+Name=Files
+Exec=waydroid app launch com.android.documentsui
+Icon=/var/lib/waydroid/data/icons/com.android.documentsui.png
+NoDisplay=false
+Categories=X-WayDroid-App;'
+[ "$(cat "$APPS/waydroid.com.android.documentsui.desktop")" = "$want_docs" ] \
+    || fail "(j1) documentsui desktop content mismatch"
+
+# Verify jelly: NoDisplay=false added right after [Desktop Entry], action group untouched
+want_jelly='[Desktop Entry]
+NoDisplay=false
+Type=Application
+Name=Browser
+Exec=waydroid app launch org.lineageos.jelly
+
+[Desktop Action new-tab]
+Name=New Tab
+NoDisplay=true
+Exec=waydroid app launch org.lineageos.jelly'
+[ "$(cat "$APPS/waydroid.org.lineageos.jelly.desktop")" = "$want_jelly" ] \
+    || fail "(j1) jelly two-group desktop content mismatch (got:
+$(cat "$APPS/waydroid.org.lineageos.jelly.desktop"))"
+
+# Verify aperture: NoDisplay=true added right after [Desktop Entry]
+want_aperture='[Desktop Entry]
+NoDisplay=true
+Type=Application
+Name=Camera
+Exec=waydroid app launch org.lineageos.aperture'
+[ "$(cat "$APPS/waydroid.org.lineageos.aperture.desktop")" = "$want_aperture" ] \
+    || fail "(j1) aperture desktop content mismatch"
+
+# Verify dialer: NoDisplay=false replaced with NoDisplay=true
+want_dialer='[Desktop Entry]
+Type=Application
+Name=Phone
+NoDisplay=true
+Exec=waydroid app launch com.google.android.dialer'
+[ "$(cat "$APPS/waydroid.com.google.android.dialer.desktop")" = "$want_dialer" ] \
+    || fail "(j1) dialer desktop content mismatch"
+
+# Verify already-correct settings: mtime and content unchanged
+cmp -s "$t/settings.orig" "$APPS/waydroid.com.android.settings.desktop" \
+    || fail "(j1) already-correct settings content changed"
+[ ! "$APPS/waydroid.com.android.settings.desktop" -nt "$t/ref-mtime" ] \
+    && [ ! "$APPS/waydroid.com.android.settings.desktop" -ot "$t/ref-mtime" ] \
+    || fail "(j1) already-correct settings mtime changed"
+
+# Verify non-listed package and non-waydroid file: completely untouched
+cmp -s "$t/fdroid.orig" "$APPS/waydroid.org.fdroid.fdroid.desktop" \
+    || fail "(j1) non-listed package content changed"
+[ ! "$APPS/waydroid.org.fdroid.fdroid.desktop" -nt "$t/ref-mtime" ] \
+    && [ ! "$APPS/waydroid.org.fdroid.fdroid.desktop" -ot "$t/ref-mtime" ] \
+    || fail "(j1) non-listed package mtime changed"
+cmp -s "$t/nautilus.orig" "$APPS/org.gnome.Nautilus.desktop" \
+    || fail "(j1) non-waydroid desktop file changed"
+
+# Second run -> nothing to change, no mtimes bumped
+touch -t 202001010000 "$APPS/waydroid.com.android.documentsui.desktop"
+out2=$(run_and apps apply 2>"$t/apps-err") || fail "(j1b) second apps apply exits 0"
+[ "$out2" = "nothing to change" ] || fail "(j1b) second run says 'nothing to change' (got: $out2)"
+[ ! "$APPS/waydroid.com.android.documentsui.desktop" -nt "$t/ref-mtime" ] \
+    || fail "(j1b) second run touched already-correct file mtime"
+
+# (j2) apps list: tab-separated shown|hidden, package, Name sorted by Name
+tab=$(printf '\t')
+list_out=$(run_and apps list 2>"$t/apps-err") || fail "(j2) apps list exits 0"
+[ ! -s "$t/apps-err" ] || fail "(j2) apps list writes nothing to stderr"
+want_list="shown${tab}org.lineageos.jelly${tab}Browser
+hidden${tab}org.lineageos.aperture${tab}Camera
+shown${tab}org.fdroid.fdroid${tab}F-Droid
+shown${tab}com.android.documentsui${tab}Files
+hidden${tab}com.google.android.dialer${tab}Phone
+shown${tab}com.android.settings${tab}Settings"
+[ "$list_out" = "$want_list" ] || fail "(j2) apps list mismatch (got:
+$list_out)"
+
+# (j3) override files in T715_ANDROID_ETC (with # comments and blank lines)
+mkdir -p "$t/etc"
+cat > "$t/etc/apps-show" <<'OVR'
+# Show Camera instead of defaults
+  org.lineageos.aperture  # inline comment
+
+OVR
+cat > "$t/etc/apps-hide" <<'OVR'
+# Hide Files
+com.android.documentsui
+OVR
+out_ovr=$(run_and apps 2>"$t/apps-err") || fail "(j3) apps with override files exits 0"
+printf '%s\n' "$out_ovr" > "$t/apps-out"
+nlines "$t/apps-out" 2 || fail "(j3) override changed exactly two files (got:
+$out_ovr)"
+grep -Fqx 'hidden Files (com.android.documentsui)' "$t/apps-out" \
+    || fail "(j3) override hid Files"
+grep -Fqx 'shown Camera (org.lineageos.aperture)' "$t/apps-out" \
+    || fail "(j3) override showed Camera"
+grep -qx 'NoDisplay=false' "$APPS/waydroid.org.lineageos.aperture.desktop" \
+    || fail "(j3) aperture desktop now NoDisplay=false"
+grep -qx 'NoDisplay=true' "$APPS/waydroid.com.android.documentsui.desktop" \
+    || fail "(j3) documentsui desktop now NoDisplay=true"
+# Settings was not in override apps-show or apps-hide, so it stayed untouched
+grep -qx 'NoDisplay=false' "$APPS/waydroid.com.android.settings.desktop" \
+    || fail "(j3) settings stayed untouched under override"
+# Single-file override (only apps-hide exists): overrides default SHOW for Browser
+rm -f "$t/etc/apps-show"
+printf 'org.lineageos.jelly\n' > "$t/etc/apps-hide"
+out_ovr2=$(run_and apps 2>"$t/apps-err") || fail "(j3b) single override exits 0"
+printf '%s\n' "$out_ovr2" > "$t/apps-out"
+grep -Fqx 'hidden Browser (org.lineageos.jelly)' "$t/apps-out" \
+    || fail "(j3b) single apps-hide override hid Browser (got: $out_ovr2)"
+grep -Fqx 'shown Files (com.android.documentsui)' "$t/apps-out" \
+    || fail "(j3b) removing apps-show restored default SHOW for Files"
+
+# (j4) start runs apply silently before starting and again once session is running
+setup_installed
+set_status_stopped
+mkdir -p "$APPS"
+cat > "$APPS/waydroid.com.android.documentsui.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Files
+NoDisplay=true
+DESKTOP
+cat > "$t/drop-camera.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Camera
+NoDisplay=false
+DESKTOP
+T715_TEST_SYSTEMCTL_CHECK_FILE="$APPS/waydroid.com.android.documentsui.desktop"
+T715_TEST_SYSTEMCTL_DROP_FILE="$APPS/waydroid.org.lineageos.aperture.desktop"
+T715_TEST_SYSTEMCTL_DROP_SRC="$t/drop-camera.desktop"
+T715_TEST_BUSCTL_AFTER=2
+start_out=$(T715_ANDROID_WAIT=3 run_and start 2>"$t/start-err") || fail "(j4) start exits 0"
+[ -z "$start_out" ] || fail "(j4) start apply is silent on stdout (got: $start_out)"
+[ ! -s "$t/start-err" ] || fail "(j4) start apply is silent on stderr (got: $(cat "$t/start-err"))"
+grep -qx 'NoDisplay=false' "$t/systemctl-snapshot" \
+    || fail "(j4) documentsui was already updated BEFORE systemctl start"
+grep -qx 'NoDisplay=true' "$APPS/waydroid.org.lineageos.aperture.desktop" \
+    || fail "(j4) newly appeared camera desktop was updated AFTER session running"
+
+# state must not modify desktop files or call waydroid
+cat > "$APPS/waydroid.com.android.documentsui.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Files
+NoDisplay=true
+DESKTOP
+set_status_running
+clear_files
+run_and state >/dev/null || fail "(j4b) state exits 0"
+grep -qx 'NoDisplay=true' "$APPS/waydroid.com.android.documentsui.desktop" \
+    || fail "(j4b) state did not touch desktop files"
+nlines "$t/wd-log" 0 || fail "(j4b) state called no waydroid"
+echo "ok - apps: apply, two-group/missing/unchanged/unlisted fixtures, overrides, list, silent start hook"
+
+# --- (k) usage and exit codes --------------------------------------------------
+run_and frobnicate >/dev/null 2>&1 && fail "(k1) unknown verb exits nonzero"
+[ "$(run_and frobnicate >/dev/null 2>&1; echo $?)" = 2 ] || fail "(k1) unknown verb exits 2"
+run_and >/dev/null 2>&1 && fail "(k2) no argument exits nonzero"
+[ "$(run_and 2>/dev/null; echo $?)" = 2 ] || fail "(k2) no argument exits 2"
 case "$(run_and 2>&1 >/dev/null)" in
 usage:*) ;;
-*) fail "(j3) usage goes to stderr on no argument" ;;
+*) fail "(k3) usage goes to stderr on no argument" ;;
 esac
-help_out=$(run_and --help 2>/dev/null) || fail "(j4) --help exits 0"
+help_out=$(run_and --help 2>/dev/null) || fail "(k4) --help exits 0"
 case "$help_out" in
-usage:*) ;;
-*) fail "(j4) --help prints usage on stdout (got: $help_out)" ;;
+usage:*apps*) ;;
+*) fail "(k4) --help prints usage including apps on stdout (got: $help_out)" ;;
 esac
-help_short=$(run_and -h 2>/dev/null) || fail "(j5) -h exits 0"
+help_short=$(run_and -h 2>/dev/null) || fail "(k5) -h exits 0"
 case "$help_short" in
 usage:*) ;;
-*) fail "(j5) -h prints usage on stdout (got: $help_short)" ;;
+*) fail "(k5) -h prints usage on stdout (got: $help_short)" ;;
 esac
-echo "ok - usage: --help/-h exit 0 on stdout, missing/unknown exit 2 on stderr"
+[ "$(run_and apps bogus >/dev/null 2>&1; echo $?)" = 2 ] || fail "(k6) apps bogus exits 2"
+[ "$(run_and apps list extra >/dev/null 2>&1; echo $?)" = 2 ] || fail "(k7) apps list extra exits 2"
+[ "$(run_and state extra >/dev/null 2>&1; echo $?)" = 2 ] || fail "(k8) state extra exits 2"
+echo "ok - usage: --help/-h exit 0 on stdout, missing/unknown/bad apps args exit 2 on stderr"
 
-# --- (k) user unit and configure-system.sh, statically -------------------------
+# --- (l) user unit and configure-system.sh, statically -------------------------
 [ -f "$UNIT" ] || fail "(k) no $UNIT"
 head -n1 "$UNIT" | grep -q '^#' || fail "(k) unit carries a header comment"
 grep -qx 'Description=.*' "$UNIT" || fail "(k) Description= missing"
