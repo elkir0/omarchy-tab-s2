@@ -46,8 +46,10 @@ native code install. 64-bit-only Android builds such as Denial/Droidloom
   1.6 GiB to about 590 MiB (CMA's 256 MiB included); nothing bad was observed
   in a day of use.
 - **Root image integration**: `/usr/local/sbin/t715-android-setup`,
-  `/usr/local/bin/t715-android`, `t715-android.service`, the Android window
-  rule in `image/rootfs/t715-tablet.lua`, the "Android" quick settings tile
+  `/usr/local/bin/t715-android`, `/usr/local/bin/waydroid` (preloaded launcher
+  wrapper), `/usr/local/lib/t715-android/launchd.py`, `t715-android.service`,
+  `t715-android-launchd.service`, the Android window rule in
+  `image/rootfs/t715-tablet.lua`, the "Android" quick settings tile
   (`image/pkg/omamobile-shell/0013-tablet-android-tile.patch`), and
   `python-pyclip` 0.7.0 (`image/pkg/python-pyclip/PKGBUILD`, with
   `wl-clipboard`, see [PACKAGES.md](PACKAGES.md)).
@@ -85,11 +87,14 @@ sudo t715-android-setup all
 4. `configure`: finds the `panfrost` DRM render node under
    `/sys/class/drm/renderD*/device/driver`, writes `drm_device`,
    `ro.opengles.version = 196609` (OpenGL ES 3.1),
-   `persist.waydroid.multi_windows = false`, and
+   `persist.waydroid.multi_windows = false`,
    `ro.lmk.use_minfree_levels = false` (puts `lmkd` in pressure/PSI mode;
-   section 9) — plus `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set —
-   to `/var/lib/waydroid/waydroid.cfg`, and runs `waydroid upgrade --offline` if
-   anything changed.
+   section 10), and `ro.config.low_ram = true` (low-RAM mode, opt out with
+   `T715_ANDROID_LOW_RAM=0`; section 8), and a fixed display size
+   (`persist.waydroid.width = 744`, `persist.waydroid.height = 1000`;
+   section 6) — plus `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set —
+   to `/var/lib/waydroid/waydroid.cfg`, and
+   runs `waydroid upgrade --offline` if anything changed.
 5. `firewall`: when `ufw` is active, allows DNS (port 53), DHCP (`67/udp`),
    and routing (`route allow in/out`) on `waydroid0`. Without these rules
    Android gets no DHCP lease.
@@ -102,16 +107,18 @@ t715-android start
 ```
 
 Once Android has booted once, expose its shared storage to the session user
-(`alarm` by default, or pass a username), and on the GAPPS image run `trim`
-(section 5):
+(`alarm` by default, or pass a username), on the GAPPS image run `trim`
+(section 5), and optionally run `optimize` to ahead-of-time compile apps that
+stay uncompiled (section 8):
 
 ```bash
 sudo t715-android-setup share
-sudo t715-android-setup trim   # GAPPS only; reversible with trim --undo
+sudo t715-android-setup trim       # GAPPS only; reversible with trim --undo
+sudo t715-android-setup optimize   # optional; AOT-compile apps (10-20 min after many installs)
 ```
 
-`t715-android-setup all` runs neither `share` nor `trim` because Android must
-have booted once first.
+`t715-android-setup all` runs none of `share`, `trim`, or `optimize` because
+Android must have booted once first.
 
 ## 4. Daily use
 
@@ -228,6 +235,28 @@ from another). `o.window("^waydroid[.].*$", { workspace = "empty" })` puts
 every Android window on its own empty workspace; checked with Play Store then
 Settings (both 744x912, Android's display full size).
 
+**Fixed display size (`persist.waydroid.width`, `persist.waydroid.height`).**
+Left alone, Android's single display follows the size of the window, and
+Waydroid's composer re-plugs the virtual display at every size change
+(`Dispatching display hotplug event` in logcat, "New display modes are added
+and the active mode has changed"). A call that lands while the display is
+absent kills `surfaceflinger` — null display in `DisplayDevice::getId()` (from
+`SurfaceComposerAIDL::getPhysicalDisplayIds`), in
+`HWComposer::presentAndGetReleaseFences` or in
+`SurfaceFlinger::onComposerHalVsync` — and Android restarts, closing every
+Android window: seen four times on the reference tablet on 2026-11-20/21,
+always while windows were opened, closed or resized. `t715-android-setup
+configure` therefore sets a fixed size, 744x1000 in the compositor's logical
+pixels (Waydroid multiplies by the output scale: 1488x2000), the size of an
+app window under the tablet's shell; `T715_ANDROID_SIZE=WxH` overrides it and
+`T715_ANDROID_SIZE=0` leaves it alone. With it: no hotplug event and no
+restart over six open/close cycles through the launcher, and no duplicate
+windows (13 windows for 4 apps had piled up before). A smaller size is not
+scaled up — Android is drawn in a corner of the window — so the resolution
+cannot be lowered this way. Android alone held 540 MB of unevictable shared
+memory (graphics buffers) with no window open after a morning with a changing
+display size, 374 MB with four windows after the change.
+
 ## 7. The Mesa bug and binary workaround
 
 Without a fix, `surfaceflinger` dies with `SIGSEGV` a few seconds after start,
@@ -257,7 +286,79 @@ always at `libgallium_dri.so+0xd508e8` (`_mesa_hash_table_u64_clear()` in
   with this source fix boots Android as well; its comparison with the patched
   vendor library is not finished, and the bug is not reported upstream yet.
 
-## 8. Measurements
+## 8. Speed
+
+Scrolling is not the bottleneck: measured on the tablet (2026-11-21), scrolling
+runs at 15-17 ms median frame time with 2-3 % janky frames, and pinning both
+CPU clusters at their maximum frequency changed that by only 2 ms. There is no
+emulation and the Panfrost GPU is in use.
+
+What actually made opening Android apps feel slow was three separate costs,
+addressed by three additions:
+
+1. **Preloaded launcher daemon (`t715-android-launchd.service` and
+   `/usr/local/bin/waydroid`)**:
+   - **Why**: every `waydroid.<package>.desktop` entry (rewritten by Waydroid
+     at every boot) runs `waydroid app launch PKG`, which is a Python program.
+     Measured on the tablet (2026-11-21), starting Python and importing
+     Waydroid's modules took about 1.1 s with all cores online, 2.3 s with the
+     big (A57) cores offline, and more under memory pressure — before Android
+     even received the request.
+   - **How**: `t715-android-launchd.service` (enabled globally for every user,
+     guarded by `ConditionPathExists` on `waydroid.cfg` and `/dev/binder`) runs
+     `/usr/local/lib/t715-android/launchd.py`, which imports Waydroid's Python
+     modules (`tools`, `tools.actions.app_manager`,
+     `tools.interfaces.IPlatform`) once, listens on
+     `$XDG_RUNTIME_DIR/t715-android/launch.fifo`, and forks a child per request
+     that calls `tools.main()` directly. Because `/usr/local/bin` precedes
+     `/usr/bin` in the session `PATH`, `/usr/local/bin/waydroid` intercepts the
+     desktop entries (and `t715-android settings`) automatically, forwarding
+     only `app launch PKG`, `app intent ACTION URI`, and `show-full-ui` (with a
+     2 s write timeout so it can never hang). Root invocations, every other
+     subcommand, and any failure or stopped daemon fall back directly to
+     `/usr/bin/waydroid`.
+   - **Measured gain**: request-to-window time for Clock (app stopped first,
+     three pairs) dropped from 3.5 / 1.9 / 1.4 s through `/usr/bin/waydroid` to
+     0.93 / 0.72 / 0.67 s through the daemon; Files dropped from 2.45 s to
+     1.07 s.
+   - **Cost**: resident memory of the idle Python daemon (not measured on the
+     tablet; roughly 40 MB is typical for Python plus Waydroid's modules).
+   - **How to bypass**: run `/usr/bin/waydroid ...` directly for a single
+     command, stop the user service
+     (`systemctl --user stop t715-android-launchd.service`, after which the
+     wrapper falls back automatically), or remove `/usr/local/bin/waydroid` to
+     restore stock behaviour.
+
+2. **Low-RAM mode (`ro.config.low_ram = true`)**:
+   - **Why**: the `GAPPS` image pushed 740-920 MB into zram swap on 2.7 GB of
+     RAM. `t715-android-setup configure` sets `ro.config.low_ram = true` by
+     default (pass `T715_ANDROID_LOW_RAM=0` to leave the key alone).
+   - **Measured gain** (`GAPPS` image, 2026-11-21): Android boots in 40 s
+     instead of 73 s; zram swap in use drops to 449 MB (was 740-920 MB);
+     Settings cold start 1.5-1.7 s (was 1.7-2.7 s); Files 1.0-1.5 s. No crash
+     seen.
+   - **Cost**: Android turns off some high-RAM features in low-RAM mode (for
+     example picture-in-picture, split-screen, and some background or widget
+     features).
+
+3. **Ahead-of-time compilation (`sudo t715-android-setup optimize [PKG...]`)**:
+   - **Why**: apps installed or updated from the Play Store remain at dexopt
+     status `verify` (interpreted/JIT), and Android's idle background
+     optimisation never runs because Waydroid freezes the idle container.
+   - **How**: run `sudo t715-android-setup optimize` after booting and
+     installing or updating apps (or pass specific package names). Without
+     arguments it parses `waydroid shell -- dumpsys package dexopt` and runs
+     `cmd package compile -m speed -f PKG` (bounded by `timeout 900`) on every
+     package whose dexopt status is not `speed`, `speed-profile`, or
+     `everything`.
+   - **Measured gain** (2026-11-21): Settings cold start dropped from 3.4 s to
+     1.7-2.7 s and Files from 3.2 s to 1.6-1.9 s.
+   - **Cost**: compile time — 3-15 s for small system apps, about 2 minutes
+     each for the Play Store and a large user app, 7 minutes for Google Play
+     services (expect 10-20 minutes after many installs) — and extra storage
+     inside Android's data partition for the compiled `.odex` artifacts.
+
+## 9. Measurements
 
 Reference tablet: `VANILLA` (without Google apps) on 2026-11-20
 (`android-smoke.sh`, fresh session, all 8 cores online unless noted) and
@@ -266,19 +367,21 @@ Reference tablet: `VANILLA` (without Google apps) on 2026-11-20
 | Metric | Observed |
 |---|---|
 | Android boot (`sys.boot_completed`), `VANILLA` | 33 s (61-63 s with A57 cluster offline) |
-| Android boot (`sys.boot_completed`), `GAPPS` (`ro.lmk.use_minfree_levels = false`) | 73 s |
+| Android boot (`sys.boot_completed`), `GAPPS` (`ro.lmk.use_minfree_levels = false`) | 73 s (40 s with `ro.config.low_ram = true`) |
 | Session start / stop from tile (`VANILLA`) | 5 s to start, 2 s to stop |
 | Settings launch: cold / after thaw / warm (`VANILLA`) | 0.85 s / 1.5 s / 0.13 s |
+| Clock request-to-window (stopped first, 3 pairs): stock vs preloaded daemon | 3.5 / 1.9 / 1.4 s vs 0.93 / 0.72 / 0.67 s |
+| Files request-to-window: stock vs preloaded daemon | 2.45 s vs 1.07 s |
 | Container memory, cgroup + page cache (`VANILLA`) | ~1.27 GB |
 | Host `MemAvailable` drop (`VANILLA`) | ~670 MB |
 | `GAPPS` memory before `trim` | 530-576 MB available, 932 MB of the 1.37 GB zram swap in use |
-| `GAPPS` memory after `trim` | 873 MB available, 671 MB swap in use, memory pressure 0 |
+| `GAPPS` memory after `trim` / with `ro.config.low_ram = true` | 873 MB available, 671 MB swap in use, memory pressure 0 / 449 MB swap in use |
 | Scrolling Settings, 1 app / 3 apps open (`VANILLA`) | 1.1 % jank (13 ms med, 25 ms p90) / 3.4 % jank (44 ms p90) |
 | GPU driver and faults (`VANILLA`) | Mali-T760 MC6 (Panfrost), GLES 3.1 Mesa 26.0.8; 0 GPU faults |
 | DNS via host `dnsmasq` (kernel `#20`) | 21 of 21 queries succeeded |
 | Idle container freeze (`VANILLA`) | ~2 minutes after the last Android window closes |
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 - **No DHCP lease / no Internet in Android**: `ufw` is blocking `waydroid0`.
   Run `sudo t715-android-setup firewall`.
@@ -313,7 +416,7 @@ Reference tablet: `VANILLA` (without Google apps) on 2026-11-20
   why it was offline then was not looked into. Check the online cores before
   comparing timings.
 
-## 10. Not working or not tested
+## 11. Not working or not tested
 
 - **No sensors in Android**: `waydroid-sensors` requires SensorFW.
 - **No cameras in Android**: both cameras stay on the Linux side.
@@ -325,7 +428,7 @@ Reference tablet: `VANILLA` (without Google apps) on 2026-11-20
 - **Keyboard notification**: Android posts a "Configure physical keyboard"
   notification at every session start.
 
-## 11. Smoke test
+## 12. Smoke test
 
 Run `image/tests/ondevice/android-smoke.sh` as root on the tablet:
 

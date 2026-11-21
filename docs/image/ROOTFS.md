@@ -1212,8 +1212,9 @@ skips itself through its `ConditionPathExists=` checks and
 |---|---|---|
 | `waydroid` | `image/rootfs/packages.extra` (ALARM) | Waydroid and its dependencies (`lxc`, `python-gbinder`, `libgbinder`, `libglibutil`, `rsync`, `wget`); `waydroid-container.service` stays disabled at build time (`configure-system.sh`) |
 | `python-pyclip` | `image/rootfs/packages.mobile` (`image/pkg/python-pyclip`, `[t715-omarchy]`) | Waydroid's shared clipboard over Wayland through `wl-clipboard`, not packaged by ALARM |
-| `/usr/local/sbin/t715-android-setup` | overlay | root-side setup (`packages`, `init`, `mesa-fix`, `configure`, `firewall`, `enable`, `share`, `google-id`, `trim`, `all`, `status`) |
+| `/usr/local/sbin/t715-android-setup` | overlay | root-side setup (`packages`, `init`, `mesa-fix`, `configure`, `firewall`, `enable`, `share`, `google-id`, `trim`, `optimize`, `all`, `status`) |
 | `/usr/local/bin/t715-android`, `t715-android.service` | overlay | session switch for the quick settings tile and user unit enabled globally (dormant until `/var/lib/waydroid/waydroid.cfg` and `/dev/binder` exist) |
+| `/usr/local/lib/t715-android/launchd.py`, `/usr/local/bin/waydroid`, `t715-android-launchd.service` | overlay | preloaded Python launcher daemon (user unit enabled globally, same `ConditionPathExists=` checks without the off marker) and `PATH`-preceding `waydroid` wrapper that routes `app launch`, `app intent`, and `show-full-ui` to it with fallback to `/usr/bin/waydroid` |
 
 What the image does not ship: Android itself (Waydroid's LineageOS system and
 vendor images, about 760 MB `VANILLA` or 1.1 GB `GAPPS`) and `/var/lib/waydroid/waydroid.cfg`. On a
@@ -1221,18 +1222,21 @@ persistent root, `sudo t715-android-setup all` (or `all --gapps`) downloads
 the images, applies the verified Mesa 26.0.8 `libgallium_dri.so` overlay
 workaround (`mesa-fix`) when the known bad vendor build is present, points
 Waydroid at the `panfrost` DRM render node and Mali-T760 OpenGL ES 3.1,
-windowing and low-memory-killer properties (`ro.lmk.use_minfree_levels = false`),
-opens `waydroid0` in `ufw`, and enables and starts `waydroid-container.service`.
-Once Android has booted, `sudo t715-android-setup share` grants the session
-user POSIX ACL access to Android's shared storage and links `~/Android`, and
-`sudo t715-android-setup trim` disables unused `GAPPS` packages and caps cached
-processes. `image/rootfs/t715-tablet.lua` puts every Android window on its own
-empty workspace.
+windowing, low-memory-killer (`ro.lmk.use_minfree_levels = false`), and
+low-RAM (`ro.config.low_ram = true`, opt-out via `T715_ANDROID_LOW_RAM=0`)
+properties, opens `waydroid0` in `ufw`, and enables and starts
+`waydroid-container.service`. Once Android has booted, `sudo t715-android-setup
+share` grants the session user POSIX ACL access to Android's shared storage and
+links `~/Android`, `sudo t715-android-setup trim` disables unused `GAPPS`
+packages and caps cached processes, and `sudo t715-android-setup optimize`
+AOT-compiles packages whose dexopt status is not yet compiled.
+`image/rootfs/t715-tablet.lua` puts every Android window on its own empty
+workspace.
 
-`image/tests/test_t715_android_setup.sh` and `image/tests/test_t715_android.sh`
-test both tools off the device, and `verify-rootfs.sh` checks the packages,
-tools, enabled user unit, disabled container service and empty
-`/var/lib/waydroid`.
+`image/tests/test_t715_android_setup.sh`, `image/tests/test_t715_android.sh`,
+and `image/tests/test_t715_android_launchd.sh` test the tools off the device,
+and `verify-rootfs.sh` checks the packages, tools, enabled user unit, disabled
+container service and empty `/var/lib/waydroid`.
 
 ## Installing software
 
