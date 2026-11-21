@@ -706,10 +706,23 @@ assert not cfg.has_option("properties", "ro.sf.lcd_density")
 assert cfg.get("custom", "ExtraOption") == "untouched"
 PY
 
+# The init .rc that boots Android past androidboot.mode=charger
+CHARGER_RC=$(find "$t" -path '*/system/etc/init/t715-charger.rc' | head -1)
+[ -n "$CHARGER_RC" ] || fail "(e) configure installs system/etc/init/t715-charger.rc in the overlay"
+grep -qx 'on charger' "$CHARGER_RC" || fail "(e) charger rc has the 'on charger' trigger"
+grep -qx '    trigger late-init' "$CHARGER_RC" || fail "(e) charger rc chains late-init"
+[ "$(stat -c %a "$CHARGER_RC" 2>/dev/null || stat -f %Lp "$CHARGER_RC")" = 644 ] \
+    || fail "(e) charger rc is mode 644"
+
 # Second run: idempotent, nothing to change, no upgrade call
 run_as configure
 [ "$RC" = 0 ] || fail "(e) second configure exits 0 (got $RC)"
 [ "$(cat "$t/out")" = "nothing to change" ] || fail "(e) second run says nothing to change"
+[ -f "$CHARGER_RC" ] || fail "(e) charger rc kept by the second run"
+: > "$CHARGER_RC"
+run_as configure
+[ "$RC" = 0 ] || fail "(e) configure with a damaged charger rc exits 0 (got $RC)"
+grep -qx '    trigger late-init' "$CHARGER_RC" || fail "(e) damaged charger rc restored"
 [ ! -s "$t/waydroid.log" ] || fail "(e) second run does not call waydroid upgrade"
 
 # T715_ANDROID_LOW_RAM=0 leaves ro.config.low_ram alone (absent or existing)
@@ -717,6 +730,7 @@ write_cfg_fixture
 clear_logs
 RC=0
 env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
     T715_ANDROID_SYSFS="$S" \
     T715_ANDROID_DEV="$D" \
     T715_ANDROID_TMP="$TMP" \
@@ -748,6 +762,7 @@ PY
 clear_logs
 RC=0
 env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
     T715_ANDROID_SYSFS="$S" \
     T715_ANDROID_DEV="$D" \
     T715_ANDROID_TMP="$TMP" \
@@ -775,6 +790,7 @@ run_as configure
 clear_logs
 RC=0
 env T715_ANDROID_CFG="$CFG" \
+    T715_ANDROID_OVERLAY="$OVERLAY" \
     T715_ANDROID_SYSFS="$S" \
     T715_ANDROID_DEV="$D" \
     T715_ANDROID_TMP="$TMP" \

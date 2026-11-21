@@ -32,7 +32,10 @@
 # and `ro.config.low_ram = true` (opt-out via `T715_ANDROID_LOW_RAM=0`) under
 # `[properties]` (plus `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set),
 # preserving every other section, key and key case, and runs `waydroid upgrade
-# --offline` only when the configuration changed.  Multi-window stays off on
+# --offline` only when the configuration changed.  It also installs
+# `system/etc/init/t715-charger.rc` into Waydroid's overlay, so that Android
+# still boots when the tablet was started with a cable in (see
+# `install_charger_rc`).  Multi-window stays off on
 # purpose:
 # `waydroid app launch` still gives each app its own Wayland window (class
 # `waydroid.<package>`), full size and without Android's caption bar, and
@@ -521,6 +524,36 @@ find_panfrost_node() {
     return 1
 }
 
+# sboot puts androidboot.mode=charger on the kernel command line when the
+# tablet starts with a cable in.  Linux ignores it, but Android's init reads
+# the same /proc/cmdline inside the container, fires its "charger" trigger
+# instead of "late-init" and stops there: no zygote, so no app ever opens
+# (seen 2026-11-21 after a forced restart on the charger).  An init .rc in
+# Waydroid's overlay chains the normal boot onto that trigger.  Silent when
+# the file is already in place; read at the container's next start.
+install_charger_rc() {
+    local dir="$OVERLAY_DIR/system/etc/init" tmp
+    local dst="$dir/t715-charger.rc"
+
+    tmp=$(mktemp "$TMP_DIR/t715-charger-rc.XXXXXX") || return 1
+    cat > "$tmp" <<'RC'
+# SM-T715 (t715-android-setup configure): the host kernel command line says
+# androidboot.mode=charger after a start with a cable in; boot Android anyway.
+on charger
+    trigger late-init
+RC
+    if [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$tmp" "$dst"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    if ! install -d -m 0755 "$dir" || ! install -m 0644 "$tmp" "$dst"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
 cmd_configure() {
     local drm_dev rc=0
 
@@ -531,6 +564,11 @@ cmd_configure() {
 
     if ! drm_dev=$(find_panfrost_node); then
         printf 'configure: no panfrost DRM render node found under %s/class/drm\n' "$SYSFS" >&2
+        return 1
+    fi
+
+    if ! install_charger_rc; then
+        printf 'configure: failed to install %s/system/etc/init/t715-charger.rc\n' "$OVERLAY_DIR" >&2
         return 1
     fi
 

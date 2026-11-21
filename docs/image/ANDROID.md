@@ -399,6 +399,18 @@ Reference tablet: `VANILLA` (without Google apps) on 2026-11-20
   so `lmkd` reads 0 kB cache and kills apps in a loop. Run
   `sudo t715-android-setup configure` to set `ro.lmk.use_minfree_levels = false`
   (pressure/PSI mode).
+- **No Android app opens after a start with a cable in** (the tile says
+  running, the launcher logs `Failed to get service waydroidplatform`, the
+  container holds about ten processes and no `zygote`): sboot puts
+  `androidboot.mode=charger` on the kernel command line when the tablet starts
+  on a charger or USB cable. Linux ignores it, but Android's `init` reads the
+  same line inside the container, fires its `charger` trigger instead of
+  `late-init`, and stops. `t715-android-setup configure` installs
+  `system/etc/init/t715-charger.rc` in Waydroid's overlay, which chains
+  `late-init` onto that trigger; run it, then restart Android
+  (`t715-android stop`, `t715-android start`). `ro.bootmode` still reads
+  `charger` inside Android. Seen on 2026-11-21 after a forced restart on the
+  cable; a start without the cable does not show it.
 - **`waydroid prop get/set` says "session is stopped"**: it was run as root.
   Run it as the session user (`alarm`), where Waydroid's session D-Bus service
   lives.
