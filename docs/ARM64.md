@@ -10,7 +10,7 @@ to download and flash**. This page says where it stands, for two kinds of reader
 
 | Brick | Where | What it holds |
 |---|---|---|
-| **The boot** | [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), a fork of [bnuuyloader](https://github.com/meowybnuuy/bnuuyloader) | what makes the tablet start a 64-bit kernel: a loader placed in PARAM through the boot logo vulnerability CVE-2026-21155; the kernel patches for 64 bits; the rescue; what was found about this tablet's bootloader |
+| **The boot** | [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), a fork of [bnuuyloader](https://github.com/meowybnuuy/bnuuyloader): its first pre-release is [0.9.0](https://github.com/elkir0/bnuuyloader/releases/tag/t715-0.9.0) | what makes the tablet start a 64-bit kernel: a loader placed in PARAM through the boot logo vulnerability CVE-2026-21155; the kernel patches for 64 bits; the rescue; what was found about this tablet's bootloader |
 | **The system** | the 64-bit Omarchy image: its sources are in the fork today (`t715/rootfs/`); the plan is to build and release it from this repository | Omarchy 4.5 for 64 bits: the build, the packages patched for the tablet, the tests |
 
 ## 1. For whoever wants arm64 and nothing else

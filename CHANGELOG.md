@@ -9,7 +9,8 @@
   the release's images do not have it ([boot/README.md](boot/README.md), "The loader's rescue").
 - **The 64-bit port, a page.** [docs/ARM64.md](docs/ARM64.md): where it stands, for whoever
   wants it without reading more (nothing to download yet) and for power users. The 64-bit
-  port itself is not released.
+  port itself is not released; its boot brick has a first pre-release, bnuuyloader's 0.9.0
+  (the sources).
 
 ## 1.0.5, pre-release
 
