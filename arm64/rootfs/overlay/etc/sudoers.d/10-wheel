@@ -1,0 +1,3 @@
+# Members of wheel administer the tablet without a password (as the owner's
+# armv7h image does): the user's placeholder password is not meant to be typed.
+%wheel ALL=(ALL:ALL) NOPASSWD: ALL

@@ -1,0 +1,40 @@
+# Omarchy 4.5.0-3 migrations held on the SM-T715 arm64 image (one migration
+# file name per line, an optional " # reason"; sorted). Consumed by
+# /usr/local/bin/t715-omarchy-migrations-hold, installed with this list as
+# /usr/share/t715-omarchy/omarchy-migrations.hold.
+#
+# A fresh image marks every shipped migration done for its user (as Omarchy's
+# installer does for a new user): nothing is pending, no login notice. This
+# list matters after an in-place Omarchy upgrade: run
+# t715-omarchy-migrations-hold as the user before omarchy-migrate, and these
+# are marked done without running. The list and its reasons are the owner's
+# other tablet port's (Lenovomarchy, image/rootfs/omarchy-migrations.hold, its
+# docs/research/omamobile/M3-MIGRATIONS.md), checked against this image: no
+# mise, no fcitx5 CJK engines, no base-devel, no power-profiles-daemon (CPU
+# frequencies are the kernel's here), no packages that only pkgs.omarchy.org
+# serves, and the omamobile bar instead of Omarchy's.
+1786719479.sh # writes broken mise wrapper for agy (no mise on the tablet); unreviewed agent CLI
+1786967403.sh # writes broken mise wrapper for kimi; no mise on the tablet
+1787215824.sh # writes broken mise wrapper for hey; no mise on the tablet
+1787342993.sh # writes broken mise wrapper for ori; no mise on the tablet
+1788129995.sh # installs omasnap (and drops satty/tensaku); pkgs.omarchy.org only
+1788595060.sh # registers native messaging hosts for Brave Origin; browser not installed
+1788941927.sh # writes broken mise wrapper for basecamp; no mise on the tablet
+1789310715.sh # writes broken mise wrapper for cf; no mise on the tablet
+1789764927.sh # installs owe + owe-lockfeed, enables owed.service; pkgs.omarchy.org only
+1790042972.sh # puts Elsewhen clock on the bar; the tablet runs the omamobile bar (upstream holds it too)
+1790539857.sh # installs monologue; pkgs.omarchy.org only
+1790542069.sh # installs hype; pkgs.omarchy.org only
+1790702362.sh # installs base-devel + Qt6 dev stack (~hundreds of MB); unused on a touch tablet
+1790863209.sh # writes broken mise wrapper for grok; no mise on the tablet
+1791112479.sh # runs `mise reshim`; mise not installed, migration would fail
+1791345484.sh # installs disktree-bin; pkgs.omarchy.org only
+1791367434.sh # installs fcitx5 CJK stack + configures input method; the tablet uses squeekboard (upstream holds fcitx)
+1791382872.sh # switches default agents to mise lazy shims; mise not installed, migration would fail
+1791403310.sh # installs omarchy-hyprland-titlebars; pkgs.omarchy.org only, pinned to Omarchy's Hyprland build
+1791554699.sh # swaps power-profiles-daemon for omarchy-power-profiles-daemon; pkgs.omarchy.org only, this image has no power-profiles-daemon at all (the rule of docs/hardware/CPUFREQ.md on frequencies and voltages)
+1791708587.sh # installs signed; pkgs.omarchy.org only
+1792020559.sh # themes fcitx5 candidate window; no fcitx5 input engines on the tablet, writes stray config
+1792041364.sh # installs gliff on aarch64; pkgs.omarchy.org only
+1792343099.sh # runs `mise unuse node@latest`; mise not installed, migration would fail
+1792504295.sh # runs `mise reshim --system`; mise not installed, migration would fail

@@ -1,0 +1,13 @@
+[Unit]
+Description=Screen off after two minutes idle (SM-T715: hypridle signals t715-keys)
+Documentation=file:///usr/share/t715-omarchy/hypridle.conf
+PartOf=graphical-session.target
+After=graphical-session.target t715-keys.service
+
+[Service]
+ExecStart=/usr/bin/hypridle -c /usr/share/t715-omarchy/hypridle.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

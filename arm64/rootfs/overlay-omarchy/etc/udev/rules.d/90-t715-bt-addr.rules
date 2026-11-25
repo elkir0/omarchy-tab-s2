@@ -1,0 +1,3 @@
+# SM-T715: the BCM4358 controller comes up without a usable address;
+# t715-bt-addr gives it a stable generated one (see that script).
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", ENV{DEVTYPE}=="host", TAG+="systemd", ENV{SYSTEMD_WANTS}+="t715-bt-addr@%k.service"

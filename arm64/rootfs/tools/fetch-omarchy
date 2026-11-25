@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# fetch-omarchy — Omarchy's own packages for aarch64 into the local pacman
+# repository out/repo/aarch64 ([t715-omarchy]), for the arm64 image.
+#
+# Adapted from omarchy-tab-s2/image/tools/repack-omarchy (read-only),
+# which does the same for armv7h and must retag what it downloads. Here
+# nothing is retagged: Omarchy publishes these packages for aarch64, so they
+# are taken exactly as published, with their signatures.
+#
+#   1. omarchy-pins (name<TAB>upstream_filename<TAB>sha256): downloads exactly
+#      these files from https://pkgs.omarchy.org/stable/aarch64, checks each
+#      against its pinned sha256.  A pinned file the channel no longer serves
+#      is taken from one of the owner's caches (read-only, same pin), when it
+#      is there: omarchy-tab-s2/image/cache/omarchy-upstream/stable/
+#      aarch64, then Lenovomarchy/cache/omarchy-upstream/stable/aarch64.
+#      Why pins: Omarchy 4.5.0-3 (since 2026-11-24; 4.0.6-1 before) is the
+#      version Omarchy Mobile's patch series is checked against, and the one
+#      the owner's other tablet (Lenovomarchy) runs: the channel moves on.
+#   2. Verifies every signature in the dev container against the keys of
+#      omarchy-keyring itself, and refuses a keyring that trusts a key not
+#      listed in omarchy-trusted.fpr (so a key change upstream fails loudly
+#      instead of being taken on trust from the package that carries it).
+#   3. Copies the packages and their signatures into out/repo/aarch64/ and
+#      indexes the repository there (repo-add, in the container): every
+#      *.pkg.tar.zst of the directory, Omarchy's and the ones built here by
+#      tools/build-pkg.
+#
+# Usage: tools/fetch-omarchy [--force] [-h|--help]
+#   --force  download and verify everything again, rebuild the index
+# Idempotent: a rerun downloads nothing and leaves the repository as it is.
+# The macOS host only moves whole package files: nothing is ever extracted
+# on it.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+LOG_TAG=omarchy
+
+PINS="$ROOTFS_DIR/omarchy-pins"
+PINNED_FILE="$ROOTFS_DIR/omarchy-trusted.fpr"
+UP_CACHE="$CACHE_DIR/omarchy-aarch64"
+OWNER_CACHE="$OWNER_REPO/image/cache/omarchy-upstream/stable/aarch64"
+LENOVO_CACHE="${T715_OMARCHY_CACHE:-}"
+BASE_URL="https://pkgs.omarchy.org/stable/aarch64"
+
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        *) die "unknown option: $1 (see --help)" ;;
+    esac
+done
+
+# ---------------------------------------------------------------- read pins
+# TSV: name, upstream_filename, sha256. Comment lines and blanks are skipped;
+# anything else is refused rather than half-honoured.
+NAMES=() FNS=() SHAS=()
+while IFS=$'\t' read -r pline; do
+    pline="${pline%%#*}"
+    [ -n "${pline//[[:space:]]/}" ] || continue
+    n="${pline%%$'\t'*}"
+    entry="$(printf '%s' "$pline" | awk -F'\t' 'NF == 3 { print $2 "\t" $3; ok = 1 }
+                                                 END { exit ok ? 0 : 3 }')" \
+        || die "$PINS: malformed line (need name<TAB>filename<TAB>sha256): $pline"
+    fn="${entry%%$'\t'*}"; sha="${entry#*$'\t'}"
+    case "$n" in *[!a-z0-9@._+-]*) die "invalid package name in $PINS: $n" ;; esac
+    case "$fn" in *.pkg.tar.zst) ;; *) die "$PINS: $n: not a package filename: $fn" ;; esac
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "$PINS: $n: bad sha256: $sha"
+    NAMES+=("$n"); FNS+=("$fn"); SHAS+=("$sha")
+done < "$PINS"
+[ "${#NAMES[@]}" -gt 0 ] || die "empty pins file: $PINS"
+have_keyring=0
+keyring_fn=""
+for i in "${!NAMES[@]}"; do
+    [ "${NAMES[$i]}" != omarchy-keyring ] || { have_keyring=1; keyring_fn="${FNS[$i]}"; }
+done
+[ "$have_keyring" = 1 ] || die "$PINS must list omarchy-keyring: signature verification uses its keys"
+
+PINNED_FPRS="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$PINNED_FILE" | grep -E '^[0-9A-F]{40}$' || true)"
+[ -n "$PINNED_FPRS" ] || die "no pinned fingerprint in $PINNED_FILE"
+
+# ------------------------------------------------------------- download phase
+mkdir -p "$UP_CACHE" "$REPO_DIR"
+downloaded=0
+for i in "${!NAMES[@]}"; do
+    n="${NAMES[$i]}"; fn="${FNS[$i]}"; sha="${SHAS[$i]}"
+    f="$UP_CACHE/$fn"
+    if [ "$FORCE" = 1 ]; then rm -f "$f" "$f.sig"; fi
+    if [ ! -f "$f" ]; then
+        log "$n: downloading $fn"
+        rm -f "$f.part"
+        if curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors -o "$f.part" "$BASE_URL/$fn"; then
+            mv -f "$f.part" "$f"
+        else
+            rm -f "$f.part"
+            # The channel moved on: an owner's cache has the pinned file (same pin).
+            found=""
+            for c in "$OWNER_CACHE" "$LENOVO_CACHE"; do
+                if [ -f "$c/$fn" ] && [ "$(sha256_of "$c/$fn")" = "$sha" ]; then found="$c"; break; fi
+            done
+            if [ -n "$found" ]; then
+                log "$n: $fn no longer on the channel; copying it from $found (read-only)"
+                cp -f "$found/$fn" "$f"
+                [ ! -f "$found/$fn.sig" ] || cp -f "$found/$fn.sig" "$f.sig"
+            else
+                die "$n: pinned file $fn is neither on $BASE_URL nor in the owner's caches: update omarchy-pins"
+            fi
+        fi
+        downloaded=$((downloaded + 1))
+    fi
+    [ "$(sha256_of "$f")" = "$sha" ] || die "$n: sha256 mismatch for $fn (pin $sha, file $(sha256_of "$f")): refusing"
+    if [ ! -f "$f.sig" ]; then
+        log "$n: downloading $fn.sig"
+        curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors -o "$f.sig.part" "$BASE_URL/$fn.sig" \
+            || die "download of $fn.sig failed (cannot verify $fn)"
+        mv -f "$f.sig.part" "$f.sig"
+    fi
+done
+if [ "$downloaded" = 0 ]; then log "all ${#NAMES[@]} packages cached (sha256 verified against the pins)"
+else log "downloaded $downloaded package(s)"; fi
+
+# ------------------------------------------- signatures (in the dev container)
+# stdout: one "VERIFIED<TAB>name<TAB>filename<TAB>arch" per package.
+verify_container() {
+    docker run --rm -i --platform "$PLATFORM" -v "$UP_CACHE:/upstream:ro" \
+        -e KEYRING_FN="$keyring_fn" -e PINNED_FPRS="$PINNED_FPRS" \
+        "$DEV_IMAGE" bash -s <<'EOS'
+set -euo pipefail
+WORK=$(mktemp -d); GHOME=$WORK/gnupg
+mkdir -m 700 -p "$GHOME" "$WORK/kr"
+# Keys come from the downloaded omarchy-keyring package itself, the same
+# bootstrap pacman-key --populate uses on a real system.
+bsdtar -xf "/upstream/$KEYRING_FN" -C "$WORK/kr" usr/share/pacman/keyrings
+krd="$WORK/kr/usr/share/pacman/keyrings"
+gpg --homedir "$GHOME" --batch --quiet --import "$krd/omarchy.gpg"
+trusted="$(cat "$krd/omarchy-trusted")"
+# The keyring vouches for itself, so pin it: every key it trusts must be one
+# of omarchy-trusted.fpr.
+while IFS=: read -r fpr _; do
+    [ -n "$fpr" ] || continue
+    if ! printf '%s\n' "$PINNED_FPRS" | grep -qx "$fpr"; then
+        echo "UNPINNED KEY: omarchy-keyring trusts $fpr, not listed in omarchy-trusted.fpr" >&2
+        exit 1
+    fi
+done <<< "$trusted"
+
+verify_sig() { # PKG: 0 iff it has a good signature by a key omarchy-trusted lists
+    local st fpr
+    st="$(gpg --homedir "$GHOME" --status-fd 1 --verify "$1.sig" "$1" 2>/dev/null || true)"
+    if printf '%s\n' "$st" | grep -q 'EXPKEYSIG\|REVKEYSIG'; then return 1; fi
+    printf '%s\n' "$st" | grep -q '^\[GNUPG:\] GOODSIG' || return 1
+    fpr="$(printf '%s\n' "$st" | sed -n 's/^\[GNUPG:\] VALIDSIG \([0-9A-F]\{40\}\) .*/\1/p' | head -n1)"
+    [ -n "$fpr" ] || return 1
+    printf '%s\n' "$trusted" | grep -q "^$fpr:"
+}
+# The plan is /upstream/.plan.tsv (one "name<TAB>filename" per line): docker
+# run hands the container no descriptor but the standard three, and stdin is
+# this script itself.
+while IFS=$'\t' read -r name fn; do
+    [ -n "$name" ] || continue
+    verify_sig "/upstream/$fn" || { echo "SIGNATURE VERIFICATION FAILED: $fn (against omarchy-keyring)" >&2; exit 1; }
+    arch="$(bsdtar -xOf "/upstream/$fn" .PKGINFO | sed -n 's/^arch = //p' | head -n1)"
+    case "$arch" in any|aarch64) ;; *) echo "$fn: unexpected arch '$arch'" >&2; exit 1 ;; esac
+    printf 'VERIFIED\t%s\t%s\t%s\n' "$name" "$fn" "$arch"
+done < /upstream/.plan.tsv
+rm -rf "$WORK"
+EOS
+}
+
+# ------------------------------------------------- verify, copy into the repository
+# MANIFEST-omarchy.tsv records what was imported (name, filename, sha256, arch).
+MANIFEST="$REPO_DIR/MANIFEST-omarchy.tsv"
+sha_of_pin() { # NAME -> the pinned sha256
+    local i
+    for i in "${!NAMES[@]}"; do
+        [ "${NAMES[$i]}" = "$1" ] && { printf '%s\n' "${SHAS[$i]}"; return 0; }
+    done
+    return 1
+}
+imported_ok() { # 0 iff the manifest is today's pin set and its files are intact
+    local n fn sha arch
+    [ -f "$MANIFEST" ] || return 1
+    [ "$(wc -l < "$MANIFEST" | tr -d ' ')" = "$(( ${#NAMES[@]} + 1 ))" ] || return 1
+    while IFS=$'\t' read -r n fn sha arch; do
+        [ -n "$n" ] || continue
+        [ -f "$REPO_DIR/$fn" ] && [ -f "$REPO_DIR/$fn.sig" ] || return 1
+        [ "$(sha256_of "$REPO_DIR/$fn")" = "$sha" ] || return 1
+        [ "$(sha_of_pin "$n")" = "$sha" ] || return 1
+    done < <(tail -n +2 "$MANIFEST")
+}
+if [ "$FORCE" = 0 ] && imported_ok; then
+    log "Omarchy's ${#NAMES[@]} packages already in $REPO_DIR (signatures verified at their import)"
+else
+    log "verifying signatures in $DEV_IMAGE"
+    # The plan travels in the directory the container already mounts.
+    PLAN="$UP_CACHE/.plan.tsv"
+    VERIFIED="$CACHE_DIR/omarchy-plan.verified"
+    rm -f "$PLAN"
+    for i in "${!NAMES[@]}"; do printf '%s\t%s\n' "${NAMES[$i]}" "${FNS[$i]}" >> "$PLAN"; done
+    verify_container > "$VERIFIED" || { rm -f "$PLAN"; die "signature verification failed"; }
+    rm -f "$PLAN"
+    [ -s "$VERIFIED" ] || die "the verification reported nothing"
+    # Files of an earlier import (recorded by us, never anyone else's).
+    if [ -f "$MANIFEST" ]; then
+        while IFS=$'\t' read -r n fn _sha _arch; do
+            [ -n "$n" ] && rm -f "$REPO_DIR/$fn" "$REPO_DIR/$fn.sig"
+        done < <(tail -n +2 "$MANIFEST")
+    fi
+    {
+        printf 'name\tfilename\tsha256\tarch\n'
+        while IFS=$'\t' read -r tag n fn arch; do
+            [ "$tag" = VERIFIED ] || die "bad line from the verification: $tag $n"
+            cp -f "$UP_CACHE/$fn" "$REPO_DIR/$fn"
+            cp -f "$UP_CACHE/$fn.sig" "$REPO_DIR/$fn.sig"
+            printf '%s\t%s\t%s\t%s\n' "$n" "$fn" "$(sha_of_pin "$n")" "$arch"
+        done < "$VERIFIED"
+    } > "$MANIFEST.tmp"
+    mv -f "$MANIFEST.tmp" "$MANIFEST"
+    rm -f "$VERIFIED"
+    FORCE=1   # the package set may have changed: rebuild the index
+fi
+
+# ---------------------------------------------------------------- repository
+# The index must list every package file of the directory, and nothing else.
+repo_ok() {
+    [ -f "$REPO_DIR/t715-omarchy.db.tar.gz" ] && [ -L "$REPO_DIR/t715-omarchy.db" ] || return 1
+    local want got
+    # -E: BSD sed (macOS) has no \| alternation in its basic expressions.
+    want="$(printf '%s\n' "$REPO_DIR"/*.pkg.tar.zst | sed -E 's|.*/||; s/-(aarch64|any|armv7h)\.pkg\.tar\.zst$//' | sort)"
+    got="$(tar -tzf "$REPO_DIR/t715-omarchy.db.tar.gz" | sed -n 's|^\(.*\)/desc$|\1|p' | sort)"
+    [ "$want" = "$got" ]
+}
+if [ "$FORCE" = 1 ] || ! repo_ok; then
+    log "indexing $REPO_DIR (repo-add)"
+    docker run --rm -i --platform "$PLATFORM" -v "$REPO_DIR:/repo" "$DEV_IMAGE" bash -s >&2 <<'EOS' || die "repo-add failed"
+set -euo pipefail
+shopt -s nullglob
+cd /repo
+pkgs=( *.pkg.tar.zst )
+[ "${#pkgs[@]}" -gt 0 ] || { echo "no packages in /repo" >&2; exit 1; }
+rm -f t715-omarchy.db t715-omarchy.db.tar.gz t715-omarchy.files t715-omarchy.files.tar.gz
+repo-add -q t715-omarchy.db.tar.gz "${pkgs[@]}"
+rm -f t715-omarchy.db.tar.gz.old t715-omarchy.files.tar.gz.old
+echo "repo-add: ${#pkgs[@]} package(s) indexed" >&2
+EOS
+    repo_ok || die "the index does not list the packages of $REPO_DIR"
+else
+    log "index already up to date"
+fi
+log "$REPO_DIR ready: $(printf '%s\n' "$REPO_DIR"/*.pkg.tar.zst | wc -l | tr -d ' ') package(s)"

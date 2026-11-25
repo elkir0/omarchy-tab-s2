@@ -1,0 +1,109 @@
+SM-T715 tablet: the edge swipe does what the Back key does.
+
+Past the on-screen keyboard and the shell's own surfaces (upstream's
+BackLink, unchanged), Back asks t715-keys, the Back key's handler, with
+SIGHUP: it closes a sheet or the drawer, is the previous page in a browser
+and Escape elsewhere. When t715-keys is not running, upstream's Escape (by
+wtype, or Hyprland's dispatcher by key code; Home for a terminal) runs, as
+BackModel.BACK_ARGV's fallback. The SM-T715's 0.2.94 series' 0009, rebased:
+upstream fixed the "key not found" of an Escape by name since, so the
+fallback is kept. test/back-model.js gains the check; test/all and
+test/back-surfaces.py follow. Against omarchy-mobile 8991845 (omamobile-shell
+0.2.147), after 0001-0007.
+
+diff --git a/plugins/omamobile.back/Back.qml b/plugins/omamobile.back/Back.qml
+index ddb68fc..5e6e72e 100644
+--- a/plugins/omamobile.back/Back.qml
++++ b/plugins/omamobile.back/Back.qml
+@@ -15,6 +15,8 @@ import "BackLink.js" as BackLink
+ // and the shell's own sheets and drawer, which all close on Escape. An app
+ // goes back one level on it, and at its top level asks for the home screen
+ // (omamobile-home), as Back at an app's first screen does on Android.
++// SM-T715 tablet: past the keyboard and the shell's own surfaces, "back" is
++// the Back key's, in t715-keys (BackModel.BACK_ARGV), Escape without it.
+ //
+ // Each edge is a thin strip on the Overlay layer, like the home pill: its
+ // window is wide enough to draw the arrow that follows the finger, but its
+@@ -49,7 +51,7 @@ Item {
+       console.log("omamobile-back:", used)
+       return used
+     }
+-    Quickshell.execDetached(BackModel.ESCAPE_ARGV)
++    Quickshell.execDetached(BackModel.BACK_ARGV)
+     return "ok"
+   }
+ 
+diff --git a/plugins/omamobile.back/BackModel.js b/plugins/omamobile.back/BackModel.js
+index 2fc787f..a0661ef 100644
+--- a/plugins/omamobile.back/BackModel.js
++++ b/plugins/omamobile.back/BackModel.js
+@@ -40,6 +40,14 @@ var ESCAPE_ARGV = ["sh", "-c",
+                    'hyprctl dispatch "$1" >/dev/null; sleep 0.05; hyprctl dispatch "$2" >/dev/null',
+                    "sh", ESCAPE_DOWN, ESCAPE_UP, TERMINALS.join(" ")]
+ 
++// SM-T715 tablet: Back is the Back key's, in t715-keys (SIGHUP to its main
++// process): it closes a sheet or the drawer, is the previous page in a
++// browser and Escape elsewhere, so the swipe and the key do one thing. When
++// t715-keys is not running (systemctl kill fails), the Escape above runs.
++var BACK_ARGV = ["sh", "-c",
++                 'systemctl --user kill --kill-whom=main --signal=SIGHUP t715-keys.service 2>/dev/null || exec "$@"',
++                 "sh"].concat(ESCAPE_ARGV)
++
+ // Home, for an app at its top level: Back is phone-wide, so an app goes back
+ // one level on Escape while it has one, and at its top level runs this
+ // command (bin/omamobile-home: the empty workspace and the home page, as the
+@@ -74,7 +82,7 @@ function inwardFor(rightEdge, translationX) {
+ 
+ if (typeof module !== "undefined") {
+   module.exports = { TERMINALS: TERMINALS, isTerminal: isTerminal,
+-    ESCAPE_DOWN: ESCAPE_DOWN, ESCAPE_UP: ESCAPE_UP, ESCAPE_ARGV: ESCAPE_ARGV, HOME_ARGV: HOME_ARGV, THRESHOLD: THRESHOLD,
++    ESCAPE_DOWN: ESCAPE_DOWN, ESCAPE_UP: ESCAPE_UP, ESCAPE_ARGV: ESCAPE_ARGV, BACK_ARGV: BACK_ARGV, HOME_ARGV: HOME_ARGV, THRESHOLD: THRESHOLD,
+     progress: progress, fires: fires, inwardFor: inwardFor
+   }
+ }
+diff --git a/test/all b/test/all
+index 0b80220..4f53ec1 100755
+--- a/test/all
++++ b/test/all
+@@ -112,7 +112,7 @@ for sc in 3 '8 \/ 3'; do
+   t=$(printf 'local omarchy_monitor_scale = 2\n' | sed "s/^local omarchy_monitor_scale = .*/local omarchy_monitor_scale = $sc/")
+   [[ $t == 'local omarchy_monitor_scale = 3' || $t == 'local omarchy_monitor_scale = 8 / 3' ]] || fail "the seeded scale line ($t)"
+ done
+-grep -c 'Quickshell.execDetached(BackModel.ESCAPE_ARGV)' "$b" >/dev/null || fail "back sends Escape through BackModel"
++grep -c 'Quickshell.execDetached(BackModel.BACK_ARGV)' "$b" >/dev/null || fail "back goes through BackModel (SM-T715: t715-keys, then Escape)"
+ grep -c 'WlrLayershell.namespace: "omamobile-back"' "$b" >/dev/null || fail "back strips' namespace"
+ grep -c 'mask: Region { item: strip }' "$b" >/dev/null || fail "only the edge strip takes touches"
+ grep -c 'exclusionMode: ExclusionMode.Normal' "$b" >/dev/null || fail "back strips stay clear of the bar and the keyboard"
+diff --git a/test/back-model.js b/test/back-model.js
+index 975f736..7e73784 100644
+--- a/test/back-model.js
++++ b/test/back-model.js
+@@ -24,6 +24,15 @@ test("Escape goes through a virtual keyboard, with Hyprland's dispatcher (down t
+   assert.ok(script.indexOf("sleep 0.05") < script.indexOf('hyprctl dispatch "$2"'))
+ })
+ 
++// SM-T715 tablet: the swipe asks t715-keys first (the Back key's handler),
++// and runs the Escape above, unchanged, only when that fails.
++test("Back is t715-keys' SIGHUP, with the Escape as its fallback", () => {
++  const [sh, c, script, name, ...rest] = M.BACK_ARGV
++  assert.deepStrictEqual([sh, c, name], ["sh", "-c", "sh"])
++  assert.strictEqual(script, 'systemctl --user kill --kill-whom=main --signal=SIGHUP t715-keys.service 2>/dev/null || exec "$@"')
++  assert.deepStrictEqual(rest, M.ESCAPE_ARGV)
++})
++
+ // The script itself, against stand-ins on a private PATH: what runs for a
+ // terminal, for another app, with nothing focused, and without wtype.
+ test("a terminal gets no Escape: Back goes home; every other window gets the virtual keyboard's Escape", () => {
+diff --git a/test/back-surfaces.py b/test/back-surfaces.py
+index 3925873..6f054e4 100755
+--- a/test/back-surfaces.py
++++ b/test/back-surfaces.py
+@@ -164,7 +164,7 @@ TestCase {
+     compare(sent(), 0, "nothing went to the app under " + label)
+     compare(back(), "ok")
+     compare(sent(), 1)
+-    compare(JSON.stringify(Quickshell.executed[0]), JSON.stringify(BackModel.ESCAPE_ARGV))
++    compare(JSON.stringify(Quickshell.executed[0]), JSON.stringify(BackModel.BACK_ARGV))
+   }
+ 
+   function test_keyboard() { alone(make(kb), "keyboard", function(o) { o.fake.oskOpen = true }, "hideKeyboard") }

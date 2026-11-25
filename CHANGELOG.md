@@ -7,6 +7,11 @@
   `boot/build-initramfs.sh --paramrescue` looks at PARAM at each boot and, when the loader it
   finds there is not one known to work, writes the one that is and restarts. Off by default;
   the release's images do not have it ([boot/README.md](boot/README.md), "The loader's rescue").
+- **The 64-bit Omarchy image, here.** [arm64/](arm64/README.md): the sources of the Omarchy 4.5
+  image for arm64 that the reference tablet runs, moved from the fork elkir0/bnuuyloader and
+  brought to its state of 2026-11-25: omarchy-mobile's head with the modem's interface, Voxtype
+  rebuilt for the tablet's ARMv8.0 CPU, the voice bar in the user's language, a first-run
+  onboarding with the AI apps, the CPU audit (`arm64/tools/t715-isa-audit`). Not released.
 - **The 64-bit port, a page.** [docs/ARM64.md](docs/ARM64.md): where it stands, for whoever
   wants it without reading more (nothing to download yet) and for power users. The 64-bit
   port itself is not released; its boot brick has a first pre-release, bnuuyloader's 0.9.0

@@ -1,0 +1,64 @@
+# Omarchy base packages left out of the SM-T715 arm64 image on purpose.
+#
+# The image installs Omarchy's own list, install/omarchy-base.packages of the
+# installed omarchy package, minus the names below. One name per line,
+# "name  # reason"; the reason is copied into the MANIFEST. Names of Omarchy's
+# list that no aarch64 repository serves (the AUR ones, and those Omarchy
+# publishes for x86_64 only) are left out automatically and listed in the
+# MANIFEST as unavailable, so they need no line here.
+# Adapted from omarchy-tab-s2/image/rootfs/packages.omarchy-skip.
+
+# --- Heavy desktop applications: not needed by the session or the shell ---
+libreoffice-fresh       # office suite, the biggest package of the list
+kdenlive                # video editor
+obs-studio              # screen recording and streaming (not in the aarch64 repositories either)
+xournalpp               # handwritten notes
+moonlight-qt            # game streaming client
+gpu-screen-recorder     # needs VAAPI/NVENC/Vulkan encoders; none on Mali-T760
+
+# --- Containers: no container runtime in this test image ---
+docker                  # Omarchy's setup would enable docker.socket
+docker-buildx           # Docker plugin
+docker-compose          # Docker plugin
+lazydocker              # Docker TUI, useless without docker
+ufw-docker              # ufw rules for Docker; depends on docker
+
+# --- Toolchains, interpreters and database client libraries ---
+clang                   # C/C++ toolchain
+llvm                    # LLVM toolchain (mesa only needs llvm-libs, which stays)
+ruby                    # Ruby interpreter
+tobi-try                # Omarchy's "try" helper, written in Ruby: would pull ruby back in
+luarocks                # Lua package manager
+lua51                   # Lua 5.1 for luarocks/Neovim plugins, not used by the session
+mariadb-libs            # MariaDB client library
+postgresql-libs         # PostgreSQL client library
+
+# --- OCR ---
+tesseract               # OCR engine (Omarchy's screenshot-to-text)
+tesseract-data-eng      # OCR language data
+
+# --- Printing: no printer on a tablet test image ---
+cups                    # print server
+cups-filters            # print filters
+cups-pk-helper          # polkit helper for CUPS
+system-config-printer   # printer settings GUI
+
+# --- Fonts ---
+noto-fonts-cjk          # CJK glyphs, several hundred MiB
+
+# --- Build-machine helpers ---
+kernel-modules-hook     # keeps the running kernel's modules across upgrades; this image has no kernel and no modules
+qemu-user-static-binfmt # runs other architectures' binaries: a build machine's job, not a tablet's
+
+# --- arm64 port: power management is the kernel's (the rule of docs/hardware/CPUFREQ.md on frequencies and voltages) ---
+power-profiles-daemon   # would switch CPU power profiles from Omarchy's Battery saver tile: nothing in this image may scale a frequency or a voltage
+
+# --- New in Omarchy 4.5's list (2026-11-24), left out as the owner's Lenovomarchy
+# --- port leaves them out (its image/rootfs/packages.omarchy-skip, M4-IMAGE-BUILD.md)
+base-devel              # a compiler toolchain nobody uses on a touch tablet (~250 MiB); migration 1790702362 is held for the same reason
+dotnet-runtime          # .NET runtime for apps the image does not install
+fcitx5-chewing          # CJK input engines (~1 GiB together): squeekboard is the input method, there is no hardware keyboard (migration 1791367434 held)
+fcitx5-chinese-addons   # CJK input engine (see fcitx5-chewing)
+fcitx5-hangul           # CJK input engine (see fcitx5-chewing)
+fcitx5-mozc             # CJK input engine (see fcitx5-chewing)
+fcitx5-table-extra      # CJK input engine (see fcitx5-chewing)

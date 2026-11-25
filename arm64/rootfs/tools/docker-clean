@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# docker-clean — remove from Docker what this build created, and nothing else.
+#
+#   images       t715-arm64-port-rootfs/* (alarm, dev, helper, base, omarchy)
+#   containers   t715-arm64-port-rootfs-*
+#   build cache  the BuildKit records that appeared since cache/buildkit-
+#                baseline.ids (written before the first image build) AND
+#                whose description names this build's steps. The owner's
+#                cache (52 GB before this work began) is never touched: no
+#                global prune, only records by their id.
+#   volumes      none to remove: this build keeps its caches in its own
+#                directory (cache/), not in Docker volumes.
+#
+#   build history  BuildKit keeps one record per build, and it holds references
+#                to the build's cache entries: nothing can be pruned while
+#                they last. Ours are named after the Dockerfile's stages,
+#                "context (rootfs-base)", "context (rootfs-omarchy)", and
+#                "lib/dev.Dockerfile"; others can be named on the command line.
+#
+# Usage: tools/docker-clean [--list] [--all-images] [--history REF ...]
+#   --list        show what would be removed, remove nothing
+#   --all-images  also t715-arm64-port-rootfs/alarm and /dev (the imported
+#                 tarball and the development image): a later build.sh
+#                 recreates them (it downloads and upgrades again)
+#   --history REF a build-history record of this build to remove as well (an
+#                 image built with `docker build` straight from a Dockerfile,
+#                as the helper image is, gets no name)
+# Without --all-images the base image stays too (a later build reuses its
+# layers) unless it does not exist.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+LOG_TAG=clean
+
+LIST=0
+ALL=0
+HISTORY=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list) LIST=1; shift ;;
+        --all-images) ALL=1; shift ;;
+        --history) HISTORY+=("${2:?--history needs a record ref}"); shift 2 ;;
+        -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        *) die "unknown option: $1 (see --help)" ;;
+    esac
+done
+docker_preflight
+
+# ------------------------------------------------------------------ containers
+owned_docker "$PREFIX-export" "$PREFIX-mkimage"
+containers="$(docker ps -a --format '{{.Names}}' | grep -E "^${PREFIX}-(export|mkimage|smoke)-" || true)"
+if [ -n "$containers" ]; then
+    log "containers:$(printf '%s\n' "$containers" | sed 's/^/ /')"
+    [ "$LIST" = 1 ] || docker rm -f $containers >/dev/null
+fi
+
+# ---------------------------------------------------------------------- images
+images="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E "^${PREFIX}/" || true)"
+if [ "$ALL" = 0 ]; then
+    images="$(printf '%s\n' "$images" | grep -vE "^${PREFIX}/(alarm|dev):" || true)"
+fi
+if [ -n "$images" ]; then
+    owned_docker $images
+    log "images:$(printf '%s\n' "$images" | sed 's/^/ /')"
+    if [ "$LIST" = 0 ]; then
+        # shellcheck disable=SC2086
+        docker image rm -f $images >/dev/null
+    fi
+fi
+
+# ----------------------------------------------------------------- build history
+hist="$(docker buildx history ls 2>/dev/null || true)"
+refs="$(printf '%s\n' "$hist" | awk '$2 == "context" && $3 ~ /^\(rootfs-(base|omarchy)\)$/ { print $1 }
+                                        $2 == "lib/dev.Dockerfile" { print $1 }')"
+for r in ${HISTORY[@]+"${HISTORY[@]}"}; do
+    refs="$refs
+$r"
+done
+refs="$(printf '%s\n' "$refs" | sed 's/\*$//' | sort -u | grep . || true)"
+if [ -n "$refs" ]; then
+    log "build history:$(printf '%s\n' "$refs" | sed 's/^/ /')"
+    if [ "$LIST" = 0 ]; then
+        # shellcheck disable=SC2086
+        docker buildx history rm $refs >/dev/null 2>&1 || warn "could not remove every build-history record"
+    fi
+fi
+
+# ----------------------------------------------------------------- build cache
+# Records of this build that appeared before the baseline was written (its
+# first development image, 2026-11-24): known by their ids. Not the layer of
+# the imported ALARM tarball: `docker import` of the very same tarball as the
+# owner's gives the same layer, which the owner's images share.
+EARLY_IDS="o3snt85z809m3pnpoee1swxsu i5f0o5bk7tkbb5yttdmp0fqpr 7k33o1g7ster5f3rngfhk19re"
+# The verbose listing: blocks that begin with "ID:" and hold "Size:",
+# "Description:", "Shared:" and "Last used:" lines.
+listing="$(docker buildx du --verbose 2>/dev/null || true)"
+new_ids="$(printf '%s\n' "$listing" | awk '/^ID:/ { print $2 }' | sed 's/\*$//' | sort -u \
+            | grep -vxFf "$CACHE_DIR/buildkit-baseline.ids" || true)"
+# This build's records: the descriptions of its steps. The generic "local
+# source for context/dockerfile" records (a few kilobytes) carry no name and
+# are left alone.
+mine() { # ID -> description if it is one of this build's
+    printf '%s\n' "$listing" | awk -v id="$1" '
+        /^ID:/ { show = ($2 == id || $2 == id "*") }
+        show && /^Description:/ { sub(/^Description: +/, ""); print; exit }'
+}
+total=0
+ids=()
+for id in $new_ids $EARLY_IDS; do
+    d="$(mine "$id")"
+    [ -n "$d" ] || continue
+    case "$d" in
+        *t715-arm64-port*|*"/t715/"*|*"cached mount /var/cache/pacman/pkg"*|*"rootfs-base"*|*"rootfs-omarchy"* \
+        |*"t715-watchdog-keeper"*|*"t715-dmabuf-check-shim"*|*"local source for t715repo"*|*"local source for pkcache"* \
+        |*"apt-get install -y --no-install-recommends e2fsprogs"*|*"/bin/sh -c set -eu")
+            size="$(printf '%s\n' "$listing" | awk -v id="$id" '/^ID:/ { show = ($2 == id || $2 == id "*") } show && /^Size:/ { print $2; exit }')"
+            shared="$(printf '%s\n' "$listing" | awk -v id="$id" '/^ID:/ { show = ($2 == id || $2 == id "*") } show && /^Shared:/ { print $2; exit }')"
+            log "cache $id ${size:-?} shared=${shared:-?}: $(printf '%s' "$d" | cut -c1-110)"
+            ids+=("$id")
+            ;;
+    esac
+done
+log "${#ids[@]} build-cache record(s) of this build among $(printf '%s\n' "$new_ids" | grep -c .) new since the baseline"
+if [ "$LIST" = 0 ] && [ "${#ids[@]}" -gt 0 ]; then
+    for id in "${ids[@]}"; do
+        # By id only. -a lets the frontend image record go too (it is
+        # "internal"); the filter keeps everything else.
+        docker buildx prune -f -a --filter "id=$id" >/dev/null 2>&1 || warn "could not remove the cache record $id"
+    done
+fi
+[ "$LIST" = 1 ] || log "done: $(docker system df --format '{{.Type}} {{.Size}}' | tr '\n' ';')"

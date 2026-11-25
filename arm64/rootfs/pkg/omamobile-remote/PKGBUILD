@@ -1,0 +1,28 @@
+# SM-T715 arm64 build of Omarchy Mobile's omamobile-remote 0.1.3, from omarchy-mobile commit
+# 899184543d60 (2026-11-25), whose signed stable repository (pkgs.omamobile.org) still publishes
+# 0.1.2. Upstream's own recipe (packages/omamobile-remote/PKGBUILD: test/all, install),
+# run from the pinned tarball instead of a checkout; nothing changed. Build:
+# tools/build-pkg omamobile-remote.
+pkgname=omamobile-remote
+pkgver=0.1.3
+pkgrel=1.1
+pkgdesc="Use an Omamobile device over ssh like a person would: screenshots, keys, taps, scrolling, locking, unlocking, apps. Opt-in, enables nothing"
+arch=(any)
+url="https://github.com/derekross/omarchy-mobile"
+license=(MIT)
+depends=(bash coreutils gawk grim hyprland procps-ng sed util-linux wlrctl wtype)
+optdepends=("openssh: reach the device from a computer")
+_commit=899184543d60fd78f0a418f403463d628165a3ed
+_tarball="omamobile-${_commit:0:7}.tar.gz"
+_top="omamobile-${_commit}"
+source=("${_tarball}::${url}/archive/${_commit}.tar.gz")
+noextract=("${_tarball}")
+sha256sums=('45cac52479602f0fbf04654abade311bca1ec88b779e0ad43e27cf6ad625f1d9')
+
+prepare() {
+  bsdtar -xf "$srcdir/$_tarball" "$_top/packages/$pkgname"
+  cd "$srcdir/$_top/packages/$pkgname"
+  [[ $(cat version) == "$pkgver" ]] || { echo "upstream version is not $pkgver" >&2; return 1; }
+}
+check() { cd "$srcdir/$_top/packages/$pkgname" && ./test/all; }
+package() { cd "$srcdir/$_top/packages/$pkgname" && ./install "$pkgdir"; }

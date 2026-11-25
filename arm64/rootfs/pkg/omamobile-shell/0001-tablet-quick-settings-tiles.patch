@@ -1,0 +1,148 @@
+SM-T715 tablet (arm64 image): quick settings without the phone's tiles.
+
+Drops mobile data, torch, location, NFC and fingerprint from the tile
+catalogue (no modem driver on arm64 yet; GNSS, the flash LED and NFC are
+not driven; no fingerprint sensor), so they show neither in the sheet nor
+under "Add tiles"; a saved layout that names them loses them (sanitize()
+skips unknown ids). Hotspot stays under "Add tiles", and Rotation
+(upstream's rotation lock, over omamobile-autorotate.service, which the
+image's t715-rotate serves) is back in the default layout. test/
+tiles-model.js follows. From the owner's Lenovomarchy port's
+0001-tablet-quick-settings-tiles (which drops hotspot and the rotation lock
+too) and the SM-T715's 0.2.94 series (0001, 0005, 0007). Against
+omarchy-mobile 8991845 (omamobile-shell 0.2.147), packages/omamobile-shell
+(applied with patch -p1 in that directory).
+
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index 1b510df..6521323 100644
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,17 +12,19 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
++// SM-T715 tablet, arm64 image (pkg/omamobile-shell): no mobile data, torch,
++// location or NFC (the modem has no arm64 driver yet, and GNSS, the flash LED
++// and NFC are not driven), and no fingerprint sensor. Hotspot stays under
++// "Add tiles" (the Wi-Fi client link drops while it runs). Rotation is the
++// rotation lock over omamobile-autorotate.service, which the image's
++// t715-rotate drives (docs/image/ROTATION.md of the owner's repository).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+-  { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
+   { id: "hotspot", label: "Hotspot" },
++  { id: "rotation-lock", label: "Rotation" },
+   { id: "dnd", label: "Do not disturb" },
+-  { id: "torch", label: "Torch" },
+-  { id: "rotation-lock", label: "Rotation lock" },
+-  { id: "location", label: "Location" },
+-  { id: "nfc", label: "NFC" },
+   { id: "battery-saver", label: "Battery saver" },
+   { id: "dark-theme", label: "Dark theme" },
+   { id: "night-light", label: "Night light" },
+@@ -30,7 +32,6 @@ var CATALOG = [
+   { id: "mic", label: "Microphone" },
+   { id: "screenshot", label: "Screenshot" },
+   { id: "screen-record", label: "Screen record" },
+-  { id: "fingerprint", label: "Fingerprint" },
+   { id: "keyboard", label: "Keyboard" },
+   { id: "clipboard", label: "Clipboard" },
+   { id: "dictation", label: "Dictation" }
+@@ -40,11 +41,12 @@ var CATALOG = [
+ // reached for most. Clipboard and Dictation close the second page: Omarchy
+ // reaches them only by keyboard shortcut, so a tile is their touch path
+ // (TOUCH-PLAN 1.12), and appending them leaves the first page as it was.
++// SM-T715 tablet: the tablet's own tiles only. Stay awake, Microphone,
++// Hotspot, Screen record and Dictation stay under "Add tiles".
+ var DEFAULT_LAYOUT = [
+-  "wifi", "bluetooth", "dnd", "torch",
+-  "mobile-data", "rotation-lock", "airplane", "location",
+-  "battery-saver", "dark-theme", "night-light", "nfc",
+-  "fingerprint", "keyboard", "clipboard", "dictation"
++  "wifi", "bluetooth", "dnd", "airplane",
++  "rotation-lock", "battery-saver", "dark-theme", "night-light",
++  "keyboard", "clipboard", "screenshot"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/test/tiles-model.js b/test/tiles-model.js
+index 1dd8978..ba810a7 100644
+--- a/test/tiles-model.js
++++ b/test/tiles-model.js
+@@ -22,16 +22,23 @@ test("the sheet has a backend for every catalog tile", () => {
+   for (const { id } of M.CATALOG) assert.ok(block.includes(`"${id}":`), `backend for ${id}`)
+ })
+ 
+-test("the default keeps the old ten tiles and leads with the most used", () => {
+-  for (const id of ["wifi", "bluetooth", "mobile-data", "rotation-lock", "torch", "dnd", "location", "nfc", "fingerprint", "keyboard"])
++// SM-T715 tablet: the default is the tablet's own (patch
++// 0001-tablet-quick-settings-tiles), and the phone's tiles are not even in
++// the catalog.
++test("the default keeps the tablet's tiles and leads with the most used", () => {
++  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot"])
+     assert.ok(M.DEFAULT_LAYOUT.includes(id), id)
+-  assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "dnd", "torch"])
++  assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "dnd", "airplane"])
++  for (const id of ["mobile-data", "torch", "location", "nfc", "fingerprint"])
++    assert.ok(!M.known(id), id)
+ })
+ 
+ test("Clipboard and Dictation close the default's second page, leaving the first as it was", () => {
++  // the tablet's default fills one page and starts a second with Keyboard,
++  // Clipboard and Screenshot
+   assert.deepStrictEqual(M.pages(M.defaults())[0],
+-    ["wifi", "bluetooth", "dnd", "torch", "mobile-data", "rotation-lock", "airplane", "location"])
+-  assert.deepStrictEqual(M.DEFAULT_LAYOUT.slice(-2), ["clipboard", "dictation"])
++    ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "battery-saver", "dark-theme", "night-light"])
++  assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "screenshot")
+   assert.strictEqual(M.pages(M.defaults()).length, 2)
+   assert.strictEqual(M.label("clipboard"), "Clipboard")
+   assert.strictEqual(M.label("dictation"), "Dictation")
+@@ -39,12 +46,12 @@ test("Clipboard and Dictation close the default's second page, leaving the first
+ 
+ test("defaults() is a copy", () => {
+   const list = M.defaults()
+-  list.push("hotspot")
+-  assert.ok(!M.DEFAULT_LAYOUT.includes("hotspot"))
++  list.push("mic")
++  assert.ok(!M.DEFAULT_LAYOUT.includes("mic"))
+ })
+ 
+ test("sanitize drops unknown ids, non-strings and duplicates, keeping order", () => {
+-  assert.deepStrictEqual(M.sanitize(["torch", "bogus", 3, null, "wifi", "torch"]), ["torch", "wifi"])
++  assert.deepStrictEqual(M.sanitize(["mic", "bogus", 3, null, "wifi", "mic"]), ["mic", "wifi"])
+   assert.deepStrictEqual(M.sanitize([]), [])
+   assert.deepStrictEqual(M.sanitize("wifi"), M.DEFAULT_LAYOUT)
+   assert.deepStrictEqual(M.sanitize(null), M.DEFAULT_LAYOUT)
+@@ -60,15 +67,15 @@ test("parseConfig falls back to the default on anything unreadable", () => {
+ })
+ 
+ test("serialize round-trips through parseConfig", () => {
+-  const text = M.serialize(["hotspot", "wifi", "bogus"])
++  const text = M.serialize(["mic", "wifi", "bogus"])
+   assert.ok(text.endsWith("\n"))
+-  assert.deepStrictEqual(JSON.parse(text), { version: 1, tiles: ["hotspot", "wifi"] })
+-  assert.deepStrictEqual(M.parseConfig(text), ["hotspot", "wifi"])
++  assert.deepStrictEqual(JSON.parse(text), { version: 1, tiles: ["mic", "wifi"] })
++  assert.deepStrictEqual(M.parseConfig(text), ["mic", "wifi"])
+ })
+ 
+ test("parseList takes JSON or space- and comma-separated ids", () => {
+-  assert.deepStrictEqual(M.parseList("wifi torch  dnd"), ["wifi", "torch", "dnd"])
+-  assert.deepStrictEqual(M.parseList("wifi,torch"), ["wifi", "torch"])
++  assert.deepStrictEqual(M.parseList("wifi mic  dnd"), ["wifi", "mic", "dnd"])
++  assert.deepStrictEqual(M.parseList("wifi,mic"), ["wifi", "mic"])
+   assert.deepStrictEqual(M.parseList('["mic","x"]'), ["mic"])
+   assert.deepStrictEqual(M.parseList("[]"), [])
+   assert.strictEqual(M.parseList(""), null)
+@@ -78,7 +85,7 @@ test("parseList takes JSON or space- and comma-separated ids", () => {
+ 
+ test("available lists the hidden tiles in catalog order", () => {
+   const spare = M.available(M.defaults())
+-  assert.deepStrictEqual(spare, ["hotspot", "stay-awake", "mic", "screenshot", "screen-record"])
++  assert.deepStrictEqual(spare, ["hotspot", "stay-awake", "mic", "screen-record", "dictation"])
+   assert.strictEqual(M.available([]).length, M.CATALOG.length)
+   assert.deepStrictEqual(M.available(M.CATALOG.map((t) => t.id)), [])
+ })

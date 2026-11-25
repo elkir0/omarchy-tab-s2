@@ -348,6 +348,7 @@ Everything we learned about this hardware is public, register addresses included
 | GPS: the BCM4752, its boot protocol, Samsung's `gpsd` offline | [GPS](docs/hardware/GPS.md) |
 | Power: battery, CPU, thermal, watchdog, SMP | [BATTERY](docs/hardware/BATTERY.md), [CPUFREQ](docs/hardware/CPUFREQ.md), [THERMAL](docs/hardware/THERMAL.md), [WATCHDOG](docs/hardware/WATCHDOG.md), [SMP_BRINGUP](docs/hardware/SMP_BRINGUP.md) |
 | The 64-bit port: a loader in PARAM through the boot logo's vulnerability, the kernel in 64 bits, and what was found about the bootloader | [ARM64](docs/ARM64.md), then the findings in the fork |
+| The 64-bit Omarchy image: its build, its packages, its tools | [arm64/](arm64/README.md) |
 | Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, since 1.0.5) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
 
 ### Drivers

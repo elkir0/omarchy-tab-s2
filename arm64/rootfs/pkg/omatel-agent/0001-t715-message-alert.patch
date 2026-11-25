@@ -1,0 +1,86 @@
+SM-T715: a new message plays feedbackd's message-new-sms and asks t715-keys for a
+glance at the screen. Only calls ring upstream, so with the screen off a message
+went unnoticed. The sound follows the same rules as the notification, plus Do Not
+Disturb. Against omatel 0.2.4.
+
+diff -ruN a/apps/omatel-agent/src/audio.rs b/apps/omatel-agent/src/audio.rs
+--- a/apps/omatel-agent/src/audio.rs
++++ b/apps/omatel-agent/src/audio.rs
+@@ -76,6 +76,35 @@
+     }
+ }
+ 
++/// A new message: its sound, and the screen lit for a glance (t715-keys, SIGUSR2).
++pub async fn message_alert(session: &Connection) {
++    if has_owner(session, "org.sigxcpu.Feedback").await {
++        if let Ok(p) = FeedbackProxy::new(session).await {
++            let sound = p
++                .trigger_feedback(
++                    "org.omamobile.Messages",
++                    "message-new-sms",
++                    HashMap::new(),
++                    -1,
++                )
++                .await;
++            if let Err(e) = sound {
++                tracing::warn!(error = %e, "feedbackd refused the message sound");
++            }
++        }
++    }
++    let wake = tokio::task::spawn_blocking(|| {
++        std::process::Command::new("systemctl")
++            .args(["--user", "kill", "--kill-whom=main", "--signal=SIGUSR2"])
++            .arg("t715-keys.service")
++            .status()
++    })
++    .await;
++    if !matches!(wake, Ok(Ok(s)) if s.success()) {
++        tracing::warn!("the screen was not woken for the message");
++    }
++}
++
+ pub async fn stop_ring(session: &Connection, id: u32) {
+     if let Ok(p) = FeedbackProxy::new(session).await {
+         let _ = p.end_feedback(id).await;
+diff -ruN a/apps/omatel-agent/src/sms.rs b/apps/omatel-agent/src/sms.rs
+--- a/apps/omatel-agent/src/sms.rs
++++ b/apps/omatel-agent/src/sms.rs
+@@ -96,10 +96,38 @@
+             tracing::info!(path = %path, conversation, message_id = id, "SMS stored");
+             iface::messages_changed(agent, conversation).await;
+             notify(agent, conversation).await;
++            alert(agent, conversation).await;
+         }
+         None => tracing::info!(path = %path, "SMS already stored (a duplicate)"),
+     }
+     Ok(())
++}
++
++/// SM-T715: a new message sounds and wakes the screen, as a call does. What
++/// silences its notification silences this too, and so does Do Not Disturb.
++async fn alert(agent: &Arc<Agent>, conversation: i64) {
++    let conv = {
++        let store = agent.messages.lock().unwrap();
++        let Ok(Some(c)) = store.conversation(conversation) else {
++            return;
++        };
++        c
++    };
++    let raw = conv
++        .numbers
++        .first()
++        .cloned()
++        .unwrap_or(conv.address.clone());
++    let blocked = agent
++        .blocked
++        .lock()
++        .unwrap()
++        .is_blocked(&raw, &agent.region())
++        .unwrap_or(false);
++    if !agent.settings().message_notifications || conv.muted || blocked || agent.do_not_disturb() {
++        return;
++    }
++    crate::audio::message_alert(&agent.session).await;
+ }
+ 
+ /// Show, update or withdraw a conversation's notification.

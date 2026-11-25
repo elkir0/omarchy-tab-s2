@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+cat <<JEOF
+[    0.000000] Booting Linux on physical CPU 0x0000000000
+[   12.345678] WARNING: CPU: 0 PID: 42 at drivers/example/foo.c:123 foo_probe+0x48/0x80
+JEOF

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+cat <<DFEOF
+Filesystem     1024-blocks    Used Available Capacity Mounted on
+/dev/mmcblk0p25   20971520 5242880  15728640      25% /
+DFEOF

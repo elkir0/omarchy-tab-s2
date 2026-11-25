@@ -1,0 +1,20 @@
+# SM-T715: keep the end of each shutdown in pstore.  The console only gets
+# warnings (console loglevel 4), so systemd-shutdown's own steps (killing
+# the remaining processes, unmounting, the final reboot) leave nothing in
+# /sys/fs/pstore/console-ramoops-0 after a slow reboot (one in ten on
+# 2026-10-29 took 91 s).  This unit starts early and stops late: when it
+# stops it raises the console loglevel to 7, so what follows is kept.
+[Unit]
+Description=Log the end of shutdown to the kernel console (pstore)
+DefaultDependencies=no
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/usr/bin/dmesg -n 7
+
+[Install]
+WantedBy=sysinit.target

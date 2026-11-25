@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+cat <<JEOF
+[    0.000000] Booting Linux on physical CPU 0x0000000000
+[    5.123456] KBOOT: up
+JEOF

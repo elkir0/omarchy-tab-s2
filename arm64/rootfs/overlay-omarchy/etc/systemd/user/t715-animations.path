@@ -1,0 +1,17 @@
+# t715-animations.path — start t715-animations.service whenever the
+# Battery saver's flag is created or removed, so Hyprland's animations
+# follow the profile switch in the running session (omarchy-tab-s2,
+# /usr/local/bin/t715-animations, docs/image/ROOTFS.md "Battery saver").
+# PathChanged= fires on the flag's creation and on its removal, checked
+# on the tablet on 2026-11-08.
+[Unit]
+Description=Watch the SM-T715 Battery saver flag (Hyprland's animations)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Path]
+PathChanged=/run/t715-power/saver
+Unit=t715-animations.service
+
+[Install]
+WantedBy=graphical-session.target

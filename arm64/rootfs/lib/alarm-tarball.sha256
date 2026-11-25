@@ -1,0 +1,4 @@
+# lib/alarm-tarball.sha256 — the official Arch Linux ARM aarch64 tarball this build
+# starts from (shasum -c format). Written by tools/pin-tarball on 2026-11-24:
+# ArchLinuxARM-aarch64-latest.tar.gz, 829367415 bytes, md5 23eec86365b24f7913c403e8f4e8719b.
+42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319  ArchLinuxARM-aarch64-latest.tar.gz

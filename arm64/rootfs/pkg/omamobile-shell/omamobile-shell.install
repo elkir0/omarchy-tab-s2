@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# omamobile-shell, SM-T715 tablet build (pkg/omamobile-shell). The image runs
+# omamobile-setup-user for alarm at build time (rootfs/omarchy-user-setup.sh).
+post_install() {
+  echo "Run 'omamobile-setup-user' as each user (the SM-T715 image does it at build time)."
+}
+post_upgrade() {
+  echo "New shell plugins and settings reach a user with 'omamobile-setup-user'."
+}

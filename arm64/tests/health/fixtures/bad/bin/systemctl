@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+case "${1:-}" in
+    is-active)
+        case "${2:-}" in
+            t715-watchdog-keeper.service|sddm) echo "active"; exit 0 ;;
+            *) echo "inactive"; exit 3 ;;
+        esac
+        ;;
+    is-system-running)
+        echo "degraded"
+        exit 1
+        ;;
+    --failed)
+        echo "t715-broken.service loaded failed failed Broken test unit"
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

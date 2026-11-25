@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+cat <<IPEOF
+2: usb0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    inet 172.16.42.1/24 brd 172.16.42.255 scope global usb0
+       valid_lft forever preferred_lft forever
+IPEOF

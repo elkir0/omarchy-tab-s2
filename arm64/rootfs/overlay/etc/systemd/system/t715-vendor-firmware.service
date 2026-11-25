@@ -1,0 +1,17 @@
+# Galaxy Tab S2 (SM-T715): the tablet's two vendor files, copied from its own
+# SYSTEM partition when the image lacks them (the Wi-Fi NVRAM and the Bluetooth
+# patch RAM never enter this image's build: they hold the tablet's MAC address
+# and Samsung firmware).  See /usr/local/sbin/t715-vendor-firmware.
+# UNTESTED on the arm64 kernel (2026-11-24).  Nothing happens once both files
+# are there.  systemctl disable t715-vendor-firmware.service turns it off.
+[Unit]
+Description=Galaxy Tab S2: copy the Wi-Fi NVRAM and Bluetooth patch RAM from SYSTEM when missing
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t715-vendor-firmware
+
+[Install]
+WantedBy=multi-user.target

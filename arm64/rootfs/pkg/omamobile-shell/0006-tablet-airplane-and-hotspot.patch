@@ -1,0 +1,145 @@
+SM-T715 tablet: Airplane mode and Hotspot that do what they say.
+
+Airplane mode turns Wi-Fi and the modem off through NetworkManager (`nmcli
+radio`: the modem has no rfkill device, and NetworkManager's state outlives
+a reboot where an rfkill block on Wi-Fi does not), Bluetooth through rfkill;
+the states are read with LC_ALL=C (rfkill says "bloqué" in French). The
+Hotspot tile shows its SSID and password in a notification. test/
+tile-scripts.sh follows: its fake nmcli keeps the radio states. The SM-T715's
+0.2.94 series' 0007-tablet-tiles-that-work, its scripts' part (the call
+card's Speaker toggle is handled in 0013). Dropped the stray
+tile-state.sh.orig new-file hunk that 0.2.133's patch carried by accident.
+Against omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0005.
+
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+index b7ab913..4bc5c7e 100755
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -12,29 +12,45 @@ case $want in on | off) ;; *) echo "usage: tile-action.sh TILE on|off" >&2; exit
+ 
+ case $tile in
+   airplane)
+-    # Wi-Fi, Bluetooth and WWAN switches only: NFC keeps its own tile, as on
+-    # Android. Turning airplane mode off unblocks what was on before it, so a
+-    # radio the user had switched off stays off.
++    # Wi-Fi, Bluetooth and the modem: NFC keeps its own tile, as on Android.
++    # Turning airplane mode off turns on what was on before it, so a radio the
++    # user had switched off stays off. SM-T715: the modem has no rfkill switch,
++    # and NetworkManager's own state outlives a reboot where an rfkill block on
++    # Wi-Fi does not: both go through it, and shannond keeps the radio off.
+     restore="$state_dir/airplane-restore"
+     if [ "$want" = on ]; then
+       mkdir -p "$state_dir"
+-      rfkill -rn -o TYPE,SOFT | awk '($1 == "wlan" || $1 == "bluetooth" || $1 == "wwan") && $2 == "unblocked" { print $1 }' \
+-        | sort -u >"$restore"
+-      for type in wlan bluetooth wwan; do rfkill block "$type" 2>/dev/null; done
++      {
++        LC_ALL=C rfkill -rn -o TYPE,SOFT | awk '$1 == "bluetooth" && $2 == "unblocked" { print $1 }'
++        [ "$(LC_ALL=C nmcli radio wifi)" = enabled ] && echo wlan
++        [ "$(LC_ALL=C nmcli radio wwan)" = enabled ] && echo wwan
++      } | sort -u >"$restore"
++      rfkill block bluetooth 2>/dev/null
++      nmcli radio wifi off
++      nmcli radio wwan off
+     else
+       types=$(cat "$restore" 2>/dev/null)
+-      [ -n "$types" ] || types="wlan bluetooth"
+-      for type in $types; do rfkill unblock "$type" 2>/dev/null; done
++      [ -n "$types" ] || types="wlan bluetooth wwan"
++      for type in $types; do
++        case $type in
++          wlan) nmcli radio wifi on ;;
++          wwan) nmcli radio wwan on ;;
++          *) rfkill unblock "$type" 2>/dev/null ;;
++        esac
++      done
+       rm -f "$restore"
+     fi
+     exit 0
+     ;;
+   hotspot)
+     # NetworkManager makes (or reuses) a connection named "Hotspot" with a
+-    # generated password; the Wi-Fi client link drops while it is up.
++    # generated password; the Wi-Fi client link drops while it is up. SM-T715:
++    # nothing else shows that password, so a notification does.
+     if [ "$want" = on ]; then
+       nmcli radio wifi on
+-      exec nmcli device wifi hotspot con-name Hotspot
++      nmcli device wifi hotspot con-name Hotspot || exit 1
++      omarchy-notification-send -u normal -g 󰀂 "Hotspot on" \
++        "$(nmcli -s -g 802-11-wireless.ssid,802-11-wireless-security.psk connection show Hotspot | tr '\n' ' ')"
+     else
+       exec nmcli connection down Hotspot
+     fi
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+index aa2ed2a..2e6bca5 100755
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -6,8 +6,8 @@
+ # Nothing here writes; each probe is bounded by timeout so a hung daemon
+ # cannot hold the sheet's refresh.
+ #
+-#   airplane      on when every Wi-Fi, Bluetooth and WWAN rfkill switch is
+-#                 soft-blocked (none without such a switch)
++#   airplane      on when the Bluetooth rfkill switch is soft-blocked and
++#                 NetworkManager has Wi-Fi and WWAN off (none without a switch)
+ #   hotspot       on while NetworkManager's "Hotspot" connection is up
+ #   powerprofile  power-profiles-daemon's active profile
+ #   theme_mode    light or dark, as Omarchy resolves the current theme
+@@ -38,9 +38,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
+ 
+ # airplane
+ if have rfkill; then
+-  t rfkill -rn -o TYPE,SOFT | awk '
+-    $1 == "wlan" || $1 == "bluetooth" || $1 == "wwan" { n++; if ($2 == "blocked") b++ }
+-    END { print "airplane=" (n == 0 ? "none" : (b == n ? "on" : "off")) }'
++  wifi=$(have nmcli && LC_ALL=C t nmcli radio wifi)
++  wwan=$(have nmcli && LC_ALL=C t nmcli radio wwan)
++  LC_ALL=C t rfkill -rn -o TYPE,SOFT | awk -v wifi="$wifi" -v wwan="$wwan" '
++    $1 == "bluetooth" || (wifi == "" && $1 == "wlan") { n++; if ($2 == "blocked") b++ }
++    END {
++      if (wifi != "") { n++; if (wifi == "disabled") b++ }
++      if (wwan != "") { n++; if (wwan == "disabled") b++ }
++      print "airplane=" (n == 0 ? "none" : (b == n ? "on" : "off"))
++    }'
+ else
+   echo "airplane=none"
+ fi
+diff --git a/test/tile-scripts.sh b/test/tile-scripts.sh
+index 0bb324e..0683d07 100755
+--- a/test/tile-scripts.sh
++++ b/test/tile-scripts.sh
+@@ -29,7 +29,16 @@ case $1 in
+     new=$([ "$1" = block ] && echo blocked || echo unblocked)
+     awk -v t="$2" -v s="$new" '"'"'$1 == t { $2 = s } { print }'"'"' "$f" >"$f.new" && cat "$f.new" >"$f" ;;
+ esac'
+-stub nmcli 'echo "nmcli $*" >>'"$log"'; [ "$1" = -t ] && cat '"$tmp"'/state/active 2>/dev/null; exit 0'
++# nmcli: logs; SM-T715 tablet build: `radio wifi|wwan [on|off]` keep their
++# state in a file (airplane mode goes through NetworkManager for both).
++stub nmcli 'echo "nmcli $*" >>'"$log"'
++if [ "$1" = radio ]; then
++  f='"$tmp"'/state/radio-$2
++  case ${3:-} in on) echo enabled >"$f" ;; off) echo disabled >"$f" ;; *) cat "$f" 2>/dev/null || echo enabled ;; esac
++  exit 0
++fi
++[ "$1" = -t ] && cat '"$tmp"'/state/active 2>/dev/null; exit 0'
++stub omarchy-notification-send 'echo "notify $*" >>'"$log"
+ stub powerprofilesctl 'echo balanced'
+ stub omarchy-theme-color 'cat '"$tmp"'/state/mode'
+ stub omarchy-theme-set 'echo "theme-set $*" >>'"$log"
+@@ -57,11 +66,13 @@ pass "tile-state.sh reads every probed tile"
+ # Airplane on blocks the radios, remembers which were on, leaves NFC alone;
+ # off unblocks only those.
+ run "$dir/tile-action.sh" airplane on
+-grep -cx "wlan blocked" "$tmp/state/rfkill" >/dev/null || fail "airplane on blocks Wi-Fi"
++[[ $(cat "$tmp/state/radio-wifi") == disabled && $(cat "$tmp/state/radio-wwan") == disabled ]] \
++  || fail "airplane on turns Wi-Fi and the modem off through NetworkManager"
+ grep -cx "nfc unblocked" "$tmp/state/rfkill" >/dev/null || fail "airplane mode leaves NFC alone"
+ grep -cx "airplane=on" <<<"$(run "$dir/tile-state.sh")" >/dev/null || fail "tile-state.sh sees airplane mode on"
+ run "$dir/tile-action.sh" airplane off
+-grep -cx "wlan unblocked" "$tmp/state/rfkill" >/dev/null || fail "airplane off unblocks Wi-Fi"
++[[ $(cat "$tmp/state/radio-wifi") == enabled && $(cat "$tmp/state/radio-wwan") == enabled ]] \
++  || fail "airplane off turns Wi-Fi and the modem back on"
+ grep -cx "bluetooth blocked" "$tmp/state/rfkill" >/dev/null || fail "airplane off keeps Bluetooth off when it was off before"
+ pass "airplane mode restores the radios it found on"
+ 

@@ -362,7 +362,8 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 - **The 64-bit port (arm64)**: a second brick for the same tablet, since 2026-11-25 the daily
   system of the reference tablet. Its boot is in
   [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), with its own roadmap; its image
-  is built from the fork's sources today and not released: `docs/ARM64.md` says where it stands.
+  is built from this repository's [arm64/](../arm64/README.md) and not released yet:
+  `docs/ARM64.md` says where it stands.
 
 ### Not planned
 

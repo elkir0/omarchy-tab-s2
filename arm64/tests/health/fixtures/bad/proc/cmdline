@@ -1,0 +1,1 @@
+console=ttySAC1 panic=5 oops=panic t715.kbootmark=0 androidboot.serialno=XYZ

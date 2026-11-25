@@ -1,0 +1,45 @@
+#!/bin/sh
+# t715-return-generator NORMAL_DIR [EARLY_DIR LATE_DIR]: the systemd generator
+# of t715.return=MIN (Galaxy Tab S2 8.0 LTE, SM-T715, arm64 bring-up). Run by
+# systemd at every boot and daemon-reload, before any unit is loaded.
+#
+# With t715.return on the kernel command line it enables t715-return.timer
+# (a timers.target.wants link in NORMAL_DIR) and, when MIN is a whole number
+# of minutes from 1 to 1440, sets the timer's OnBootSec to MIN minutes (a
+# drop-in in NORMAL_DIR); any other value keeps the timer's own 10 minutes
+# and says so in the kernel log (fail safe: the knob was meant). Without the
+# knob it writes nothing. It never fails the boot: every error is ignored.
+#
+# T715_CMDLINE names another command line file (the smoke check's tests).
+set -u
+normal="${1:-}"
+[ -n "$normal" ] || exit 0
+cmdline="${T715_CMDLINE:-/proc/cmdline}"
+kmsg="${T715_KMSG:-/dev/kmsg}"
+
+found=0
+min=
+for kv in $(cat "$cmdline" 2>/dev/null); do
+    case "$kv" in
+        t715.return) found=1; min= ;;
+        t715.return=*) found=1; min="${kv#*=}" ;;
+    esac
+done
+[ "$found" = 1 ] || exit 0
+
+mkdir -p "$normal/timers.target.wants" 2>/dev/null || exit 0
+ln -sf /etc/systemd/system/t715-return.timer "$normal/timers.target.wants/t715-return.timer" 2>/dev/null || exit 0
+case "$min" in
+    '' | *[!0-9]* | 0*) min= ;;
+esac
+if [ -n "$min" ] && [ "$min" -ge 1 ] && [ "$min" -le 1440 ]; then
+    mkdir -p "$normal/t715-return.timer.d" 2>/dev/null
+    printf '# t715-return-generator: t715.return=%s on the kernel command line\n[Timer]\nOnBootSec=\nOnBootSec=%smin\n' \
+        "$min" "$min" > "$normal/t715-return.timer.d/50-t715-return-cmdline.conf" 2>/dev/null
+    printf '<5>t715-return: t715.return=%s: the system reboots %s min after the boot unless /run/t715-stay exists then\n' \
+        "$min" "$min" > "$kmsg" 2>/dev/null
+else
+    printf '<4>t715-return: t715.return is not 1 to 1440 minutes: the system reboots 10 min after the boot unless /run/t715-stay exists then\n' \
+        > "$kmsg" 2>/dev/null
+fi
+exit 0

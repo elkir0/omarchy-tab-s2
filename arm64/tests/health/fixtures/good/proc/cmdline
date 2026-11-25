@@ -1,0 +1,1 @@
+console=ttySAC1 panic=5 oops=panic androidboot.serialno=GOODSECRET123

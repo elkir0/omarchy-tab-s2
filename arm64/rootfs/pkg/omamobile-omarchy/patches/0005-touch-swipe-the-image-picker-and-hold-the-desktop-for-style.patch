@@ -1,0 +1,87 @@
+# Touch screens: swipe through the image picker (backgrounds, themes), fit it
+# to a narrow screen, and hold the desktop for the Style menu (there is no
+# right button or keyboard shortcut on a phone).
+#
+# Omarchy 4.5 port: 4.5 renamed the menu's "style" route to "appearance"
+# ("style" stays an alias), so the hold summons "appearance" by its id. The
+# swipe follows 4.5's right-to-left reading (Util.readingKey flips the arrow
+# keys; the swipe flips the same way) and waits for the picker's reveal
+# (layoutSettled), as 4.5's keys do. 4.5's hold-to-preview (PreviewHold) is
+# a separate handler and untouched.
+
+diff --git i/shell/plugins/background/Background.qml w/shell/plugins/background/Background.qml
+--- i/shell/plugins/background/Background.qml
++++ w/shell/plugins/background/Background.qml
+@@ -218,6 +218,17 @@
+     if (!bgSwitchProc.running) bgSwitchProc.running = true
+   }
+ 
++  // Touch screens: hold the desktop for the Appearance menu (4.0's "style"
++  // route; a phone has no right button or keyboard shortcut).
++  function openStyleMenu() {
++    if (!styleMenuProc.running) styleMenuProc.running = true
++  }
++
++  Process {
++    id: styleMenuProc
++    command: ["omarchy-menu", "summon", "appearance"]
++  }
++
+   function openThemeSwitcher() {
+     var payload = JSON.stringify({ source: "themes" })
+ 
+@@ -521,6 +532,10 @@
+       MouseArea {
+         anchors.fill: parent
+         acceptedButtons: Qt.LeftButton | Qt.RightButton
++        onPressAndHold: function(mouse) {
++          root.openStyleMenu()
++          mouse.accepted = true
++        }
+         onDoubleClicked: function(mouse) {
+           if (mouse.button === Qt.RightButton) root.openThemeSwitcher()
+           else root.openSelector()
+diff --git i/shell/plugins/image-picker/ImagePicker.qml w/shell/plugins/image-picker/ImagePicker.qml
+--- i/shell/plugins/image-picker/ImagePicker.qml
++++ w/shell/plugins/image-picker/ImagePicker.qml
+@@ -55,10 +55,11 @@
+   property color foreground: Commons.Color.imagePicker.text
+   property color selectedBorder: Commons.Color.imagePicker.selectedBorder
+   property color unselectedBorder: Commons.Color.imagePicker.unselectedBorder
+-  property int expandedWidth: 768
+-  property int expandedHeight: 475
++  // Fit narrow screens (phones): never wider than the window allows.
++  property int expandedWidth: panel.width > 0 ? Math.min(768, panel.width - 96) : 768
++  property int expandedHeight: Math.round(475 * expandedWidth / 768)
+   property int sliceWidth: 108
+-  property int sliceHeight: 432
++  property int sliceHeight: Math.round(432 * expandedWidth / 768)
+   property int sliceSpacing: -30
+   property int skewOffset: 28
+   property int bottomChromeHeight: showLabels ? (filterable ? 104 : 74) : (filterable ? 60 : 30)
+@@ -728,6 +729,25 @@
+ 
+           Component.onCompleted: forceActiveFocus()
+ 
++          // Swipe to move through the images on touch screens: toward the
++          // reading start for the next one, as the arrow keys read.
++          DragHandler {
++            target: null
++            yAxis.enabled: false
++            enabled: root.layoutSettled
++            property real swipeX: 0
++            onActiveTranslationChanged: swipeX = activeTranslation.x
++            onActiveChanged: {
++              if (active) {
++                swipeX = 0
++              } else if (Math.abs(swipeX) > 40) {
++                var next = swipeX < 0
++                if (Commons.I18n.rightToLeft) next = !next
++                root.selectAdjacent(next ? 1 : -1)
++              }
++            }
++          }
++
+           Repeater {
+             id: imageCards
+             model: visibleImages

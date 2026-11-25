@@ -1,0 +1,31 @@
+processor	: 0
+CPU implementer	: 0x41
+CPU part	: 0xd03
+
+processor	: 1
+CPU implementer	: 0x41
+CPU part	: 0xd03
+
+processor	: 2
+CPU implementer	: 0x41
+CPU part	: 0xd03
+
+processor	: 3
+CPU implementer	: 0x41
+CPU part	: 0xd03
+
+processor	: 4
+CPU implementer	: 0x41
+CPU part	: 0xd07
+
+processor	: 5
+CPU implementer	: 0x41
+CPU part	: 0xd07
+
+processor	: 6
+CPU implementer	: 0x41
+CPU part	: 0xd07
+
+processor	: 7
+CPU implementer	: 0x41
+CPU part	: 0xd07

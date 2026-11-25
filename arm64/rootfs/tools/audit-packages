@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# audit-packages — which of the packages the owner installs for Omarchy on
+# armv7h exist for aarch64.
+#
+# Reads (read-only) the owner's three lists in omarchy-tab-s2/image/
+# rootfs/ — packages.extra, packages.mobile, packages.omarchy-skip — and
+# Omarchy's own base list (install/omarchy-base.packages) from the pinned
+# omarchy package of the local repository (the very version the image
+# installs, 4.0.6), then asks pacman, in the dev container with ALARM's
+# aarch64 repositories and the local [t715-omarchy]:
+#   ok            pacman -Sp resolves the name: the package (or a provider) is
+#                 installable with all its dependencies; repository and version
+#   provided      no package of that name, another provides it
+#   missing       no repository has it ("target not found")
+#   unresolvable  the package exists but a dependency cannot be satisfied
+# and the same for the owner's 15 pkg/ directories (their package names).
+#
+# Output: out/package-audit.tsv (list, name, status, repository, version, detail)
+# and a summary on stdout.  The synchronized databases are kept in
+# cache/syncdb, so a rerun syncs quickly.
+#
+# Usage: tools/audit-packages
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+LOG_TAG=audit
+
+SYNC_DIR="$SYNCDB_DIR"
+OWNER_LISTS="$OWNER_REPO/image/rootfs"
+OWNER_PKG="$OWNER_REPO/image/pkg"
+[ -f "$OWNER_LISTS/packages.extra" ] || die "no $OWNER_LISTS/packages.extra (set T715_OWNER_REPO)"
+[ -d "$REPO_DIR" ] && [ -f "$REPO_DIR/t715-omarchy.db" ] || die "no local repository: run tools/fetch-omarchy first"
+
+mkdir -p "$SYNC_DIR"
+ensure_pkcache_dir
+
+mkdir -p "$OUT_DIR"
+OUT="$OUT_DIR/package-audit.tsv"
+
+# Lists travel in a directory the container mounts read-only.
+WORK="$CACHE_DIR/audit"
+rm -rf "$WORK"; mkdir -p "$WORK/lists"
+for f in packages.extra packages.mobile packages.omarchy-skip; do
+    cp -f "$OWNER_LISTS/$f" "$WORK/lists/$f"
+done
+: > "$WORK/lists/pkg-dirs"
+for d in "$OWNER_PKG"/*/; do
+    n="$(basename "$d")"
+    pkgname="$(sed -n 's/^pkgname=//p' "$d/PKGBUILD" | head -n1 | tr -d '[:space:]')"
+    arch="$(sed -n 's/^arch=(//p' "$d/PKGBUILD" | head -n1 | tr -d ')')"
+    printf '%s\t%s\t%s\n' "$n" "${pkgname:-$n}" "${arch:-?}" >> "$WORK/lists/pkg-dirs"
+done
+
+docker run --rm -i --platform "$PLATFORM" \
+    -v "$REPO_DIR:/repo:ro" -v "$WORK:/work:ro" -v "$OUT_DIR:/out" \
+    -v "$PKCACHE_DIR:/var/cache/pacman/pkg" -v "$SYNC_DIR:/var/lib/pacman/sync" \
+    "$DEV_IMAGE" bash -s <<'EOS' || die "audit failed"
+set -euo pipefail
+sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+awk -v stanza='[t715-omarchy]
+SigLevel = Optional TrustedOnly
+Server = file:///repo' '!done && /^\[core\]$/ { print stanza; print ""; done = 1 } { print }' \
+    /etc/pacman.conf > /tmp/pc && cat /tmp/pc > /etc/pacman.conf
+pacman-key --init >/dev/null 2>&1
+pacman-key --populate archlinuxarm >/dev/null 2>&1
+k=$(ls /repo/omarchy-keyring-*-any.pkg.tar.zst)
+d=$(mktemp -d); bsdtar -xf "$k" -C "$d" usr/share/pacman/keyrings
+pacman-key --add "$d/usr/share/pacman/keyrings/omarchy.gpg" >/dev/null 2>&1
+pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571 >/dev/null 2>&1
+rm -rf "$d"
+pacman -Sy --noconfirm >&2
+
+o=$(ls /repo/omarchy-4.*-aarch64.pkg.tar.zst)
+
+# Omarchy's base list (the installed omarchy package's own).
+bsdtar -xOf "$o" usr/share/omarchy/install/omarchy-base.packages > /tmp/omarchy-base.packages
+: > /out/package-audit.tsv
+printf 'list\tname\tstatus\trepository\tversion\tdetail\n' >> /out/package-audit.tsv
+
+check() { # LIST NAME
+    local list="$1" name="$2" si sp repo ver detail status
+    si="$(pacman -Si --print-format '%r' "$name" 2>/dev/null | head -n1 || true)"
+    repo=""; ver=""; detail=""
+    if [ -n "$si" ]; then
+        repo="$(pacman -Si "$name" 2>/dev/null | sed -n 's/^Repository *: //p' | head -n1)"
+        ver="$(pacman -Si "$name" 2>/dev/null | sed -n 's/^Version *: //p' | head -n1)"
+    fi
+    if sp="$(pacman -Sp --print-format '%r %n' "$name" 2>&1)"; then
+        if [ -n "$si" ]; then status=ok; else status=provided; repo="$(printf '%s\n' "$sp" | head -n1)"; fi
+    else
+        if printf '%s\n' "$sp" | grep -q 'target not found'; then
+            status=missing
+        elif [ -z "$si" ]; then
+            status=unresolvable
+        elif printf '%s\n' "$sp" - | grep -q 'unable to satisfy'; then
+            status=unresolvable
+        else
+            status=unresolvable
+            detail="$(printf '%s\n' "$sp" | tr '\n' ' ' | cut -c1-160)"
+        fi
+    fi
+    if [ "$status" = unresolvable ] && [ -z "$detail" ]; then
+        detail="$(printf '%s\n' "$sp" | sed -n "s/^:: unable to satisfy dependency '\([^']*\)' required by \(.*\)$/\1 (needed by \2)/p" \
+            | paste -sd, - | sed 's/,/, /g' | cut -c1-200)"
+    fi
+    detail="${detail:-$(printf '%s\n' "$sp" | head -n1 | cut -c1-160)}"
+    detail="${detail#\'}"; detail="${detail%\'}"
+    detail="$(printf '%s' "$detail" | tr '\t' ' ')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$list" "$name" "$status" "$repo" "$ver" "$detail" >> /out/package-audit.tsv
+}
+
+# entries FILE: names of a "name  # comment" list.
+entries() { sed -n 's/^[[:space:]]*\([^#[:space:]][^#[:space:]]*\).*/\1/p' "$1"; }
+
+for name in $(entries /tmp/omarchy-base.packages); do check omarchy-base "$name"; done
+for name in $(entries /work/lists/packages.extra); do
+    name="${name#\?}"
+    check packages.extra "$name"
+done
+for name in $(entries /work/lists/packages.mobile); do check packages.mobile "$name"; done
+for name in $(entries /work/lists/packages.omarchy-skip); do check packages.omarchy-skip "$name"; done
+while IFS=$'\t' read -r dir pkg arch; do check "pkg/$dir ($arch)" "$pkg"; done < /work/lists/pkg-dirs
+
+echo "audit: $(wc -l < /out/package-audit.tsv) lines" >&2
+EOS
+
+# Summary.
+{
+    printf 'list\tok\tprovided\tmissing\tunresolvable\n'
+    for list in omarchy-base packages.extra packages.mobile packages.omarchy-skip; do
+        printf '%s\t%s\t%s\t%s\t%s\n' "$list" \
+            "$(awk -F'\t' -v l="$list" '$1 == l && $3 == "ok"' "$OUT" | wc -l | tr -d ' ')" \
+            "$(awk -F'\t' -v l="$list" '$1 == l && $3 == "provided"' "$OUT" | wc -l | tr -d ' ')" \
+            "$(awk -F'\t' -v l="$list" '$1 == l && $3 == "missing"' "$OUT" | wc -l | tr -d ' ')" \
+            "$(awk -F'\t' -v l="$list" '$1 == l && $3 == "unresolvable"' "$OUT" | wc -l | tr -d ' ')"
+    done
+} | column -t -s $'\t'
+log "written $OUT"

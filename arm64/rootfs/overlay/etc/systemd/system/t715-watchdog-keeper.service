@@ -1,0 +1,69 @@
+# Galaxy Tab S2 (SM-T715), arm64: the only thing that feeds the SoC watchdog.
+#
+# The port's design (elkir0/bnuuyloader's t715/docs/PRODUCTION-LOADER.md): the loader arms the Exynos 5433
+# watchdog before it starts the kernel, and the kernel never feeds it
+# (s3c2410_wdt.tmr_atboot=1 watchdog.handle_boot_enabled=0 on the command
+# line).  A kernel that hangs, a boot that stalls before this unit starts, is
+# reset by the hardware; at the next boot the loader finds no "KBOOT: up" and
+# boots the fallback.  Once the system is up, this unit keeps it alive:
+# /usr/local/sbin/t715-watchdog-keeper holds /dev/watchdog and pings it
+# every 5 s until it is stopped.  (The hardware limit is about 32 s: the
+# watchdog must not expire between the driver's probe and the first ping.)
+#
+# Order: before basic.target, so that it starts as soon as sysinit.target is
+# reached.  Since 2026-11-24 (the Omarchy 4.5 image) it no longer waits for
+# the boot mark: the mark comes once sshd and the USB link are up, far later
+# than the watchdog's timeout allows the keeper to wait; the mark requires
+# the keeper instead (t715-kboot-mark.service), so a marked boot is always
+# one whose keeper runs.  A boot the loader will not find marked (a failed
+# sshd or USB link, or t715.kbootmark=0 during the bring-up) is now kept
+# alive: it falls back at its next boot, which a reset or t715.return=MIN
+# (t715-return.timer) brings.
+#
+# If the keeper dies, the watchdog keeps running (the driver has the magic
+# close: a close without "V" stops nothing) and nobody feeds it: it is
+# started again within a second, and its open pings at once.  It is restarted
+# without a start limit, so a keeper that keeps crashing still pings at each
+# start and never turns its own failure into resets.  What does reset the
+# tablet is what should: a system that cannot run the keeper at all.
+#
+# Only a watchdog the kernel left running is fed: the keeper never starts a
+# stopped one (that is the kernel command line's decision, s3c2410_wdt.tmr_atboot).
+# Without the device the unit does not start (ConditionPathExists=): the
+# driver is built in, so /dev/watchdog exists in devtmpfs before init runs.
+# Not BindsTo=dev-watchdog.device: udev does not tag the watchdog's misc node
+# for systemd, so that device unit never appears; the keeper then failed on
+# its dependency after the 90 s device timeout and held basic.target (and
+# with it the USB link, NetworkManager and the Wi-Fi NVRAM copy) for those
+# 90 s (first boot of this image on the tablet, 2026-11-25).
+#
+# Stop and shutdown: on SIGTERM the keeper exits and leaves the watchdog
+# running; the kernel logs "watchdog0: watchdog did not stop!" and stops it
+# itself at the end of a clean reboot or poweroff.  A shutdown that hangs
+# after that is reset like a hung boot.  To stop the watchdog for a test:
+# systemctl kill -s USR1 t715-watchdog-keeper  (magic close, "V"), or boot
+# without s3c2410_wdt.tmr_atboot=1.
+[Unit]
+Description=Galaxy Tab S2: feed the SoC watchdog once the system is up
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+DefaultDependencies=no
+ConditionPathExists=/dev/watchdog
+After=sysinit.target
+Before=basic.target
+StartLimitIntervalSec=0
+# A system that ends in emergency or rescue mode has no network: the owner cannot reach it, and fed
+# it would stay there for ever. Stopping the keeper lets the watchdog reset it; the loader's ledger
+# then gives the next boot to the 32-bit system (kboot5 cycle, 2026-11-24).
+Conflicts=emergency.target emergency.service rescue.target rescue.service
+Before=emergency.target emergency.service rescue.target rescue.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/t715-watchdog-keeper
+Restart=on-failure
+RestartSec=1
+# The last process the OOM killer may choose: killed, it is a reset.
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=sysinit.target multi-user.target graphical.target

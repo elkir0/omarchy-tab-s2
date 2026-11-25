@@ -1,0 +1,20 @@
+#!/bin/sh
+# t715-return: the end of a bring-up boot (Galaxy Tab S2 8.0 LTE, SM-T715,
+# arm64), run by t715-return.service when t715-return.timer fires
+# (t715.return=MIN on the kernel command line). Reboots, unless /run/t715-stay
+# exists at that moment: then this boot stays, and nothing fires again. The
+# decision goes to the kernel log (the loader's RAM ring sees it, through
+# console=sec_log) and to the journal.
+set -u
+stay="${T715_STAY:-/run/t715-stay}"
+kmsg="${T715_KMSG:-/dev/kmsg}"
+say() { # LEVEL MESSAGE
+    printf '<%s>t715-return: %s\n' "$1" "$2" > "$kmsg" 2>/dev/null
+    printf 't715-return: %s\n' "$2"
+}
+if [ -e "$stay" ]; then
+    say 5 "$stay exists: this boot stays (no return to the arm32 system)"
+    exit 0
+fi
+say 4 "the time of t715.return is up and there is no $stay: rebooting"
+exec ${T715_REBOOT:-systemctl reboot}

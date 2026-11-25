@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Forked from omarchy-mobile 5f7ba48, packages/omamobile-sensors/lib/autorotate.py.
+"""Rotate Hyprland's screen and touch input with the tablet (docs/image/ROTATION.md).
+
+    t715-rotate [--dry-run] [--session]   the daemon, omamobile-autorotate.service
+    t715-rotate set 0|1|2|3               one transform, and lock the rotation
+    t715-rotate turn                      a quarter turn clockwise, and lock
+    T715_ROTATE_PORTRAIT_CLASSES=omacam   focused classes held in portrait;
+                                          empty disables the hold
+
+The daemon is a client of iio-sensor-proxy: it claims the accelerometer and
+applies an orientation that has held for HOLD_MS. While
+~/.local/state/omamobile/rotation-lock exists, or the screen is off, it holds
+no claim, so nothing turns under a closed cover. Screen and touch change in one
+eval, or they would disagree, and on a touch-only tablet only SSH recovers from
+that. A reload resets both, so the daemon applies the transform again after one.
+While the focused window's class is one of T715_ROTATE_PORTRAIT_CLASSES (the
+camera, which turns its own preview), the screen stays at transform 0.
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+
+import gi
+gi.require_version('Gio', '2.0')
+gi.require_version('GLibUnix', '2.0')
+from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+
+NAME = 'net.hadess.SensorProxy'
+PATH = '/net/hadess/SensorProxy'
+OUTPUT = 'DSI-1'
+HOLD_MS = 700
+TRANSFORMS = {'normal': 0, 'left-up': 1, 'bottom-up': 2, 'right-up': 3}
+if os.environ.get('T715_ROTATE_UPSIDE_DOWN') == '0':
+    del TRANSFORMS['bottom-up']
+# Classes the daemon holds in portrait (transform 0) while one of their
+# windows has focus: omacam turns its own preview from the accelerometer.
+_classes = os.environ.get('T715_ROTATE_PORTRAIT_CLASSES', 'omacam')
+PORTRAIT_CLASSES = frozenset(c.strip() for c in _classes.split(',') if c.strip())
+
+
+def active_class(line):
+    """The focused window's class from an activewindow>> event line, or None."""
+    if line.startswith('activewindow>>'):
+        return line.split('>>', 1)[1].split(',', 1)[0] or None
+    return None
+
+
+def focused_class():
+    """The focused window's class from hyprctl, or None."""
+    try:
+        return json.loads(hyprctl('-j', 'activewindow').stdout or '{}').get('class')
+    except json.JSONDecodeError:
+        return None
+
+
+def log(msg):
+    print(f't715-rotate: {msg}', file=sys.stderr, flush=True)
+
+
+def lock_path():
+    state = os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state')
+    return os.path.join(state, 'omamobile', 'rotation-lock')
+
+
+def screen_off_path():
+    return os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/run/user/1000'), 't715-keys', 'touch-off')
+
+
+def lock():
+    os.makedirs(os.path.dirname(lock_path()), exist_ok=True)
+    open(lock_path(), 'a').close()
+
+
+def hyprctl(*args):
+    return subprocess.run(['hyprctl', *args], capture_output=True, text=True)
+
+
+def monitor():
+    """The panel's dict from hyprctl, or None."""
+    try:
+        mons = json.loads(hyprctl('-j', 'monitors').stdout or '[]')
+    except json.JSONDecodeError:
+        return None
+    return next((m for m in mons if m.get('name') == OUTPUT), None)
+
+
+def apply(transform, dry_run=False):
+    mon = {'scale': 2} if dry_run else monitor()
+    if mon is None:
+        log('no monitor')
+        return False
+    lua = (f'hl.monitor({{ output = "{OUTPUT}", mode = "preferred", position = "auto", '
+           f'scale = {mon["scale"]:g}, transform = {transform} }}); '
+           f'hl.config({{ input = {{ touchdevice = {{ transform = {transform}, output = "{OUTPUT}" }} }} }})')
+    if dry_run:
+        log(f'would run: hyprctl eval {lua!r}')
+        return True
+    r = hyprctl('eval', lua)
+    if r.returncode != 0 or r.stdout.strip() != 'ok':
+        log(f'eval failed: {(r.stdout + r.stderr).strip()[:200]}')
+        return False
+    log(f'transform {transform}')
+    return True
+
+
+class Rotator:
+    def __init__(self, args):
+        self.args = args
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION if args.session else Gio.BusType.SYSTEM, None)
+        self.claimed = False
+        self.proxy_up = False
+        self.current = None
+        self.pending = None
+        self.timer = 0
+        self.held_class = False
+        self.held_transform = None
+        self.held_orientation = None
+        mon = None if args.dry_run else monitor()
+        if mon is not None:
+            self.current = mon.get('transform', 0)
+        self.bus.signal_subscribe(NAME, 'org.freedesktop.DBus.Properties', 'PropertiesChanged',
+                                  PATH, None, Gio.DBusSignalFlags.NONE, self._changed)
+        Gio.bus_watch_name_on_connection(self.bus, NAME, Gio.BusNameWatcherFlags.AUTO_START,
+                                         self._appeared, self._vanished)
+        self.monitors = []
+        for path in (lock_path(), screen_off_path()):
+            m = Gio.File.new_for_path(path).monitor_file(Gio.FileMonitorFlags.NONE, None)
+            m.connect('changed', lambda *a: self._update_claim())
+            self.monitors.append(m)
+        if PORTRAIT_CLASSES and not args.dry_run:
+            self._check_focus(focused_class())
+        if not args.dry_run:
+            self._watch_reloads()
+
+    def _watch_reloads(self):
+        """Hyprland's event socket: a reload clears the monitor rule and the touch transform."""
+        path = os.path.join(os.environ['XDG_RUNTIME_DIR'], 'hypr',
+                            os.environ['HYPRLAND_INSTANCE_SIGNATURE'], '.socket2.sock')
+        self.events = Gio.SocketClient().connect(Gio.UnixSocketAddress.new(path), None)
+        self.lines = Gio.DataInputStream.new(self.events.get_input_stream())
+        self.lines.read_line_async(GLib.PRIORITY_DEFAULT, None, self._event)
+
+    def _event(self, stream, result):
+        line, _ = stream.read_line_finish_utf8(result)
+        if line is None:
+            log('Hyprland went away')
+            return
+        self.on_event_line(line)
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self._event)
+
+    def on_event_line(self, line):
+        if line.startswith('configreloaded') and self.current:
+            apply(self.current)
+        elif PORTRAIT_CLASSES and line.startswith('activewindow>>'):
+            self._check_focus(active_class(line))
+
+    def _check_focus(self, focused):
+        """Hold the panel in portrait while a camera-class window has focus."""
+        hold = focused in PORTRAIT_CLASSES
+        if hold == self.held_class:
+            return
+        if hold:
+            self.held_class = True
+            self.held_transform = self.current
+            self.held_orientation = None  # a previous hold's would be stale
+            self._cancel()
+            if self.current != 0:
+                self._apply(0)  # the camera turns its own preview
+            return
+        self.held_class = False
+        if self.claimed:
+            self._apply(TRANSFORMS.get(self.held_orientation or self._prop('AccelerometerOrientation')))
+        elif self.held_transform is not None and self.held_transform != self.current:
+            self._apply(self.held_transform)
+        self.held_transform = None
+
+    def _apply(self, transform):
+        if transform is None:
+            return
+        if apply(transform, self.args.dry_run):
+            self.current = transform
+
+    def _call(self, method):
+        try:
+            self.bus.call_sync(NAME, PATH, NAME, method, None, None, Gio.DBusCallFlags.NONE, 5000, None)
+            return True
+        except GLib.Error as e:
+            log(f'{method}: {e.message}')
+            return False
+
+    def _prop(self, prop):
+        try:
+            v = self.bus.call_sync(NAME, PATH, 'org.freedesktop.DBus.Properties', 'Get',
+                                   GLib.Variant('(ss)', (NAME, prop)), GLib.VariantType.new('(v)'),
+                                   Gio.DBusCallFlags.NONE, 5000, None)
+            return v.unpack()[0]
+        except GLib.Error:
+            return None
+
+    def _appeared(self, conn, name, owner):
+        self.proxy_up = bool(self._prop('HasAccelerometer'))
+        if not self.proxy_up:
+            log('the sensor proxy has no accelerometer')
+        self._update_claim()
+
+    def _vanished(self, conn, name):
+        self.proxy_up = False
+        self.claimed = False
+
+    def _update_claim(self):
+        want = self.proxy_up and not os.path.exists(lock_path()) and not os.path.exists(screen_off_path())
+        if self.claimed and not want:
+            self.claimed = not self._call('ReleaseAccelerometer')
+            self._cancel()
+        elif want and not self.claimed:
+            self.claimed = self._call('ClaimAccelerometer')
+            if self.claimed:
+                self._orientation(self._prop('AccelerometerOrientation'))
+
+    def _changed(self, conn, sender, path, iface, signal_name, params):
+        _iface, changed, _ = params.unpack()
+        if 'AccelerometerOrientation' in changed and self.claimed:
+            self._orientation(changed['AccelerometerOrientation'])
+
+    def _cancel(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+
+    def _orientation(self, orientation):
+        if self.held_class:
+            self.held_orientation = orientation  # for the focus that ends the hold
+            return
+        self._cancel()
+        self.pending = TRANSFORMS.get(orientation)
+        if self.pending is not None and self.pending != self.current:
+            self.timer = GLib.timeout_add(HOLD_MS, self._held)
+
+    def _held(self):
+        self.timer = 0
+        self._apply(self.pending)
+        return False
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ['turn']:
+        mon = monitor()
+        if mon is None:
+            return 1
+        lock()
+        return 0 if apply((mon.get('transform', 0) + 1) % 4) else 1
+    if argv[:1] == ['set']:
+        if argv[1:] not in (['0'], ['1'], ['2'], ['3']):
+            print(__doc__, file=sys.stderr)
+            return 2
+        lock()
+        return 0 if apply(int(argv[1])) else 1
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--dry-run', action='store_true', help='log the hyprctl calls instead of making them')
+    ap.add_argument('--session', action='store_true', help='the sensor proxy is on the session bus (testing)')
+    a = ap.parse_args(argv)
+    Rotator(a)
+    loop = GLib.MainLoop()
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, loop.quit)
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, loop.quit)
+    loop.run()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

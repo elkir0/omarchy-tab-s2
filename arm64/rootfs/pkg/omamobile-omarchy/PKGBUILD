@@ -1,0 +1,141 @@
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64 port) build of omamobile-omarchy for
+# Omarchy 4.5, taken from the owner's other tablet port (Lenovomarchy,
+# image/pkg/omamobile-omarchy 0.1.48-2, which runs on its tablet over Omarchy
+# 4.5.0-3) with one patch more.
+#
+# Upstream is https://github.com/derekross/omarchy-mobile; this recipe pins
+# upstream commit 899184543d60fd78f0a418f403463d628165a3ed (omamobile-omarchy
+# 0.1.51, 2026-11-24) by tarball and sha256, and takes the patch tool
+# (bin/omamobile-omarchy-patches), lib/lock-pam, the libalpm hook, the
+# tmpfiles rule and the licences from that tree.
+#
+# The two series families (patches/ for Omarchy 4.5, legacy-4.0.6/ for 4.0.6)
+# live in this directory, as Lenovomarchy trimmed them for a tablet with no
+# modem, no fingerprint reader and no packaged kernel (its
+# docs/research/omamobile/M1-OMARCHY-PATCHES.md has every keep/drop decision):
+# upstream's 0012 and 0016 (omamobile-update and the phone's channel guard),
+# 0014 (emergency call), 0020 (touch phrasing, inert without
+# omamobile-update), 0021 (display off before suspend: the phone's wake
+# path), 0022 (fingerprint) and 0029 (double tap to wake: needs
+# omamobile-doubletap) are dropped; 9000 (omarchy-channel-set and
+# omarchy-refresh-pacman refuse while pacman.conf has [alarm]) and 9001
+# (omarchy update without a kernel package and without yay) are the tablet's.
+# For the SM-T715 their comments are reworded, and the 4.5 family gains
+#   9002-t715-lock-blank-through-keys.patch: the lock's idle blank goes
+#     through t715-keys (SIGUSR1, as hypridle's timeout), so the touchscreen
+#     and the accelerometer go off with the panel; the 0.1.32 series'
+#     t715-lock-blank-through-keys.patch, rebased on 4.5.0-3 after the series.
+# Compared with the SM-T715's 0.1.32-1.2 build (Omarchy 4.0.6): 0020, 0021 and
+# 0022, which that build kept, are not in this series (Lenovomarchy's 4.5
+# trim, above); 0031 (first-run skips units that are not installed) is new.
+#
+# 0.1.51's own changes over 0.1.48: 0012, 0016, 0019 and 0020 only rebrand
+# "Omarchy Mobile" to "Omamobile" in comments (0012/0016/0020 stay dropped;
+# 0019 is taken as upstream now has it), and 0032 (idle: re-arm the monitor
+# when the timeout changes) and 0033 (network panel: one detail a row on a
+# narrow card) are new. Both are kept: neither is phone-only by the rules
+# above — 0032 fixes Omarchy's own idle service re-arming its monitor after a
+# timeout change, which the tablet's lock and screensaver idle rely on just
+# as much as a phone's do, and 0033 is a narrow-card layout fix in the
+# network panel the tablet's modem uses; neither needs omamobile-update,
+# omamobile-doubletap, a fingerprint reader or the phone's wake path. The
+# applier (bin/omamobile-omarchy-patches), the libalpm hook and
+# lib/update-bin/* also changed upstream, by the same rebrand only; the
+# tablet takes the tool and the hook from the tarball and ships no
+# update-bin, so nothing else moves. The legacy-4.0.6 family is unchanged
+# upstream between the two commits, so the tablet's 4.0.6 trim carries over
+# as it was.
+#
+# Source: GitHub's archive of the commit (tarballs/omamobile-8991845.tar.gz,
+# 16,975,821 bytes, top directory omamobile-<commit>: the repository was
+# renamed), whose packages/omamobile-omarchy is the commit's tree (checked
+# against upstream-new/, identical). The 0.1.48 pin above used the same
+# encoding of its commit.
+#
+# Build: tools/build-pkg omamobile-omarchy (rootfs/build.sh does it).
+# Image: rootfs/install-mobile.sh (packages.mobile), checked by the smoke check.
+#
+# Maintainer (upstream): Derek Ross <derekross@gmail.com>
+pkgname=omamobile-omarchy
+pkgver=0.1.51
+pkgrel=1.1
+pkgdesc="Omarchy Mobile's touch patches to Omarchy 4.5, re-applied after every Omarchy upgrade (SM-T715 tablet build)"
+arch=(any)
+url='https://github.com/derekross/omarchy-mobile'
+license=(MIT)
+depends=(
+  'omarchy>=4.0.6'
+  bash
+  python
+  patch
+  libarchive
+  util-linux
+)
+checkdepends=(python diffutils patch util-linux libarchive)
+optdepends=('omamobile-shell: the tablet status bar, quick settings and home screen')
+install=omamobile-omarchy.install
+
+_commit=899184543d60fd78f0a418f403463d628165a3ed
+_tarball="omamobile-${_commit:0:7}.tar.gz"
+_top="omamobile-${_commit}"
+source=(
+  "${_tarball}::${url}/archive/${_commit}.tar.gz"
+  omamobile-omarchy.install
+)
+sha256sums=(
+  '45cac52479602f0fbf04654abade311bca1ec88b779e0ad43e27cf6ad625f1d9'
+  'SKIP'
+)
+noextract=("${_tarball}")
+
+prepare() {
+  bsdtar -xf "$srcdir/$_tarball" "$_top/packages/$pkgname"
+  cd "$srcdir/$_top/packages/$pkgname"
+  [[ $(cat version) == "$pkgver" ]] || {
+    echo "upstream version is not $pkgver" >&2
+    return 1
+  }
+  # The unmodified upstream series must be the one the tablet trim was made
+  # from: if these counts drift after an upstream bump, redo the trim.
+  local n4x=$(ls patches/*.patch | wc -l) n406=$(ls legacy-4.0.6/*.patch | wc -l)
+  (( n4x == 31 && n406 == 29 )) || {
+    echo "upstream series sizes changed (4.5: $n4x, 4.0.6: $n406; expected 31/29)" >&2
+    echo "redo the tablet trim against the new upstream" >&2
+    return 1
+  }
+
+  # The patch tool, lock-pam, the libalpm hook, the tmpfiles rule and the
+  # licences come from upstream; everything else (both series, install,
+  # .install, tests) is the tablet's, carried in this directory.
+  rm -rf "$srcdir/pkgsrc-root"
+  mkdir -p "$srcdir/pkgsrc-root/bin" "$srcdir/pkgsrc-root/lib" \
+           "$srcdir/pkgsrc-root/libalpm" "$srcdir/pkgsrc-root/tmpfiles"
+  cp -a bin/omamobile-omarchy-patches "$srcdir/pkgsrc-root/bin/"
+  cp -a lib/lock-pam "$srcdir/pkgsrc-root/lib/"
+  cp -a libalpm/95-omamobile-omarchy-patches.hook "$srcdir/pkgsrc-root/libalpm/"
+  cp -a tmpfiles/omamobile-run.conf "$srcdir/pkgsrc-root/tmpfiles/"
+  cp -a LICENSE LICENSE.omarchy "$srcdir/pkgsrc-root/"
+  cp -a "$startdir/patches" "$startdir/legacy-4.0.6" "$startdir/install" \
+        "$startdir/omamobile-omarchy.install" "$startdir/version" "$startdir/test" \
+        "$srcdir/pkgsrc-root/"
+  [[ $(cat "$srcdir/pkgsrc-root/version") == "$pkgver" ]] || {
+    echo "version file is not $pkgver" >&2
+    return 1
+  }
+}
+
+check() {
+  # Lenovomarchy's adaptation of upstream's test suite (the tail of test/all
+  # says what is not run and why), then this build's own checks.
+  cp -a "$srcdir/pkgsrc-root" "$srcdir/checktree"
+  bash "$srcdir/checktree/test/all"
+  cd "$srcdir/pkgsrc-root"
+  local n=$(ls patches/*.patch | wc -l) n406=$(ls legacy-4.0.6/*.patch | wc -l)
+  (( n == 27 && n406 == 24 )) || { echo "expected 27 + 24 patches, have $n + $n406" >&2; return 1; }
+  grep -q 'kill-whom=main --signal=SIGUSR1 t715-keys.service' patches/9002-t715-lock-blank-through-keys.patch
+  ! grep -rqi 'yoga tab\|yt-j706f' patches/9*.patch legacy-4.0.6/9*.patch
+}
+
+package() {
+  "$srcdir/pkgsrc-root/install" "$pkgdir"
+}

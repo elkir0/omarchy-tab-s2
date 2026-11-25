@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: MIT
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64 port) build of omamobile's
+# omamobile-voice 0.1.1: Whisper's multilingual base speech model
+# (ggml-base.bin) in place of upstream's English-only base.en.
+#
+# Why: the tablet's session runs in French, and Whisper's .en models hear
+# English only, so upstream's base.en leaves the voice bar deaf to the
+# owner's language. The multilingual base, the same size class (142 MB,
+# Balanced in the voice settings), hears French and English and the other
+# languages the voice settings offer. omamobile-shell 0.2.147-2.1
+# (pkg/omamobile-shell, its patch 0014) sets Voxtype up with either model:
+# with this one, a new user's Voxtype config hears the session's language
+# (French on the tablet) with model "base", and the voice settings switch
+# the language later (English then offers the .en models, downloaded
+# through Voxtype).
+#
+# Upstream: https://github.com/derekross/omamobile, packages/omamobile-voice
+# 0.1.1 at commit 899184543d60fd78f0a418f403463d628165a3ed (its PKGBUILD,
+# LICENSE.whisper and test/all, adapted). The model is fetched at build time
+# from the same pinned commit of whisper.cpp's model repository as
+# upstream's base.en, and checked against its sha256 (huggingface.co's LFS
+# sha256 for ggml-base.bin at that commit; nothing binary is committed
+# here). The weights are OpenAI's Whisper (MIT), converted to ggml by
+# whisper.cpp (MIT): LICENSE.whisper, its first line naming this model.
+# The build needs huggingface.co the first time; makepkg keeps the file in
+# SRCDEST under a commit-named file, so later builds don't fetch it again.
+#
+# omamobile-setup-user links the model into each user's
+# ~/.local/share/voxtype/models (the only place Voxtype looks) and enables
+# the daemon, as upstream's does with base.en.
+
+# Maintainer (upstream): Derek Ross <derekross@gmail.com>
+
+pkgname=omamobile-voice
+pkgver=$(cat "${startdir:-.}/version")
+pkgrel=1.1
+_commit=5359861c739e955e79d9a303bcbc70fb988958b1
+_model=ggml-base.bin
+pkgdesc="Omamobile: Whisper's multilingual base speech model for Voxtype, so voice input works with no download (SM-T715 tablet build)"
+arch=(any)
+url="https://huggingface.co/ggerganov/whisper.cpp"
+license=(MIT)
+# Not a hard dependency: Omarchy's Remove > Dictation removes voxtype-bin
+# with pacman -Rns, and this package must not refuse that.
+optdepends=('voxtype-bin: the dictation engine that uses this model')
+source=("$_model-$_commit::https://huggingface.co/ggerganov/whisper.cpp/resolve/$_commit/$_model"
+        LICENSE.whisper)
+noextract=("$_model-$_commit")
+sha256sums=('60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe'
+            SKIP)
+
+check() {
+  "$startdir/test/all"
+}
+
+package() {
+  install -Dm644 "$srcdir/$_model-$_commit" "$pkgdir/usr/share/omamobile/voice/models/$_model"
+  install -Dm644 "$srcdir/LICENSE.whisper" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.whisper"
+}

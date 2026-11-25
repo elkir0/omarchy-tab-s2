@@ -1,0 +1,427 @@
+#!/bin/sh
+# init — the initramfs of the Galaxy Tab S2 8.0 LTE (SM-T715) for its arm64
+# system: busybox sh as PID 1. It boots an aarch64 root image kept as a file
+# on the tablet's USERDATA partition, or a directory of it.
+#
+# A skeleton of the armv7h port's initramfs (omarchy-tab-s2,
+# boot/initramfs/init: 1700 lines, with test kernels, modules, a debug link,
+# messages on screen and its own watchdog guard), for the arm64 port of
+# 2026-11-24, written for the loader's design (elkir0/bnuuyloader's t715/docs/PRODUCTION-LOADER.md):
+#
+#   - Nothing here handles failure. The loader arms the watchdog and nobody
+#     feeds it before t715-watchdog-keeper.service runs in the image: a boot
+#     that stops anywhere, here included, is reset by the hardware, and at
+#     the next boot the loader finds no "KBOOT: up" and hands back to S-Boot.
+#     So every failure is logged and then init waits for that reset.  It
+#     never restarts the tablet itself (the armv7h one did, to Android).
+#   - The budget is the watchdog's (about 30 s, the hardware's limit, from the
+#     kernel's own probe of the watchdog): this must reach /sbin/init well
+#     inside it.  A persistent root is checked with e2fsck -p first: that can
+#     be slow, and a first boot seeds a whole image: minutes, which the
+#     watchdog will not allow.  Start the kernel WITHOUT
+#     s3c2410_wdt.tmr_atboot=1 for a first boot of a persistent root.
+#
+# Two modes, as the armv7h port:
+#
+#   image mode (the default): the partition named USERDATA is set read-only
+#     at the block level and mounted ro,noload,nosuid,nodev,noexec (Android's
+#     file system: its journal is never replayed); the image is attached
+#     read-only and mounted at /run/t715/lower; the root is an overlayfs on it
+#     whose upper layer is a tmpfs (/run/t715/rw).  Every change lives in RAM
+#     and is lost at reboot.  Nothing is ever written to USERDATA.
+#
+#   persistent mode (t715.persist=NAME): NAME, a directory at the top of
+#     USERDATA, is the root, read-write (/run/t715/userdata is USERDATA).  On
+#     its first boot it is seeded from the image by the image's own cp -a,
+#     chrooted into the image, as the armv7h port does it; a failure there
+#     falls back to image mode.  A NAME that exists already is used as it is:
+#     one seeded here (its .t715-persist marker), or one seeded by hand from
+#     the image (no marker: the owner's copy, its kernel modules added), which
+#     is taken as a root only when it is an aarch64 system: its
+#     /usr/lib/systemd/systemd is a 64-bit AArch64 ELF.  Anything else there
+#     (the armv7h system's root, a stray directory) is never touched: image
+#     mode.
+#
+# Knobs (kernel command line):
+#   t715.rootimg=PATH   image inside USERDATA (no leading slash, no ".."):
+#                       media/0/linux/rootfs-aarch64.img
+#   t715.persist=NAME   the persistent root USERDATA/NAME instead of image mode
+#   t715.rootwait=SECS  wait for the partition named USERDATA (20)
+#   t715.shell=1        stop in a shell on the console once /newroot is ready
+#                       (`exec switch_root /newroot /sbin/init` to go on), and
+#                       on any failure.  The watchdog is not fed meanwhile.
+#   t715.wdtfeed=1      the initramfs feeds the watchdog, every 5 s, from the
+#                       moment /init runs until the hand-over.  Off by default
+#                       (nothing feeds it before the image's
+#                       t715-watchdog-keeper.service does).  On, the watchdog's
+#                       timeout has to cover only from the hand-over to that
+#                       service, not the kernel's whole start: for a kernel
+#                       still slow to start (one core).  The timeout itself is
+#                       never changed here.
+#   quiet               (the kernel's own word) the initramfs's progress lines
+#                       go to the kernel log only, not to the screen: the
+#                       daily boot shows the Plymouth splash, not text.
+#                       Warnings and errors still print.
+#
+# Every step goes to the kernel log as "t715-initramfs: ..." (console=sec_log
+# mirrors it into S-Boot's RAM ring, where the loader's own log goes).
+# UNTESTED on the tablet (2026-11-24): syntax and unit tests only, in Docker.
+
+PATH=/bin:/sbin
+umask 022
+
+RUNDIR=/run/t715
+NEWROOT=/newroot
+UD_MNT=/userdata
+LOWER=$RUNDIR/lower
+RW=$RUNDIR/rw
+SEED_MARGIN_KIB=524288     # a seed needs the image's use plus 512 MiB free
+PERSIST_MARK=.t715-persist
+
+# Where the init looks; the tests (tests/test-initramfs.sh) point them at
+# files of their own, and TEST=1 lets USERDATA be a plain file there.
+CMDLINE=/proc/cmdline
+SYS_BLOCK=/sys/block
+MOUNTS=/proc/mounts
+DEVWATCHDOG=/dev/watchdog
+TEST=
+
+ROOTWAIT=20
+ROOTIMG=media/0/linux/rootfs-aarch64.img
+PERSIST=
+SHELL=0
+WDTFEED=0
+FEEDER=
+LOOP_DEV=
+UD_DEV=
+
+kmsg=/dev/kmsg
+say() { printf 't715-initramfs: %s\n' "$*"; }
+QUIET=0
+log() { [ "$QUIET" = 1 ] || say "$*"; printf '<6>t715-initramfs: %s\n' "$*" >"$kmsg" 2>/dev/null; }
+warn() { say "WARNING: $*"; printf '<4>t715-initramfs: WARNING: %s\n' "$*" >"$kmsg" 2>/dev/null; }
+err() { say "ERROR: $*"; printf '<3>t715-initramfs: ERROR: %s\n' "$*" >"$kmsg" 2>/dev/null; }
+
+is_mounted() { grep -q " $1 " "$MOUNTS" 2>/dev/null; }
+
+mount_early() {
+    # The archive has no /sys (its builder keeps only the directories that hold files): make every
+    # mount point first. Without it sysfs is never mounted, and nothing under /sys exists: no USB
+    # device controller, no partition names (arm64 bring-up, 2026-11-25, cycles kboot5 and kboot6).
+    mkdir -p /proc /sys /dev /run 2>/dev/null || true
+    [ -d /proc/self ] || mount -t proc proc /proc || true
+    is_mounted /sys || mount -t sysfs sysfs /sys || true
+    is_mounted /dev || mount -t devtmpfs devtmpfs /dev || true
+    # "quiet" is read here, before the first log line (read_knobs comes later).
+    case " $(cat "$CMDLINE" 2>/dev/null) " in *" quiet "*) QUIET=1 ;; esac
+    mkdir -p /dev/pts /run "$RUNDIR" "$NEWROOT" "$UD_MNT"
+    mount -t devpts devpts /dev/pts 2>/dev/null || true
+    is_mounted /run || mount -t tmpfs tmpfs /run || true
+    [ -w /proc/sys/kernel/sysrq ] && echo 1 >/proc/sys/kernel/sysrq
+    [ -c /dev/tty0 ] && printf '\033[2J\033[H' >/dev/tty0 2>/dev/null
+    return 0
+}
+
+read_knobs() {
+    for kv in $(cat "$CMDLINE" 2>/dev/null); do
+        case "$kv" in
+            t715.rootimg=*) ROOTIMG="${kv#*=}" ;;
+            t715.persist=*) PERSIST="${kv#*=}" ;;
+            t715.rootwait=*) ROOTWAIT="${kv#*=}" ;;
+            t715.shell=1) SHELL=1 ;;
+            t715.wdtfeed=1) WDTFEED=1 ;;
+        esac
+    done
+    case "$ROOTWAIT" in '' | *[!0-9]*) ROOTWAIT=20 ;; esac
+    # The image path is inside USERDATA: no leading slash, no "..", nothing
+    # but letters, digits and . _ / + , -
+    case "$ROOTIMG" in
+        '' | /* | *..* | *[!A-Za-z0-9._/+,-]*)
+            warn "t715.rootimg: not a path inside USERDATA, using the default"
+            ROOTIMG=media/0/linux/rootfs-aarch64.img ;;
+    esac
+    # A persistent root is a plain name at the top of USERDATA, not hidden.
+    case "$PERSIST" in
+        *[!A-Za-z0-9_+.-]* | '' | .*) PERSIST= ;;
+    esac
+    log "knobs: rootimg=$ROOTIMG${PERSIST:+, persist=$PERSIST}, rootwait=${ROOTWAIT}s${SHELL:+, shell}${WDTFEED:+, wdtfeed}"
+}
+
+# wdt_feed_start, wdt_feed_stop: t715.wdtfeed. busybox's watchdog applet,
+# in the foreground so that its pid is known. -T 5: a keepalive every 5 s
+# (the applet's default is 60 s, more than the hardware allows). No -t: the
+# timeout stays the kernel's. Stopped with SIGTERM, it closes the device
+# without the magic character: the watchdog keeps running, and nothing feeds
+# it until the image's t715-watchdog-keeper.service opens it.
+wdt_feed_start() {
+    [ "$WDTFEED" = 1 ] || return 0
+    if [ ! -c "$DEVWATCHDOG" ]; then
+        warn "t715.wdtfeed=1: no $DEVWATCHDOG here, nothing feeds the watchdog before the image does"
+        return 0
+    fi
+    watchdog -F -T 5 "$DEVWATCHDOG" &
+    FEEDER=$!
+    log "feeding the watchdog every 5 s until the hand-over (pid $FEEDER)"
+}
+
+wdt_feed_stop() {
+    [ -n "$FEEDER" ] || return 0
+    kill "$FEEDER" 2>/dev/null || true
+    wait "$FEEDER" 2>/dev/null || true
+    FEEDER=
+    log "the watchdog is not fed any more: the image's t715-watchdog-keeper.service has the timeout for it"
+}
+
+# find_userdata: the partition named USERDATA on the eMMC. The eMMC is always
+# mmcblk0 (fixed by the device tree's aliases): a microSD card that carries a
+# copy of a tablet's eMMC has partitions with the same names.
+find_userdata() {
+    _fu_waited=0
+    while :; do
+        UD_DEV=
+        for d in "$SYS_BLOCK"/mmcblk0/mmcblk0p*/; do
+            if [ "$(sed -n 's/^PARTNAME=//p' "$d/uevent" 2>/dev/null)" = USERDATA ]; then
+                UD_DEV="/dev/$(sed -n 's/^DEVNAME=//p' "$d/uevent")"
+            fi
+        done
+        if [ -n "$UD_DEV" ] && { [ -b "$UD_DEV" ] || [ -n "$TEST" ]; }; then
+            log "USERDATA is $UD_DEV (after ${_fu_waited}s)"
+            return 0
+        fi
+        [ "$_fu_waited" -ge "$ROOTWAIT" ] && break
+        sleep 1
+        _fu_waited=$((_fu_waited + 1))
+    done
+    err "no partition named USERDATA after ${ROOTWAIT}s"
+    return 1
+}
+
+# check_ext4: the superblock's magic (0xEF53 at byte 1080) says whether the
+# partition is an ext4 file system. Two bytes, read one by one and compared
+# as a string: this busybox has no od, and a number would be lost to a null.
+check_ext4() {
+    _cm="$(dd if="$UD_DEV" bs=1 skip=1080 count=2 2>/dev/null)"
+    if [ "$_cm" = "$(printf '\123\357')" ]; then
+        log "USERDATA: an ext4 file system (the superblock's magic)"
+    else
+        warn "the superblock of $UD_DEV does not carry ext4's magic: trying to mount it anyway"
+    fi
+}
+
+# mount_userdata_ro: read-only at the block level too, and no journal replay:
+# Android's file system is never changed from here.
+mount_userdata_ro() {
+    blockdev --setro "$UD_DEV" || return 1
+    mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$UD_DEV" "$UD_MNT" || {
+        err "cannot mount USERDATA ($UD_DEV) read-only"
+        return 1
+    }
+    log "USERDATA mounted read-only, no journal replay"
+}
+
+attach_image() {
+    _ai_img="$UD_MNT/$ROOTIMG"
+    if [ ! -f "$_ai_img" ]; then
+        err "no image $ROOTIMG on USERDATA"
+        return 1
+    fi
+    LOOP_DEV="$(losetup -f)" || return 1
+    losetup -r "$LOOP_DEV" "$_ai_img" || { LOOP_DEV=; return 1; }
+    log "image $ROOTIMG attached read-only at $LOOP_DEV ($(($(blockdev --getsize64 "$LOOP_DEV") / 1048576)) MiB)"
+}
+
+detach_image() {
+    [ -z "$LOOP_DEV" ] || losetup -d "$LOOP_DEV"
+    LOOP_DEV=
+}
+
+# boot_image: image mode.
+boot_image() {
+    attach_image || return 1
+    mkdir -p "$LOWER" "$RW"
+    if ! mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER"; then
+        err "cannot mount the image $ROOTIMG (is it a raw ext4 image?)"
+        detach_image
+        return 1
+    fi
+    mount -t tmpfs -o mode=0755 tmpfs "$RW" || return 1
+    mkdir -p "$RW/upper" "$RW/work"
+    mount -t overlay -o "lowerdir=$LOWER,upperdir=$RW/upper,workdir=$RW/work" overlayfs "$NEWROOT" \
+        || { err "cannot mount the overlay on the image (CONFIG_OVERLAY_FS?)"; return 1; }
+    log "image mode: /run/t715/lower is the image, /run/t715/rw the RAM layer: changes are lost at reboot"
+}
+
+# seed_persist: first boot of a persistent root. Each top-level entry of the
+# image (lost+found aside) is copied by the image's own /usr/bin/cp, chrooted
+# into the image, onto /mnt, where USERDATA/.NAME.t715-seed is bind-mounted.
+# The marker goes in last, then the directory is renamed NAME. An interrupted
+# seed leaves only the hidden directory, which the next attempt removes.
+seed_persist() {
+    _sp_tmp="$UD_MNT/.$PERSIST.t715-seed"
+    log "seeding USERDATA/$PERSIST from $ROOTIMG (its first boot): this takes minutes"
+    attach_image || return 1
+    mkdir -p "$LOWER"
+    mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER" || { detach_image; return 1; }
+    if [ ! -d "$LOWER/mnt" ] || [ ! -x "$LOWER/usr/bin/cp" ]; then
+        err "the image has no /mnt or no /usr/bin/cp: cannot seed from it"
+        umount "$LOWER"; detach_image
+        return 1
+    fi
+    # df -Pk's last line: used is its third field, free its fourth (this
+    # busybox has no awk).
+    set -- $(df -Pk "$LOWER" | tail -n 1)
+    _sp_used="${3:-}"
+    set -- $(df -Pk "$UD_MNT" | tail -n 1)
+    _sp_free="${4:-}"
+    case "$_sp_used$_sp_free" in
+        '' | *[!0-9]*)
+            err "cannot read the image's use or USERDATA's free space"
+            umount "$LOWER"; detach_image
+            return 1 ;;
+    esac
+    [ ! -e "$_sp_tmp" ] || { log "removing an interrupted seed"; rm -rf "$_sp_tmp"; }
+    set -- $(df -Pk "$UD_MNT" | tail -n 1)
+    _sp_free="${4:-}"
+    if [ "$_sp_free" -lt $((_sp_used + SEED_MARGIN_KIB)) ]; then
+        err "USERDATA has $((_sp_free / 1024)) MiB free, the seed needs $(((_sp_used + SEED_MARGIN_KIB) / 1024)) MiB: image mode"
+        umount "$LOWER"; detach_image
+        return 1
+    fi
+    if ! mkdir -m 0755 "$_sp_tmp" || ! mount --bind "$_sp_tmp" "$LOWER/mnt"; then
+        umount "$LOWER"; detach_image
+        return 1
+    fi
+    _sp_rc=0
+    for _sp_e in "$LOWER"/* "$LOWER"/.[!.]* "$LOWER"/..?*; do
+        [ -e "$_sp_e" ] || [ -L "$_sp_e" ] || continue
+        _sp_n=${_sp_e##*/}
+        case "$_sp_n" in
+            lost+found) ;;
+            mnt) mkdir -m 0755 "$_sp_tmp/mnt" || _sp_rc=1 ;;
+            *) chroot "$LOWER" /usr/bin/cp -a "/$_sp_n" /mnt/ || _sp_rc=1 ;;
+        esac
+    done
+    umount "$LOWER/mnt" || _sp_rc=1
+    umount "$LOWER"
+    detach_image
+    if [ "$_sp_rc" != 0 ]; then
+        err "copying the image into USERDATA/.$PERSIST.t715-seed failed: image mode"
+        return 1
+    fi
+    {
+        printf 'persistent root %s, seeded from %s\n' "$PERSIST" "$ROOTIMG"
+        printf 'initramfs %s\n' "$(cat /etc/t715-initramfs.id 2>/dev/null)"
+        printf 'date %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    } >"$_sp_tmp/$PERSIST_MARK"
+    sync
+    mv "$_sp_tmp" "$UD_MNT/$PERSIST" || { err "cannot finish the seed of USERDATA/$PERSIST: image mode"; return 1; }
+    sync
+    log "USERDATA/$PERSIST seeded"
+}
+
+# is_aarch64_elf FILE: FILE is a 64-bit little-endian AArch64 ELF: bytes 0-3
+# the magic, 4 = 2 (ELFCLASS64), 5 = 1 (little-endian), 18 = 0xB7 (EM_AARCH64,
+# the low byte of e_machine), read byte by byte as check_ext4 reads its magic
+# (no od here; a null byte is never compared).
+is_aarch64_elf() {
+    [ -f "$1" ] || return 1
+    [ "$(dd if="$1" bs=1 count=4 2>/dev/null)" = "$(printf '\177ELF')" ] || return 1
+    [ "$(dd if="$1" bs=1 skip=4 count=2 2>/dev/null)" = "$(printf '\002\001')" ] || return 1
+    [ "$(dd if="$1" bs=1 skip=18 count=1 2>/dev/null)" = "$(printf '\267')" ]
+}
+
+# persist_root: USERDATA read-write, checked first; NAME is the root.
+persist_root() {
+    log "checking USERDATA (e2fsck -p)"
+    e2fsck -p "$UD_DEV" >"$RUNDIR/e2fsck.log" 2>&1
+    _pr_rc=$?
+    log "e2fsck exit $_pr_rc: $(grep -m 1 -E ': (clean|[0-9]+/[0-9]+ files)' "$RUNDIR/e2fsck.log")"
+    if [ "$_pr_rc" -ge 4 ]; then
+        err "e2fsck left errors on USERDATA (exit $_pr_rc): no read-write mount, image mode"
+        return 1
+    fi
+    blockdev --setrw "$UD_DEV" 2>/dev/null
+    mount -t ext4 -o rw,noatime,errors=remount-ro "$UD_DEV" "$UD_MNT" || {
+        err "cannot mount USERDATA read-write"
+        return 1
+    }
+    _pr_root="$UD_MNT/$PERSIST"
+    if [ ! -d "$_pr_root" ]; then
+        seed_persist || return 1
+    fi
+    if [ ! -f "$_pr_root/$PERSIST_MARK" ]; then
+        # Not seeded here: the owner's own copy of the image is a root too,
+        # once its systemd shows it is an aarch64 system.
+        if is_aarch64_elf "$_pr_root/usr/lib/systemd/systemd"; then
+            log "USERDATA/$PERSIST has no seed marker but is an aarch64 system (its systemd): used as it is"
+        else
+            err "USERDATA/$PERSIST exists without its marker and is no aarch64 system (no 64-bit AArch64 /usr/lib/systemd/systemd): never touched, image mode"
+            return 1
+        fi
+    fi
+    mount --bind "$_pr_root" "$NEWROOT" || { err "cannot mount USERDATA/$PERSIST as the root"; return 1; }
+    mkdir -p "$NEWROOT/run"
+    # USERDATA as a whole is the image's run-t715-userdata.mount (/run/t715/userdata): a bind made
+    # here into the new root's /run would be covered by this /run at the handoff.
+    log "persistent root USERDATA/$PERSIST, read-write"
+}
+
+# handoff_ready: /run travels into the new root (/run/t715/* says what was
+# booted), and the optional shell. handoff then replaces this init.
+handoff_ready() {
+    wdt_feed_stop
+    mount -n -o move /run "$NEWROOT/run" || return 1
+    if [ "$SHELL" = 1 ]; then
+        say "t715.shell=1: /newroot is ready; this shell is the initramfs's. The watchdog is not fed."
+        say "  'exec switch_root /newroot /sbin/init' boots the image; exit stays here."
+        (exec setsid cttyhack sh) 2>/dev/null || sh
+    fi
+    log "switch_root to the image, init /sbin/init"
+}
+
+handoff() {
+    handoff_ready || return 1
+    exec switch_root "$NEWROOT" /sbin/init
+}
+
+shell_now() {
+    [ "$SHELL" = 1 ] || return 0
+    say "a shell on the console (t715.shell=1); exit to wait for the reset"
+    (exec setsid cttyhack sh) 2>/dev/null || sh
+}
+
+wait_for_reset() {
+    # A dead initramfs must not keep the tablet alive.
+    wdt_feed_stop
+    say "waiting: the watchdog resets a start that stopped (nothing feeds it before the image does)"
+    while :; do sleep 2147483647 || sleep 5; done
+}
+
+main() {
+    mount_early
+    log "starting (kernel $(uname -r), initramfs $(cat /etc/t715-initramfs.id 2>/dev/null))"
+    read_knobs
+    wdt_feed_start
+    find_userdata || { shell_now; wait_for_reset; exit 1; }
+    check_ext4
+    if [ -n "$PERSIST" ]; then
+        if persist_root; then
+            handoff
+            err "the hand-over to USERDATA/$PERSIST failed"
+        else
+            # Back to the image mode: USERDATA read-only again.
+            umount "$NEWROOT" 2>/dev/null
+            if is_mounted "$UD_MNT"; then umount "$UD_MNT" || true; fi
+            warn "persistent root not available: trying image mode"
+        fi
+    fi
+    is_mounted "$UD_MNT" || mount_userdata_ro || { shell_now; wait_for_reset; exit 1; }
+    boot_image || { shell_now; wait_for_reset; exit 1; }
+    handoff
+    err "the hand-over to the image failed"
+    shell_now
+    wait_for_reset
+    exit 1
+}
+
+main

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# pin-tarball — write lib/alarm-tarball.sha256: the SHA-256 of the official
+# ALARM aarch64 tarball now in cache/ (downloading it first when absent).
+#
+# ALARM serves its tarballs over HTTP with an md5 only (lib/common.sh checks
+# it); the pin makes every later build use the very same base and fail
+# loudly when ALARM has published another one. Run it once after a reviewed
+# update: the date in the comment says which tarball the pin is for.
+set -euo pipefail
+# shellcheck source=../lib/common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
+LOG_TAG=pin
+
+ensure_tarball
+sha="$(sha256_of "$ALARM_TARBALL_PATH")"
+size="$(stat -f %z "$ALARM_TARBALL_PATH" 2>/dev/null || stat -c %s "$ALARM_TARBALL_PATH")"
+{
+    printf '# lib/alarm-tarball.sha256 — the official Arch Linux ARM aarch64 tarball this build\n'
+    printf '# starts from (shasum -c format). Written by tools/pin-tarball on %s:\n' "$(date -u +%Y-%m-%d)"
+    printf '# %s, %s bytes, md5 %s.\n' "$ALARM_TARBALL" "$size" "$(md5_of "$ALARM_TARBALL_PATH")"
+    printf '%s  %s\n' "$sha" "$ALARM_TARBALL"
+} > "$ALARM_PIN.tmp"
+mv -f "$ALARM_PIN.tmp" "$ALARM_PIN"
+log "pinned $(cat "$ALARM_PIN" | tail -n1)"

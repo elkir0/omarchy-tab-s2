@@ -11,6 +11,9 @@
 /out/
 image/out/
 image/cache/
+arm64/rootfs/out/
+arm64/rootfs/cache/
+arm64/rootfs/pkg/t715-modem/t715-modem-src.tar.gz*
 legacy/phosh/rootfs/
 legacy/phosh/cache/
 legacy/phosh/*.tar.gz

@@ -1,0 +1,961 @@
+#!/usr/bin/env python3
+"""t715-isa-audit: can these AArch64 ELF files run on an ARMv8.0-A CPU?
+
+The SM-T715 (Exynos 7420: Cortex-A53 + Cortex-A57) implements ARMv8.0-A with
+the optional features fp, asimd, aes, pmull, sha1, sha2 and crc32, nothing
+newer. Code built for a later CPU dies there with SIGILL. This tool scans the
+executable code of AArch64 ELF files (executables, shared objects, relocatable
+objects, Arch packages) for instructions of later extensions.
+
+    t715-isa-audit [--json] [--run] [--faults N] PATH...
+
+PATH is an ELF file, a directory (walked, symlinks not followed) or an Arch
+package (*.pkg.tar.zst/.xz/.gz, extracted with bsdtar or tar). Files that are
+not 64-bit little-endian AArch64 ELF are skipped and counted in the summary.
+
+Verdicts: OK (no fault-class instruction outside the outline-atomics helpers),
+RISK (fault-class instructions found; counts and the first fault addresses are
+printed), ERROR (unparseable ELF). Exit status: 0 when no file is RISK (and,
+with --run, no program got SIGILL), 1 otherwise, 2 on usage error.
+
+Limits: this is a static scan. Code that a library only runs after checking
+the CPU (ifunc resolvers, getauxval(AT_HWCAP) dispatch, as in glibc, OpenSSL
+or ONNX Runtime kernels) is counted like any other code, so RISK means "can
+fault", not "will fault"; --run on the tablet gives the dynamic answer. Data
+words inside executable sections can look like instructions; "$d" mapping
+symbols are honoured when the symbol table has them.
+
+Python 3 standard library only (runs on macOS and on the tablet).
+"""
+
+import argparse
+import array
+import json
+import mmap
+import os
+import re
+import shutil
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+# ---------------------------------------------------------------------------
+# Instruction classes
+# ---------------------------------------------------------------------------
+
+CLASSES = (
+    # key,      description,                                        fault?
+    ("lse",      "LSE atomics (ARMv8.1)",                            True),
+    ("rdm",      "RDM SQRDMLAH/SQRDMLSH (ARMv8.1)",                  True),
+    ("fp16",     "FP16 half-precision arithmetic (ARMv8.2, +FHM)",   True),
+    ("dotprod",  "DotProd SDOT/UDOT (ARMv8.2)",                      True),
+    ("rcpc",     "RCpc LDAPR (ARMv8.3) / LDAPUR, STLUR (ARMv8.4)",   True),
+    ("jscvt",    "JSCVT FJCVTZS (ARMv8.3)",                          True),
+    ("fcma",     "FCMA FCMLA/FCADD (ARMv8.3)",                       True),
+    ("pauth",    "PAuth non-hint (RETAA, BLRAA, LDRAA, PACIA ...)",  True),
+    ("frintts",  "FRINT32/FRINT64 (ARMv8.5)",                        True),
+    ("bf16",     "BF16 (ARMv8.6)",                                   True),
+    ("i8mm",     "I8MM SMMLA/USDOT/SUDOT (ARMv8.6)",                 True),
+    ("sve",      "SVE/SVE2 (ARMv8.2+/ARMv9)",                        True),
+    ("sme",      "SME (ARMv9.2)",                                    True),
+    ("crypto2",  "SHA512/SHA3/SM3/SM4 (ARMv8.2)",                    True),
+    ("flagm",    "FlagM/FlagM2 CFINV/RMIF/SETF/AXFLAG (ARMv8.4)",    True),
+    ("rng",      "RNDR/RNDRRS system register reads (ARMv8.5)",      True),
+    ("mops",     "MOPS CPY*/SET* (ARMv8.8)",                         True),
+    ("cssc",     "CSSC ABS/CNT/CTZ/SMAX... (ARMv8.9)",               True),
+    ("pac_bti",  "PAC/BTI hint space (harmless on ARMv8.0)",         False),
+)
+CLASS_KEYS = tuple(c[0] for c in CLASSES)
+CLS = {k: i for i, k in enumerate(CLASS_KEYS)}
+IS_FAULT = tuple(c[2] for c in CLASSES)
+LSE = CLS["lse"]
+HINT = CLS["pac_bti"]
+
+# ---------------------------------------------------------------------------
+# Encoding table: (mask, value, class, instruction class in the Arm ARM).
+#
+# Masks come from the A64 encoding index of the Arm Architecture Reference
+# Manual for A-profile (DDI 0487, "A64 Instruction Set Encoding" chapter): a
+# word belongs to the class when (word & mask) == value. Every value listed
+# is UNDEFINED on ARMv8.0-A, except the pac_bti rows, which sit in the HINT
+# space and execute as NOPs there. The first matching row wins.
+# ---------------------------------------------------------------------------
+
+ENCODINGS = (
+    # --- LSE (FEAT_LSE, ARMv8.1) -------------------------------------------
+    # Atomic memory operations: size 111 V=0 00 A R 1 Rs o3=0 opc 00 Rn Rt
+    # LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN{,A,L,AL}{B,H,,}
+    # and their ST* aliases (Rt=XZR).
+    (0x3F208C00, 0x38200000, "lse", "Atomic memory operations, o3=0 (LDADD ... LDUMIN, ST*)"),
+    # Atomic memory operations, o3=1 opc=000: SWP{,A,L,AL}{B,H,,}
+    (0x3F20FC00, 0x38208000, "lse", "Atomic memory operations, o3=1 opc=000 (SWP)"),
+    # Compare and swap: size 0010001 L 1 Rs o0 Rt2=11111 Rn Rt (CAS{,A,L,AL}{B,H,,})
+    (0x3FA07C00, 0x08A07C00, "lse", "Compare and swap (CAS)"),
+    # Compare and swap pair: 0 sz 0010000 L 1 Rs o0 11111 Rn Rt (CASP{,A,L,AL})
+    (0xBFA07C00, 0x08207C00, "lse", "Compare and swap pair (CASP)"),
+
+    # --- RCpc (FEAT_LRCPC ARMv8.3, FEAT_LRCPC2 ARMv8.4) ----------------------
+    # Atomic memory operations, A=1 R=0 Rs=11111 o3=1 opc=100: LDAPR{B,H,,}
+    (0x3FFFFC00, 0x38BFC000, "rcpc", "Atomic memory operations, o3=1 opc=100 (LDAPR)"),
+    # LDAPR/STLR (unscaled immediate): size 011001 opc 0 imm9 00 Rn Rt
+    (0x3F200C00, 0x19000000, "rcpc", "LDAPR/STLR (unscaled immediate) (LDAPUR*, STLUR*)"),
+
+    # --- RDM (FEAT_RDM, ARMv8.1) ---------------------------------------------
+    # Advanced SIMD three same extra, U=1 opcode=000x
+    (0xBF20F400, 0x2E008400, "rdm", "AdvSIMD three same extra, U=1 opcode=000x (SQRDMLAH/SQRDMLSH vector)"),
+    # Advanced SIMD scalar three same extra, U=1 opcode=000x
+    (0xFF20F400, 0x7E008400, "rdm", "AdvSIMD scalar three same extra, U=1 opcode=000x (SQRDMLAH/SQRDMLSH scalar)"),
+    # Advanced SIMD vector x indexed element, U=1 opcode=11x1
+    (0xBF00D400, 0x2F00D000, "rdm", "AdvSIMD vector x indexed element, U=1 opcode=11x1 (SQRDMLAH/SQRDMLSH by element)"),
+    # Advanced SIMD scalar x indexed element, U=1 opcode=11x1
+    (0xFF00D400, 0x7F00D000, "rdm", "AdvSIMD scalar x indexed element, U=1 opcode=11x1 (SQRDMLAH/SQRDMLSH by element)"),
+
+    # --- DotProd (FEAT_DotProd, ARMv8.2) -------------------------------------
+    # Advanced SIMD three same extra, size=10 opcode=0010 (U selects SDOT/UDOT)
+    (0x9FE0FC00, 0x0E809400, "dotprod", "AdvSIMD three same extra, size=10 opcode=0010 (SDOT/UDOT vector)"),
+    # Advanced SIMD vector x indexed element, size=10 opcode=1110
+    (0x9FC0F400, 0x0F80E000, "dotprod", "AdvSIMD vector x indexed element, size=10 opcode=1110 (SDOT/UDOT by element)"),
+
+    # --- I8MM (FEAT_I8MM, ARMv8.6) -------------------------------------------
+    (0xBFE0FC00, 0x0E809C00, "i8mm", "AdvSIMD three same extra, U=0 size=10 opcode=0011 (USDOT vector)"),
+    (0x9FE0FC00, 0x0E80A400, "i8mm", "AdvSIMD three same extra, size=10 opcode=0100 (SMMLA/UMMLA)"),
+    (0xBFE0FC00, 0x0E80AC00, "i8mm", "AdvSIMD three same extra, U=0 size=10 opcode=0101 (USMMLA)"),
+    (0xBF40F400, 0x0F00F000, "i8mm", "AdvSIMD vector x indexed element, U=0 size=x0 opcode=1111 (SUDOT/USDOT by element)"),
+
+    # --- BF16 (FEAT_BF16, ARMv8.6) -------------------------------------------
+    (0xBF40F400, 0x0F40F000, "bf16", "AdvSIMD vector x indexed element, U=0 size=x1 opcode=1111 (BFDOT/BFMLALB/T by element)"),
+    (0xBF60FC00, 0x2E40FC00, "bf16", "AdvSIMD three same extra, U=1 size=x1 opcode=1111 (BFDOT/BFMLALB/T vector)"),
+    (0xBFE0FC00, 0x2E40EC00, "bf16", "AdvSIMD three same extra, U=1 size=01 opcode=1101 (BFMMLA)"),
+    (0xFFFFFC00, 0x1E634000, "bf16", "FP data-processing (1 source), ftype=01 opcode=000110 (BFCVT)"),
+    (0xBFFFFC00, 0x0EA16800, "bf16", "AdvSIMD two-register misc, U=0 size=10 opcode=10110 (BFCVTN/BFCVTN2)"),
+
+    # --- FCMA (FEAT_FCMA, ARMv8.3) -------------------------------------------
+    (0xBF20E400, 0x2E00C400, "fcma", "AdvSIMD three same extra, U=1 opcode=10xx (FCMLA vector)"),
+    (0xBF20EC00, 0x2E00E400, "fcma", "AdvSIMD three same extra, U=1 opcode=11x0 (FCADD)"),
+    (0xBF009400, 0x2F001000, "fcma", "AdvSIMD vector x indexed element, U=1 opcode=0xx1 (FCMLA by element)"),
+
+    # --- FP16 arithmetic (FEAT_FP16 ARMv8.2, FEAT_FHM) -----------------------
+    # Scalar floating-point classes with ftype=11 (half precision). FCVT
+    # between half and single/double (ftype=11 opcode=00010x, or opc=11) is
+    # ARMv8.0 and deliberately absent.
+    (0xFFFE7C00, 0x1EE04000, "fp16", "FP data-processing (1 source), ftype=11 opcode=0000xx (FMOV/FABS/FNEG/FSQRT)"),
+    (0xFFFC7C00, 0x1EE44000, "fp16", "FP data-processing (1 source), ftype=11 opcode=001xxx (FRINT*)"),
+    (0xFFE0FC00, 0x1EE02000, "fp16", "FP compare, ftype=11 (FCMP/FCMPE)"),
+    (0xFFE01FE0, 0x1EE01000, "fp16", "FP immediate, ftype=11 (FMOV immediate)"),
+    (0xFFE00C00, 0x1EE00400, "fp16", "FP conditional compare, ftype=11 (FCCMP/FCCMPE)"),
+    (0xFFE00C00, 0x1EE00800, "fp16", "FP data-processing (2 source), ftype=11 (FMUL/FDIV/FADD/FSUB/FMAX/FMIN/FNMUL ...)"),
+    (0xFFE00C00, 0x1EE00C00, "fp16", "FP conditional select, ftype=11 (FCSEL)"),
+    (0xFFC00000, 0x1FC00000, "fp16", "FP data-processing (3 source), ftype=11 (FMADD/FMSUB/FNMADD/FNMSUB)"),
+    (0x7FE0FC00, 0x1EE00000, "fp16", "Conversion between FP and integer, ftype=11 (FCVT*S/U, SCVTF, UCVTF, FMOV general)"),
+    (0x7FE00000, 0x1EC00000, "fp16", "Conversion between FP and fixed-point, ftype=11"),
+    # Advanced SIMD half-precision classes
+    (0x9F60C400, 0x0E400400, "fp16", "AdvSIMD three same (FP16)"),
+    (0xDF60C400, 0x5E400400, "fp16", "AdvSIMD scalar three same FP16"),
+    (0x9F7E0C00, 0x0E780800, "fp16", "AdvSIMD two-register miscellaneous (FP16)"),
+    (0xDF7E0C00, 0x5E780800, "fp16", "AdvSIMD scalar two-register miscellaneous FP16"),
+    (0xBF7FFC00, 0x0E30C800, "fp16", "AdvSIMD across lanes, U=0 sz=0 opcode=01100 (FMAXNMV/FMINNMV half)"),
+    (0xBF7FFC00, 0x0E30F800, "fp16", "AdvSIMD across lanes, U=0 sz=0 opcode=01111 (FMAXV/FMINV half)"),
+    (0xFF7FCC00, 0x5E30C800, "fp16", "AdvSIMD scalar pairwise, U=0 sz=0 opcode=011xx (FMAXNMP/FADDP/FMAXP/... half)"),
+    (0xBFC03400, 0x0F001000, "fp16", "AdvSIMD vector x indexed element, U=0 size=00 opcode=xx01 (FMLA/FMLS/FMUL half)"),
+    (0xBFC0F400, 0x2F009000, "fp16", "AdvSIMD vector x indexed element, U=1 size=00 opcode=1001 (FMULX half)"),
+    (0xFFC03400, 0x5F001000, "fp16", "AdvSIMD scalar x indexed element, U=0 size=00 opcode=xx01 (FMLA/FMLS/FMUL half)"),
+    (0xFFC0F400, 0x7F009000, "fp16", "AdvSIMD scalar x indexed element, U=1 size=00 opcode=1001 (FMULX half)"),
+    (0xBFF8FC00, 0x0F00FC00, "fp16", "AdvSIMD modified immediate, op=0 cmode=1111 o2=1 (FMOV vector immediate half)"),
+    (0x9FF0FC00, 0x0F10E400, "fp16", "AdvSIMD shift by immediate, immh=001x opcode=11100 (SCVTF/UCVTF fixed-point half)"),
+    (0x9FF0FC00, 0x0F10FC00, "fp16", "AdvSIMD shift by immediate, immh=001x opcode=11111 (FCVTZS/FCVTZU fixed-point half)"),
+    (0xDFF0FC00, 0x5F10E400, "fp16", "AdvSIMD scalar shift by immediate, immh=001x opcode=11100 (SCVTF/UCVTF half)"),
+    (0xDFF0FC00, 0x5F10FC00, "fp16", "AdvSIMD scalar shift by immediate, immh=001x opcode=11111 (FCVTZS/FCVTZU half)"),
+    # FEAT_FHM (half-precision multiply-add long, ARMv8.2 optional)
+    (0xBF60FC00, 0x0E20EC00, "fp16", "AdvSIMD three same, U=0 size=x0 opcode=11101 (FMLAL/FMLSL vector)"),
+    (0xBF60FC00, 0x2E20CC00, "fp16", "AdvSIMD three same, U=1 size=x0 opcode=11001 (FMLAL2/FMLSL2 vector)"),
+    (0xBFC0B400, 0x0F800000, "fp16", "AdvSIMD vector x indexed element, U=0 size=10 opcode=0x00 (FMLAL/FMLSL by element)"),
+    (0xBFC0B400, 0x2F808000, "fp16", "AdvSIMD vector x indexed element, U=1 size=10 opcode=1x00 (FMLAL2/FMLSL2 by element)"),
+
+    # --- FRINTTS (FEAT_FRINTTS, ARMv8.5) -------------------------------------
+    (0xFFBE7C00, 0x1E284000, "frintts", "FP data-processing (1 source), ftype=0x opcode=0100xx (FRINT32Z/32X/64Z/64X)"),
+    (0x9FBFEC00, 0x0E21E800, "frintts", "AdvSIMD two-register misc, size=0x opcode=1111x (FRINT32Z/32X/64Z/64X vector)"),
+
+    # --- JSCVT (FEAT_JSCVT, ARMv8.3) -----------------------------------------
+    (0xFFFFFC00, 0x1E7E0000, "jscvt", "Conversion between FP and integer, sf=0 ftype=01 rmode=11 opcode=110 (FJCVTZS)"),
+
+    # --- PAuth outside the hint space (FEAT_PAuth, ARMv8.3) -------------------
+    (0xFFFFC000, 0xDAC10000, "pauth", "Data-processing (1 source), opcode2=00001 opcode=00xxxx (PACIA/PACIB/PACDA/PACDB/AUT*, *Z*)"),
+    (0xFFFFF800, 0xDAC14000, "pauth", "Data-processing (1 source), opcode2=00001 opcode=01000x (XPACI/XPACD)"),
+    (0xFFE0FC00, 0x9AC03000, "pauth", "Data-processing (2 source), opcode=001100 (PACGA)"),
+    (0xFFFFF81F, 0xD61F081F, "pauth", "Unconditional branch (register), opc=0000 op3=00001x op4=11111 (BRAAZ/BRABZ)"),
+    (0xFFFFF81F, 0xD63F081F, "pauth", "Unconditional branch (register), opc=0001 op3=00001x op4=11111 (BLRAAZ/BLRABZ)"),
+    (0xFFFFFBFF, 0xD65F0BFF, "pauth", "Unconditional branch (register), opc=0010 op3=00001x (RETAA/RETAB)"),
+    (0xFFFFFBFF, 0xD69F0BFF, "pauth", "Unconditional branch (register), opc=0100 op3=00001x (ERETAA/ERETAB)"),
+    (0xFFFFF800, 0xD71F0800, "pauth", "Unconditional branch (register), opc=1000 op3=00001x (BRAA/BRAB)"),
+    (0xFFFFF800, 0xD73F0800, "pauth", "Unconditional branch (register), opc=1001 op3=00001x (BLRAA/BLRAB)"),
+    (0xFF200400, 0xF8200400, "pauth", "Load/store register (pac): size=11 V=0 bit21=1 bit10=1 (LDRAA/LDRAB)"),
+
+    # --- PAC/BTI in the HINT space: NOPs on ARMv8.0 (harmless) ---------------
+    # HINT: 1101 0101 0000 0011 0010 CRm op2 11111
+    (0xFFFFFFFF, 0xD50320FF, "pac_bti", "HINT #7 (XPACLRI)"),
+    (0xFFFFFF3F, 0xD503211F, "pac_bti", "HINT #8/#10/#12/#14 (PACIA1716/PACIB1716/AUTIA1716/AUTIB1716)"),
+    (0xFFFFFF1F, 0xD503231F, "pac_bti", "HINT #24..#31 (PACIAZ/PACIASP/PACIBZ/PACIBSP/AUTIAZ/AUTIASP/AUTIBZ/AUTIBSP)"),
+    (0xFFFFFF3F, 0xD503241F, "pac_bti", "HINT #32/#34/#36/#38 (BTI, BTI c/j/jc)"),
+    (0xFFFFFFFF, 0xD50324FF, "pac_bti", "HINT #39 (PACM)"),
+
+    # --- SVE / SVE2 / SME: whole top-level encoding groups --------------------
+    (0x1E000000, 0x04000000, "sve", "Top-level op0=0010: SVE encodings"),
+    (0x9E000000, 0x80000000, "sme", "Top-level op0=1 0000: SME encodings"),
+
+    # --- SHA512/SHA3/SM3/SM4 (FEAT_SHA512/SHA3/SM3/SM4, ARMv8.2) -------------
+    (0xFFE0B000, 0xCE608000, "crypto2", "Cryptographic three-register SHA512 (SHA512H/H2/SU1, RAX1, SM3PARTW1/2, SM4EKEY)"),
+    (0xFF808000, 0xCE000000, "crypto2", "Cryptographic four-register (EOR3/BCAX/SM3SS1)"),
+    (0xFFE00000, 0xCE800000, "crypto2", "XAR"),
+    (0xFFFFF000, 0xCEC08000, "crypto2", "Cryptographic two-register SHA512 (SHA512SU0/SM4E)"),
+    (0xFFE0C000, 0xCE408000, "crypto2", "Cryptographic three-register, imm2 (SM3TT1A/1B/2A/2B)"),
+
+    # --- FlagM / FlagM2 (ARMv8.4 / ARMv8.5) ----------------------------------
+    (0xFFFFFFBF, 0xD500401F, "flagm", "MSR (immediate) op1=000 CRm=0000 op2=00x (CFINV/XAFLAG)"),
+    (0xFFFFFFFF, 0xD500405F, "flagm", "MSR (immediate) op1=000 CRm=0000 op2=010 (AXFLAG)"),
+    (0xFFE07C10, 0xBA000400, "flagm", "Rotate right into flags (RMIF)"),
+    (0xFFFFBC1F, 0x3A00080D, "flagm", "Evaluate into flags (SETF8/SETF16)"),
+
+    # --- RNG (FEAT_RNG, ARMv8.5): MRS Xt, RNDR / RNDRRS ------------------------
+    (0xFFFFFFC0, 0xD53B2400, "rng", "MRS S3_3_C2_C4_{0,1} (RNDR/RNDRRS)"),
+
+    # --- MOPS (FEAT_MOPS, ARMv8.8) -------------------------------------------
+    (0x3B200C00, 0x19000400, "mops", "Memory copy and memory set (CPYF*/CPY*/SET*/SETG*)"),
+
+    # --- CSSC (FEAT_CSSC, ARMv8.9) -------------------------------------------
+    (0x7FFFF800, 0x5AC01800, "cssc", "Data-processing (1 source), opcode=00011x (CTZ/CNT)"),
+    (0x7FFFFC00, 0x5AC02000, "cssc", "Data-processing (1 source), opcode=001000 (ABS)"),
+    (0x7FE0F000, 0x1AC06000, "cssc", "Data-processing (2 source), opcode=0110xx (SMAX/UMAX/SMIN/UMIN register)"),
+    (0x7FF00000, 0x11C00000, "cssc", "Min/max (immediate) (SMAX/UMAX/SMIN/UMIN immediate)"),
+)
+
+
+def build_dispatch(table=ENCODINGS):
+    """First-level table indexed by bits 31:21 of the word: the rows that can
+    match words with those top bits, in table order (None: no row can)."""
+    rows = []
+    for mask, value, key, _doc in table:
+        if value & ~mask & 0xFFFFFFFF:
+            raise AssertionError("value outside mask: %#x/%#x" % (mask, value))
+        rows.append((mask, value, CLS[key]))
+    dispatch = [None] * 2048
+    for top in range(2048):
+        hi = top << 21
+        bucket = tuple(r for r in rows if (hi & r[0] & 0xFFE00000) == (r[1] & 0xFFE00000))
+        if bucket:
+            dispatch[top] = bucket
+    return dispatch
+
+
+DISPATCH = build_dispatch()
+
+
+def classify_word(w):
+    """Class key of one instruction word, or None (ARMv8.0 or unallocated)."""
+    bucket = DISPATCH[w >> 21]
+    if bucket:
+        for mask, value, cls in bucket:
+            if w & mask == value:
+                return CLASS_KEYS[cls]
+    return None
+
+
+def scan_words(words, dispatch=DISPATCH):
+    """Hot loop: [(word index, word, class index)] for every match."""
+    hits = []
+    add = hits.append
+    for i, w in enumerate(words):
+        bucket = dispatch[w >> 21]
+        if bucket is not None:
+            for mask, value, cls in bucket:
+                if w & mask == value:
+                    add((i, w, cls))
+                    break
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# Outline atomics
+# ---------------------------------------------------------------------------
+
+# libgcc (-moutline-atomics), compiler-rt and Rust's compiler-builtins name
+# their helpers __aarch64_<op><bytes>_<model>; each checks
+# __aarch64_have_lse_atomics before using the LSE instruction.
+OUTLINE_HELPER_RE = re.compile(
+    rb"__aarch64_(?:cas|casp|swp|ldadd|ldclr|ldeor|ldset)(?:1|2|4|8|16)_(?:relax|acq|rel|acq_rel|sync)\Z")
+
+
+def _is_ret(w):
+    return (w & 0xFFFFFC1F) == 0xD65F0000
+
+
+def _ends_block(w):
+    # RET, BR, unconditional B, or zero/UDF padding
+    return ((w & 0xFFFFFC1F) in (0xD65F0000, 0xD61F0000)
+            or (w & 0xFC000000) == 0x14000000 or w == 0)
+
+
+NOP = 0xD503201F
+
+
+def _lse_size(w):
+    """(is_pair, size bits) of an LSE word, to match the LL/SC fallback."""
+    if (w & 0xBFA07C00) == 0x08207C00:      # CASP: sz in bit 30
+        return True, (w >> 30) & 1
+    return False, w >> 30
+
+
+def flag_load_before(words, i):
+    """Heuristic 1: the LSE word at i is at most 16 instructions after the
+    __aarch64_have_lse_atomics test that libgcc, compiler-rt and Rust's
+    compiler-builtins all emit with the IP0 register,
+        ADRP X16, flag; LDRB W16, [X16, #:lo12:flag]; CBZ/CBNZ W16, fallback
+    and is followed within 4 instructions by RET (the LSE fast path).
+    Ordinary code testing a byte flag uses other registers and no RET."""
+    for j in range(i - 1, max(0, i - 17), -1):
+        if ((words[j] & 0xFFC003FF) == 0x39400210              # LDRB W16, [X16, #imm]
+                and (words[j - 1] & 0x9F00001F) == 0x90000010  # ADRP X16
+                and (words[j + 1] & 0x7E00001F) == 0x34000010):  # CBZ/CBNZ W16
+            break
+    else:
+        return False
+    return any(_is_ret(words[k]) for k in range(i + 1, min(len(words), i + 5)))
+
+
+def small_llsc_function(words, i):
+    """Heuristic 2: the LSE word at i sits in the first 8 instructions of a
+    function shorter than 32 instructions that ends with an LL/SC loop of the
+    same access size (LDXR/LDAXR ... STXR/STLXR, or the pair forms for CASP),
+    then RET. The function starts after the previous RET/BR/B or padding."""
+    n = len(words)
+    start = None
+    for j in range(i - 1, max(-1, i - 33), -1):
+        if _ends_block(words[j]):
+            start = j + 1
+            break
+    if start is None:
+        if i > 32:
+            return False
+        start = 0
+    while start < i and words[start] == NOP:
+        start += 1
+    if i - start >= 8:      # helpers: [BTI] ADRP LDRB CBZ [MOV] <LSE> - the LSE op comes first
+        return False
+    end = min(n, start + 31)
+    pair, size = _lse_size(words[i])
+    k = start
+    while k < end:
+        w = words[k]
+        if pair:
+            is_ldx = (w & 0xBFFF0000) == 0x887F0000 and ((w >> 30) & 1) == size
+        else:
+            is_ldx = (w & 0x3FFF7C00) == 0x085F7C00 and (w >> 30) == size
+        if is_ldx:
+            for m in range(k + 1, end):
+                s = words[m]
+                if pair:
+                    is_stx = (s & 0xBFE00000) == 0x88200000
+                else:
+                    is_stx = (s & 0x3FE07C00) == 0x08007C00
+                if is_stx:
+                    for e in range(m + 1, end):
+                        if _is_ret(words[e]):
+                            return i < e
+                    return False
+        k += 1
+    return False
+
+
+# ---------------------------------------------------------------------------
+# ELF parsing (64-bit little-endian only, by hand)
+# ---------------------------------------------------------------------------
+
+class NotElf(Exception):
+    pass
+
+
+class OtherArch(Exception):
+    pass
+
+
+class ElfError(Exception):
+    pass
+
+
+EM_AARCH64 = 183
+ET_NAMES = {1: "REL", 2: "EXEC", 3: "DYN", 4: "CORE"}
+SHT_SYMTAB, SHT_NOBITS, SHT_DYNSYM = 2, 8, 11
+SHF_EXECINSTR = 0x4
+PT_LOAD, PT_INTERP = 1, 3
+PF_X = 0x1
+SHN_UNDEF, SHN_LORESERVE, SHN_XINDEX = 0, 0xFF00, 0xFFFF
+
+
+def _cstr(data, off, limit=None):
+    if off < 0 or off >= len(data):
+        return b""
+    end = data.find(b"\0", off, limit if limit is not None else len(data))
+    if end < 0:
+        end = limit if limit is not None else len(data)
+    return bytes(data[off:end])
+
+
+class CodeRegion:
+    """An executable section (or PT_LOAD segment) to decode."""
+    __slots__ = ("index", "name", "vaddr", "offset", "size")
+
+    def __init__(self, index, name, vaddr, offset, size):
+        self.index, self.name, self.vaddr, self.offset, self.size = index, name, vaddr, offset, size
+
+
+class Elf:
+    def __init__(self, data):
+        self.data = data
+        size = len(data)
+        if size < 4 or bytes(data[:4]) != b"\x7fELF":
+            raise NotElf()
+        if size < 20:
+            raise ElfError("truncated ELF identification (%d bytes)" % size)
+        ei_class, ei_data = data[4], data[5]
+        if ei_data not in (1, 2):
+            raise ElfError("bad EI_DATA %d" % ei_data)
+        machine = struct.unpack_from("<H" if ei_data == 1 else ">H", data, 18)[0]
+        if machine != EM_AARCH64 or ei_class != 2 or ei_data != 1:
+            raise OtherArch("machine %d class %d data %d" % (machine, ei_class, ei_data))
+        if size < 64:
+            raise ElfError("truncated ELF header (%d bytes)" % size)
+        (self.e_type, _m, _v, self.entry, phoff, shoff, _f, _ehs, phentsize, phnum,
+         shentsize, shnum, shstrndx) = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+        self.type_name = ET_NAMES.get(self.e_type, "type%d" % self.e_type)
+
+        # program headers
+        self.segments = []
+        if phoff and phnum:
+            if phentsize < 56:
+                raise ElfError("bad e_phentsize %d" % phentsize)
+            if phoff + phnum * phentsize > size:
+                raise ElfError("program header table beyond end of file")
+            for k in range(phnum):
+                self.segments.append(struct.unpack_from("<IIQQQQQQ", data, phoff + k * phentsize))
+        self.has_interp = any(p[0] == PT_INTERP for p in self.segments)
+
+        # section headers
+        self.sections = []
+        if shoff:
+            if shentsize < 64:
+                raise ElfError("bad e_shentsize %d" % shentsize)
+            if shoff + shentsize > size:
+                raise ElfError("section header table beyond end of file")
+            if shnum == 0 or shstrndx == SHN_XINDEX:
+                sec0 = struct.unpack_from("<IIQQQQIIQQ", data, shoff)
+                if shnum == 0:
+                    shnum = sec0[5]
+                if shstrndx == SHN_XINDEX:
+                    shstrndx = sec0[6]
+            if shoff + shnum * shentsize > size:
+                raise ElfError("section header table beyond end of file")
+            for k in range(shnum):
+                self.sections.append(struct.unpack_from("<IIQQQQIIQQ", data, shoff + k * shentsize))
+        self.shstr = None
+        if self.sections and 0 < shstrndx < len(self.sections):
+            s = self.sections[shstrndx]
+            if s[1] != SHT_NOBITS and s[4] + s[5] <= size:
+                self.shstr = (s[4], s[4] + s[5])
+
+    def section_name(self, k):
+        if self.shstr is None:
+            return "#%d" % k
+        lo, hi = self.shstr
+        return _cstr(self.data, lo + self.sections[k][0], hi).decode("latin-1") or "#%d" % k
+
+    def code_regions(self):
+        """Executable sections; PT_LOAD+PF_X segments when there are none."""
+        regions = []
+        size = len(self.data)
+        for k, s in enumerate(self.sections):
+            _name, sh_type, flags, addr, off, sz = s[:6]
+            if not flags & SHF_EXECINSTR or sh_type == SHT_NOBITS or sz == 0:
+                continue
+            if off + sz > size:
+                raise ElfError("section %s beyond end of file" % self.section_name(k))
+            regions.append(CodeRegion(k, self.section_name(k), addr, off, sz))
+        if self.sections:
+            return regions, "sections"
+        for k, p in enumerate(self.segments):
+            p_type, p_flags, off, vaddr, _pa, filesz = p[:6]
+            if p_type != PT_LOAD or not p_flags & PF_X or filesz == 0:
+                continue
+            if off + filesz > size:
+                raise ElfError("PT_LOAD segment %d beyond end of file" % k)
+            regions.append(CodeRegion(-1 - k, "LOAD#%d" % k, vaddr, off, filesz))
+        if not regions:
+            raise ElfError("no section headers and no executable PT_LOAD segment")
+        return regions, "segments"
+
+    def symbols(self, wanted):
+        """Yield (table kind, name, value, size, shndx) for symbols whose name
+        passes wanted(strtab, offset)."""
+        size = len(self.data)
+        for k, s in enumerate(self.sections):
+            sh_type = s[1]
+            if sh_type not in (SHT_SYMTAB, SHT_DYNSYM):
+                continue
+            off, sz, link, entsize = s[4], s[5], s[6], s[9]
+            if entsize != 24 or off + sz > size or not 0 < link < len(self.sections):
+                continue
+            st = self.sections[link]
+            if st[4] + st[5] > size:
+                continue
+            strtab = bytes(self.data[st[4]:st[4] + st[5]])
+            if not wanted(strtab, None):
+                continue
+            kind = "symtab" if sh_type == SHT_SYMTAB else "dynsym"
+            raw = bytes(self.data[off:off + sz - sz % 24])
+            for st_name, _info, _other, shndx, value, ssize in struct.iter_unpack("<IBBHQQ", raw):
+                if st_name and wanted(strtab, st_name):
+                    yield kind, _cstr(strtab, st_name), value, ssize, shndx
+
+    def has_symtab(self):
+        return any(s[1] == SHT_SYMTAB and s[5] for s in self.sections)
+
+
+# ---------------------------------------------------------------------------
+# Per-file analysis
+# ---------------------------------------------------------------------------
+
+def _region_of(regions, elf, shndx, value):
+    """(region, offset in region) of a symbol, or (None, None)."""
+    if elf.e_type == 1:                               # ET_REL: section-relative
+        for r in regions:
+            if r.index == shndx:
+                return r, value
+        return None, None
+    for r in regions:
+        if r.vaddr <= value < r.vaddr + r.size:
+            return r, value - r.vaddr
+    return None, None
+
+
+def _want_helpers_or_mapping(strtab, off):
+    if off is None:
+        return b"__aarch64_" in strtab or b"$d" in strtab or b"$x" in strtab
+    c = strtab[off] if off < len(strtab) else 0
+    if c == 0x24:                                     # '$'
+        return strtab.startswith((b"$d", b"$x"), off)
+    return strtab.startswith(b"__aarch64_", off)
+
+
+def analyse_elf(elf, max_faults):
+    regions, source = elf.code_regions()
+
+    # symbols: outline helpers and "$d"/"$x" mapping symbols
+    helpers = {}            # region index -> [(lo, hi)] byte offsets
+    mapping = {}            # region index -> [(offset, is_data)]
+    helper_names = set()
+    if source == "sections":
+        for _kind, name, value, ssize, shndx in elf.symbols(_want_helpers_or_mapping):
+            if shndx == SHN_UNDEF or shndx >= SHN_LORESERVE:
+                continue                              # undefined, absolute, common, xindex
+            r, off = _region_of(regions, elf, shndx, value)
+            if r is None:
+                continue
+            if name.startswith(b"$"):
+                if name[:2] in (b"$d", b"$x") and (len(name) == 2 or name[2:3] == b"."):
+                    mapping.setdefault(r.index, []).append((off, name[1:2] == b"d"))
+            elif OUTLINE_HELPER_RE.match(name):
+                helpers.setdefault(r.index, []).append((off, off + (ssize or 128)))
+                helper_names.add(name.decode("latin-1"))
+    use_heuristic = not elf.has_symtab()
+
+    counts = [0] * len(CLASS_KEYS)
+    lse_inline = lse_safe = lse_probable = 0
+    faults = []             # (vaddr, file offset, section, word, class)
+    n_words = 0
+    for r in regions:
+        nbytes = r.size - r.size % 4
+        words = array.array("I")
+        if words.itemsize != 4:
+            words = array.array("L")
+        words.frombytes(bytes(elf.data[r.offset:r.offset + nbytes]))
+        if sys.byteorder != "little":
+            words.byteswap()
+        n_words += len(words)
+        # blank data ranges named by "$d" mapping symbols
+        marks = sorted(mapping.get(r.index, ()))
+        for k, (off, is_data) in enumerate(marks):
+            if is_data:
+                hi = marks[k + 1][0] if k + 1 < len(marks) else nbytes
+                lo_w, hi_w = (off + 3) // 4, min(len(words), hi // 4)
+                if hi_w > lo_w:
+                    words[lo_w:hi_w] = array.array(words.typecode, bytes(4 * (hi_w - lo_w)))
+        ranges = helpers.get(r.index, ())
+        for i, w, cls in scan_words(words):
+            counts[cls] += 1
+            if cls == LSE:
+                off = i * 4
+                if any(lo <= off < hi for lo, hi in ranges):
+                    lse_safe += 1
+                    continue
+                if use_heuristic and (flag_load_before(words, i) or small_llsc_function(words, i)):
+                    lse_probable += 1
+                    continue
+                lse_inline += 1
+            if IS_FAULT[cls]:
+                faults.append((r.vaddr + i * 4, r.offset + i * 4, r.name, w, CLASS_KEYS[cls]))
+
+    faults.sort()
+    nfaults = len(faults)
+    if max_faults:
+        faults = faults[:max_faults]
+    return {
+        "type": elf.type_name,
+        "code_from": source,
+        "words": n_words,
+        "counts": {k: counts[i] for i, k in enumerate(CLASS_KEYS)},
+        "lse": {"inline": lse_inline, "outline_safe": lse_safe, "outline_probable": lse_probable},
+        "outline_mode": "symbols" if not use_heuristic else "heuristic",
+        "outline_helpers": sorted(helper_names),
+        "fault_count": nfaults,
+        "faults": [{"vaddr": "%#x" % va, "offset": "%#x" % fo, "section": sec,
+                    "encoding": "%#010x" % w, "class": c} for va, fo, sec, w, c in faults],
+        "executable": elf.e_type == 2 or (elf.e_type == 3 and elf.has_interp),
+    }
+
+
+def _open_data(path):
+    with open(path, "rb") as f:
+        try:
+            return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except (ValueError, OSError):
+            return f.read()
+
+
+def check_file(path, display, opts, stats):
+    """Analyse one file; returns a result dict or None when skipped."""
+    try:
+        data = _open_data(path)
+    except OSError as e:
+        stats["error"] += 1
+        return {"path": display, "verdict": "ERROR", "error": "cannot read: %s" % e.strerror}
+    t0 = time.monotonic()
+    try:
+        try:
+            elf = Elf(data)
+            res = analyse_elf(elf, opts.faults)
+        except NotElf:
+            stats["skipped_non_elf"] += 1
+            return None
+        except OtherArch:
+            stats["skipped_other_arch"] += 1
+            return None
+        except (ElfError, struct.error, ValueError, IndexError, OverflowError, MemoryError) as e:
+            stats["error"] += 1
+            return {"path": display, "verdict": "ERROR", "error": str(e) or e.__class__.__name__}
+    finally:
+        if isinstance(data, mmap.mmap):
+            data.close()
+    res["seconds"] = round(time.monotonic() - t0, 3)
+    res = dict({"path": display, "verdict": "RISK" if res["fault_count"] else "OK"}, **res)
+    stats["risk" if res["fault_count"] else "ok"] += 1
+    if opts.run and res["executable"]:
+        res["run"] = run_program(path)
+        if res["run"]["signal"] == "SIGILL":
+            stats["sigill"] += 1
+        elif res["run"]["signal"] == "SIGSEGV":
+            stats["sigsegv"] += 1
+    return res
+
+
+# ---------------------------------------------------------------------------
+# --run
+# ---------------------------------------------------------------------------
+
+def target_cpu_warning():
+    try:
+        with open("/proc/cpuinfo", encoding="latin-1") as f:
+            text = f.read()
+    except OSError:
+        return "no /proc/cpuinfo here: --run only means something on the ARMv8.0 tablet"
+    feats = set()
+    for line in text.splitlines():
+        if line.lower().startswith("features") and ":" in line:
+            feats.update(line.split(":", 1)[1].split())
+    if not feats:
+        return "/proc/cpuinfo has no Features line: --run only means something on the ARMv8.0 tablet"
+    if "atomics" in feats:
+        return ("this CPU has LSE ('atomics' in /proc/cpuinfo): newer instructions do not fault "
+                "here, --run only means something on the ARMv8.0 tablet")
+    return None
+
+
+def _run_once(path, arg, home, env):
+    try:
+        proc = subprocess.Popen([path, arg], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, cwd=home, env=env, start_new_session=True)
+    except OSError as e:
+        return {"arg": arg, "status": "exec-error", "error": e.strerror or str(e), "signal": None}
+    try:
+        rc = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        proc.wait()
+        return {"arg": arg, "status": "timeout", "signal": None}
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = "signal %d" % -rc
+        return {"arg": arg, "status": name, "signal": name}
+    # A launcher that re-executes the program (Electron, a shell wrapper) reports
+    # its child's fatal signal as an exit code 128 + N: a crash all the same.
+    if rc - 128 in CRASH_SIGNALS:
+        name = signal.Signals(rc - 128).name
+        return {"arg": arg, "status": "%s (exit %d)" % (name, rc), "exit": rc, "signal": name}
+    return {"arg": arg, "status": "exit %d" % rc, "exit": rc, "signal": None}
+
+
+CRASH_SIGNALS = {int(signal.SIGILL), int(signal.SIGSEGV), int(signal.SIGBUS), int(signal.SIGABRT),
+                 int(signal.SIGTRAP), int(signal.SIGFPE)}
+
+
+def cores_since(path, since):
+    """Core dumps systemd-coredump recorded since `since` (epoch seconds) for `path`
+    itself (a launcher that re-executes itself, as Electron does, crashes under the
+    same path): [(exe, signal)]. Other programs of the same directory are not
+    counted: their cores belong to their own run. Empty where coredumpctl is
+    missing or answers nothing."""
+    try:
+        p = subprocess.run(["coredumpctl", "--no-pager", "--json=short", "list",
+                            "--since=@%d" % int(since)],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+        records = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    out = []
+    for r in records if isinstance(records, list) else []:
+        exe = str(r.get("exe") or "")
+        if exe == os.path.abspath(path):
+            try:
+                name = signal.Signals(int(r.get("sig"))).name
+            except (TypeError, ValueError):
+                name = "signal %s" % r.get("sig")
+            out.append((exe, name))
+    return out
+
+
+def run_program(path):
+    home = tempfile.mkdtemp(prefix="t715-isa-audit-home-")
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "HOME")}
+    env["HOME"] = home
+    since = time.time()
+    try:
+        res = _run_once(os.path.abspath(path), "--version", home, env)
+        if res.get("exit", 0) != 0 and not res.get("signal"):
+            res = _run_once(os.path.abspath(path), "--help", home, env)
+            res["after"] = "--version exited non-zero"
+        cores = cores_since(path, since)
+        if cores:
+            res["cores"] = ["%s %s" % (sig, exe) for exe, sig in cores]
+            if not res.get("signal"):
+                res["signal"] = cores[0][1]
+                res["status"] = "%s (core dump of %s)" % (cores[0][1], os.path.basename(cores[0][0]))
+        return res
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Walking paths and packages
+# ---------------------------------------------------------------------------
+
+PKG_SUFFIXES = (".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.gz")
+
+
+def _last_line(stderr, rc):
+    lines = stderr.decode("utf-8", "replace").strip().splitlines()
+    return lines[-1] if lines else "exit %d" % rc
+
+
+def extract_package(pkg, dest):
+    """Extract an Arch package with bsdtar, else tar (else zstd -dc | tar for
+    a tar without zstd support); returns an error message or None."""
+    errors = []
+    for prog in ("bsdtar", "tar"):
+        if shutil.which(prog):
+            p = subprocess.run([prog, "-xf", pkg, "-C", dest], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if p.returncode == 0:
+                return None
+            errors.append(_last_line(p.stderr, p.returncode))
+    if pkg.endswith(".zst") and shutil.which("zstd") and shutil.which("tar"):
+        unz = subprocess.Popen(["zstd", "-dcq", "--", pkg], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.run(["tar", "-xf", "-", "-C", dest], stdin=unz.stdout,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        unz.stdout.close()
+        unz_err = unz.stderr.read()
+        unz.stderr.close()
+        if unz.wait() == 0 and p.returncode == 0:
+            return None
+        errors.append(_last_line(unz_err, unz.returncode) if unz.returncode
+                          else _last_line(p.stderr, p.returncode))
+    if not errors:
+        return "cannot extract: neither bsdtar nor tar found"
+    return "cannot extract: %s" % errors[0]
+
+
+def walk(top):
+    """Regular files under top, sorted, symlinks neither followed nor listed."""
+    for root, dirs, files in os.walk(top, followlinks=False):
+        dirs.sort()
+        for name in sorted(files):
+            p = os.path.join(root, name)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                yield p
+
+
+def check_path(path, opts, stats, emit):
+    if os.path.isdir(path):
+        for p in walk(path):
+            emit(check_file(p, p, opts, stats))
+    elif path.endswith(PKG_SUFFIXES):
+        tmp = tempfile.mkdtemp(prefix="t715-isa-audit-pkg-")
+        try:
+            err = extract_package(path, tmp)
+            if err:
+                stats["error"] += 1
+                emit({"path": path, "verdict": "ERROR", "error": err})
+                return
+            for p in walk(tmp):
+                emit(check_file(p, path + "::" + os.path.relpath(p, tmp), opts, stats))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    else:
+        emit(check_file(path, path, opts, stats))
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def format_line(res):
+    if res["verdict"] == "ERROR":
+        return "ERROR %s  %s" % (res["path"], res["error"])
+    c, lse = res["counts"], res["lse"]
+    parts = ["lse=%d(inline)/%d(outline)" % (lse["inline"], lse["outline_safe"] + lse["outline_probable"])]
+    if lse["outline_probable"]:
+        parts.append("outline=heuristic")
+    for k in CLASS_KEYS:
+        if k != "lse" and c[k]:
+            parts.append("%s=%d%s" % (k, c[k], "(hint,harmless)" if k == "pac_bti" else ""))
+    if res["code_from"] == "segments":
+        parts.append("code=PT_LOAD")
+    lines = ["%-5s %s  %s" % (res["verdict"], res["path"], " ".join(parts))]
+    for f in res["faults"]:
+        if res["type"] == "REL":
+            where = "%s+%#x" % (f["section"], int(f["vaddr"], 16))
+        else:
+            where = "%s (file %s)" % (f["vaddr"], f["offset"])
+        lines.append("      fault %s %s %s" % (where, f["encoding"], f["class"]))
+    if res["fault_count"] > len(res["faults"]):
+        lines.append("      ... %d more" % (res["fault_count"] - len(res["faults"])))
+    run = res.get("run")
+    if run:
+        lines.append("      run %s: %s%s" % (run["arg"], run["status"],
+                                             (" (%s)" % run["error"]) if run.get("error") else ""))
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="t715-isa-audit",
+        description="Find instructions newer than ARMv8.0-A in AArch64 ELF files "
+                    "(the SM-T715 CPU: fp asimd aes pmull sha1 sha2 crc32).")
+    ap.add_argument("paths", metavar="PATH", nargs="+",
+                    help="ELF file, directory, or Arch package (*.pkg.tar.zst/.xz/.gz)")
+    ap.add_argument("--json", action="store_true", help="print one JSON document")
+    ap.add_argument("--run", action="store_true",
+                    help="also run each executable once with --version (then --help), "
+                         "10 s timeout, and report SIGILL/SIGSEGV")
+    ap.add_argument("--faults", type=int, default=3, metavar="N",
+                    help="fault addresses listed per RISK file (default 3, 0 = all)")
+    opts = ap.parse_args(argv)
+    if opts.faults < 0:
+        ap.error("--faults must be >= 0")
+    missing = [p for p in opts.paths if not os.path.lexists(p)]
+    if missing:
+        ap.error("no such file or directory: %s" % ", ".join(missing))
+
+    warnings = []
+    if opts.run:
+        w = target_cpu_warning()
+        if w:
+            warnings.append(w)
+            if not opts.json:
+                print("warning: " + w, file=sys.stderr)
+
+    stats = {"ok": 0, "risk": 0, "error": 0, "skipped_non_elf": 0, "skipped_other_arch": 0,
+             "sigill": 0, "sigsegv": 0}
+    results = []
+    t0 = time.monotonic()
+
+    def emit(res):
+        if res is None:
+            return
+        if opts.json:
+            results.append(res)
+        else:
+            print(format_line(res), flush=True)
+
+    for p in opts.paths:
+        check_path(p, opts, stats, emit)
+
+    elapsed = time.monotonic() - t0
+    checked = stats["ok"] + stats["risk"] + stats["error"]
+    skipped = stats["skipped_non_elf"] + stats["skipped_other_arch"]
+    failed = stats["risk"] > 0 or (opts.run and stats["sigill"] > 0)
+    if opts.json:
+        doc = {
+            "tool": "t715-isa-audit",
+            "baseline": "armv8.0-a (fp asimd aes pmull sha1 sha2 crc32)",
+            "classes": {k: d for k, d, _f in CLASSES},
+            "files": results,
+            "summary": dict(checked=checked, skipped=skipped, seconds=round(elapsed, 3), **stats),
+            "warnings": warnings,
+        }
+        json.dump(doc, sys.stdout, indent=1)
+        sys.stdout.write("\n")
+    else:
+        line = ("summary: checked=%d ok=%d risk=%d error=%d skipped=%d (non-elf=%d other-arch=%d)"
+                % (checked, stats["ok"], stats["risk"], stats["error"], skipped,
+                   stats["skipped_non_elf"], stats["skipped_other_arch"]))
+        if opts.run:
+            line += " sigill=%d sigsegv=%d" % (stats["sigill"], stats["sigsegv"])
+        line += " time=%.1fs" % elapsed
+        print(line)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        status = main()
+        sys.stdout.flush()
+    except KeyboardInterrupt:
+        status = 130
+    except BrokenPipeError:                       # e.g. piped into head
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        status = 1
+    sys.exit(status)

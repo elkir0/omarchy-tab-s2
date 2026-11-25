@@ -1,0 +1,9 @@
+# t715-update-check.service — one look for updates (omarchy-tab-s2;
+# /usr/local/bin/t715-update-check). Its log: journalctl --user -u t715-update-check
+[Unit]
+Description=Look for Omarchy and system updates (SM-T715)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/t715-update-check

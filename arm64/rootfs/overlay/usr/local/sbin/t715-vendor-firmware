@@ -1,0 +1,66 @@
+#!/bin/sh
+# t715-vendor-firmware: at boot, when one of the tablet's two vendor files is
+# missing, copy it from the tablet's own SYSTEM partition, mounted read-only
+# without replaying its journal.  The same two files the armv7h public image's
+# initramfs imports (omarchy-tab-s2, boot/initramfs/init,
+# import_device_files); here a systemd unit does it, since this image boots
+# without that initramfs.
+#
+#   Wi-Fi NVRAM:      SYSTEM/etc/wifi/nvram_net.txt -> brcm/samsung-gts28/nvram_net.txt
+#                     (the image links brcm/brcmfmac4358-pcie.txt there).  Its
+#                     macaddr= line holds a MAC address shared by every
+#                     SM-T715: it is blanked as the armv7h image blanks it,
+#                     and t715-wifi-addr gives the interface a stable address.
+#   Bluetooth patch RAM: SYSTEM/vendor/firmware/bcm4358A3_V0086.0144.hcd -> brcm/BCM4358A3.hcd
+#                     (the image links brcm/BCM.samsung,gts28ltexx.hcd there).
+#
+# Nothing is logged but the result: neither file's content.
+# Unit: t715-vendor-firmware.service (multi-user).  UNTESTED on the arm64
+# kernel (2026-11-24): written from the armv7h image's behaviour.
+fw=/usr/lib/firmware/brcm
+nvram=$fw/samsung-gts28/nvram_net.txt
+hcd=$fw/BCM4358A3.hcd
+mnt=/run/t715-system-ro
+log() { logger -t t715-vendor-firmware -- "$*" 2>/dev/null || echo "t715-vendor-firmware: $*"; }
+
+[ -d "$fw" ] || exit 0
+[ -f "$nvram" ] && [ -s "$hcd" ] && exit 0
+
+dev=
+for d in /sys/block/mmcblk[0-9]*/mmcblk[0-9]*p*; do
+    [ -r "$d/uevent" ] || continue
+    if [ "$(sed -n 's/^PARTNAME=//p' "$d/uevent" 2>/dev/null)" = SYSTEM ]; then
+        dev="/dev/${d##*/}"
+    fi
+done
+if [ -z "$dev" ] || [ ! -b "$dev" ]; then
+    log "no partition named SYSTEM: the vendor files stay missing"
+    exit 0
+fi
+
+# Read-only at the block level, and no journal replay: Android's file system.
+blockdev --setro "$dev" || exit 1
+mkdir -p "$mnt"
+if ! mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$dev" "$mnt"; then
+    log "cannot mount SYSTEM read-only: the vendor files stay missing"
+    rmdir "$mnt" 2>/dev/null
+    exit 0
+fi
+
+if [ ! -f "$nvram" ] && [ -f "$mnt/etc/wifi/nvram_net.txt" ]; then
+    mkdir -p "${nvram%/*}"
+    sed 's/^macaddr=.*/macaddr=<REDACTED>/' "$mnt/etc/wifi/nvram_net.txt" >"$nvram.t715" \
+        && chmod 0644 "$nvram.t715" && mv -f "$nvram.t715" "$nvram" \
+        && log "Wi-Fi NVRAM copied from SYSTEM (macaddr line blanked)"
+fi
+if [ ! -s "$hcd" ] && [ -f "$mnt/vendor/firmware/bcm4358A3_V0086.0144.hcd" ]; then
+    cp "$mnt/vendor/firmware/bcm4358A3_V0086.0144.hcd" "$hcd.t715" \
+        && chmod 0644 "$hcd.t715" && mv -f "$hcd.t715" "$hcd" \
+        && log "Bluetooth patch RAM copied from SYSTEM ($(wc -c <"$hcd") bytes)"
+fi
+[ -f "$nvram" ] || log "Wi-Fi NVRAM still missing (no etc/wifi/nvram_net.txt on SYSTEM)"
+[ -s "$hcd" ] || log "Bluetooth patch RAM still missing (no vendor/firmware/bcm4358A3_V0086.0144.hcd on SYSTEM)"
+
+umount "$mnt"
+rmdir "$mnt" 2>/dev/null
+exit 0

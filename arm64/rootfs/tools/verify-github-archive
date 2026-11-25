@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+# verify-github-archive — check that a GitHub "archive of a commit" tarball
+# holds exactly the content of that commit, file by file, the way git itself
+# addresses content: every file's git blob id (sha1 of "blob <size>\\0<data>")
+# and mode, and the set of paths, compared with the commit's tree as GitHub's
+# API lists it (an immutable commit has one tree).
+#
+# Why: GitHub does not promise byte-identical archives. The owner's PKGBUILDs
+# pin the sha256 of the tarballs they downloaded (omarchy-mobile at b746f5a and
+# 87b8395, omatel v0.2.4); on 2026-11-24 GitHub served another encoding of
+# the first (85 bytes shorter), which makepkg refuses. Re-pinning a checksum
+# blindly would take new bytes on trust: this checks what they contain.
+#
+# The tarball is read in memory (nothing is extracted to disk). The script
+# runs isolated (python3 -I) and fetches one API page.
+#
+# Usage: tools/verify-github-archive TARBALL OWNER/REPO COMMIT SUBDIRECTORY
+#   TARBALL       the archive (…/archive/<COMMIT>.tar.gz)
+#   SUBDIRECTORY  the tree to check, relative to the archive's top directory
+#                 ("" for everything)
+# Exit: 0 when every path, blob id and mode under SUBDIRECTORY matches.
+import hashlib
+import json
+import sys
+import tarfile
+import urllib.request
+
+
+def blob_id(data):
+    header = ("blob %d\0" % len(data)).encode()
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def main(argv):
+    if len(argv) != 5:
+        sys.exit("usage: verify-github-archive TARBALL OWNER/REPO COMMIT SUBDIRECTORY")
+    tarball, repo, commit, subdir = argv[1:]
+    subdir = subdir.strip("/")
+    url = "https://api.github.com/repos/%s/git/trees/%s?recursive=1" % (repo, commit)
+    request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                                   "User-Agent": "t715-arm64-rootfs-verify"})
+    with urllib.request.urlopen(request, timeout=60) as answer:
+        tree = json.load(answer)
+    if tree.get("truncated"):
+        sys.exit("the tree listing is truncated: cannot verify")
+    if len(tree.get("sha", "")) == 40 and tree["sha"] != commit:
+        # For a commit id the API answers with the commit's tree id, which is
+        # another id than the commit's: both identify one content.
+        pass
+    expected = {}
+    for entry in tree["tree"]:
+        path = entry["path"]
+        if subdir and not (path == subdir or path.startswith(subdir + "/")):
+            continue
+        expected[path] = (entry["mode"], entry["sha"] if entry["type"] == "blob" else None)
+
+    found = {}
+    top = None
+    with tarfile.open(tarball, "r:gz") as archive:
+        for member in archive:
+            parts = member.name.split("/")
+            if top is None:
+                top = parts[0]
+            if not parts[0] == top:
+                sys.exit("a member outside the archive's top directory: %s" % member.name)
+            rel = "/".join(parts[1:])
+            if not rel:
+                continue
+            if subdir and not (rel == subdir or rel.startswith(subdir + "/")):
+                continue
+            if member.isdir():
+                found[rel.rstrip("/")] = ("040000", None)
+            elif member.isfile():
+                data = archive.extractfile(member).read()
+                found[rel] = ("100755" if member.mode & 0o111 else "100644", blob_id(data))
+            elif member.issym():
+                # A symbolic link: mode 120000, whose blob is the link's target.
+                found[rel] = ("120000", blob_id(member.linkname.encode()))
+            elif member.islnk():
+                found[rel] = ("hardlink->%s" % member.linkname, None)
+            else:
+                found[rel] = ("other:%s" % member.type.decode(), None)
+
+    missing = sorted(set(expected) - set(found))
+    extra = sorted(set(found) - set(expected))
+    differing = sorted(p for p in set(expected) & set(found) if expected[p] != found[p])
+    nfiles = sum(1 for p in expected if expected[p][1] is not None)
+    print("commit %s, %s: %d paths (%d files)" % (commit[:12], subdir or ".", len(expected), nfiles))
+    if missing:
+        print("MISSING in the archive: %s" % " ".join(missing[:10]))
+    if extra:
+        print("NOT IN the commit: %s" % " ".join(extra[:10]))
+    if differing:
+        print("DIFFERENT: %s" % " ".join(differing[:10]))
+    if not missing and not extra and not differing:
+        print("OK: every path, blob id and mode of %s is the commit's" % (subdir or "the tree"))
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

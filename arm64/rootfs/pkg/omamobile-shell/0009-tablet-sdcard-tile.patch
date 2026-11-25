@@ -1,0 +1,189 @@
+SM-T715 tablet: the SD card tile, over t715-sdcard.
+
+The microSD slot's own tile: on while the card is mounted, off with a card in
+but not mounted (a tap mounts it, about a second) or with no card. The
+session's udiskie already mounts a card that goes in, so the tile shows and
+changes the state rather than owning it. A long press opens the card in
+Files (Disks when it cannot be read). Without the command or the slot no
+sdcard key is probed and the tile stays dimmed, so an image without
+t715-sdcard or a kernel without the slot never fails. The SM-T715's 0.2.94
+series' 0012-tablet-sdcard-tile, rebased. Against omarchy-mobile 8991845
+(omamobile-shell 0.2.147), after 0001-0008.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+index edb7bd5..e4997ea 100644
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -275,7 +275,7 @@ Item {
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+     "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane,
+-    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
++    "sdcard": sdcard, "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+     "screen-record": screenRecord, "fingerprint": fingerprint, "keyboard": keyboard,
+@@ -1083,6 +1083,46 @@ Item {
+     }
+   }
+ 
++  // SM-T715 tablet: the microSD slot (t715-sdcard, in the root image's
++  // overlay). The session's udiskie already mounts a card that goes in, so
++  // the tile shows and changes the state rather than owning it. A tap mounts
++  // a readable card that is not mounted, ejects one that is, and does
++  // nothing without a card; a long press opens the card in Files (Disks
++  // when it cannot be read). No "sdcard" key without the command or the
++  // slot: the tile stays dimmed, on a kernel or an image without it.
++  QtObject {
++    id: sdcard
++    readonly property bool available: root.probedHas("sdcard")
++    readonly property bool enabled: available && root.probedOn("sdcard", "sdcard")
++    readonly property bool hasCard: available && root.probed.sdcard_card === "yes"
++    // A full-size SD glyph while a card is in, the micro SD one without.
++    readonly property string icon: hasCard ? "󰑹" : "󰟜"
++    readonly property string status: {
++      if (!available) return "No slot"
++      if (root.optimistic["sdcard"] !== undefined)
++        return root.optimistic["sdcard"] ? "Mounting…" : "Ejecting…"
++      if (!hasCard) return "No card"
++      if (!enabled) return root.probed.sdcard_fs ? "Not mounted" : "Not readable"
++      return root.probed.sdcard_free ? root.probed.sdcard_free + " free" : "On"
++    }
++    readonly property bool longPress: true
++    function toggle() {
++      if (!available || !hasCard) return
++      root.runTileAction("sdcard", !enabled)
++      sdcardProbeLater.restart()
++    }
++    function openDetails() {
++      root.dismiss()
++      Quickshell.execDetached(["t715-sdcard", "open"])
++    }
++  }
++
++  Timer {
++    id: sdcardProbeLater
++    interval: 2000
++    onTriggered: root.refreshProbe()
++  }
++
+   // Rotation lock over omamobile-autorotate (omamobile-sensors): it rotates
+   // the screen while the sensor proxy has an accelerometer, unless
+   // ~/.local/state/omamobile/rotation-lock exists. Turning the lock off also
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index da2c8cf..4b7ca15 100644
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -18,11 +18,14 @@ var VERSION = 1
+ // "Add tiles" (the Wi-Fi client link drops while it runs). Rotation is the
+ // rotation lock over omamobile-autorotate.service, which the image's
+ // t715-rotate drives (docs/image/ROTATION.md of the owner's repository), and
+-// Rotate a quarter turn by hand through t715-rotate.
++// Rotate a quarter turn by hand through t715-rotate. SD card is the microSD
++// slot's mount, t715-sdcard (udiskie mounts a card that goes in; the tile
++// shows and changes the state).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "airplane", label: "Airplane mode" },
++  { id: "sdcard", label: "SD card" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+   { id: "rotate", label: "Rotate" },
+@@ -48,7 +51,8 @@ var CATALOG = [
+ var DEFAULT_LAYOUT = [
+   "wifi", "bluetooth", "dnd", "airplane",
+   "rotation-lock", "rotate", "battery-saver", "dark-theme",
+-  "night-light", "keyboard", "clipboard", "screenshot"
++  "night-light", "keyboard", "clipboard", "screenshot",
++  "sdcard"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+index 4bc5c7e..80db38e 100755
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -101,6 +101,11 @@ case $tile in
+       exec omamobile-screenrecord stop
+     fi
+     ;;
++  sdcard)
++    # SM-T715: the microSD card's mount (t715-sdcard). Mounting takes about a
++    # second; ejecting unmounts and says so.
++    if [ "$want" = on ]; then exec t715-sdcard mount; else exec t715-sdcard eject; fi
++    ;;
+   mobile-data)
+     exec omamobile-sit data "$want"
+     ;;
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+index 2e6bca5..06e5a3d 100755
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -28,6 +28,13 @@
+ #                 Mobile network page) has the modem off for this boot: the
+ #                 tile stays dimmed but keeps its chevron, so the page that
+ #                 turns it back on can be reached; absent otherwise
++#   sdcard        SM-T715: the microSD slot (t715-sdcard): on while the card
++#                 is mounted, off with a card in and not mounted or with no
++#                 card; no line without the command, or on a kernel without
++#                 the slot
++#   sdcard_card   a card in the slot: yes or no
++#   sdcard_fs     its file system, empty when none can be read
++#   sdcard_free   its free space while it is mounted, empty otherwise
+ #   dictation     voxtype: on while recording, busy while transcribing, off
+ #                 when idle; down when its user service isn't running, none
+ #                 without voxtype (in the root image; Remove > Dictation
+@@ -97,6 +104,26 @@ else
+   echo "record=none"
+ fi
+ 
++# sdcard: the microSD slot through t715-sdcard's state, one call; no key at
++# all without the command or the slot, so the tile stays dimmed ("no slot"
++# here is a kernel without the slot driver, not an empty slot).
++if have t715-sdcard; then
++  sdc=$(t t715-sdcard state)
++  case $(printf '%s\n' "$sdc" | sed -n 's/^slot=//p') in
++    yes)
++      card=$(printf '%s\n' "$sdc" | sed -n 's/^card=//p')
++      fs=$(printf '%s\n' "$sdc" | sed -n 's/^fs=//p')
++      printf 'sdcard_card=%s\nsdcard_fs=%s\n' "$card" "$fs"
++      if [ "$(printf '%s\n' "$sdc" | sed -n 's/^mounted=//p')" = yes ]; then
++        echo "sdcard=on"
++        echo "sdcard_free=$(printf '%s\n' "$sdc" | sed -n 's/^free=//p')"
++      else
++        echo "sdcard=off"
++      fi
++      ;;
++  esac
++fi
++
+ # dictation: the daemon writes idle, recording or transcribing to its state
+ # file (state_file = "auto" in Omarchy's voxtype config). A stale file
+ # outlives a stopped daemon, so the user service has to be active too.
+diff --git a/test/tiles-model.js b/test/tiles-model.js
+index 8569768..fdf332c 100644
+--- a/test/tiles-model.js
++++ b/test/tiles-model.js
+@@ -26,7 +26,7 @@ test("the sheet has a backend for every catalog tile", () => {
+ // 0001-tablet-quick-settings-tiles), and the phone's tiles are not even in
+ // the catalog.
+ test("the default keeps the tablet's tiles and leads with the most used", () => {
+-  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot"])
++  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot", "sdcard"])
+     assert.ok(M.DEFAULT_LAYOUT.includes(id), id)
+   assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "dnd", "airplane"])
+   for (const id of ["mobile-data", "torch", "location", "nfc", "fingerprint"])
+@@ -35,10 +35,10 @@ test("the default keeps the tablet's tiles and leads with the most used", () =>
+ 
+ test("Clipboard and Dictation close the default's second page, leaving the first as it was", () => {
+   // the tablet's default fills one page and starts a second with Night
+-  // light, Keyboard, Clipboard and Screenshot
++  // light, Keyboard, Clipboard, Screenshot and SD card
+   assert.deepStrictEqual(M.pages(M.defaults())[0],
+     ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme"])
+-  assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "screenshot")
++  assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "sdcard")
+   assert.strictEqual(M.pages(M.defaults()).length, 2)
+   assert.strictEqual(M.label("clipboard"), "Clipboard")
+   assert.strictEqual(M.label("dictation"), "Dictation")

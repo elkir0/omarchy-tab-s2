@@ -1,0 +1,30 @@
+# SM-T715 arm64 build of Omarchy Mobile's omamobile-settings 0.1.4, from omarchy-mobile commit
+# 899184543d60 (2026-11-25), whose signed stable repository (pkgs.omamobile.org) still publishes
+# 0.1.2. Upstream's own recipe (packages/omamobile-settings/PKGBUILD: bin/build, test/all,
+# install), run from the pinned tarball instead of a checkout; nothing changed. Build:
+# tools/build-pkg omamobile-settings.
+pkgname=omamobile-settings
+pkgver=0.1.4
+pkgrel=1.1
+pkgdesc="Native mobile Settings framework and device information"
+arch=(aarch64)
+url="https://github.com/derekross/omarchy-mobile"
+license=(MIT)
+depends=(omarchy bash coreutils systemd brightnessctl polkit python qt6-base qt6-declarative qt6-svg)
+makedepends=(gcc make)
+checkdepends=(dbus python)
+_commit=899184543d60fd78f0a418f403463d628165a3ed
+_tarball="omamobile-${_commit:0:7}.tar.gz"
+_top="omamobile-${_commit}"
+source=("${_tarball}::${url}/archive/${_commit}.tar.gz")
+noextract=("${_tarball}")
+sha256sums=('45cac52479602f0fbf04654abade311bca1ec88b779e0ad43e27cf6ad625f1d9')
+
+prepare() {
+  bsdtar -xf "$srcdir/$_tarball" "$_top/packages/$pkgname"
+  cd "$srcdir/$_top/packages/$pkgname"
+  [[ $(cat version) == "$pkgver" ]] || { echo "upstream version is not $pkgver" >&2; return 1; }
+}
+build() { cd "$srcdir/$_top/packages/$pkgname" && ./bin/build; }
+check() { cd "$srcdir/$_top/packages/$pkgname" && ./test/all; }
+package() { cd "$srcdir/$_top/packages/$pkgname" && ./install "$pkgdir"; }

@@ -1,0 +1,32 @@
+#!/bin/bash
+# t715-update-check — tell the owner once when an Omarchy or system update exists.
+# Run by t715-update-check.timer (omarchy-tab-s2; docs/image/ROOTFS.md).
+#
+# Omarchy's own check lives in a bar widget the tablet's bar does not load, and
+# its first-run notice fires whether or not anything is new. checkupdates reads
+# copies of pacman's databases, so nothing here needs root or changes the system;
+# the upgrade itself stays the owner's: `omarchy update`, or the notification.
+#
+# Usage: t715-update-check [--print]    (--print: no notification)
+set -u
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/t715/update-notified"
+
+nm-online -q -t 5 || exit 0
+pkgs=$(checkupdates --nocolor 2>/dev/null) || exit 0
+[ -n "$pkgs" ] || exit 0
+
+count=$(printf '%s\n' "$pkgs" | wc -l)
+omarchy=$(printf '%s\n' "$pkgs" | awk '$1 == "omarchy" { print $4 }')
+summary="${omarchy:+Omarchy $omarchy, }$count packages"
+
+if [ "${1:-}" = --print ]; then
+  printf '%s\n' "$summary"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$state")"
+[ "$(cat "$state" 2>/dev/null)" = "$summary" ] && exit 0
+omarchy-notification-send -u normal -g 󰏔 "Update available" "$summary. Tap to update." \
+  --exec omarchy-launch-floating-terminal-with-presentation omarchy-update
+printf '%s\n' "$summary" >"$state"

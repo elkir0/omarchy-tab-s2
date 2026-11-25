@@ -1,0 +1,49 @@
+#!/bin/sh
+# SM-T715: run by systemd-shutdown just before the reboot, after its last
+# SIGKILL ($1: halt, poweroff, reboot or kexec). Every process still there
+# goes to the kernel log with its state and wait channel, and SysRq w adds
+# the kernel stacks of those in D state: t715-shutdown-log
+# has raised the console loglevel, so pstore's console keeps the lines for
+# the next boot, and t715-pstore-shutdown copies them to /var/log.
+# Why: seen once in 40 reboots (2026-10-29), NetworkManager and
+# wpa_supplicant were still around after SIGKILL, most likely waiting in
+# brcmfmac (docs/journal/ONDEVICE-2026-10-29.md).
+mode=${1:-?}
+k=/dev/kmsg
+n=0
+dstate=0
+# The hooks run in parallel under one executor ($PPID, systemd-shutdown's
+# fork): it, the other hooks (mdadm.shutdown) and their children are not
+# left over, so a process descending from $PPID is skipped.
+ours() { # PPID-of-the-process: true if its ancestry reaches the executor
+    local a=$1 t
+    while [ "$a" -gt 1 ]; do
+        [ "$a" = "$PPID" ] && return 0
+        read -r t < "/proc/$a/stat" 2>/dev/null || return 1
+        # shellcheck disable=SC2086
+        set -- ${t##*) }; a=$2
+    done
+    return 1
+}
+for d in /proc/[0-9]*; do
+    p=${d#/proc/}
+    [ "$p" = 1 ] || [ "$p" = $$ ] || [ "$p" = "$PPID" ] && continue
+    read -r s < "$d/stat" 2>/dev/null || continue
+    comm=${s#*(}; comm=${comm%)*}
+    # shellcheck disable=SC2086 # the fields after "pid (comm) ", word-split
+    set -- ${s##*) }
+    # stat's 9th field, flags: PF_KTHREAD (0x00200000) marks a kernel thread
+    # (not an empty cmdline: every /proc file reads as size 0)
+    [ $(( $7 & 0x200000 )) = 0 ] || continue
+    st=$1
+    ours "$2" && continue
+    wchan=; read -r wchan < "$d/wchan" 2>/dev/null
+    echo "<3>t715-stuck: $mode: pid $p $comm, state $st, wchan ${wchan:-?}" > "$k"
+    n=$((n + 1))
+    [ "$st" = D ] && dstate=$((dstate + 1))
+done
+[ "$n" = 0 ] || echo "<3>t715-stuck: $mode: $n process(es) left, $dstate in D state" > "$k"
+# /proc/PID/stack reads empty on this kernel: SysRq w has the kernel print
+# the stack of every task in D state (uninterruptible, as in a driver call)
+[ "$dstate" = 0 ] || echo w > /proc/sysrq-trigger
+exit 0

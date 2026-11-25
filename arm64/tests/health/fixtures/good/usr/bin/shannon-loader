@@ -1,0 +1,3 @@
+#!/bin/sh
+# fixture stand-in for the modem loader: only its presence is read
+exit 0

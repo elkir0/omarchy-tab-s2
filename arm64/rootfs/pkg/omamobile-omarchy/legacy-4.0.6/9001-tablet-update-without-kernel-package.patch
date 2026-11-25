@@ -1,0 +1,49 @@
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64), tablet-only: same changes as the 4.5 series'
+# 9001-tablet-update-without-kernel-package.patch, against Omarchy 4.0.6
+# (4.0.6-1). 4.0.6's restart step is one script; the vmlinuz probe and the
+# "kernel updated" prompt are dropped (no pacman package owns the tablet's
+# kernel), and yay runs only when installed.
+--- i/bin/omarchy-update-restart
++++ w/bin/omarchy-update-restart
+@@ -8,23 +8,11 @@
+   gum confirm "$1" && { omarchy-system-reboot; exit 0; }
+ }
+ 
+-running_kernel=$(uname -r)
+-kernel_updated=true
+-
+-for kernel in /usr/lib/modules/*/vmlinuz; do
+-  if [[ -f $kernel ]] && pacman -Qo "$kernel" &>/dev/null; then
+-    installed_kernel=$(basename "$(dirname "$kernel")")
+-
+-    if [[ $installed_kernel == $running_kernel ]]; then
+-      kernel_updated=false
+-      break
+-    fi
+-  fi
+-done
+-
+-if [[ $kernel_updated == "true" ]]; then
+-  confirm_reboot "Linux kernel has been updated. Reboot?"
+-elif [[ -f $HOME/.local/state/omarchy/reboot-required ]]; then
++# SM-T715: no pacman package owns the kernel (it lives in a slot of the
++# CACHE partition, its modules are put into /usr/lib/modules/<release> by
++# hand), so the vmlinuz probe above would always report
++# a kernel update. A reboot is asked for only when Omarchy asked for one.
++if [[ -f $HOME/.local/state/omarchy/reboot-required ]]; then
+   confirm_reboot "Updates require reboot. Ready?"
+ fi
+ 
+--- i/bin/omarchy-update-aur-pkgs
++++ w/bin/omarchy-update-aur-pkgs
+@@ -2,8 +2,9 @@
+ 
+ # omarchy:summary=Update AUR packages if any are installed
+ 
++# SM-T715: no yay on the tablet; list foreign packages instead.
+ if pacman -Qem >/dev/null; then
+-  if omarchy-pkg-aur-accessible; then
++  if command -v yay >/dev/null && omarchy-pkg-aur-accessible; then
+     echo -e "\e[32m\nUpdate AUR packages\e[0m"
+     yay -Sua --noconfirm --cleanafter --ignore gcc14,gcc14-libs
+     echo

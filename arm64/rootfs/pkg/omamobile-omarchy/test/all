@@ -1,0 +1,106 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Tests for the tablet build of omamobile-omarchy (from the Lenovomarchy port,
+# used by the SM-T715 arm64 image with one patch more, 9002), from a copy
+# of this directory alone: syntax, the staged layout and hook, the re-patch
+# tool against synthetic Omarchy trees (and the real aarch64 omarchy package
+# when OMARCHY_PKG has one), and the tablet series against upstream's
+# fixtures. Adapted from upstream 0.1.51's test/all: the update wrapper,
+# modules-cleanup, zram and sleep-lock tests are not run here because the
+# tablet package ships none of them (see M1-OMARCHY-PATCHES.md).
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+pass() { printf 'ok - %s\n' "$1"; }
+
+for f in install omamobile-omarchy.install lib/lock-pam test/lock-pam.sh test/lock-glance test/run-mode.sh; do
+  bash -n "$f" || fail "$f parses"
+done
+for f in bin/omamobile-omarchy-patches test/patches.py; do
+  python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f" || fail "$f parses"
+done
+pass "scripts parse"
+
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+./install "$t/stage"
+for f in usr/bin/omamobile-omarchy-patches usr/lib/omamobile-omarchy/lock-pam \
+         usr/share/libalpm/hooks/95-omamobile-omarchy-patches.hook \
+         usr/share/licenses/omamobile-omarchy/LICENSE usr/share/omamobile/omarchy/version; do
+  [[ -e $t/stage/$f ]] || fail "not staged: $f"
+done
+[[ $(ls "$t/stage/usr/share/omamobile/omarchy/patches" | wc -l) == $(ls patches/*.patch | wc -l) ]] || fail "every patch staged"
+[[ $(ls "$t/stage/usr/share/omamobile/omarchy/legacy-4.0.6" | wc -l) == $(ls legacy-4.0.6/*.patch | wc -l) ]] || fail "every legacy patch staged"
+pass "install stages the tool, both series and the hook"
+
+hook=libalpm/95-omamobile-omarchy-patches.hook
+for want in 'Operation = Install' 'Operation = Upgrade' 'Target = omarchy' 'Target = omarchy-dev' \
+            'Target = omamobile-omarchy' 'When = PostTransaction' 'Exec = /usr/bin/omamobile-omarchy-patches apply --hook'; do
+  grep -qxF "$want" "$hook" || fail "hook: $want"
+done
+grep -q AbortOnFail "$hook" && fail "hook: a failed re-patch must not abort pacman"
+pass "the hook re-applies after Omarchy or this package changes"
+
+# The tablet ships no kernel-module cleanup of any kind: the image's kernel
+# modules are not pacman packages, so nothing may prune /usr/lib/modules.
+[[ ! -e $t/stage/usr/lib/omamobile-omarchy/modules-cleanup ]] || fail "modules-cleanup staged"
+[[ ! -e $t/stage/usr/lib/systemd/system/omamobile-modules-cleanup.timer ]] || fail "cleanup timer staged"
+[[ ! -e $t/stage/usr/lib/systemd/system/omamobile-modules-cleanup.service ]] || fail "cleanup service staged"
+[[ ! -e $t/stage/usr/lib/systemd/system/linux-modules-cleanup.service.d ]] || fail "linux-modules-cleanup drop-in staged"
+! find "$t/stage" -name '*modules-cleanup*' | grep -q . || fail "no modules-cleanup file anywhere in the stage"
+[[ -z $(find "$t/stage" -type l | tee /dev/stderr) ]] || fail "no enabled units (no wants links) in the stage"
+pass "nothing that could delete /usr/lib/modules is staged"
+
+# No update wrapper or stand-ins: the tablet updates through Omarchy's own flow.
+[[ ! -e $t/stage/usr/bin/omamobile-update ]] || fail "omamobile-update staged"
+[[ ! -e $t/stage/usr/lib/omamobile-omarchy/update-bin ]] || fail "update stand-ins staged"
+[[ ! -e $t/stage/usr/lib/systemd/zram-generator.conf.d/91-omamobile.conf ]] || fail "zram drop-in staged"
+pass "no phone update path or zram drop-in staged"
+
+bash test/run-mode.sh || fail "the /run mode rule"
+
+# Every patch file says what it is for, before its first diff
+for p in patches/*.patch legacy-4.0.6/*.patch; do
+  [[ $(sed -n '1p' "$p") == \#* || $(sed -n '1p' "$p") == commit* ]] || fail "$p starts with a header"
+done
+pass "every patch has a header"
+
+# The tablet's phone-only drops are gone from both families
+for gone in 0012-update-hand 0014-lock-emergency 0016-pacman-a-phone 0020-notifications-touch-phrasing \
+            0021-sleep-turn 0022-lock-fingerprint 0029-lock-double-tap; do
+  ! compgen -G "patches/${gone}*patch" >/dev/null || fail "patches/ still has $gone"
+  ! compgen -G "legacy-4.0.6/${gone}*patch" >/dev/null || fail "legacy-4.0.6/ still has $gone"
+done
+for kept in 9000-tablet-pacman-keeps-alarm 9001-tablet-update-without-kernel-package; do
+  [[ -f patches/${kept}.patch ]] || fail "patches/ missing $kept"
+  [[ -f legacy-4.0.6/${kept}.patch ]] || fail "legacy-4.0.6/ missing $kept"
+done
+pass "the tablet keeps and drops what the design says"
+
+python3 -B test/patches.py || fail "re-patch tool"
+python3 -I test/source-family.py || fail "source-family selection"
+
+# The lock's PAM file (lib/lock-pam), and against the real omarchy-apply-lock
+# when the package is at hand, found as test/patches.py finds it.
+pkg=${OMARCHY_PKG:-$(ls ~/.cache/omamobile-rootfs/pkg/omarchy-[0-9]*-aarch64.pkg.tar.* 2>/dev/null | grep -v '\.sig$' | sort | tail -1 || true)}
+if [[ -n $pkg ]] && command -v bsdtar >/dev/null; then
+  mkdir -p "$t/omarchy-pkg"
+  bsdtar -xf "$pkg" -C "$t/omarchy-pkg" .PKGINFO usr/bin/omarchy-apply-lock usr/bin/omarchy-system-sleep-lock
+  # The packaged source alias is absolute /usr/bin. Normalize this one test
+  # input inside the fake root; never follow it into the host's installed tree.
+  install -Dm755 "$t/omarchy-pkg/usr/bin/omarchy-system-sleep-lock" "$t/omarchy-pkg/usr/share/omarchy/bin/omarchy-system-sleep-lock"
+  OMARCHY_PKG_ROOT=$t/omarchy-pkg bash test/lock-pam.sh || fail "lock-pam"
+else
+  bash test/lock-pam.sh || fail "lock-pam"
+  pass "lock-pam against the real omarchy-apply-lock # SKIP no omarchy package or bsdtar"
+fi
+[[ $(grep -cx '  /usr/lib/omamobile-omarchy/lock-pam || true' omamobile-omarchy.install) == 2 ]] \
+  || fail "install and upgrade write the lock's PAM file"
+pass "install and upgrade write the lock's PAM file when it is missing"
+
+# Not run here (upstream 0.1.51 runs them; this package ships none of what
+# they test): test/update.sh and test/migration-mobile-holds.py (omamobile-update
+# and its update-bin stand-ins are not installed), test/modules-cleanup.sh and
+# test/zram.sh (no modules-cleanup, no zram drop-in),
+# test/sleep-lock-family.py and test/sleep-lock.sh (patch 0021 is dropped),
+# the OWL inline-reply container test (patch 0015's runtime side is a phone
+# shell surface; the patch itself is covered by patches.py).

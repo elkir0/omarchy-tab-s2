@@ -1,0 +1,12 @@
+# Galaxy Tab S2 (SM-T715), arm64: reboot unless /run/t715-stay exists, at the
+# time t715-return.timer says (t715.return=MIN on the kernel command line).
+# Never started without that knob (its condition, and nothing enables the
+# timer then).
+[Unit]
+Description=Galaxy Tab S2: reboot to the arm32 system unless /run/t715-stay exists (t715.return=MIN)
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+ConditionKernelCommandLine=t715.return
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t715-return

@@ -1,0 +1,63 @@
+SM-T715 tablet: the Mobile data tile opens Réseau mobile.
+
+A long press on the tile opens t715-mobile-settings (package t715-modem), and
+so does a tap while no connection exists, since the APN has to be set there
+first. Upstream's "Mobile network" page (omamobile.mobilenetwork, summoned
+through the CLI) is the Pixel's; the tablet keeps its own app. Against
+omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0010; ported from
+the armv7h series' 0006-tablet-mobile-settings (0.2.94). Adaptation to
+0.2.133: the stub's chevron (details/detailsUnavailable, to
+omamobile.mobilenetwork, fed by tile-state.sh's data_switch) goes, and
+longPress comes in -- 0.2.94's tile had no chevron either, so the touch
+paths are the same as on the 0.2.94 build.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -1055,31 +1055,30 @@
+ 
+   // ---------------------------------------------------------------- stubs
+ 
+-  // Mobile data over omamobile-modem-sit: the tile is the cellular bearer
+-  // (omamobile-sit data on|off, which starts or stops
+-  // omamobile-sit-data.service through polkit). "No modem" until
+-  // omamobile-sitd publishes its state, unless the modem's start script
+-  // refused this boot and left its reason (tile-state.sh's data_status
+-  // with data=none): then the tile says why.
++  // Mobile data over NetworkManager's gsm connection (SM-T715, patch 0010:
++  // the modem is shannond's ModemManager facade, not omamobile-sit). "Set up"
++  // without a gsm device or connection: the APN is set in Réseau mobile.
+   QtObject {
+     id: mobileData
+     readonly property bool available: root.probedHas("data")
+     readonly property bool enabled: available && root.probedOn("mobile-data", "data")
+-    // Bars from the signal sitd reports; crossed out with no modem, data
++    // Bars from the signal shannond reports; crossed out with no modem, data
+     // off, or no network (TilesModel.dataIcon).
+     readonly property string icon: TilesModel.dataIcon(available, enabled, root.probed.data_signal)
+-    readonly property string status: !available ? (root.probed.data_status || "No modem")
++    readonly property string status: !available ? "Set up"
+       : !enabled ? "Off" : (root.probed.data_status || "On")
+-    function toggle() { if (available) root.runTileAction("mobile-data", !enabled) }
+-    // The chevron (and a long press): the Mobile network page
+-    // (omamobile.mobilenetwork), through the CLI, since a plugin only
+-    // summons its own panels. Shown with a modem, and with one the owner
+-    // switched off on that page, which is where it is switched back on.
+-    readonly property bool details: available || detailsUnavailable
+-    readonly property bool detailsUnavailable: !available && root.probed.data_switch === "off"
++    readonly property bool longPress: true
++    function toggle() {
++      if (available) root.runTileAction("mobile-data", !enabled)
++      else openDetails()
++    }
++    // SM-T715 (patch 0011): a long press, or a tap while no connection exists,
++    // opens Réseau mobile (t715-mobile-settings, package t715-modem), where
++    // the APN is set. Upstream's chevron to the Pixel's Mobile network page
++    // (omamobile.mobilenetwork, and its data_switch probe) is not kept.
+     function openDetails() {
+       root.dismiss()
+-      Quickshell.execDetached(["omarchy-shell", "shell", "summon", "omamobile.mobilenetwork", "{}"])
++      Quickshell.execDetached(["t715-mobile-settings"])
+     }
+   }
+ 

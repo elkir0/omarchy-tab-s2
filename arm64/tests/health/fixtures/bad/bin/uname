@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+case "${1:-}" in
+    -m) echo "aarch64" ;;
+    -r) echo "6.12.114-t715-arm64" ;;
+    *) echo "Linux" ;;
+esac

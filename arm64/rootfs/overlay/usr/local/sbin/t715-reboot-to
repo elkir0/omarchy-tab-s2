@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+# t715-reboot-to: restart the SM-T715 into RECOVERY or Download mode.
+#
+# sboot picks what to boot from INFORM3, a PMU register that survives a
+# software reset (0x105C080C, docs/journal/PROGRESS.md).  Samsung's kernel
+# writes it on "reboot recovery" / "reboot download"
+# (kernel_universal5433 drivers/staging/samsung/sec_reboot.c:109-165:
+# 0x12345670 | mode, recovery 4, download 1); the mainline kernel only
+# resets it to normal (0x12345670) at boot, so this writes it through
+# /dev/mem, reads it back, then reboots cleanly with systemctl.
+#
+# On a tablet without Android this is the way to Download mode (heimdall)
+# without the hardware keys, and to the rescue system in RECOVERY.
+#
+# Usage: t715-reboot-to recovery|download|normal [--no-reboot]   (root)
+# "normal --no-reboot" cancels an earlier --no-reboot.
+import mmap
+import os
+import struct
+import subprocess
+import sys
+
+PMU_BASE = 0x105C0000
+INFORM3 = 0x080C
+MODES = {"recovery": 0x12345674, "download": 0x12345671, "normal": 0x12345670}
+
+
+def main(argv):
+    args = [a for a in argv[1:] if a != "--no-reboot"]
+    if len(args) != 1 or args[0] not in MODES:
+        sys.exit("usage: t715-reboot-to recovery|download|normal [--no-reboot]")
+    value = MODES[args[0]]
+    fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+    try:
+        mem = mmap.mmap(fd, mmap.PAGESIZE, mmap.MAP_SHARED,
+                        mmap.PROT_READ | mmap.PROT_WRITE, offset=PMU_BASE)
+        try:
+            mem[INFORM3:INFORM3 + 4] = struct.pack("<I", value)
+            got = struct.unpack("<I", mem[INFORM3:INFORM3 + 4])[0]
+        finally:
+            mem.close()
+    finally:
+        os.close(fd)
+    if got != value:
+        sys.exit("t715-reboot-to: INFORM3 reads 0x%08x, not 0x%08x" % (got, value))
+    print("t715-reboot-to: INFORM3 = 0x%08x (%s)" % (got, args[0]))
+    if "--no-reboot" not in argv:
+        subprocess.run(["systemctl", "reboot"], check=True)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

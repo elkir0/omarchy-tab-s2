@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# The patches themselves go on from the pacman hook (95-omamobile-omarchy-patches),
+# which runs after this package is installed or upgraded.
+# Omarchy's lock needs /etc/pam.d/omarchy-lock-password, which only Omarchy's
+# installer writes: an image-built tablet had none, so the lock refused
+# (TOUCH-PLAN 0.1). Written when missing, never owned by a package.
+post_install() {
+  /usr/lib/omamobile-omarchy/lock-pam || true
+  echo "omamobile-omarchy: tablet series (no modem, no packaged kernel)."
+  echo "  'omarchy update' runs Omarchy's own flow, guarded by patches 9000/9001."
+  echo "  Patch log: /var/log/omamobile/omarchy-patches.log; omamobile-omarchy-patches status|verify"
+}
+post_upgrade() {
+  /usr/lib/omamobile-omarchy/lock-pam || true
+}
+pre_remove() {
+  # Omarchy's own files back, so removing the package doesn't strand patched copies
+  /usr/bin/omamobile-omarchy-patches restore >/dev/null 2>&1 || true
+}

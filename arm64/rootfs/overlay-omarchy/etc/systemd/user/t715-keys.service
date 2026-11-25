@@ -1,0 +1,29 @@
+# t715-keys.service — the SM-T715's Power and Home keys in the Omarchy
+# session (omarchy-tab-s2, touch layer P1; /usr/local/bin/t715-keys,
+# docs/image/ROOTFS.md). Enabled for every user at build time
+# (systemctl --global enable); runs with the graphical session uwsm starts.
+# Its log: journalctl --user -u t715-keys
+[Unit]
+Description=SM-T715 hardware keys (Power: screen and system menu, Home)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/t715-keys
+# omarchy-shell (behind omarchy-menu) refuses to run without it, and the
+# user manager may not have imported Hyprland's environment yet.
+Environment=OMARCHY_PATH=/usr/share/omarchy
+# arm64 port: the A57 cores are never taken offline from the session.  The
+# script writes "0" to each big core's online file when the screen goes dark
+# (armv7h image: 60-t715-big-cores.rules makes those files writable for
+# wheel).  Here the path is one that does not exist: the script reads that as
+# "a kernel without the hot-unplug" and writes nothing.  Which cores run is
+# the kernel's business (arm64 SMP is still being brought up).  "%%d": systemd
+# expands a lone %d to the credentials directory, which left the script a path
+# with no %d and crashed it at every screen-off (2026-11-25).
+Environment=T715_KEYS_BIG_CORES=/nonexistent/t715-arm64-no-cpu-hotplug/cpu%%d/online
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

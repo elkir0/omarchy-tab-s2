@@ -1,0 +1,25 @@
+# t715-squeekboard.service — squeekboard, the on-screen keyboard, in the
+# SM-T715's Omarchy session (omarchy-tab-s2, touch layer P1; docs/image/ROOTFS.md).
+# Enabled for every user at build time (systemctl --global enable); runs with
+# the graphical session uwsm starts, once uwsm has imported WAYLAND_DISPLAY
+# into the user manager (as for t715-keys.service).
+# A unit rather than Hyprland's start-up launch (uwsm-app): at a slot-3 boot
+# three uwsm-app launches came within 230 ms while the shell loaded, and
+# squeekboard's never ran, without a trace (docs/journal/ONDEVICE-2026-10-28.md).
+# squeekboard's own mobi.phosh.OSK.service waits for gnome-session and has no
+# [Install] section. Its log: journalctl --user -u t715-squeekboard
+[Unit]
+Description=Squeekboard on-screen keyboard (SM-T715 touch layer)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Omarchy's screensaver turns the setting off while it runs and on again when it
+# exits; a crash in between would leave a tablet with no keyboard at all.
+ExecStartPre=/usr/bin/gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true
+ExecStart=/usr/bin/squeekboard
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

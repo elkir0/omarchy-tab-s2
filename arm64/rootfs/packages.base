@@ -1,0 +1,25 @@
+# The base image's packages (rootfs-aarch64-base.img), one per line, "name  # why".
+# ALARM's base group is in the tarball already: systemd, e2fsprogs, udev, openssh is
+# NOT in it on its own (the tarball lists it as explicit), util-linux, pacman, ...
+# Adapted from omarchy-tab-s2/image/rootfs/packages.extra for a first
+# boot: what gets the tablet reachable, and what the overlay's scripts need.
+
+# --- Reachable over the USB debug link (usb-rndis.service) and Wi-Fi ---
+networkmanager         # the network stack; no systemd-resolved in the base image
+wpa_supplicant         # NetworkManager's Wi-Fi backend (an optdependency of it)
+openssh                # sshd: root and the user by key only (overlay sshd_config.d)
+dnsmasq                # DHCP for the Mac on usb0 (/etc/usb-rndis/dnsmasq.conf)
+sudo                   # wheel administers the tablet (overlay sudoers.d)
+
+# --- What the overlay and the owner's first tests need ---
+iproute2               # ip, used by usb-rndis-setup and the network scripts
+busybox                # devmem and the other small tools: read-only SoC register checks
+usbutils               # lsusb
+python                 # t715-reboot-to
+rsync                  # copying files over ssh
+vim                    # the editor ALARM's tarball does not install by itself
+nano                   # ALARM's default editor, kept
+less                   # pagers of pacman and man
+bash-completion        # pacman's completion on a slow link
+man-db man-pages       # documentation without the network
+htop iw wireless-regdb # the owner's console tools and the regulatory database

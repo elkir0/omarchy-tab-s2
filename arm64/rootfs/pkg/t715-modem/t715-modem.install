@@ -1,0 +1,13 @@
+# Enable the modem chain and the call profile user unit for every user.
+post_install() {
+  systemctl enable shannon-nv-provision.service shannon-modem-prepare.service >/dev/null 2>&1 || true
+  systemctl --global enable t715-call-profile.service >/dev/null 2>&1 || true
+  echo "t715-modem: add the desktop user to the radio group (usermod -aG radio USER) for shannonctl"
+}
+post_upgrade() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+pre_remove() {
+  systemctl disable shannon-nv-provision.service shannon-modem-prepare.service >/dev/null 2>&1 || true
+  systemctl --global disable t715-call-profile.service >/dev/null 2>&1 || true
+}

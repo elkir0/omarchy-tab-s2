@@ -1,0 +1,16 @@
+[Unit]
+Description=USB RNDIS gadget for headless debugging over USB
+Documentation=file:///usr/local/sbin/usb-rndis-setup
+# Must be up before sshd so the debug link exists as soon as ssh is reachable.
+Before=sshd.service
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usb-rndis-setup
+RemainAfterExit=yes
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

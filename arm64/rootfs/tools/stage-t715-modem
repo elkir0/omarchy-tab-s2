@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# stage-t715-modem — the source archive of pkg/t715-modem (aarch64): the SS333 modem stack of
+# omarchy-tab-s2 (modem/), as one of its commits holds it, into pkg/t715-modem/t715-modem-src.tar.gz
+# (git-ignored), then tools/build-pkg t715-modem builds it.
+#
+# Usage: tools/stage-t715-modem [COMMIT]     (default: HEAD of $T715_UNIFIED)
+#
+# git archive takes the committed files only: nothing of a working tree (a loader binary built
+# for armv7h, a local edit) can slip in. The archive holds modem/loader (sources, tests and
+# Makefile: the package builds and tests the loader for aarch64), modem/shannond (without its
+# tests), modem/audio, modem/ui, modem/systemd, modem/udev, modem/modprobe and modem/tools.
+# Same commit, same archive (git archive's file times are the commit's; gzip -n).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+UNIFIED="${T715_UNIFIED:-}"
+[ -n "$UNIFIED" ] || UNIFIED="$(cd "$(dirname "$0")/"../../.. && pwd)" || true
+COMMIT="${1:-HEAD}"
+OUT="$HERE/pkg/t715-modem/t715-modem-src.tar.gz"
+rev="$(git -C "$UNIFIED" rev-parse --verify "$COMMIT^{commit}")"
+git -C "$UNIFIED" archive --format=tar "$rev" -- \
+    modem/loader modem/shannond ':(exclude)modem/shannond/tests' modem/audio modem/ui \
+    modem/systemd modem/udev modem/modprobe modem/tools \
+    | gzip -n -9 > "$OUT.part"
+mv "$OUT.part" "$OUT"
+printf '%s\n' "$rev" > "$OUT.commit"
+echo "$OUT: omarchy-tab-s2 ${rev:0:12}, $(wc -c < "$OUT" | tr -d ' ') bytes"

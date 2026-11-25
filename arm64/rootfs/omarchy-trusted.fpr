@@ -1,0 +1,7 @@
+# tools/omarchy-trusted.fpr — fingerprints of the Omarchy signing keys we
+# accept, one per line. tools/repack-omarchy refuses to run when the
+# downloaded omarchy-keyring trusts any key not listed here, so a key change
+# upstream fails loudly instead of being taken on trust from the package that
+# carries it. Checked on 2026-10-28 against omarchy-keyring 20251027-1
+# ("Omarchy <pkgs@omarchy.org>").
+40DFB630FF42BCFFB047046CF0134EE680CAC571

@@ -1,0 +1,995 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""omamobile-omarchy-patches against synthetic Omarchy trees, and against the
+real aarch64 omarchy package when one is at hand (OMARCHY_PKG=path, or the
+root image build's pacman cache, ~/.cache/omamobile-rootfs/pkg).
+
+Each synthetic case builds a root with a fake pacman local database (desc and
+a gzipped mtree) the way pacman leaves one."""
+import glob
+import gzip
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PKG = os.path.dirname(HERE)
+TOOL = os.path.join(PKG, "bin", "omamobile-omarchy-patches")
+SERIES = os.path.join(PKG, "patches")
+STATE = "var/lib/omamobile/omarchy-patches"
+
+failures = 0
+
+
+def ok(cond, what):
+    global failures
+    if cond:
+        print("ok - " + what)
+    else:
+        failures += 1
+        print("not ok - " + what)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def run(root, *args, series=None, env=None):
+    cmd = [sys.executable, "-I", TOOL] + list(args) + ["--root", root]
+    if series:
+        cmd += ["--series", series]
+    e = dict(os.environ)
+    e.update(env or {})
+    p = subprocess.run(cmd, capture_output=True, text=True, env=e)
+    return p.returncode, p.stdout + p.stderr
+
+
+# ---------------------------------------------------------------- synthetic Omarchy
+
+
+A_V1 = "import QtQuick\nItem {\n  // palette\n  color: Color.text\n  width: 10\n  height: 20\n}\n"
+A_QUALIFIED = A_V1.replace("color: Color.text", "color: Commons.Color.text")
+A_PHONE = A_QUALIFIED.replace("  width: 10\n", "  width: 10\n  // phone\n  touch: true\n")
+TOOL_V1 = "#!/bin/bash\necho one\necho two\necho three\n"
+TOOL_PHONE = TOOL_V1.replace("echo two\n", "echo two\necho phone\n")
+TOOL_V3 = "#!/bin/bash\necho one\necho TWO-CHANGED\necho three\n"
+LUA_V1 = "-- settings\nlocal a = 1\n-- old comment\nlocal b = 2\nreturn a + b\n"
+LUA_PHONE = LUA_V1.replace("-- old comment\n", "")
+NEW_QML = "import QtQuick\nItem { id: keypad }\n"
+
+
+def udiff(old, new, path, created=False):
+    """A -p1 unified diff with git's i/ w/ prefixes."""
+    with tempfile.TemporaryDirectory() as d:
+        a, b = os.path.join(d, "a"), os.path.join(d, "b")
+        with open(a, "w") as f:
+            f.write(old)
+        with open(b, "w") as f:
+            f.write(new)
+        out = subprocess.run(["diff", "-u", a, b], capture_output=True, text=True).stdout
+    lines = out.splitlines(keepends=True)[2:]
+    head = "--- %s\n+++ w/%s\n" % ("/dev/null" if created else "i/" + path, path)
+    if created:
+        lines = [l.replace("@@ -1,0 ", "@@ -0,0 ", 1) if l.startswith("@@") else l for l in lines]
+    return head + "".join(lines)
+
+
+def write_series(d, patches):
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    for name, text in patches.items():
+        with open(os.path.join(d, name), "w") as f:
+            f.write("# test patch %s\n%s" % (name, text))
+    return d
+
+
+def install_omarchy(root, version, files, links):
+    """What pacman does on an install or upgrade: every file of the package
+    written, the local database entry replaced. Files outside it stay."""
+    for rel, text in files.items():
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if os.path.lexists(p):
+            os.unlink(p)
+        with open(p, "w") as f:
+            f.write(text)
+    for rel, target in links.items():
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if os.path.lexists(p):
+            os.unlink(p)
+        os.symlink(target, p)
+    db = os.path.join(root, "var/lib/pacman/local")
+    for old in glob.glob(os.path.join(db, "omarchy-*")):
+        shutil.rmtree(old)
+    entry = os.path.join(db, "omarchy-%s" % version)
+    os.makedirs(entry)
+    with open(os.path.join(entry, "desc"), "w") as f:
+        f.write("%%NAME%%\nomarchy\n\n%%VERSION%%\n%s\n\n" % version)
+    lines = ["#mtree", "/set type=file uid=0 gid=0 mode=644"]
+    for rel, text in sorted(files.items()):
+        lines.append("./%s time=1.0 size=%d sha256digest=%s" % (rel, len(text.encode()), sha(text.encode())))
+    for rel, target in sorted(links.items()):
+        lines.append("./%s time=1.0 type=link link=%s" % (rel, target))
+    with gzip.open(os.path.join(entry, "mtree"), "wt") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def omarchy_files(a=A_V1, tool=TOOL_V1, lua=LUA_V1):
+    return ({"usr/share/omarchy/shell/a.qml": a, "usr/bin/omarchy-tool": tool,
+             "usr/share/omarchy/default/hypr/x.lua": lua, "usr/share/omarchy/shell/b.qml": "Item {}\n"},
+            {"usr/share/omarchy/bin/omarchy-tool": "/usr/bin/omarchy-tool"})
+
+
+SERIES_FULL = {
+    "0000-backport-qualify.patch": udiff(A_V1, A_QUALIFIED, "shell/a.qml"),
+    "0001-tool.patch": udiff(TOOL_V1, TOOL_PHONE, "bin/omarchy-tool"),
+    "0002-new-keypad.patch": udiff("", NEW_QML, "shell/plugins/lock/Keypad.qml", created=True),
+    "0003-phone-on-qualified.patch": udiff(A_QUALIFIED, A_PHONE, "shell/a.qml"),
+    "0004-lua-drop-comment.patch": udiff(LUA_V1, LUA_PHONE, "default/hypr/x.lua"),
+}
+
+
+def read(root, rel):
+    p = os.path.join(root, rel)
+    return open(p).read() if os.path.isfile(p) else None
+
+
+def omarchy_intact(root, files):
+    return all(read(root, rel) == text for rel, text in files.items())
+
+
+def synthetic(t):
+    root = os.path.join(t, "root")
+    series = write_series(os.path.join(t, "series"), SERIES_FULL)
+    notified = os.path.join(t, "notified")
+    notify = os.path.join(t, "notify")
+    with open(notify, "w") as f:
+        f.write("#!/bin/sh\nprintf '%%s|%%s\\n' \"$1\" \"$2\" >> %s\n" % notified)
+    os.chmod(notify, 0o755)
+    env = {"OMAMOBILE_NOTIFY_CMD": notify}
+    files, links = omarchy_files()
+    install_omarchy(root, "1.0-1", files, links)
+
+    ok("-- old comment" in SERIES_FULL["0004-lua-drop-comment.patch"].split("@@", 2)[2]
+       and "\n--- old comment\n" in SERIES_FULL["0004-lua-drop-comment.patch"],
+       "fixture: a removed Lua comment shows as a '--- ' line in a hunk")
+
+    # Apply on a fresh install
+    rc, out = run(root, "apply", series=series, env=env)
+    ok(rc == 0, "apply: exit 0 (%s)" % out.strip().splitlines()[-1:])
+    ok(read(root, "usr/share/omarchy/shell/a.qml") == A_PHONE, "apply: patches in order (0003 on 0000)")
+    ok(read(root, "usr/bin/omarchy-tool") == TOOL_PHONE, "apply: a bin/ link's target is patched")
+    ok(os.path.islink(os.path.join(root, "usr/share/omarchy/bin/omarchy-tool")), "apply: the link stays a link")
+    ok(read(root, "usr/share/omarchy/shell/plugins/lock/Keypad.qml") == NEW_QML, "apply: a new file is created")
+    ok(read(root, "usr/share/omarchy/default/hypr/x.lua") == LUA_PHONE, "apply: a hunk removing '-- ...' lines is parsed as a hunk")
+    status = json.load(open(os.path.join(root, STATE, "status.json")))
+    ok(status["result"] == "ok" and len(status["applied"]) == 5 and not status["upstream"], "apply: status.json says 5 applied")
+    ok(os.path.isfile(os.path.join(root, "var/log/omamobile/omarchy-patches.log")), "apply: logs to /var/log/omamobile")
+    rc, out = run(root, "verify")
+    ok(rc == 0, "verify: the series is in place")
+
+    # Already applied: nothing written
+    before = os.stat(os.path.join(root, "usr/share/omarchy/shell/a.qml")).st_mtime_ns
+    rc, out = run(root, "apply", series=series, env=env)
+    ok(rc == 0 and "already applied" in out, "apply again: already applied")
+    ok(os.stat(os.path.join(root, "usr/share/omarchy/shell/a.qml")).st_mtime_ns == before, "apply again: nothing rewritten")
+
+    # Omarchy upgrade that contains 0000: reported as upstream, the rest applied
+    files, links = omarchy_files(a=A_QUALIFIED)
+    install_omarchy(root, "1.1-1", files, links)
+    rc, out = run(root, "apply", "--hook", series=series, env=env)
+    status = json.load(open(os.path.join(root, STATE, "status.json")))
+    ok(rc == 0, "upgrade with 0000 upstream: exit 0")
+    ok(status["upstream"] == ["0000-backport-qualify.patch"] and len(status["applied"]) == 4,
+       "upgrade with 0000 upstream: 0000 skipped and reported, 4 applied")
+    ok("upstream  0000-backport-qualify.patch" in out, "upgrade with 0000 upstream: said in the output")
+    ok(read(root, "usr/share/omarchy/shell/a.qml") == A_PHONE, "upgrade with 0000 upstream: 0003 still applies")
+    ok(not os.path.exists(notified), "upgrade with 0000 upstream: no failure notification")
+
+    # A patch that no longer applies: Omarchy's files left exactly as shipped
+    files, links = omarchy_files(a=A_QUALIFIED, tool=TOOL_V3)
+    install_omarchy(root, "1.2-1", files, links)
+    rc, out = run(root, "apply", "--hook", series=series, env=env)
+    status = json.load(open(os.path.join(root, STATE, "status.json")))
+    ok(rc == 1, "failing patch: exit 1")
+    ok(omarchy_intact(root, files), "failing patch: every Omarchy file is as the package shipped it")
+    ok(status["result"] == "failed" and status["failed"]["patch"] == "0001-tool.patch", "failing patch: status names 0001")
+    ok(os.path.exists(notified) and "PIN pad" in open(notified).read(), "failing patch: the user is notified")
+    ok("FAILED" in open(os.path.join(root, "var/log/omamobile/omarchy-patches.log")).read(), "failing patch: logged")
+    ok(not glob.glob(os.path.join(root, STATE, "omamobile-omarchy-patches-*")), "failing patch: no scratch left")
+    os.unlink(notified)
+
+    # The fixed series on the same Omarchy: applies, from the pristine files
+    fixed = dict(SERIES_FULL)
+    fixed["0001-tool.patch"] = udiff(TOOL_V3, TOOL_V3.replace("echo TWO-CHANGED\n", "echo TWO-CHANGED\necho phone\n"), "bin/omarchy-tool")
+    series2 = write_series(os.path.join(t, "series2"), fixed)
+    rc, out = run(root, "apply", series=series2, env=env)
+    ok(rc == 0 and "echo phone" in read(root, "usr/bin/omarchy-tool"), "new series after a failure: applies")
+
+    # A series that drops a patch: its file goes back to Omarchy's, a file it
+    # created goes away
+    dropped = dict(fixed)
+    del dropped["0002-new-keypad.patch"]
+    del dropped["0004-lua-drop-comment.patch"]
+    series3 = write_series(os.path.join(t, "series3"), dropped)
+    rc, out = run(root, "apply", series=series3, env=env)
+    ok(rc == 0, "dropped patches: exit 0")
+    ok(read(root, "usr/share/omarchy/shell/plugins/lock/Keypad.qml") is None, "dropped patches: the created file is removed")
+    ok(read(root, "usr/share/omarchy/default/hypr/x.lua") == LUA_V1, "dropped patches: the file is Omarchy's again")
+    ok(read(root, "usr/share/omarchy/shell/a.qml") == A_PHONE, "dropped patches: the rest stay applied")
+
+    # A file changed by something else: refuse, touch nothing
+    with open(os.path.join(root, "usr/share/omarchy/shell/a.qml"), "a") as f:
+        f.write("// edited by hand\n")
+    snapshot = {rel: read(root, rel) for rel in list(files) + ["usr/share/omarchy/shell/a.qml"]}
+    rc, out = run(root, "apply", series=series2, env=env)
+    ok(rc == 1 and "changed outside" in out, "hand-edited file: refused")
+    ok(all(read(root, rel) == text for rel, text in snapshot.items()), "hand-edited file: nothing touched")
+    if os.path.exists(notified):
+        os.unlink(notified)
+
+    # pacman -S omarchy puts Omarchy's files back; the hook then applies again
+    install_omarchy(root, "1.2-1", files, links)
+    rc, out = run(root, "apply", "--hook", series=series2, env=env)
+    ok(rc == 0 and read(root, "usr/share/omarchy/shell/a.qml") == A_PHONE, "after a reinstall: applies again")
+
+    # restore: Omarchy's files back, created ones removed
+    rc, out = run(root, "restore")
+    ok(rc == 0 and omarchy_intact(root, files) and read(root, "usr/share/omarchy/shell/plugins/lock/Keypad.qml") is None,
+       "restore: Omarchy's own files are back")
+
+    # A phone patched at image build (no state): recovered by reversing the series
+    root2 = os.path.join(t, "root2")
+    files, links = omarchy_files()
+    install_omarchy(root2, "1.0-1", files, links)
+    built = {"usr/share/omarchy/shell/a.qml": A_PHONE, "usr/bin/omarchy-tool": TOOL_PHONE,
+             "usr/share/omarchy/default/hypr/x.lua": LUA_PHONE, "usr/share/omarchy/shell/plugins/lock/Keypad.qml": NEW_QML}
+    for rel, text in built.items():
+        os.makedirs(os.path.dirname(os.path.join(root2, rel)), exist_ok=True)
+        with open(os.path.join(root2, rel), "w") as f:
+            f.write(text)
+    extra = dict(SERIES_FULL)
+    extra["0005-more.patch"] = udiff("Item {}\n", "Item { id: more }\n", "shell/b.qml")
+    series4 = write_series(os.path.join(t, "series4"), extra)
+    rc, out = run(root2, "apply", series=series4, env=env)
+    ok(rc == 0 and "reversing" in out, "image-patched files without state: Omarchy's copies recovered by reversing")
+    ok(all(read(root2, rel) == text for rel, text in built.items()) and read(root2, "usr/share/omarchy/shell/b.qml") == "Item { id: more }\n",
+       "image-patched files without state: the new series applied on top")
+
+    # From the pacman cache when nothing else has Omarchy's copy
+    root3 = os.path.join(t, "root3")
+    files, links = omarchy_files()
+    install_omarchy(root3, "1.0-1", files, links)
+    if shutil.which("bsdtar"):
+        stage = os.path.join(t, "pkgstage")
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(stage, rel)), exist_ok=True)
+            with open(os.path.join(stage, rel), "w") as f:
+                f.write(text)
+        cache = os.path.join(root3, "var/cache/pacman/pkg")
+        os.makedirs(cache)
+        subprocess.run(["bsdtar", "-cf", os.path.join(cache, "omarchy-1.0-1-aarch64.pkg.tar.gz"), "-z", "-C", stage, "usr"], check=True)
+        with open(os.path.join(root3, "usr/share/omarchy/shell/b.qml"), "w") as f:
+            f.write("Item { id: unknown }\n")
+        rc, out = run(root3, "apply", series=series4, env=env)
+        ok(rc == 0 and "package cache" in out and read(root3, "usr/share/omarchy/shell/b.qml") == "Item { id: more }\n",
+           "Omarchy's copy from the package cache")
+    else:
+        print("ok - Omarchy's copy from the package cache # SKIP no bsdtar")
+
+    # No Omarchy: nothing to do
+    root4 = os.path.join(t, "root4")
+    os.makedirs(os.path.join(root4, "var/lib/pacman/local"))
+    rc, out = run(root4, "apply", series=series, env=env)
+    ok(rc == 0 and "not installed" in out, "no Omarchy installed: nothing to do")
+
+    # The shipped series parses: every patch changes a file, with -p1 paths
+    sys.path.insert(0, os.path.dirname(TOOL))
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("patches_tool", TOOL)
+    spec = importlib.util.spec_from_loader("patches_tool", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    empty = os.path.join(t, "empty")
+    os.makedirs(empty)
+    pats, digest = mod.load_series(SERIES, empty)
+    ok(len(pats) == len(glob.glob(os.path.join(SERIES, "*.patch"))) and all(p.files for p in pats), "the shipped series parses (%d patches)" % len(pats))
+    ok(all(f.startswith("usr/share/omarchy/") for p in pats for f in p.files), "shipped series: paths land in /usr/share/omarchy")
+
+
+# ---------------------------------------------------------------- the real package
+
+
+def real_package(t):
+    pkg = os.environ.get("OMARCHY_PKG")
+    if not pkg:
+        cands = sorted(glob.glob(os.path.expanduser("~/.cache/omamobile-rootfs/pkg/omarchy-[0-9]*-aarch64.pkg.tar.*")))
+        cands = [c for c in cands if not c.endswith(".sig")]
+        pkg = cands[-1] if cands else ""
+    if not pkg or not shutil.which("bsdtar"):
+        print("ok - the real Omarchy package # SKIP no omarchy package (OMARCHY_PKG=...) or bsdtar")
+        return
+    ex = os.path.join(t, "pkg")
+    os.makedirs(ex)
+    subprocess.run(["bsdtar", "-xf", pkg, "-C", ex], check=True)
+    info = dict(l.split(" = ", 1) for l in open(os.path.join(ex, ".PKGINFO")).read().splitlines() if " = " in l)
+    version = info["pkgver"]
+    selected_series = os.path.join(PKG, "legacy-4.0.6") if version.startswith("4.0.6-") else SERIES
+
+    def make_root(name, mtree_from):
+        root = os.path.join(t, name)
+        os.makedirs(root)
+        shutil.copytree(os.path.join(ex, "usr"), os.path.join(root, "usr"), symlinks=True)
+        entry = os.path.join(root, "var/lib/pacman/local/omarchy-%s" % version)
+        os.makedirs(entry)
+        with open(os.path.join(entry, "desc"), "w") as f:
+            f.write("%%NAME%%\nomarchy\n\n%%VERSION%%\n%s\n\n" % version)
+        if mtree_from:
+            shutil.copy(mtree_from, os.path.join(entry, "mtree"))
+        return root, entry
+
+    if version.startswith("4.5.0-"):
+        import port45
+        port45.actual(t, ex, version, make_root, run, ok, read, selected_series, PKG, qml_parse)
+        # About's layouts by terminal size (0030), run on the patched 4.5
+        # files (port45 ends by restoring its own root)
+        root45, _ = make_root("real45-about", os.path.join(ex, ".MTREE"))
+        rc, out = run(root45, "apply", series=selected_series)
+        ok(rc == 0, "real4.5: the series applies to a second root (%s)" % out.strip().splitlines()[-1])
+        show_logo(t, root45, centred=True)
+        about_layout(t, root45, tools=os.path.join(root45, "usr/bin"))
+        # The glance under qmltestrunner, on the family phones run
+        lock_glance_run(root45, ex, "real4.5")
+        return
+
+    root, _ = make_root("real", os.path.join(ex, ".MTREE"))
+    rc, out = run(root, "apply", series=selected_series)
+    ok(rc == 0, "real omarchy %s: the shipped series applies (%s)" % (version, out.strip().splitlines()[-1]))
+    status = json.load(open(os.path.join(root, STATE, "status.json")))
+    ok(not status["upstream"] and len(status["applied"]) == len(glob.glob(os.path.join(selected_series, "*.patch"))),
+       "real omarchy %s: every patch applied, none upstream" % version)
+    upd = read(root, "usr/bin/omarchy-update")
+    ok("omamobile-update" not in upd and "OMAMOBILE_UPDATE" not in upd,
+       "real omarchy: the tablet keeps Omarchy's own omarchy-update (0012 dropped)")
+    ok(os.path.isfile(os.path.join(root, "usr/share/omarchy/shell/plugins/lock/Keypad.qml")), "real omarchy: the lock's keypad is there (0003)")
+    notif = "usr/share/omarchy/shell/plugins/notifications/"
+    ok("inlineReplySupported: true" in read(root, notif + "Service.qml")
+       and "sendInlineReply" in read(root, notif + "Service.qml")
+       and "notificationReplyField" in read(root, notif + "components/NotificationCard.qml"),
+       "real omarchy: notifications take an inline reply (0015)")
+    card = read(root, notif + "components/NotificationCard.qml")
+    service = read(root, notif + "Service.qml")
+    ok("DragHandler {\n    id: swipeHandler" in card and "yAxis.enabled: false" in card
+       and "dragThreshold:" in card and "root.width * 0.35" in card
+       and "root.closeRequested()" in card.split("function finishSwipe", 1)[1]
+       and "!root.replying" in card.split("id: swipeHandler", 1)[1].split("}", 1)[0],
+       "real omarchy: a toast swipes away past 35%, not while a reply is typed (0017)")
+    ok('objectName: "notificationCloseButton"' in card and "width: Style.space(44)" in card
+       and "height: Style.space(44)" in card and "visible: root.closeButtonShown" in card,
+       "real omarchy: a 44 px close button on toasts (0017)")
+    ok("acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad | PointerDevice.Stylus" in card
+       and "mouse.button === Qt.RightButton" in card,
+       "real omarchy: hover pauses for a mouse only; right-click still closes (0017)")
+    ok("!card.held" in service and "closeButtonShown: service.touchScreen" in service
+       and '["hyprctl", "-j", "devices"]' in service and "touchScreenProc.running = true" in service,
+       "real omarchy: the close button shows when Hyprland lists a touch screen (0017)")
+    forget = service.split("function forgetNotification(name) {", 1)
+    ok(len(forget) == 2 and "function forget(name: string): string {\n      return service.forgetNotification(name)" in service
+       and "/^[0-9]+-[0-9]+\\.json$/.test(file)" in forget[1].split("\n  }\n", 1)[0]
+       and 'removePopup(i, "forget")' in forget[1].split("\n  }\n", 1)[0]
+       and "enqueuePopupFileJob(" in forget[1].split("\n  }\n", 1)[0]
+       and 'if (reason === "forget") deletePopupFileFor(entry)\n      else archivePopupFileFor(entry)' in service,
+       "real omarchy: forget takes one notification away, toast or history, on the file queue (0019)")
+    menu = read(root, "usr/share/omarchy/shell/plugins/menu/Menu.qml")
+    back = menu.split("DragHandler {\n        id: backSwipe", 1)
+    ok(len(back) == 2 and "yAxis.enabled: false" in back[1].split("}", 1)[0]
+       and "!resultList.moving" in back[1].split("}", 1)[0] and "root.goBack()" in back[1].split("NumberAnimation", 1)[0],
+       "real omarchy: a swipe right on the menu goes back, not while the list scrolls (0018)")
+    ok('objectName: "menuBackButton"' in menu and "visible: card.canGoBack" in menu
+       and 'root.activeMenu !== "root" && !root.dmenuActive' in menu
+       and menu.split('objectName: "menuBackButton"', 1)[1].count("onClicked: root.goBack()") >= 1,
+       "real omarchy: the menu's header has a back button below the top level (0018)")
+    ok("(event.key === Qt.Key_Backspace || event.key === Qt.Key_Left) && !root.filterText) {\n            root.goBack()" in menu,
+       "real omarchy: Backspace and Left still go back (0018)")
+    ok("property bool cardSettled: false" in menu, "real omarchy: the menu-first-frame bridge applies after 0018")
+    qml_parse(root, selected_series)
+    lock_glance(root, ex)
+    lock_battery(t, root)
+    lock_media(root)
+    app_icons_largest(root)
+    lib = read(root, "usr/share/omarchy/shell/services/AppLibrary.qml")
+    launch = lib.split("  function launch(desktopId, name) {", 1)
+    ok("function launchesShellSurface(id)" in lib and 'String(command[0]).replace(/^.*\\//, "") === "omarchy-shell"' in lib
+       and len(launch) == 2 and "if (!root.launchesShellSurface(id)) root.beginLaunchFeedback(name)" in launch[1].split("\n  }", 1)[0],
+       "real omarchy: no launch toast for an entry that runs omarchy-shell, every other launch keeps it (0025)")
+    for name in ("omarchy-channel-set", "omarchy-refresh-pacman"):
+        text = read(root, "usr/bin/" + name)
+        guard = text.find("if grep -q '^\\[alarm\\]' /etc/pacman.conf")
+        ok(guard >= 0 and (text.find("sudo ") < 0 or guard < text.find("sudo ")),
+           "real omarchy: %s refuses on the tablet before it touches pacman (9000)" % name)
+    screensaver_launcher(t, os.path.join(root, "usr/bin/omarchy-launch-screensaver"))
+    show_logo(t, root)
+    about_layout(t, root)
+    # 0020 (touch phrasing) and 0022 (fingerprint probe) are dropped on the
+    # tablet: the notification sender stays Omarchy's own, and with no
+    # fingerprint reader nothing probes fprintd.
+    ok(read(root, "usr/bin/omarchy-notification-send") == read(ex, "usr/bin/omarchy-notification-send"),
+       "real omarchy: the notification sender is Omarchy's own (0020 dropped)")
+    ok("fprintd-list" not in read(root, "usr/share/omarchy/shell/plugins/lock/Service.qml"),
+       "real omarchy: the lock does no fingerprint probing of its own (0022 dropped)")
+    rc, out = run(root, "apply", series=selected_series)
+    ok(rc == 0 and "already applied" in out, "real omarchy: already applied")
+    rc, _ = run(root, "verify")
+    ok(rc == 0, "real omarchy: verify")
+
+    # An Omarchy that already contains one of the series (the first that
+    # touches no symlinks): the package as shipped plus that patch, with an
+    # mtree to match
+    root2, entry = make_root("real-upstream", None)
+
+    def touches_no_links(path):
+        names = [l[6:].split("\t")[0].rstrip("\n") for l in open(path) if l.startswith("+++ w/")]
+        return names and not any(os.path.islink(os.path.join(root2, "usr/share/omarchy", n)) for n in names)
+
+    patch0000 = next(p for p in sorted(glob.glob(os.path.join(selected_series, "*.patch"))) if touches_no_links(p))
+    p = mod_patch(root2, patch0000)
+    subprocess.run(["patch", "-s", "-p1", "-d", root2, "-i", p], check=True)
+    lines = ["#mtree", "/set type=file uid=0 gid=0 mode=644"]
+    for dirpath, _dirs, names in os.walk(os.path.join(root2, "usr")):
+        for n in names:
+            full = os.path.join(dirpath, n)
+            rel = os.path.relpath(full, root2)
+            if os.path.islink(full):
+                lines.append("./%s type=link link=%s" % (rel, os.readlink(full)))
+            else:
+                lines.append("./%s sha256digest=%s" % (rel, sha(open(full, "rb").read())))
+    with gzip.open(os.path.join(entry, "mtree"), "wt") as f:
+        f.write("\n".join(lines) + "\n")
+    rc, out = run(root2, "apply", series=selected_series)
+    status = json.load(open(os.path.join(root2, STATE, "status.json")))
+    ok(rc == 0 and status["upstream"] == [os.path.basename(patch0000)],
+       "real omarchy with %s upstream: skipped and reported, the rest applied" % os.path.basename(patch0000))
+    ok(len(status["applied"]) == len(glob.glob(os.path.join(selected_series, "*.patch"))) - 1, "real omarchy with one patch upstream: the others apply on it")
+
+
+def qml_parse(root, series=None):
+    """Every QML file the series touches still parses, when qmlformat is at
+    hand (it reports syntax errors without needing the shell's imports)."""
+    tool = shutil.which("qmlformat") or next(
+        (p for p in ("/usr/lib/qt6/bin/qmlformat", "/usr/lib64/qt6/bin/qmlformat") if os.path.isfile(p)), "")
+    if not tool:
+        print("ok - real omarchy: the patched QML parses # SKIP no qmlformat")
+        return
+    files = set()
+    for p in glob.glob(os.path.join(series or SERIES, "*.patch")):
+        for line in open(p):
+            if line.startswith("+++ w/") and line.rstrip().endswith(".qml"):
+                files.add(line[6:].rstrip())
+    bad = [f for f in sorted(files)
+           if subprocess.run([tool, os.path.join(root, "usr/share/omarchy", f)], capture_output=True).returncode != 0]
+    ok(files and not bad, "real omarchy: the %d patched QML files parse (qmlformat)%s" % (len(files), " " + str(bad) if bad else ""))
+
+
+def app_icons_largest(root):
+    """Patch 0024: the icon index keeps the largest size per name. The
+    patched indexIconLine and iconPathSize run in node against paths in
+    the scan's order (SVGs first, then PNGs in directory order)."""
+    node = shutil.which("node")
+    if not node:
+        print("ok - real omarchy: the largest icon rule # SKIP no node")
+        return
+    lib = read(root, "usr/share/omarchy/shell/services/AppLibrary.qml")
+    fns = []
+    for name in ("iconPathSize", "indexIconLine"):
+        i = lib.find("  function %s(" % name)
+        j = lib.find("\n  }\n", i)
+        ok(i >= 0 and j > i, "real omarchy: AppLibrary has %s (0024)" % name)
+        if i < 0 or j < 0:
+            return
+        fns.append(lib[i:j + 4])
+    js = ("var root = {pendingIconIndex: {}};\n" + "\n".join("function " + f.strip()[len("function "):] for f in fns) +
+          "\n[process.argv.slice(1)].forEach(function(ps) { ps.forEach(indexIconLine) });"
+          "\nconsole.log(JSON.stringify(root.pendingIconIndex))")
+    paths = ["/usr/share/icons/hicolor/scalable/apps/foot.svg",
+             "/usr/share/icons/hicolor/32x32/apps/chromium.png",
+             "/usr/share/icons/hicolor/48x48/apps/chromium.png",
+             "/usr/share/icons/hicolor/256x256/apps/chromium.png",
+             "/usr/share/icons/hicolor/128x128/apps/chromium.png",
+             "/usr/share/icons/hicolor/64x64/apps/foot.png",
+             "/usr/share/pixmaps/odd.png",
+             "/usr/share/icons/hicolor/24x24/apps/odd.png"]
+    p = subprocess.run([node, "-e", js, "--"] + paths, capture_output=True, text=True)
+    got = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else {}
+    ok(got.get("chromium", "").endswith("/256x256/apps/chromium.png")
+       and got.get("foot", "").endswith("/scalable/apps/foot.svg")
+       and got.get("odd", "").endswith("/24x24/apps/odd.png"),
+       "real omarchy: the icon index keeps the largest size, an SVG over any PNG (0024: %s)" % (got or p.stderr.strip()[:120]))
+
+
+def lock_glance(root, ex):
+    """Patch 0023: the lock's glance view. Static checks on the patched
+    files, then test/lock-glance (qmltestrunner, offscreen) against them."""
+    lock = "usr/share/omarchy/shell/plugins/lock/"
+    view = read(root, lock + "LockView.qml")
+    service = read(root, lock + "Service.qml")
+    card = read(root, "usr/share/omarchy/shell/plugins/notifications/components/NotificationCard.qml")
+    ok(os.path.isfile(os.path.join(root, lock + "LockGlance.qml")) and os.path.isfile(os.path.join(root, lock + "LockGlance.js"))
+       and "LockGlance {\n      id: glance" in view,
+       "real omarchy: the lock has a glance view (0023)")
+    ok(view.count("opacity: root.pinOpacity") == 4 and view.count("&& root.pinVisible") == 3 and "visible: root.pinVisible" in view,
+       "real omarchy: every part of the PIN view hides under the glance (0023)")
+    wake = service.split("function wake(): string {", 1)
+    ok(len(wake) == 2 and "root.wakeSerial += 1" in wake[1].split("}", 1)[0]
+       and "wakeSerial: root.wakeSerial" in service,
+       "real omarchy: the wake call brings the glance back (0023)")
+    blank = service.split("function runBlank() {", 1)
+    dark = service.split("function dark(): string {", 1)
+    run_wake = service.split("function runWake() {", 1)
+    ok(len(blank) == 2 and "markDark()" in blank[1].split("}", 1)[0]
+       and len(dark) == 2 and "root.markDark()" in dark[1].split("}", 1)[0]
+       and len(run_wake) == 2 and "displayDark = false" in run_wake[1].split("}", 1)[0]
+       and "blankSerial: root.blankSerial" in service and "displayDark: root.displayDark" in service,
+       "real omarchy: the lock's blank and the dark call bring the glance back, a wake lights it (0023)")
+    ok("maximumLineCount: root.summaryLines" in card and "maximumLineCount: root.bodyLines" in card
+       and "property int summaryLines: 2" in card and "property int bodyLines: 3" in card,
+       "real omarchy: notification toasts keep their line counts (0023)")
+    glance = read(root, lock + "LockGlance.qml") + read(root, lock + "LockGlance.js")
+    ok("XMLHttpRequest" not in glance and "curl" not in glance and "execDetached" not in glance
+       and "call notifications forget" in glance and "invokeAction" not in glance,
+       "real omarchy: the glance asks no network and runs no notification action, only the forget call (0023)")
+    ok("darkTapWakes" not in view and "armWakeGuard()" in read(root, lock + "LockGlance.qml"),
+       "real omarchy: a dark touch wakes the lock itself (0029 dropped: no omamobile-doubletap)")
+    lock_glance_run(root, ex, "real omarchy")
+
+
+def lock_glance_run(root, ex, label):
+    """test/lock-glance (qmltestrunner, offscreen) against a patched root of
+    either family. ex is the package as extracted, unpatched: the computer
+    lock's password prompt is Omarchy's own expression, a literal on 4.0.6
+    and a translation on 4.5. Our patches put the PIN prompt in front of it
+    (0003, 0011) and must leave it as the other branch; the suite then checks
+    that a computer's lock shows what the view declares."""
+    view = "usr/share/omarchy/shell/plugins/lock/LockView.qml"
+    decl = "  readonly property string placeholderText: "
+    theirs, ours = ([l[len(decl):] for l in (read(d, view) or "").splitlines() if l.startswith(decl)] for d in (ex, root))
+    ok(len(theirs) == 1 and len(ours) == 1 and theirs[0].strip()
+       and ours[0] in (theirs[0], 'padShown ? "Enter PIN" : ' + theirs[0]),
+       "%s: the computer lock's password prompt is Omarchy's own (0003, 0011)" % label)
+    p = subprocess.run(["bash", os.path.join(HERE, "lock-glance"), os.path.join(root, "usr/share/omarchy/shell")],
+                       capture_output=True, text=True)
+    if p.returncode == 77:
+        print("ok - %s: the glance under qmltestrunner # SKIP no qmltestrunner" % label)
+        return
+    out = p.stdout + p.stderr
+    totals = [l for l in out.splitlines() if l.startswith("Totals:")]
+    ok(p.returncode == 0, "%s: the glance under qmltestrunner (0023: %s)" % (label, totals[-1] if totals else "no result"))
+    if p.returncode != 0:
+        print("\n".join(l for l in out.splitlines() if l.startswith(("FAIL", "   ", "QWARN")))[:4000])
+
+
+# Power supplies as the kernel lists them: (name, type, present, capacity,
+# status, online[, scope]); "" for an attribute the supply has not got.
+SUPPLIES = {
+    # cheetah plugged in: the gauge says Discharging (net current negative), the USB charger is online
+    "phone-plugged": [("battery", "Battery", "1", "87", "Discharging", ""), ("usb", "USB", "", "", "Charging", "1")],
+    "phone-unplugged": [("battery", "Battery", "1", "87", "Discharging", ""), ("usb", "USB", "", "", "Not charging", "0")],
+    "phone-full": [("battery", "Battery", "1", "100", "Full", ""), ("usb", "USB", "", "", "", "1")],
+    "laptop": [("AC", "Mains", "", "", "", "0"), ("BAT0", "Battery", "1", "9", "Discharging", "")],
+    # a desktop: only a wireless mouse's battery, not present
+    "desktop": [("hidpp_battery_0", "Battery", "0", "50", "", "")],
+    "none": [],
+    # the odd shapes: a Mains supply with no online file says nothing about charging
+    "mains-no-online": [("AC", "Mains", "", "", "", ""), ("BAT0", "Battery", "1", "42", "Discharging", "")],
+    # a battery with no present file counts as present (omamobile-update's rule)
+    "no-present-file": [("battery", "Battery", "", "63", "Discharging", "")],
+    # the other charger types online, the gauge still saying Discharging
+    "usb-c": [("battery", "Battery", "1", "50", "Discharging", ""), ("usbc", "USB_C", "", "", "", "1")],
+    "usb-pd": [("battery", "Battery", "1", "51", "Discharging", ""), ("pd", "USB_PD", "", "", "", "1")],
+    "wireless": [("battery", "Battery", "1", "52", "Discharging", ""), ("qi", "Wireless", "", "", "", "1")],
+    # a charger that is there but offline
+    "charger-offline": [("battery", "Battery", "1", "53", "Discharging", ""), ("usbc", "USB_C", "", "", "", "0")],
+    # the 7 Pro with a controller paired: its battery (scope Device, present,
+    # full) sorts before the gauge (max170xx_battery, no scope file), the
+    # charger is offline. The gauge's level, not charging, not full.
+    "phone-with-controller": [("hid-0005:054C:0CE6.0003-battery", "Battery", "1", "100", "Full", "", "Device"),
+                              ("max170xx_battery", "Battery", "1", "64", "Discharging", "", ""),
+                              ("usb", "USB", "", "", "Not charging", "0", "")],
+    # the controller charging over its own cable, the phone unplugged
+    "phone-controller-charging": [("hid-0005:054C:0CE6.0003-battery", "Battery", "1", "40", "Charging", "", "Device"),
+                                  ("max170xx_battery", "Battery", "1", "64", "Discharging", "", ""),
+                                  ("usb", "USB", "", "", "Not charging", "0", "")],
+    # a desktop with only a controller: a present Device-scope battery is no battery
+    "desktop-controller": [("ps-controller-battery-02:00:00:00:00:01", "Battery", "1", "100", "Full", "", "Device")],
+}
+WANT = {
+    "phone-plugged": (True, 87, True, False), "phone-unplugged": (True, 87, False, False),
+    "phone-full": (True, 100, True, True), "laptop": (True, 9, False, False),
+    "desktop": (False, -1, False, False), "none": (False, -1, False, False),
+    "mains-no-online": (True, 42, False, False), "no-present-file": (True, 63, False, False),
+    "usb-c": (True, 50, True, False), "usb-pd": (True, 51, True, False), "wireless": (True, 52, True, False),
+    "charger-offline": (True, 53, False, False),
+    "phone-with-controller": (True, 64, False, False), "phone-controller-charging": (True, 64, False, False),
+    "desktop-controller": (False, -1, False, False),
+}
+
+
+def lock_battery(t, root):
+    """Patch 0026: the battery on the lock. Static checks, then the supply
+    command run against fake /sys/class/power_supply trees and its output
+    through LockBattery.parse in node: omamobile-update's rule."""
+    lock = "usr/share/omarchy/shell/plugins/lock/"
+    view = read(root, lock + "LockView.qml")
+    qml = read(root, lock + "LockBattery.qml") or ""
+    js = os.path.join(root, lock, "LockBattery.js")
+    ok(os.path.isfile(js) and qml and 'LockBattery {\n      objectName: "lockBattery"' in view
+       and "lit: !root.displayDark" in view and "wakeSerial: root.wakeSerial" in view,
+       "real omarchy: the lock has a battery indicator, polled only while lit (0026)")
+    ok("visible: present" in qml and "No battery" not in qml and '"/sys/class/power_supply"' in qml
+       and "running: battery.lit" in qml.split("Timer {", 1)[1].split("}", 1)[0]
+       and "UPower" not in qml and "XMLHttpRequest" not in qml,
+       "real omarchy: nothing shows without a battery, and the lock asks the kernel, not UPower (0026)")
+    argv_prefix = '["timeout", "-k", "1", "3", "bash", "-c", Battery.COMMAND, "--", "/sys/class/power_supply"]'
+    dark = qml.split("onLitChanged:", 1)[1].split("onWakeSerialChanged", 1)[0] if "onLitChanged:" in qml else ""
+    ok(argv_prefix in qml and "id: stale" in qml and "battery.clear()" in qml and "stale.restart()" in qml
+       and "charging = false" in dark and "full = false" in dark and "lockBatteryBolt" not in qml,
+       "real omarchy: a hung reading is cut and cleared, a blank drops the bolt, and the bar's glyph carries the "
+       "only bolt (0026)")
+    node = shutil.which("node")
+    if not node:
+        print("ok - real omarchy: the lock's battery rule # SKIP no node")
+        return
+    cmd = subprocess.run([node, "-e", "process.stdout.write(require(process.argv[1]).COMMAND)", js],
+                         capture_output=True, text=True).stdout
+    ok(0 <= cmd.find("/scope") < cmd.find("/capacity"),
+       "real omarchy: the lock's supply command reads scope before capacity, which can wake a HID device (0026)")
+    bad = []
+    for name, supplies in SUPPLIES.items():
+        d = os.path.join(t, "ps-" + name)
+        os.makedirs(d)
+        for s in supplies:
+            sd = os.path.join(d, s[0])
+            os.makedirs(sd)
+            for attr, value in zip(("type", "present", "capacity", "status", "online", "scope"), s[1:]):
+                if value != "":
+                    with open(os.path.join(sd, attr), "w") as f:
+                        f.write(value + "\n")
+        out = subprocess.run(["bash", "-c", cmd, "--", d], capture_output=True, text=True)
+        got = subprocess.run([node, "-e", "var m = require(process.argv[1]); var s = m.parse(process.argv[2]);"
+                              "process.stdout.write(JSON.stringify([s.present, s.percent, s.charging, s.full, "
+                              "m.icon(s.percent, s.charging, s.full)]))", js, out.stdout],
+                             capture_output=True, text=True).stdout
+        want = list(WANT[name])
+        got = json.loads(got) if got else None
+        # A Device-scope battery (a paired controller, keyboard or mouse) is
+        # skipped in bash, before its capacity is read: no line for it.
+        lines = [l for l in out.stdout.split("\n") if l]
+        peripherals = [s for s in supplies if len(s) > 6 and s[6] == "Device"]
+        skipped = len(lines) == len(supplies) - len(peripherals) and not any(p[3] in l.split("\t") for p in peripherals for l in lines)
+        if out.stderr or not got or got[:4] != want or (want[0] and not got[4]) or (not want[0] and got[4]) or not skipped:
+            bad.append((name, got, lines if not skipped else "", out.stderr.strip()[:80]))
+    ok(not bad, "real omarchy: the lock's battery reads the supplies as omamobile-update does, a charger online is "
+       "charging, a peripheral's Device-scope battery is skipped unread, no battery is nothing (0026)%s"
+       % (" " + repr(bad) if bad else ""))
+    # A sysfs read that never returns (a FIFO nobody writes): the lock's argv
+    # ends it through timeout(1), non-zero, and the output so far parses to
+    # no battery.
+    d = os.path.join(t, "ps-hang", "battery")
+    os.makedirs(d)
+    os.mkfifo(os.path.join(d, "type"))
+    started = time.monotonic()
+    out = subprocess.run(["timeout", "-k", "1", "3", "bash", "-c", cmd, "--", os.path.dirname(d)],
+                         capture_output=True, text=True, timeout=20)
+    took = time.monotonic() - started
+    got = subprocess.run([node, "-e", "var s = require(process.argv[1]).parse(process.argv[2]);"
+                          "process.stdout.write(JSON.stringify([s.present, s.charging]))", js, out.stdout],
+                         capture_output=True, text=True).stdout
+    ok(out.returncode != 0 and took < 8 and got == "[false,false]",
+       "real omarchy: a hung supply read ends through timeout(1) with no battery (0026: rc %s, %.1fs)"
+       % (out.returncode, took))
+
+
+def lock_media(root):
+    """Patch 0027: media controls on the lock. Static checks that they only
+    play, pause and skip (no Raise, no seek, nothing started, no network),
+    that they reuse Omarchy's media model, then LockMedia.js's rules in
+    node. test/lock-glance drives them under touch."""
+    lock = "usr/share/omarchy/shell/plugins/lock/"
+    glance = read(root, lock + "LockGlance.qml")
+    media = read(root, lock + "LockMedia.qml") or ""
+    source = read(root, lock + "LockMediaSource.qml") or ""
+    js = os.path.join(root, lock, "LockMedia.js")
+    ok(os.path.isfile(js) and media and source and "LockMedia {\n            id: glanceMedia" in glance
+       and "LockMedia {\n    id: pinMedia" in glance and "glanceMedia.buttonAt(swipe, mouse.x, mouse.y)" in glance,
+       "real omarchy: the lock has media controls on the glance and the PIN view, the glance's taps reach them (0027)")
+    ok('import "../services/media/MediaModel.js" as MediaModel' in source and "MediaModel.isProxyPlayer" in source
+       and os.path.isfile(os.path.join(root, "usr/share/omarchy/shell/plugins/services/media/MediaModel.js")),
+       "real omarchy: the lock's media controls use Omarchy's media model (0027)")
+    code = media + source + (open(js).read() if os.path.isfile(js) else "")
+    ok(".raise()" not in code and "execDetached" not in code and "Process" not in code and "XMLHttpRequest" not in code
+       and ".position =" not in code and "PanelSlider" not in code and "openUri" not in code and ".quit()" not in code,
+       "real omarchy: the lock's media controls only play, pause and skip: no Raise, no seek, nothing started (0027)")
+    ok("fits && glance.progress < 1" in glance and "ticking: glance.active && !!glance.lock && !glance.lock.displayDark" in glance,
+       "real omarchy: the PIN view's row only where it fits, the position asked only while lit (0027)")
+    node = shutil.which("node")
+    if not node:
+        print("ok - real omarchy: the lock's media rules # SKIP no node")
+        return
+    check = r"""
+var M = require(process.argv[1]), assert = require("assert")
+assert.strictEqual(M.artSource("https://i.example/c.jpg"), "")
+assert.strictEqual(M.artSource("http://i.example/c.jpg"), "")
+assert.strictEqual(M.artSource("file:///tmp/c.png"), "file:///tmp/c.png")
+assert.strictEqual(M.artSource("/tmp/a b.png"), "file:///tmp/a%20b.png")
+assert.strictEqual(M.artSource("data:image/png;base64,AA"), "data:image/png;base64,AA")
+assert.strictEqual(M.artSource("qrc:/x.png"), "")
+var p = function(o) { return Object.assign({ dbusName: "x", trackTitle: "T", trackArtist: "A", identity: "Music", isPlaying: true, playbackState: 1 }, o) }
+var proxy = function(q) { return q.dbusName.indexOf("playerctld") >= 0 }
+assert.strictEqual(M.pick([], {}, proxy), null)
+assert.strictEqual(M.pick([p({ isPlaying: false, playbackState: 0 })], {}, proxy), null)
+var a = p({ dbusName: "a", isPlaying: false, playbackState: 2 }), b = p({ dbusName: "b", isPlaying: false, playbackState: 2 }), c = p({ dbusName: "c" })
+assert.strictEqual(M.pick([a, b], { a: 2, b: 1 }, proxy), a)
+assert.strictEqual(M.pick([a, b, c], { a: 2, b: 1 }, proxy), c)
+var pc = p({ dbusName: "org.mpris.MediaPlayer2.playerctld" })
+assert.strictEqual(M.pick([pc, a], { "org.mpris.MediaPlayer2.playerctld": 9 }, proxy), a)
+assert.deepStrictEqual(M.lines(p({}), true), { title: "Music", detail: "Playing" })
+assert.deepStrictEqual(M.lines(p({}), false), { title: "T", detail: "A" })
+assert.strictEqual(M.accessibleName(p({}), true).indexOf("T,"), -1)
+"""
+    r = subprocess.run([node, "-e", check, js], capture_output=True, text=True)
+    ok(r.returncode == 0, "real omarchy: the lock's media rules: local art only, playing then most recent, playerctld last, "
+       "hidden text hides the track (0027)%s" % (" " + r.stderr.strip()[-300:] if r.returncode else ""))
+
+
+def screensaver_launcher(t, launcher):
+    """Patch 0006's launcher against fake commands: every way out of it puts
+    the on-screen keyboard back unless a screensaver runs (TOUCH-PLAN 0.5)."""
+    fakes = os.path.join(t, "ss-fakes")
+    runtime = os.path.join(t, "ss-runtime")
+    os.makedirs(fakes)
+    os.makedirs(runtime)
+    state = os.path.join(t, "ss-osk")
+    log = os.path.join(t, "ss-log")
+
+    def fake(name, body):
+        path = os.path.join(fakes, name)
+        with open(path, "w") as f:
+            f.write("#!/bin/bash\n" + body + "\n")
+        os.chmod(path, 0o755)
+
+    fake("omarchy-cmd-missing", "exit 1")
+    fake("pgrep", "exit 1")  # no screensaver running
+    fake("omarchy-toggle-enabled", "exit 1")
+    fake("omarchy-hyprland-monitor-focused", "echo DSI-1")
+    fake("omarchy-shell", '[[ "$*" == "lock isLocked" ]] && echo "${FAKE_LOCKED:-false}"')
+    fake("busctl", "exit 0")  # squeekboard is on the bus
+    fake("gsettings", 'case $1 in get) cat "$FAKE_OSK" ;; set) echo "$4" > "$FAKE_OSK"; echo "set $4" >> "$FAKE_LOG" ;; esac')
+    fake("xdg-terminal-exec", 'sleep "${FAKE_TERMINAL_DELAY:-0}"; echo xterm.desktop')
+    fake("omarchy-notification-send", "exit 0")
+    fake("hyprctl", "exit 0")
+
+    def start(**extra):
+        with open(state, "w") as f:
+            f.write("true\n")
+        open(log, "w").close()
+        env = {"PATH": fakes + ":/usr/bin:/bin", "HOME": t, "XDG_RUNTIME_DIR": runtime,
+               "FAKE_OSK": state, "FAKE_LOG": log}
+        env.update(extra)
+        return subprocess.Popen(["bash", launcher], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def osk():
+        return open(state).read().strip()
+
+    marker = os.path.join(runtime, "omarchy-screensaver-osk-off")
+    p = start()
+    p.wait(timeout=20)
+    ok(open(log).read() == "set false\nset true\n" and osk() == "true" and not os.path.exists(marker),
+       "0006: an early exit (no supported terminal) turns the keyboard back on")
+
+    p = start(FAKE_LOCKED="true")
+    p.wait(timeout=20)
+    ok(open(log).read() == "" and osk() == "true", "0006: a locked session leaves the keyboard setting alone")
+
+    p = start(FAKE_TERMINAL_DELAY="1")
+    for _ in range(100):
+        if osk() == "false":
+            break
+        subprocess.run(["sleep", "0.05"])
+    p.terminate()
+    p.wait(timeout=20)
+    ok(osk() == "true" and not os.path.exists(marker), "0006: a launcher stopped by a signal turns the keyboard back on")
+
+
+def show_logo(t, root, centred=False):
+    """Patch 0028: omarchy-show-logo in terminals of several widths (script(1)
+    gives it one): the wide logo where it fits, the stacked one where only
+    that fits, none below, and the wide one with no terminal at all.
+    logo.txt is omarchy-settings', so an 81-column stand-in here. The 4.5
+    family centres the stacked logo; the 4.0.6 one leaves it at the left."""
+    narrow = os.path.join(root, "usr/share/omarchy/logo-narrow.txt")
+    ok(os.path.isfile(narrow), "0028: logo-narrow.txt is created")
+    widest = max(len(l) for l in open(narrow, encoding="utf-8").read().splitlines())
+    ok(widest == 48, "0028: the stacked logo is 48 columns (%d)" % widest)
+    if not shutil.which("script"):
+        print("ok - 0028: the logo by terminal width # SKIP no script(1)")
+        return
+    path = os.path.join(t, "logo-path-centred" if centred else "logo-path")
+    os.makedirs(path)
+    shutil.copy(narrow, path)
+    with open(os.path.join(path, "logo.txt"), "w", encoding="utf-8") as f:
+        f.write(("█" * 81 + "\n") * 9)
+    show = os.path.join(root, "usr/bin/omarchy-show-logo")
+
+    def lines(cols):
+        cmd = "stty cols %d rows 40; bash %s" % (cols, show)
+        out = subprocess.run(["script", "-qec", cmd, "/dev/null"], env={"PATH": "/usr/bin:/bin", "OMARCHY_PATH": path,
+                             "TERM": "xterm"}, stdin=subprocess.DEVNULL, capture_output=True, timeout=20).stdout
+        rows = [l for l in out.decode("utf-8", "replace").replace("\r", "").split("\n") if "█" in l]
+        return len(rows), max((len(l.strip("\x1b[0m32")) for l in rows), default=0)
+
+    ok(lines(120) == (9, 81) and lines(81) == (9, 81), "0028: a terminal as wide as the logo shows it as before")
+    ok(lines(80)[0] == 17 and lines(66)[0] == 17 and lines(48)[0] == 17, "0028: a narrower one shows it stacked")
+    ok(lines(47)[0] == 0, "0028: one too narrow for that shows none, not a wrapped one")
+
+    def margins(cols):
+        """The columns left free on each side of the logo's widest rows."""
+        cmd = "stty cols %d rows 40; bash %s" % (cols, show)
+        out = subprocess.run(["script", "-qec", cmd, "/dev/null"], env={"PATH": "/usr/bin:/bin", "OMARCHY_PATH": path,
+                             "TERM": "xterm"}, stdin=subprocess.DEVNULL, capture_output=True, timeout=20).stdout
+        rows = [l for l in out.decode("utf-8", "replace").replace("\r", "").split("\n") if "█" in l]
+        left = min(len(l) - len(l.lstrip(" ")) for l in rows)
+        return left, cols - max(len(l.rstrip()) for l in rows)
+
+    if centred:
+        ok(margins(66) == (9, 9) and margins(49) == (0, 1) and margins(48) == (0, 0),
+           "0028: the stacked logo is centred in the terminal (%s at 66 columns)" % (margins(66),))
+    else:
+        ok(margins(66) == (0, 18), "0028 (4.0.6): the stacked logo is at the left, as before")
+    ok(margins(120)[0] == 0, "0028: the wide logo stays where Omarchy puts it")
+    out = subprocess.run(["setsid", "-w", "bash", show], env={"PATH": "/usr/bin:/bin", "OMARCHY_PATH": path},
+                         stdin=subprocess.DEVNULL, capture_output=True, timeout=20).stdout
+    ok(out.decode("utf-8", "replace").count("█" * 81) == 9, "0028: no terminal: the wide logo, as before")
+
+
+def about_layout(t, root, tools=None):
+    """Patch 0030: the About layout by terminal size. A stand-in fastfetch
+    whose modules are as big as Omarchy's on a phone (54 columns, 28 rows
+    with the closing break) and a 54x26 logo, as Omarchy's about.txt is: side
+    by side needs 118 columns, the logo above 56 columns and 57 rows. The
+    functions first, then the render loop in real terminals (script(1)), where
+    the fastfetch that draws on the terminal has to get the same options."""
+    launcher = os.path.join(root, "usr/bin/omarchy-launch-about")
+    stub = os.path.join(t, "about-bin")
+    os.makedirs(stub)
+    # Every call is logged with whether it drew on the terminal (the render)
+    # or into a pipe (the measurements).
+    with open(os.path.join(stub, "fastfetch"), "w") as f:
+        f.write('#!/bin/bash\n[[ -t 1 ]] && to=tty || to=pipe\nprintf "%s:%s\\n" "$to" "$*" >>"$FASTFETCH_LOG"\n'
+                '[[ $* == "--logo none" ]] && { for i in $(seq 27); do printf "%054d\\n" "$i"; done; echo; }\nexit 0\n')
+    # No About window to find, so fit_window gives up as it does without Hyprland.
+    with open(os.path.join(stub, "hyprctl"), "w") as f:
+        f.write("#!/bin/bash\necho '[]'\n")
+    for name in ("fastfetch", "hyprctl"):
+        os.chmod(os.path.join(stub, name), 0o755)
+
+    def home(name, logo=True, own_config=False):
+        h = os.path.join(t, name)
+        os.makedirs(os.path.join(h, ".config/omarchy/branding"))
+        if logo:
+            with open(os.path.join(h, ".config/omarchy/branding/about.txt"), "w", encoding="utf-8") as f:
+                f.write(("█" * 54 + "\n") * 26)
+        if own_config:
+            os.makedirs(os.path.join(h, ".config/fastfetch"))
+            open(os.path.join(h, ".config/fastfetch/config.jsonc"), "w").close()
+        return h
+
+    def env(h):
+        # tools: the package's own commands the launcher sources or calls (4.5)
+        return {"PATH": stub + (":" + tools if tools else "") + ":/usr/bin:/bin", "HOME": h, "TERM": "xterm",
+                "FASTFETCH_LOG": os.path.join(h, "fastfetch.log")}
+
+    sizes = [(61, 63), (57, 63), (56, 63), (41, 63), (61, 56), (61, 55), (61, 117), (29, 118), (26, 136)]
+    # Everything up to the render block, so the functions load and nothing runs.
+    body = r"""source <(sed '/^if \[\[ \${1:-} == "--render" \]\]; then$/,$d' "$1"); shift
+room=$(layout_room); echo "room:$room"
+while (( $# )); do echo "$1 $2:$(logo_options "$1" "$2")"; shift 2; done"""
+
+    def options(h):
+        args = [str(n) for size in sizes for n in size]
+        out = subprocess.run(["bash", "-c", body, "bash", launcher] + args, env=env(h), capture_output=True,
+                             text=True, timeout=20).stdout
+        return dict(l.split(":", 1) for l in out.splitlines() if ":" in l)
+
+    got = options(home("about-home"))
+    ok(got.get("room") == "118 56 57", "0030: the room for each layout: 118 columns, or 56 by 57 rows (%s)" % got.get("room"))
+    ok(all(got.get("%d %d" % s) == "" for s in [(29, 118), (26, 136)]),
+       "0030: a terminal as wide as the side-by-side layout gets fastfetch as before")
+    ok(all(got.get("%d %d" % s) == "--logo-position top" for s in [(61, 63), (57, 63), (61, 56), (61, 117)]),
+       "0030: a narrower one with 57 rows and 56 columns gets the logo above the modules")
+    ok(all(got.get("%d %d" % s) == "--logo none" for s in [(56, 63), (41, 63), (61, 55)]),
+       "0030: one a row or a column short of that gets the modules without the logo")
+    own = options(home("about-own-config", own_config=True))
+    nologo = options(home("about-no-logo", logo=False))
+    ok(own.get("room") == "" and all(own.get("%d %d" % s) == "" for s in sizes)
+       and nologo.get("room") == "" and all(nologo.get("%d %d" % s) == "" for s in sizes),
+       "0030: a user's own fastfetch config, or no logo file, gets fastfetch as before")
+
+    if not shutil.which("script"):
+        print("ok - 0030: the render loop by terminal size # SKIP no script(1)")
+        return
+
+    def rendered(rows, cols):
+        h = home("about-render-%dx%d" % (rows, cols))
+        log = env(h)["FASTFETCH_LOG"]
+        p = subprocess.Popen(["script", "-qec", "stty rows %d cols %d; bash %s --render" % (rows, cols, launcher),
+                              "/dev/null"], env=env(h), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        drawn = None
+        for _ in range(100):
+            time.sleep(0.1)
+            lines = open(log).read().splitlines() if os.path.exists(log) else []
+            drawn = next((l[4:] for l in lines if l.startswith("tty:")), None)
+            if drawn is not None:
+                break
+        # A key closes About, as it does on a phone.
+        try:
+            p.stdin.write(b"q")
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            return drawn, None
+        return drawn, p.returncode
+
+    for (rows, cols), want, what in [((61, 63), "--logo-position top", "the logo above the modules"),
+                                     ((41, 63), "--logo none", "the modules alone"),
+                                     ((29, 118), "", "fastfetch as before")]:
+        drawn, rc = rendered(rows, cols)
+        ok(drawn == want and rc == 0, "0030: About in a %dx%d terminal draws %s, and a key closes it (%r, exit %s)"
+           % (rows, cols, what, drawn, rc))
+
+
+# Omarchy 4.0.6's notification texts (headline, body) and what a phone shows
+# for each (patch 0020); None leaves the text as it is.
+PHRASINGS = [
+    (("Screenshot saved to clipboard and file", "Edit with Super + Alt + , (or click this)"), "Tap to view"),
+    (("Screen recording saved", "Open with Super + Alt + , (or click this)"), "Tap to open"),
+    (("Update System", "Click to update the system."), "Tap to update the system."),
+    (("Setup Wi-Fi", "Click to configure the wireless network."), "Tap to configure the wireless network."),
+    (("Install Dictation with Voxtype", "Click to install voice dictation for Omarchy."),
+     "Tap to install voice dictation for Omarchy."),
+    (("Voxtype Dictation Ready", "Hold F9 to dictate (or toggle with Super + Ctrl + X)."),
+     "Use the Dictation tile in quick settings."),
+    (("Run Migrations", "Click to run 1 pending migration."), "Tap to run 1 pending migration."),
+    (("Run Migrations", "Click to run 3 pending migrations."), "Tap to run 3 pending migrations."),
+    (("Process crashed: foot", "Click to diagnose with AI"), "Tap to diagnose with AI"),
+    (("Learn Keybindings", "Super + K for cheatsheet.\nSuper + Space for Omarchy Menu."), ""),
+    (("Pong installed", "Start it with Super + Space"), ""),
+    (("No saved width found for kitty on workspace 2", "Use Super + Alt + Home to save one for this workspace."), ""),
+    (("Saved width for kitty on workspace 2", "Restore using Super + Home on this workspace."), ""),
+    (("Copied", "Paste it anywhere (or press Super + Ctrl + V for history)."), "Paste it anywhere."),
+    (("Reminder", "5 minutes are up (click the bar to snooze)"), None),
+    (("Two lines", "Line one\nline two"), None),
+    (("Battery low", ""), None),
+]
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="omamobile-omarchy-test-") as t:
+        synthetic(t)
+        real_package(t)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

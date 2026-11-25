@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+cat <<DEOF
+[    0.000000] Booting Linux on physical CPU 0x0000000000
+[    0.000000] Kernel command line: console=ttySAC1 panic=5 oops=panic androidboot.serialno=GOODSECRET123
+[    5.123456] KBOOT: up
+DEOF

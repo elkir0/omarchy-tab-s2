@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: MIT
+# Notifications: swipe to dismiss, and a close button on touch screens. On a
+# touch screen a tap runs the toast's default action and there is no right
+# button, so a toast could only be got rid of by letting it launch something,
+# and a critical one (Omarchy's first-run invitations) never expires. A
+# sideways swipe now moves the card with the finger: let go past 35% of its
+# width, or flick it, and it flies off that side and closes as a right-click
+# does; short of that it springs back. The drag starts only past a threshold,
+# so a tap still runs the default action, and it is off while a reply is
+# being typed. When Hyprland lists a touch screen, each toast also gets a
+# close glyph with a 44 px target in its top-right corner; a seat with only a
+# mouse shows none, so desktops look as before. Hover pauses the countdown
+# for a mouse or stylus only (a finger doesn't hover), and a card being
+# swiped doesn't expire under the finger. Right-click still closes.
+#
+# Against Omarchy 4.0.6 (edge 4.0.6-1) with 0015 (inline reply) applied.
+#
+# Omarchy 4.5: Use the Toast scene's independent horizontal translation and a persistent
+# 40 px close target. Preserve mouse actions and disable dragging during reply.
+
+diff --git i/shell/plugins/notifications/Toast.qml w/shell/plugins/notifications/Toast.qml
+--- i/shell/plugins/notifications/Toast.qml
++++ w/shell/plugins/notifications/Toast.qml
+@@ -28,6 +28,23 @@
+   property real cardWidth: Style.space(380)
+   property string replyPlaceholder: ""
+   property bool replyOpen: false
++  property real swipeOffset: 0
++  transform: Translate { x: card.swipeOffset }
++  DragHandler {
++    target: null
++    enabled: !card.replyOpen && !card.place.hidden && !card.place.leaving
++    acceptedDevices: PointerDevice.TouchScreen
++    xAxis.enabled: true
++    yAxis.enabled: false
++    onActiveTranslationChanged: if (active) card.swipeOffset = activeTranslation.x
++    onActiveChanged: {
++      if (!active) {
++        var dismiss = Math.abs(card.swipeOffset) >= Math.min(Style.space(90), card.width * 0.25)
++        card.swipeOffset = 0
++        if (dismiss) card.dismissed()
++      }
++    }
++  }
+   signal replyRequested()
+   signal replyCancelled()
+   signal replySent(string text)
+@@ -454,7 +471,7 @@
+                 anchors.centerIn: parent
+                 text: card.ago()
+                 color: card.dimColor
+-                opacity: card.hovered ? 0 : 1
++                opacity: 0
+                 visible: opacity > 0.01
+                 font.family: Style.font.family
+                 font.pixelSize: Style.font.bodySmall
+@@ -465,10 +482,10 @@
+                 id: shut
+                 anchors.right: parent.right
+                 anchors.verticalCenter: parent.verticalCenter
+-                implicitWidth: closeMark.implicitWidth + Style.space(6)
+-                implicitHeight: closeMark.implicitHeight
++                implicitWidth: Math.max(Style.space(40), closeMark.implicitWidth + Style.space(6))
++                implicitHeight: Math.max(Style.space(40), closeMark.implicitHeight)
+                 enabled: card.hovered
+-                opacity: card.hovered ? 1 : 0
++                opacity: 1
+                 visible: opacity > 0.01
+                 readonly property bool hot: card.pointerOver(shut)
+                 Behavior on opacity { NumberAnimation { duration: card.fade; easing.type: Easing.InOutQuad } }

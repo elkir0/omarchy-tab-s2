@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# fetch-omamobile — Omarchy Mobile's own packages for aarch64 (the few this
+# image takes as published) into the local pacman repository out/repo/aarch64
+# ([t715-omarchy]), next to Omarchy's (tools/fetch-omarchy) and the packages
+# built here (tools/build-pkg).
+#
+# Adapted from the owner's Lenovomarchy port (image/tools/repack-omamobile,
+# read-only), in the manner of tools/fetch-omarchy:
+#   1. omamobile-pins (name<TAB>upstream_filename<TAB>sha256): downloads
+#      exactly these files from https://pkgs.omamobile.org/stable/aarch64 and
+#      their detached signatures, and checks each file against its pin. The
+#      first pin is omamobile-keyring, the package that carries the
+#      repository's keys. The repository index (omamobile.db and its .sig) is
+#      downloaded fresh at each verification.
+#   2. In the dev container: the keyring's keys are imported from the pinned
+#      keyring package itself, and every one of them (primaries and subkeys)
+#      must be listed in omamobile-trusted.fpr; the keyring package's own
+#      signature, the index's signature and every package's signature must be
+#      good (gpgv) and made by a listed key (VALIDSIG fingerprint); the pinned
+#      sha256 of each package must be the one the signed index carries; the
+#      package's arch must be any or aarch64.
+#   3. Copies the packages (not their signatures: pacman here has no Omarchy
+#      Mobile key, and the checks above are the trust boundary, as for the
+#      packages tools/build-pkg makes) into out/repo/aarch64/, records them in
+#      MANIFEST-omamobile.tsv and indexes the repository (repo-add, in the
+#      container). The keyring package itself is not published.
+#
+# Usage: tools/fetch-omamobile [--force] [-h|--help]
+#   --force  download and verify everything again, rebuild the index
+# Idempotent: a rerun downloads nothing and leaves the repository as it is.
+# The macOS host only moves whole package files: nothing is extracted on it.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+LOG_TAG=omamobile
+
+PINS="$ROOTFS_DIR/omamobile-pins"
+PINNED_FILE="$ROOTFS_DIR/omamobile-trusted.fpr"
+UP_CACHE="$CACHE_DIR/omamobile-aarch64"
+BASE_URL="https://pkgs.omamobile.org/stable/aarch64"
+MANIFEST="$REPO_DIR/MANIFEST-omamobile.tsv"
+
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        *) die "unknown option: $1 (see --help)" ;;
+    esac
+done
+
+# ---------------------------------------------------------------- read pins
+NAMES=() FNS=() SHAS=()
+while IFS= read -r pline; do
+    pline="${pline%%#*}"
+    [ -n "${pline//[[:space:]]/}" ] || continue
+    n="${pline%%$'\t'*}"
+    entry="$(printf '%s' "$pline" | awk -F'\t' 'NF == 3 { print $2 "\t" $3; ok = 1 }
+                                                 END { exit ok ? 0 : 3 }')" \
+        || die "$PINS: malformed line (need name<TAB>filename<TAB>sha256): $pline"
+    fn="${entry%%$'\t'*}"; sha="${entry#*$'\t'}"
+    case "$n" in *[!a-z0-9@._+-]*) die "invalid package name in $PINS: $n" ;; esac
+    case "$fn" in "$n"-*.pkg.tar.zst) ;; *) die "$PINS: $n: not a package filename of $n: $fn" ;; esac
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "$PINS: $n: bad sha256: $sha"
+    NAMES+=("$n"); FNS+=("$fn"); SHAS+=("$sha")
+done < "$PINS"
+[ "${#NAMES[@]}" -ge 2 ] || die "$PINS lists no package besides the keyring"
+[ "${NAMES[0]}" = omamobile-keyring ] || die "$PINS: the first pin must be omamobile-keyring"
+KEYRING_FN="${FNS[0]}"
+
+PINNED_FPRS="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$PINNED_FILE" | grep -E '^[0-9A-F]{40}$' || true)"
+[ -n "$PINNED_FPRS" ] || die "no pinned fingerprint in $PINNED_FILE"
+
+sha_of_pin() { # NAME -> the pinned sha256
+    local i
+    for i in "${!NAMES[@]}"; do
+        [ "${NAMES[$i]}" = "$1" ] && { printf '%s\n' "${SHAS[$i]}"; return 0; }
+    done
+    return 1
+}
+
+# ------------------------------------------------------------- download phase
+mkdir -p "$UP_CACHE" "$REPO_DIR"
+fetch() { # URL FILE
+    rm -f "$2.part"
+    curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors -o "$2.part" "$1" || { rm -f "$2.part"; return 1; }
+    mv -f "$2.part" "$2"
+}
+downloaded=0
+for i in "${!NAMES[@]}"; do
+    n="${NAMES[$i]}"; fn="${FNS[$i]}"; sha="${SHAS[$i]}"
+    f="$UP_CACHE/$fn"
+    if [ "$FORCE" = 1 ]; then rm -f "$f" "$f.sig"; fi
+    if [ ! -f "$f" ]; then
+        log "$n: downloading $fn"
+        fetch "$BASE_URL/$fn" "$f" || die "$n: download of $fn failed"
+        downloaded=$((downloaded + 1))
+    fi
+    [ "$(sha256_of "$f")" = "$sha" ] || die "$n: sha256 mismatch for $fn (pin $sha, file $(sha256_of "$f")): refusing"
+    if [ ! -f "$f.sig" ]; then
+        fetch "$BASE_URL/$fn.sig" "$f.sig" || die "download of $fn.sig failed (cannot verify $fn)"
+    fi
+done
+if [ "$downloaded" = 0 ]; then log "all ${#NAMES[@]} files cached (sha256 verified against the pins)"
+else log "downloaded $downloaded file(s)"; fi
+
+# ------------------------------------------------- up to date?
+imported_ok() { # 0 iff the manifest is today's pin set and its files are intact
+    local n fn sha arch want
+    [ -f "$MANIFEST" ] || return 1
+    want=$(( ${#NAMES[@]} - 1 ))
+    [ "$(tail -n +2 "$MANIFEST" | grep -c .)" = "$want" ] || return 1
+    while IFS=$'\t' read -r n fn sha arch; do
+        [ -n "$n" ] || continue
+        [ -f "$REPO_DIR/$fn" ] || return 1
+        [ "$(sha256_of "$REPO_DIR/$fn")" = "$sha" ] || return 1
+        [ "$(sha_of_pin "$n" 2>/dev/null)" = "$sha" ] || return 1
+    done < <(tail -n +2 "$MANIFEST")
+}
+
+if [ "$FORCE" = 0 ] && imported_ok; then
+    log "Omarchy Mobile's $(( ${#NAMES[@]} - 1 )) packages already in $REPO_DIR (verified at their import)"
+else
+    log "downloading the signed repository index (omamobile.db)"
+    fetch "$BASE_URL/omamobile.db" "$UP_CACHE/omamobile.db" || die "download of omamobile.db failed"
+    fetch "$BASE_URL/omamobile.db.sig" "$UP_CACHE/omamobile.db.sig" || die "download of omamobile.db.sig failed"
+    PLAN="$UP_CACHE/.plan.tsv"
+    VERIFIED="$CACHE_DIR/omamobile-plan.verified"
+    rm -f "$PLAN"
+    for i in "${!NAMES[@]}"; do
+        [ "$i" -gt 0 ] || continue
+        printf '%s\t%s\t%s\n' "${NAMES[$i]}" "${FNS[$i]}" "${SHAS[$i]}" >> "$PLAN"
+    done
+    ensure_dev_image
+    log "verifying the keyring, the index and the signatures in $DEV_IMAGE"
+    docker run --rm -i --platform "$PLATFORM" -v "$UP_CACHE:/upstream:ro" \
+        -e KEYRING_FN="$KEYRING_FN" -e KEYRING_SHA="${SHAS[0]}" -e PINNED_FPRS="$PINNED_FPRS" \
+        "$DEV_IMAGE" bash -s > "$VERIFIED" <<'EOS' || { rm -f "$PLAN"; die "verification failed"; }
+set -euo pipefail
+fail() { echo "fetch-omamobile (container): $*" >&2; exit 1; }
+WORK=$(mktemp -d); export GNUPGHOME=$WORK/gnupg
+mkdir -m 700 -p "$GNUPGHOME" "$WORK/kr" "$WORK/db"
+listed() { printf '%s\n' "$PINNED_FPRS" | grep -qx "$1"; }
+echo "$KEYRING_SHA  /upstream/$KEYRING_FN" | sha256sum -c --quiet - || fail "keyring sha256"
+bsdtar -xf "/upstream/$KEYRING_FN" -C "$WORK/kr" usr/share/pacman/keyrings/omamobile.gpg
+gpg --batch --quiet --import "$WORK/kr/usr/share/pacman/keyrings/omamobile.gpg" 2>/dev/null
+n=0
+while IFS= read -r fpr; do
+    n=$((n + 1))
+    listed "$fpr" || fail "UNPINNED KEY: omamobile-keyring holds $fpr, not listed in omamobile-trusted.fpr"
+done < <(gpg --batch --with-colons --with-subkey-fingerprints --list-keys | awk -F: '/^fpr:/ {print $10}')
+[ "$n" -gt 0 ] || fail "the keyring holds no key"
+echo "keyring: $n key(s), all listed" >&2
+# good_sig SIG FILE: a good signature by a listed key (primary or subkey).
+good_sig() {
+    local st fpr
+    st="$(gpgv --status-fd 1 --keyring "$GNUPGHOME/pubring.kbx" "$1" "$2" 2>/dev/null || true)"
+    printf '%s\n' "$st" | grep -q '^\[GNUPG:\] GOODSIG' || return 1
+    if printf '%s\n' "$st" | grep -qE '^\[GNUPG:\] (EXPKEYSIG|REVKEYSIG|BADSIG|ERRSIG)'; then return 1; fi
+    fpr="$(printf '%s\n' "$st" | sed -n 's/^\[GNUPG:\] VALIDSIG \([0-9A-F]\{40\}\) .*/\1/p' | head -n1)"
+    [ -n "$fpr" ] && listed "$fpr"
+}
+good_sig "/upstream/$KEYRING_FN.sig" "/upstream/$KEYRING_FN" || fail "the keyring package's signature is not good"
+good_sig /upstream/omamobile.db.sig /upstream/omamobile.db || fail "the repository index's signature is not good"
+bsdtar -xf /upstream/omamobile.db -C "$WORK/db"
+db_sha() { # NAME FILENAME -> the %SHA256SUM% the signed index carries for that file
+    local d
+    for d in "$WORK"/db/*/desc; do
+        awk -v n="$1" -v f="$2" '
+            /^%NAME%$/ { getline; name = ($1 == n) }
+            /^%FILENAME%$/ { getline; file = ($1 == f) }
+            /^%SHA256SUM%$/ { getline; sha = $1 }
+            END { if (name && file) print sha }' "$d"
+    done | head -n1
+}
+while IFS=$'\t' read -r name fn sha; do
+    [ -n "$name" ] || continue
+    echo "$sha  /upstream/$fn" | sha256sum -c --quiet - || fail "$fn: sha256"
+    got="$(db_sha "$name" "$fn")"
+    [ -n "$got" ] || fail "$name: $fn is not in the signed omamobile.db"
+    [ "$got" = "$sha" ] || fail "$name: pin $sha is not the signed index's $got"
+    good_sig "/upstream/$fn.sig" "/upstream/$fn" || fail "SIGNATURE VERIFICATION FAILED: $fn"
+    arch="$(bsdtar -xOf "/upstream/$fn" .PKGINFO | sed -n 's/^arch = //p' | head -n1)"
+    case "$arch" in any|aarch64) ;; *) fail "$fn: unexpected arch '$arch'" ;; esac
+    printf 'VERIFIED\t%s\t%s\t%s\t%s\n' "$name" "$fn" "$sha" "$arch"
+done < /upstream/.plan.tsv
+rm -rf "$WORK"
+EOS
+    rm -f "$PLAN"
+    [ "$(grep -c '^VERIFIED' "$VERIFIED")" = $(( ${#NAMES[@]} - 1 )) ] || die "the verification did not report every package"
+    # Files of an earlier import (recorded by us, never anyone else's).
+    if [ -f "$MANIFEST" ]; then
+        while IFS=$'\t' read -r n fn _sha _arch; do
+            [ -n "$n" ] && rm -f "$REPO_DIR/$fn"
+        done < <(tail -n +2 "$MANIFEST")
+    fi
+    {
+        printf 'name\tfilename\tsha256\tarch\n'
+        while IFS=$'\t' read -r tag n fn sha arch; do
+            [ "$tag" = VERIFIED ] || die "bad line from the verification: $tag $n"
+            cp -f "$UP_CACHE/$fn" "$REPO_DIR/$fn.part"
+            mv -f "$REPO_DIR/$fn.part" "$REPO_DIR/$fn"
+            printf '%s\t%s\t%s\t%s\n' "$n" "$fn" "$sha" "$arch"
+        done < "$VERIFIED"
+    } > "$MANIFEST.tmp"
+    mv -f "$MANIFEST.tmp" "$MANIFEST"
+    rm -f "$VERIFIED"
+    log "verified and imported: $(tail -n +2 "$MANIFEST" | cut -f2 | tr '\n' ' ')"
+    FORCE=1
+fi
+
+# ---------------------------------------------------------------- repository
+repo_ok() {
+    [ -f "$REPO_DIR/t715-omarchy.db.tar.gz" ] && [ -L "$REPO_DIR/t715-omarchy.db" ] || return 1
+    local want got
+    want="$(printf '%s\n' "$REPO_DIR"/*.pkg.tar.zst | sed -E 's|.*/||; s/-(aarch64|any|armv7h)\.pkg\.tar\.zst$//' | sort)"
+    got="$(tar -tzf "$REPO_DIR/t715-omarchy.db.tar.gz" | sed -n 's|^\(.*\)/desc$|\1|p' | sort)"
+    [ "$want" = "$got" ]
+}
+if [ "$FORCE" = 1 ] || ! repo_ok; then
+    ensure_dev_image
+    log "indexing $REPO_DIR (repo-add)"
+    docker run --rm -i --platform "$PLATFORM" -v "$REPO_DIR:/repo" "$DEV_IMAGE" bash -s >&2 <<'EOS' || die "repo-add failed"
+set -euo pipefail
+shopt -s nullglob
+cd /repo
+pkgs=( *.pkg.tar.zst )
+[ "${#pkgs[@]}" -gt 0 ] || { echo "no packages in /repo" >&2; exit 1; }
+rm -f t715-omarchy.db t715-omarchy.db.tar.gz t715-omarchy.files t715-omarchy.files.tar.gz
+repo-add -q t715-omarchy.db.tar.gz "${pkgs[@]}"
+rm -f t715-omarchy.db.tar.gz.old t715-omarchy.files.tar.gz.old
+echo "repo-add: ${#pkgs[@]} package(s) indexed" >&2
+EOS
+    repo_ok || die "the index does not list the packages of $REPO_DIR"
+else
+    log "index already up to date"
+fi
+log "$REPO_DIR ready: $(printf '%s\n' "$REPO_DIR"/*.pkg.tar.zst | wc -l | tr -d ' ') package(s)"

@@ -1,0 +1,30 @@
+I: Bus=0018 Vendor=0000 Product=0000 Version=0000
+N: Name="Synaptics TM3177-001"
+P: Phys=rmi4-00/input0
+S: Sysfs=/devices/platform/14ed0000.i2c/i2c-5/5-0020/rmi4-00/rmi4-00.fn12/input/input1
+U: Uniq=
+H: Handlers=event1
+B: PROP=2
+B: EV=b
+B: KEY=400 0 0 0 0 0
+B: ABS=260800000000003
+
+I: Bus=0019 Vendor=0001 Product=0001 Version=0100
+N: Name="gpio-keys"
+P: Phys=gpio-keys/input0
+S: Sysfs=/devices/platform/gpio-keys/input/input0
+U: Uniq=
+H: Handlers=kbd event0
+B: PROP=0
+B: EV=3
+B: KEY=4000 0 0 1c0000 0 0 0
+
+I: Bus=0019 Vendor=0001 Product=0001 Version=0100
+N: Name="hall-sensor"
+P: Phys=gpio-keys/input1
+S: Sysfs=/devices/platform/hall-sensor/input/input2
+U: Uniq=
+H: Handlers=event2
+B: PROP=0
+B: EV=21
+B: SW=1

@@ -1,0 +1,43 @@
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64), tablet-only: omarchy-channel-set and
+# omarchy-refresh-pacman refuse when /etc/pacman.conf carries Arch Linux
+# ARM's [alarm] repository. In 4.5 both render the platform's pacman
+# templates (omarchy-apply-pacman) and copy them over /etc/pacman.conf and
+# /etc/pacman.d/mirrorlist; the tablet's hand-built pacman.conf (with
+# [t715-omarchy] and Arch Linux ARM repositories) would be replaced by
+# Omarchy's aarch64 template, which has neither. The tablet updates with
+# plain 'omarchy update'.
+#
+# Carried forward from the 0.1.32 tablet series (its 0016 keyed the same
+# guard on [alarm]); rebased against Omarchy 4.5.0 (4.5.0-3).
+--- i/bin/omarchy-channel-set
++++ w/bin/omarchy-channel-set
+@@ -11,6 +11,13 @@
+ trap 'exit 130' INT
+ trap 'exit 143' TERM
+ 
++# SM-T715: keep Arch Linux ARM's repositories in /etc/pacman.conf.
++if grep -q '^\[alarm\]' /etc/pacman.conf; then
++  echo "omarchy-channel-set: not on this tablet. It would replace Arch Linux ARM's" >&2
++  echo "pacman.conf with Omarchy's own. Update with 'omarchy update'." >&2
++  exit 1
++fi
++
+ usage() { echo "Usage: omarchy-channel-set [stable|rc|edge|dev]"; }
+ fail() { echo "Error: $*" >&2; exit 1; }
+ 
+--- i/bin/omarchy-refresh-pacman
++++ w/bin/omarchy-refresh-pacman
+@@ -5,6 +5,13 @@
+ 
+ set -e
+ 
++# SM-T715: keep Arch Linux ARM's repositories in /etc/pacman.conf.
++if grep -q '^\[alarm\]' /etc/pacman.conf; then
++  echo "omarchy-refresh-pacman: not on this tablet. It would replace Arch Linux ARM's" >&2
++  echo "pacman.conf with Omarchy's own. Update with 'omarchy update'." >&2
++  exit 1
++fi
++
+ channel="${1:-}"
+ if [[ -n $channel && $channel != "stable" && $channel != "rc" && $channel != "edge" ]]; then
+   echo "Invalid channel: $channel" >&2

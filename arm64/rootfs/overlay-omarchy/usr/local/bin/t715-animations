@@ -1,0 +1,99 @@
+#!/bin/sh
+# t715-animations: Hyprland's animations follow the Battery saver
+# (omarchy-tab-s2, rootfs/t715-looknfeel.lua, docs/hardware/BATTERY.md 13).
+#
+# power-profiles-daemon's power-saver, applied by t715-power-profile as
+# root, leaves the flag /run/t715-power/saver behind (removed by
+# balanced). This script turns Hyprland's animations off while the flag
+# exists and on when it does not, in the running session, through
+# hyprctl eval; the tablet block of looknfeel.lua reads the same flag
+# at Hyprland's start and on every config reload. t715-animations.path
+# (a user unit) starts t715-animations.service whenever the flag is
+# created or removed, and the service runs once more at the session's
+# start, closing the window between Hyprland's config read and the path
+# unit's start. "keyword" is gone with Hyprland's Lua config (it prints
+# "unknown request"), so eval is the only way.
+#
+# Usage: t715-animations [apply|status]   (no argument means apply)
+#   apply   on (balanced) or off (Battery saver), as the flag says
+#   status  the flag's state and Hyprland's animations:enabled
+# Without HYPRLAND_INSTANCE_SIGNATURE (uwsm exports it into the user
+# manager while the graphical session runs) apply changes nothing and
+# exits 0. A failing or unanswered hyprctl exits 1. Each apply logs one
+# line (logger -t t715-animations, or stderr where there is no logger).
+# The flag's path comes from T715_ANIM_SAVER, for the off-device test
+# (tests/test_t715_animations.sh). Exits 2 on a wrong usage.
+set -u
+
+SAVER=${T715_ANIM_SAVER:-/run/t715-power/saver}
+
+usage() {
+    printf 'usage: t715-animations [apply|status]\n' >&2
+}
+
+# log TEXT: to the journal, or to stderr where there is no logger (the
+# test's stub collects what the script has to say).
+log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t t715-animations "$*"
+    else
+        printf 't715-animations: %s\n' "$*" >&2
+    fi
+}
+
+# The wanted value: false while the saver flag exists, true otherwise.
+want() {
+    if [ -e "$SAVER" ]; then
+        printf 'false\n'
+    else
+        printf 'true\n'
+    fi
+}
+
+# trim TEXT: its whitespace removed, for hyprctl eval's "ok".
+trim() { printf '%s' "$1" | tr -d '[:space:]'; }
+
+apply() {
+    if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+        log "no Hyprland session: nothing to change"
+        return 0
+    fi
+    w=$(want)
+    out=$(hyprctl eval "hl.config({ animations = { enabled = $w } })" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(trim "$out")" = ok ]; then
+        if [ "$w" = true ]; then
+            log "animations on (balanced)"
+        else
+            log "animations off (Battery saver)"
+        fi
+        return 0
+    fi
+    log "hyprctl eval failed: $(printf '%s\n' "$out" | sed -n '1p')"
+    return 1
+}
+
+status() {
+    if [ -e "$SAVER" ]; then
+        printf 'saver flag: present (%s)\n' "$SAVER"
+    else
+        printf 'saver flag: absent (%s)\n' "$SAVER"
+    fi
+    if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+        printf 'hyprland animations:enabled: unknown (no Hyprland session)\n'
+        return 0
+    fi
+    v=$(hyprctl getoption animations:enabled 2>/dev/null \
+        | awk 'NR == 1 && /^(bool|int):/ { print $2 }')
+    if [ -n "$v" ]; then
+        printf 'hyprland animations:enabled: %s\n' "$v"
+    else
+        printf 'hyprland animations:enabled: unknown (hyprctl failed)\n'
+    fi
+}
+
+case ${1:-apply} in
+    apply) apply ;;
+    status) status ;;
+    *) usage; exit 2 ;;
+esac

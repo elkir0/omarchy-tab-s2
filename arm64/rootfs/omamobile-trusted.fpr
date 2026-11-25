@@ -1,0 +1,13 @@
+# omamobile-trusted.fpr — fingerprints of the Omarchy Mobile keys we accept
+# (from the omamobile-keyring package the repository publishes; the owner's
+# Lenovomarchy port checked them on 2026-11-17, tools/omamobile-trusted.fpr
+# there). Signatures are made by the release key's signing SUBKEY, so the
+# subkey's fingerprint is listed with the two primaries'. tools/fetch-omamobile
+# refuses a keyring holding any key, primary or subkey, not listed here.
+#
+# primary "Omarchy Mobile Package Signing" (2026-10-12, signs the keyring package)
+6C84FE3D240709E70E27CC94B301F5EA62B249FE
+# primary "Omarchy Mobile Release Key" (2026-10-26, certifies only)
+20567593566EEEE2DD8864608632C8075EB94673
+# its ed25519 signing subkey (the one that makes the .sig files)
+DDBA4581E0178D33DB69973F7F1041BF47291504

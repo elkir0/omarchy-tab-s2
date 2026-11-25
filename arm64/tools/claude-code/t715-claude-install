@@ -1,0 +1,84 @@
+#!/bin/bash
+# t715-claude-install — Claude Code on the SM-T715's arm64 system: Anthropic's own linux-arm64
+# build, installed for the user who runs this (no root), the way Anthropic's installer does it.
+#
+#   t715-claude-install            the latest release (Anthropic's installer takes the same)
+#   t715-claude-install VERSION    a given release, e.g. 2.1.326
+#
+# 1. The release's manifest.json and manifest.json.sig from downloads.claude.ai; the signature
+#    must be by Anthropic's release key (31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE,
+#    shipped in this package; manifest-verify.sh, a throwaway keyring): fail closed.
+# 2. The linux-arm64 binary named by that manifest, its size and sha256 checked against it.
+# 3. The binary's own `claude install`: ~/.local/bin/claude and ~/.local/share/claude, with
+#    Claude Code's own updates from then on, as after Anthropic's install.sh.
+#
+# Nothing of Anthropic's is in the image (its licence). Since 2026-11-25 the image's pacman also
+# sees Omarchy's aarch64 channel, whose claude-code package Omarchy's package manager installs;
+# this is the other way, Anthropic's own: it installed Claude Code 2.1.332 on the tablet that day.
+# On the tablet, beside it: manifest-verify.sh and anth-release-key.gpg (T715_CLAUDE_KEYDIR).
+# The download (about 370 MB) goes to ~/.cache, not /tmp (a RAM disk), and is deleted afterwards.
+set -euo pipefail
+
+REL=https://downloads.claude.ai/claude-code-releases
+PLATFORM=linux-arm64
+KEYDIR=${T715_CLAUDE_KEYDIR:-/usr/share/t715-claude-code}
+
+say() { printf 't715-claude-install: %s\n' "$*"; }
+die() { printf 't715-claude-install: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -ne 0 ] || die "run this as your own user, not root: Claude Code installs into your home"
+[ "$(uname -m)" = aarch64 ] || die "this installer is for the arm64 system (uname -m: $(uname -m))"
+for c in curl gpg python3 sha256sum; do command -v "$c" >/dev/null || die "$c is missing"; done
+# shellcheck source=manifest-verify.sh
+. "$KEYDIR/manifest-verify.sh"
+CLAUDE_SIGNING_KEY_DIR=$KEYDIR
+
+want=${1:-latest}
+case "$want" in
+  latest|stable) version=$(curl -fsSL --max-time 30 "$REL/$want") || die "cannot reach downloads.claude.ai" ;;
+  *) version=$want ;;
+esac
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a release version: '${version:0:40}'"
+
+cache=${XDG_CACHE_HOME:-$HOME/.cache}
+mkdir -p "$cache"
+work=$(mktemp -d "$cache/t715-claude-install.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+say "Claude Code $version for $PLATFORM: the signed manifest"
+curl -fsSL --max-time 30 -o "$work/manifest.json" "$REL/$version/manifest.json" \
+  || die "cannot download the manifest of $version"
+curl -fsSL --max-time 30 -o "$work/manifest.json.sig" "$REL/$version/manifest.json.sig" \
+  || die "no manifest.json.sig for $version: refusing to install unverified"
+verify_manifest_signature "$work/manifest.json" "$work/manifest.json.sig" \
+  || die "the manifest's signature is NOT Anthropic's release key ($CLAUDE_SIGNING_KEY_FP): refusing to install"
+say "manifest signed by Anthropic's release key ($CLAUDE_SIGNING_KEY_FP)"
+
+read -r sum size < <(python3 -I - "$work/manifest.json" "$PLATFORM" "$version" <<'PY'
+import json, re, sys
+m = json.load(open(sys.argv[1]))
+if m.get("version") not in (None, sys.argv[3]):
+    sys.exit("the manifest is for another version")
+p = m["platforms"][sys.argv[2]]
+if not re.fullmatch(r"[0-9a-f]{64}", p["checksum"]) or int(p["size"]) <= 0:
+    sys.exit("bad checksum or size in the manifest")
+print(p["checksum"], int(p["size"]))
+PY
+) || die "the manifest has no usable $PLATFORM entry"
+
+# The download, then the copy `claude install` makes: twice the binary, plus room.
+need_kib=$(( size / 1024 * 2 + 102400 ))
+have_kib=$(df -Pk "$work" | awk 'NR == 2 { print $4 }')
+[ "$have_kib" -ge "$need_kib" ] || die "not enough room in $cache: $((have_kib / 1024)) MiB free, $((need_kib / 1024)) MiB needed"
+
+say "downloading $((size / 1048576)) MiB from downloads.claude.ai"
+curl -fL --max-time 3600 --retry 3 -o "$work/claude" "$REL/$version/$PLATFORM/claude" \
+  || die "download failed"
+[ "$(stat -c %s "$work/claude")" = "$size" ] || die "the download's size is not the manifest's: refusing"
+[ "$(sha256sum "$work/claude" | cut -d' ' -f1)" = "$sum" ] || die "the download's sha256 is not the manifest's: refusing"
+say "size and sha256 match the signed manifest"
+
+chmod 0755 "$work/claude"
+say "installing for $(id -un) (claude install)"
+(cd "$work" && "$work/claude" install) || die "claude install failed"
+say "done: $(command -v claude || echo "$HOME/.local/bin/claude")"

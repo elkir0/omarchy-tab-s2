@@ -1,0 +1,506 @@
+# smoke-check-omarchy — the Omarchy image's part of the smoke check, sourced
+# by /usr/lib/t715-arm64/smoke-check when omarchy is installed (the functions
+# pass/fail/warn/info/run, $U and $tmp come from it).
+#
+# Adapted from omarchy-tab-s2/image/rootfs/smoke-check.sh (read-only):
+# its session stack sections, verbatim except for the user (the image's
+# placeholder instead of alarm) and the two vendor files, placeholders in
+# this image: missing, they are a warning here.
+#
+# FAIL: Omarchy is not 4.5.x, or a touch-layer or Omarchy Mobile package is
+#       not at the version this build pins (below); an Omarchy migration is
+#       pending for the user (the login notice); mako is installed; SDDM does
+#       not log the user into omarchy.desktop;
+#       Hyprland, quickshell, uwsm or sddm cannot report a version; ldd misses
+#       a library of Hyprland, quickshell, sddm or squeekboard; the dmabuf-check
+#       shim is not wired; the touch layer is not in place (t715-keys --check,
+#       the on-screen keyboard's gsettings, terminal layouts, session
+#       environment); the touch shell is not (omamobile-omarchy's patch series,
+#       the QML modules its plugins import, the user's profile or plugin links);
+#       PipeWire's BlueZ plugin is missing; the user's Hyprland config does not
+#       verify.
+# WARN: other session binaries, QML modules the Omarchy shell may miss, the
+#       two vendor files.
+
+indent() { sed 's/^/        /'; }
+
+echo "== Omarchy 4.5 and the touch layer's versions =="
+# What this build pins (omarchy-pins, omamobile-pins, pkg/*/PKGBUILD,
+# 2026-11-24): change them together.
+expect_version() { # PACKAGE VERSION-PATTERN (an extended regular expression)
+    local got
+    got="$(pacman -Q "$1" 2>/dev/null | cut -d' ' -f2)"
+    if [ -n "$got" ] && printf '%s\n' "$got" | grep -qxE "$2"; then
+        pass "$1 $got"
+    else
+        fail "$1: ${got:-not installed}, expected $2"
+    fi
+}
+expect_version omarchy '4\.5\.[0-9]+-[0-9.]+'
+expect_version omarchy-settings "$(pacman -Q omarchy 2>/dev/null | cut -d' ' -f2 | sed 's/\./\\./g')"
+expect_version omarchy '4\.5\.0-3'
+expect_version omarchy-speedtest '0\.2\.2-1'
+expect_version yay '13\.0\.1-1'
+expect_version omamobile-omarchy '0\.1\.51-1\.1'
+expect_version omamobile-shell '0\.2\.147-3\.1'
+expect_version omamobile-voice '0\.1\.1-1\.1'
+expect_version voxtype-bin '1\.3\.1-1\.1'
+expect_version mise-bin '2026\.11\.14-1'
+expect_version ollama '0\.35\.0-1'
+expect_version omamobile-settings '0\.1\.4-1\.1'
+expect_version omamobile-remote '0\.1\.3-1\.1'
+expect_version wlrctl '0\.2\.2-1'
+expect_version omatel-agent '0\.2\.4-1\.1'
+expect_version t715-modem '0\.1\.0-10'
+# The modem chain: enabled, started only after this boot's mark, ModemManager masked, the user in radio.
+for u in shannon-nv-provision shannon-modem-prepare; do
+    [ "$(systemctl is-enabled "$u.service" 2>/dev/null)" = enabled ] && pass "$u.service enabled" || fail "$u.service not enabled"
+done
+d=/etc/systemd/system/shannon-modem-prepare.service.d/10-t715-arm64-after-mark.conf
+grep -qx 'Requisite=t715-kboot-mark.service' "$d" 2>/dev/null && grep -q '^After=.*t715-kboot-mark.service' "$d" \
+    && pass "the modem chain waits for KBOOT: up ($d)" || fail "no boot-mark ordering for the modem chain ($d)"
+if [ ! -e /usr/lib/systemd/system/ModemManager.service ]; then
+    pass "ModemManager is not installed (shannond's facade is the only ModemManager1)"
+elif [ "$(systemctl is-enabled ModemManager.service 2>/dev/null)" = masked ]; then
+    pass "ModemManager.service masked (shannond's facade)"
+else
+    fail "ModemManager.service installed and not masked"
+fi
+id -nG "$U" | tr ' ' '\n' | grep -qx radio && pass "$U is in radio (shannonctl)" || fail "$U is not in radio"
+expect_version hyprgraphics '0\.6\.0-2\.1'
+if pacman -Q mako >/dev/null 2>&1; then
+    fail "mako is installed: it takes org.freedesktop.Notifications from Omarchy 4.5's shell"
+else
+    pass "mako is not installed (Omarchy 4.5's shell is the notification server)"
+fi
+# No login notice: Omarchy's own check, as the user (omarchy-migrate-notify
+# runs omarchy-migrate --pending, which exits 0 and lists them when any).
+nmig="$(ls /usr/share/omarchy/migrations/*.sh 2>/dev/null | wc -l)"
+if out="$(run env HOME=/home/$U OMARCHY_PATH=/usr/share/omarchy omarchy-migrate --pending 2>&1)"; then
+    fail "omarchy-migrate --pending lists for $U: $(printf '%s\n' "$out" | head -n 4 | tr '\n' ' ')"
+elif [ "$nmig" -gt 0 ] && [ "$(ls /home/$U/.local/state/omarchy/migrations/ 2>/dev/null | wc -l)" -ge "$nmig" ]; then
+    pass "no pending Omarchy migration for $U: all $nmig marked done (no login notice)"
+else
+    fail "omarchy-migrate --pending: none, but only $(ls /home/$U/.local/state/omarchy/migrations/ 2>/dev/null | wc -l) of $nmig markers"
+fi
+hold=/usr/share/t715-omarchy/omarchy-migrations.hold
+if [ -s "$hold" ] && bash -n /usr/local/bin/t715-omarchy-migrations-hold 2>/dev/null; then
+    missing=""
+    while read -r name _; do
+        case "$name" in ''|'#'*) continue ;; esac
+        [ -f "/usr/share/omarchy/migrations/$name" ] || missing="$missing $name"
+    done < "$hold"
+    if [ -z "$missing" ]; then
+        pass "the migration hold list: $(grep -c '^[0-9]*\.sh' "$hold") migrations, each shipped by this Omarchy; t715-omarchy-migrations-hold parses"
+    else
+        warn "the hold list names migrations this Omarchy does not ship:$missing"
+    fi
+else
+    fail "no migration hold list ($hold) or t715-omarchy-migrations-hold"
+fi
+# SDDM logs the user into Omarchy's session, as on the owner's armv7h tablet.
+al=/etc/sddm.conf.d/autologin.conf
+if [ "$(sed -n 's/^User=//p' "$al" 2>/dev/null)" = "$U" ] && [ "$U" = alarm ] \
+   && [ "$(sed -n 's/^Session=//p' "$al" 2>/dev/null)" = omarchy.desktop ] \
+   && { [ -f /usr/local/share/wayland-sessions/omarchy.desktop ] || [ -f /usr/share/wayland-sessions/omarchy.desktop ]; } \
+   && [ "$(readlink /etc/systemd/system/display-manager.service)" = /usr/lib/systemd/system/sddm.service ]; then
+    pass "SDDM autologin: User=$U, Session=omarchy.desktop ($al; the session file is there; sddm is the display manager)"
+else
+    fail "SDDM autologin is not User=alarm Session=omarchy.desktop with sddm as the display manager: $(grep -E '^(User|Session)=' "$al" 2>/dev/null | tr '\n' ' ')"
+fi
+
+echo "== versions =="
+# version LABEL CMD...: PASS with the first lines of the output.
+version() {
+    local label="$1" out rc
+    shift
+    out="$(run "$@" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+        pass "$label: $(printf '%s\n' "$out" | head -n1)"
+        printf '%s\n' "$out" | sed -n '2,3p' | indent
+    else
+        fail "$label (exit $rc): $(printf '%s\n' "$out" | head -n1)"
+        printf '%s\n' "$out" | sed -n '2,6p' | indent
+    fi
+}
+version "Hyprland --version" Hyprland --version
+version "quickshell --version" quickshell --version
+# SDDM has no --version (an unknown option starts the daemon): have it print
+# its built-in default configuration instead, which runs the binary.
+out="$(run sddm --example-config 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^\[Autologin\]'; then
+    pass "sddm --example-config runs (SDDM has no --version; package $(pacman -Q sddm 2>/dev/null | cut -d' ' -f2))"
+else
+    fail "sddm --example-config (exit $rc): $(printf '%s\n' "$out" | head -n1)"
+fi
+
+# uwsm: the first of these that prints a version.
+uwsm_done=0
+for args in "--version" "version" "-v"; do
+    # shellcheck disable=SC2086
+    out="$(run uwsm $args 2>&1)" && [ -n "$out" ] \
+        && printf '%s\n' "$out" | grep -qiE '[0-9]+\.[0-9]+' && {
+        pass "uwsm $args: $(printf '%s\n' "$out" | head -n1)"
+        uwsm_done=1
+        break
+    }
+done
+if [ "$uwsm_done" = 0 ]; then
+    if out="$(run uwsm --help 2>&1)"; then
+        pass "uwsm --help runs (no version option; package $(pacman -Q uwsm 2>/dev/null | cut -d' ' -f2))"
+    else
+        fail "uwsm cannot run: $(printf '%s\n' "$out" | tail -n1)"
+    fi
+fi
+
+echo "== Hyprland dmabuf-check shim =="
+# The wrapper must come first in the session's PATH, the shim must take
+# Hyprland's drmPrimeFDToHandle (Arch links with -z now, so LD_DEBUG shows
+# the binding at start-up), and Hyprland's children must not inherit it.
+shim=/usr/local/lib/t715-dmabuf-check-shim.so
+hyprland_cmd="$(run sh -c 'command -v Hyprland')"
+if [ "$hyprland_cmd" = /usr/local/bin/Hyprland ]; then
+    pass "Hyprland in PATH is the wrapper ($hyprland_cmd)"
+else
+    fail "Hyprland in PATH is ${hyprland_cmd:-missing}, not /usr/local/bin/Hyprland"
+fi
+if run env LD_DEBUG=bindings LD_PRELOAD="$shim" /usr/bin/Hyprland --version 2>&1 \
+        | grep -q "binding file /usr/bin/Hyprland .* to $shim .*drmPrimeFDToHandle"; then
+    pass "Hyprland's drmPrimeFDToHandle binds to the shim"
+else
+    fail "Hyprland's drmPrimeFDToHandle does not bind to $shim"
+fi
+if run env LD_PRELOAD="$shim" env | grep -q '^LD_PRELOAD='; then
+    fail "the shim leaves LD_PRELOAD to child processes"
+else
+    pass "the shim drops LD_PRELOAD for child processes"
+fi
+
+echo "== shared libraries (ldd) =="
+# libs BIN REQUIRED: PASS/FAIL (or WARN when not required).
+libs() {
+    local bin="$1" required="$2" path out missing n
+    path="$(command -v "$bin" 2>/dev/null || true)"
+    if [ -z "$path" ]; then
+        if [ "$required" = 1 ]; then fail "$bin: not installed"; else warn "$bin: not installed"; fi
+        return
+    fi
+    path="$(readlink -f "$path")"
+    if ! out="$(ldd "$path" 2>&1)"; then
+        if [ "$required" = 1 ]; then fail "ldd $path: $(printf '%s\n' "$out" | head -n1)"
+        else warn "ldd $path: $(printf '%s\n' "$out" | head -n1)"; fi
+        return
+    fi
+    missing="$(printf '%s\n' "$out" | awk '/not found/ {print $1}' | tr '\n' ' ')"
+    n="$(printf '%s\n' "$out" | grep -c '=>' || true)"
+    if [ -n "$missing" ]; then
+        if [ "$required" = 1 ]; then fail "ldd $path: not found: $missing"
+        else warn "ldd $path: not found: $missing"; fi
+    elif [ "$required" = 1 ]; then
+        pass "ldd $path: $n libraries, none missing"
+    else
+        info "ldd $path: $n libraries, none missing"
+    fi
+}
+# The binary itself: "Hyprland" in PATH is the shim's shell wrapper.
+libs /usr/bin/Hyprland 1
+libs /usr/local/lib/t715-dmabuf-check-shim.so 1
+libs quickshell 1
+libs sddm 1
+libs squeekboard 1
+# Omarchy Mobile's packages (tools/fetch-omamobile): two binaries, one script.
+libs omamobile-settings 1
+libs wlrctl 1
+bash -n /usr/bin/omamobile-remote 2>/dev/null && pass "omamobile-remote parses (bash)" || fail "omamobile-remote is missing or does not parse"
+for b in start-hyprland hyprctl Xwayland sddm-greeter-qt6 foot \
+         /usr/lib/firefox/firefox; do
+    libs "$b" 0
+done
+for f in /usr/lib/xdg-desktop-portal-hyprland /usr/lib/dri/panfrost_dri.so \
+         /usr/lib/dri/exynos_dri.so /usr/lib/libgallium-*.so; do
+    [ -e "$f" ] || continue
+    if missing="$(ldd "$f" 2>&1 | awk '/not found/ {print $1}' | tr '\n' ' ')" && [ -z "$missing" ]; then
+        info "ldd $f: none missing"
+    else
+        warn "ldd $f: not found: $missing"
+    fi
+done
+dri="$(ls /usr/lib/dri/ 2>/dev/null | grep -E '^(panfrost|exynos|kmsro|libdril)' | tr '\n' ' ')"
+info "Mesa DRI entries for this SoC: ${dri:-none}"
+
+echo "== QML modules imported by the Omarchy shell =="
+shell_dir=/usr/share/omarchy/shell
+qs_bin="$(readlink -f "$(command -v quickshell 2>/dev/null || echo /usr/bin/quickshell)")"
+if [ -d "$shell_dir" ]; then
+    found=""; builtin=""; missing=""
+    while IFS= read -r m; do
+        case "$m" in qs|qs.*) continue ;; esac   # the shell's own modules
+        d="/usr/lib/qt6/qml/${m//.//}"
+        if [ -f "$d/qmldir" ]; then
+            found="$found $m"
+        elif [[ $m == Quickshell* ]] && [ -f "$qs_bin" ] && grep -aqF "$m" "$qs_bin"; then
+            builtin="$builtin $m"
+        else
+            missing="$missing $m"
+        fi
+    done < <(find "$shell_dir" -name '*.qml' -exec \
+                 sed -n 's/^[[:space:]]*import[[:space:]]\{1,\}\([A-Za-z][A-Za-z0-9_.]*\).*/\1/p' {} + | sort -u)
+    info "in /usr/lib/qt6/qml:${found:- none}"
+    info "built into quickshell:${builtin:- none}"
+    if [ -n "$missing" ]; then
+        warn "not found (the shell may fail to load them):$missing"
+    else
+        info "every imported module was found"
+    fi
+else
+    warn "no $shell_dir"
+fi
+
+echo "== touch layer P1 (docs/image/ROOTFS.md) =="
+# t715-keys: its interpreter runs, the event size matches the kernel's, the
+# commands it calls exist (no key device in a container: listed as none).
+out="$(run /usr/local/bin/t715-keys --check 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "t715-keys --check: $(printf '%s\n' "$out" | head -n1 | sed 's/^t715-keys: //')"
+else
+    fail "t715-keys --check (exit $rc): $(printf '%s\n' "$out" | grep -m1 FAIL || printf '%s\n' "$out" | tail -n1)"
+fi
+# The on-screen keyboard shows itself only with this gsetting on (alarm's
+# dconf database, written at build time).
+osk="$(run env HOME=/home/$U gsettings get org.gnome.desktop.a11y.applications screen-keyboard-enabled 2>/dev/null)"
+if [ "$osk" = true ]; then
+    pass "the user's gsetting org.gnome.desktop.a11y.applications screen-keyboard-enabled: true"
+else
+    fail "the user's gsetting screen-keyboard-enabled: ${osk:-unreadable}, not true"
+fi
+# Its layout: the first input source, locale.env's T715_XKB.
+T715_XKB=$(sed -n 's/^T715_XKB=//p' /usr/share/t715-omarchy/locale.env 2>/dev/null)
+if [ "$T715_XKB" = fr ]; then
+    want="[('xkb', 'fr'), ('xkb', 'us')]"
+else
+    want="[('xkb', 'us'), ('xkb', 'fr')]"
+fi
+src="$(run env HOME=/home/$U gsettings get org.gnome.desktop.input-sources sources 2>/dev/null)"
+if [ "$src" = "$want" ]; then
+    pass "the user's gsetting org.gnome.desktop.input-sources sources: $src"
+else
+    fail "the user's gsetting input-sources sources: ${src:-unreadable}, not $want"
+fi
+# The user's terminal layouts with Esc load in squeekboard's own layout parser.
+for l in us fr; do
+    f=/home/$U/.local/share/squeekboard/keyboards/terminal/$l.yaml
+    out="$(run squeekboard-test-layout "$f" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'Test result: OK'; then
+        pass "squeekboard-test-layout $f: OK"
+    else
+        fail "squeekboard-test-layout $f (exit $rc): $(printf '%s\n' "$out" | grep -v '^$' | head -n2 | tr '\n' ' ')"
+    fi
+done
+# The session environment as systemd's user manager builds it: the Wayland
+# input method must win over Omarchy's fcitx values.
+gen=/usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator
+if [ -x "$gen" ]; then
+    envd="$(run env HOME=/home/$U "$gen" 2>/dev/null)"
+    want="QT_IM_MODULE=wayland GTK_IM_MODULE=wayland INPUT_METHOD=none XMODIFIERS=@im=none SDL_IM_MODULE=none"
+    bad=""
+    for kv in $want; do
+        printf '%s\n' "$envd" | grep -qx -- "$kv" || bad="$bad ${kv%%=*}=$(printf '%s\n' "$envd" | sed -n "s/^${kv%%=*}=//p")"
+    done
+    if [ -z "$bad" ]; then
+        pass "user session environment (environment.d): $want"
+    else
+        fail "user session environment (environment.d):$bad"
+    fi
+else
+    warn "no $gen: session environment not checked"
+fi
+
+echo "== touch layer P2: the touch shell (docs/image/ROOTFS.md) =="
+# omamobile-omarchy's patch series is in place on this Omarchy (the applier's
+# own status and verify: every patched file still has the sha256 it wrote).
+patches=/usr/bin/omamobile-omarchy-patches
+if [ -x "$patches" ]; then
+    out="$("$patches" status 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'result: ok'; then
+        pass "omamobile-omarchy-patches status: $(printf '%s\n' "$out" | sed -n 's/^message: //p')"
+    else
+        fail "omamobile-omarchy-patches status (exit $rc): $(printf '%s\n' "$out" | tr '\n' ' ' | cut -c1-160)"
+    fi
+    out="$("$patches" verify 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass "omamobile-omarchy-patches verify: $(printf '%s\n' "$out" | head -n1 | sed 's/^ok *//')"
+    else
+        fail "omamobile-omarchy-patches verify (exit $rc): $(printf '%s\n' "$out" | grep -m1 FAIL)"
+    fi
+else
+    fail "no $patches (omamobile-omarchy)"
+fi
+# Every QML module the touch shell's plugins import must be installed: a
+# missing one makes the Omarchy shell drop that plugin.
+mobile_dir=/usr/share/omamobile/shell/plugins
+if [ -d "$mobile_dir" ]; then
+    found=""; builtin=""; missing=""
+    while IFS= read -r m; do
+        case "$m" in qs|qs.*) continue ;; esac   # the Omarchy shell's own modules
+        d="/usr/lib/qt6/qml/${m//.//}"
+        if [ -f "$d/qmldir" ]; then
+            found="$found $m"
+        elif [[ $m == Quickshell* ]] && [ -f "$qs_bin" ] && grep -aqF "$m" "$qs_bin"; then
+            builtin="$builtin $m"
+        else
+            missing="$missing $m"
+        fi
+    done < <(find "$mobile_dir" -name '*.qml' -exec \
+                 sed -n 's/^[[:space:]]*import[[:space:]]\{1,\}\([A-Za-z][A-Za-z0-9_.]*\).*/\1/p' {} + | sort -u)
+    if [ -z "$missing" ]; then
+        pass "QML modules of the omamobile plugins: in /usr/lib/qt6/qml:${found:- none}; built into quickshell:${builtin:- none}"
+    else
+        fail "QML modules of the omamobile plugins not found:$missing"
+    fi
+    # The plugin QML parses (qmlformat, Qt's own parser), as upstream's test/all checks it.
+    qmlformat=/usr/lib/qt6/bin/qmlformat
+    if [ -x "$qmlformat" ]; then
+        bad=""; n=0
+        while IFS= read -r -d '' q; do
+            n=$((n + 1))
+            run "$qmlformat" "$q" >/dev/null 2>&1 || bad="$bad ${q#$mobile_dir/}"
+        done < <(find "$mobile_dir" -name '*.qml' -print0)
+        if [ -z "$bad" ]; then pass "the $n QML files of the omamobile plugins parse (qmlformat)"
+        else fail "omamobile QML that does not parse:$bad"; fi
+    else
+        info "no $qmlformat: the omamobile QML is not parsed here"
+    fi
+else
+    fail "no $mobile_dir (omamobile-shell)"
+fi
+# Its helpers run on this Python and bash.
+bad=""
+for b in omamobile-setup-user omamobile-launch omamobile-osk-watch omamobile-bt-agent omamobile-screenrecord omamobile-widget; do
+    f="/usr/bin/$b"
+    if [ ! -x "$f" ]; then bad="$bad $b(missing)"; continue; fi
+    case "$(head -n1 "$f")" in
+        *python3*) python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f" 2>/dev/null || bad="$bad $b" ;;
+        *)         bash -n "$f" 2>/dev/null || bad="$bad $b" ;;
+    esac
+done
+if [ -z "$bad" ]; then pass "omamobile helpers parse (python3, bash)"; else fail "omamobile helpers:$bad"; fi
+if run python3 -c 'import dbus, dbus.mainloop.glib; from gi.repository import GLib' 2>/dev/null; then
+    pass "python3 has dbus and GLib (omamobile-osk-watch, omamobile-bt-agent)"
+else
+    fail "python3 cannot import dbus or gi.repository.GLib (omamobile-osk-watch, omamobile-bt-agent)"
+fi
+# the user's shell profile: the touch shell's bar, its plugins linked.
+shell_json=/home/$U/.config/omarchy/shell.json
+if python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); assert c["bar"]["id"] == "omamobile.bar"' "$shell_json" 2>/dev/null; then
+    pass "the user's shell.json: bar omamobile.bar, plugins $(python3 -c 'import json, sys; print(" ".join(p["id"] for p in json.load(open(sys.argv[1]))["plugins"]))' "$shell_json")"
+else
+    fail "the user's shell.json does not select omamobile.bar"
+fi
+bad=""
+for p in "$mobile_dir"/omamobile.*; do
+    [ "$(readlink -f "/home/$U/.config/omarchy/plugins/${p##*/}")" = "$p" ] || bad="$bad ${p##*/}"
+done
+if [ -z "$bad" ]; then pass "omamobile plugins linked into the user's ~/.config/omarchy/plugins"
+else fail "omamobile plugins not linked for the user:$bad"; fi
+# AI (Golden, 2026-11-25): the voice bar in the profile, Voxtype set up from the shipped
+# multilingual model, dictation's default Voxtype, and voxtype-bin the ARMv8.0 build (its
+# description says so; Omarchy's prebuilt dies with SIGILL on the A53/A57).
+if python3 -c 'import json, sys; assert any(p.get("id") == "omamobile.voice" for p in json.load(open(sys.argv[1]))["plugins"])' "$shell_json" 2>/dev/null; then
+    pass "the voice bar (omamobile.voice) in the user's shell.json"
+else
+    fail "omamobile.voice is not in the user's shell.json"
+fi
+vox_conf=/home/$U/.config/voxtype/config.toml
+if grep -qE '^model = "base"$' "$vox_conf" 2>/dev/null && [ -e "/home/$U/.local/share/voxtype/models/ggml-base.bin" ]; then
+    pass "Voxtype set up for the user: $(grep -E '^(model|language) ' "$vox_conf" | tr '\n' ' ')with the shipped ggml-base.bin"
+else
+    fail "Voxtype is not set up for the user (model base and the ggml-base.bin link expected)"
+fi
+if [ "$(cat "/home/$U/.config/omarchy/defaults/dictation" 2>/dev/null)" = voxtype ]; then
+    pass "Omarchy's dictation default: voxtype"
+else
+    fail "Omarchy's dictation default is not voxtype: $(cat "/home/$U/.config/omarchy/defaults/dictation" 2>/dev/null || echo none)"
+fi
+# The first-run onboarding (0015): shipped, and started at login by the tablet's
+# Hyprland block (t715-tablet.lua) for a user without a name or with the placeholder.
+if [ -x /usr/bin/omamobile-onboarding ] && grep -q 'omamobile-onboarding --nudge' "/home/$U/.config/hypr/hyprland.lua" 2>/dev/null; then
+    pass "omamobile-onboarding shipped and its nudge started at login (hyprland.lua)"
+else
+    fail "omamobile-onboarding missing, or its nudge not in the user's hyprland.lua"
+fi
+if pacman -Qi voxtype-bin 2>/dev/null | grep -q '^Description *: .*ARMv8\.0'; then
+    pass "voxtype-bin is the ARMv8.0 build"
+else
+    fail "voxtype-bin is not the ARMv8.0 build (pkg/voxtype-bin)"
+fi
+if grep -qE '^IgnorePkg +=.* voxtype-bin( |$)' /etc/pacman.conf; then
+    pass "IgnorePkg holds voxtype-bin"
+else
+    fail "IgnorePkg does not hold voxtype-bin: an upgrade from Omarchy's channel would bring back the SIGILL build"
+fi
+
+echo "== Bluetooth (docs/image/ROOTFS.md) =="
+fw=/usr/lib/firmware/brcm
+if [ -s "$fw/BCM4358A3.hcd" ] && [ "$(readlink "$fw/BCM.samsung,gts28ltexx.hcd")" = BCM4358A3.hcd ]; then
+    pass "BCM4358 patch RAM: $fw/BCM4358A3.hcd ($(wc -c < "$fw/BCM4358A3.hcd") bytes), BCM.samsung,gts28ltexx.hcd -> BCM4358A3.hcd"
+else
+    warn "PLACEHOLDER: no Bluetooth patch RAM in $fw (it comes from the tablet's SYSTEM partition at the first boot)"
+fi
+if sh -n /usr/local/sbin/t715-bt-addr 2>/dev/null && command -v btmgmt >/dev/null; then
+    pass "t715-bt-addr parses; btmgmt present"
+else
+    fail "t715-bt-addr does not parse, or no btmgmt (bluez-utils)"
+fi
+libs /usr/lib/bluetooth/bluetoothd 0
+# Bluetooth audio: wireplumber needs PipeWire's BlueZ SPA plugin (pipewire-audio).
+spa=/usr/lib/spa-0.2/bluez5/libspa-bluez5.so
+if [ -f "$spa" ] && missing="$(ldd "$spa" 2>&1 | awk '/not found/ {print $1}' | tr '\n' ' ')" && [ -z "$missing" ]; then
+    pass "PipeWire's BlueZ plugin $spa: present, no library missing"
+else
+    fail "PipeWire's BlueZ plugin $spa: missing, or not found: ${missing:-?}"
+fi
+
+echo "== Wi-Fi (docs/image/ROOTFS.md) =="
+# The NVRAM holds the tablet's MAC address: only its presence and size here.
+if [ -s "$fw/brcmfmac4358-pcie.bin" ] && [ -s "$fw/samsung-gts28/nvram_net.txt" ] \
+        && [ "$(readlink "$fw/brcmfmac4358-pcie.txt")" = samsung-gts28/nvram_net.txt ]; then
+    pass "BCM4358 Wi-Fi: $fw/brcmfmac4358-pcie.bin ($(wc -c < "$fw/brcmfmac4358-pcie.bin") bytes), brcmfmac4358-pcie.txt -> samsung-gts28/nvram_net.txt ($(wc -c < "$fw/samsung-gts28/nvram_net.txt") bytes)"
+else
+    warn "PLACEHOLDER: no Wi-Fi NVRAM in $fw (it comes from the tablet's SYSTEM partition at the first boot); brcmfmac4358-pcie.txt -> $(readlink "$fw/brcmfmac4358-pcie.txt")"
+fi
+# t715-wifi-addr runs from udev and logs to the journal with logger.
+if sh -n /usr/local/sbin/t715-wifi-addr 2>/dev/null && command -v logger >/dev/null \
+        && command -v wpa_supplicant >/dev/null; then
+    pass "t715-wifi-addr parses; logger and wpa_supplicant present"
+else
+    fail "t715-wifi-addr does not parse, or no logger or wpa_supplicant"
+fi
+echo "== Hyprland config (the user's) =="
+# Required: a config error makes Hyprland draw its error bar, and Hyprland's
+# text rendering can deadlock on this device (docs/journal/ONDEVICE-2026-10-28.md).
+cfg=/home/$U/.config/hypr/hyprland.lua
+if [ -r "$cfg" ] && run Hyprland --help 2>&1 | grep -q -- '--verify-config'; then
+    # Omarchy 4.5's default/hypr/startup-cursor.lua, outside a session: its
+    # config.reloaded handler reads HYPRLAND_INSTANCE_SIGNATURE (nil is a Lua
+    # error) and calls hl.timer(), which makes Hyprland 0.57 segfault in
+    # --verify-config mode (no event loop). Found on the owner's Lenovomarchy
+    # tablet (docs/research/omamobile/M4-IMAGE-BUILD.md): a two-line wrapper
+    # stubs the timer, then loads the user's config, with the variable set.
+    # The check keeps its value: an unknown function or section still fails.
+    printf 'hl.timer = function() end\ndofile("%s")\n' "$cfg" > "$tmp/verify.lua"
+    chmod 0644 "$tmp/verify.lua"
+    # Omarchy's bootstrap.lua finds the user's modules through $HOME.
+    out="$(run env HOME=/home/$U OMARCHY_PATH=/usr/share/omarchy HYPRLAND_INSTANCE_SIGNATURE=verify \
+               Hyprland --verify-config --config "$tmp/verify.lua" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'config ok'; then
+        pass "Hyprland --verify-config of $cfg (through the hl.timer stub): config ok"
+    else
+        fail "Hyprland --verify-config of $cfg (through the hl.timer stub): exit $rc, no \"config ok\""
+    fi
+    printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -v -e '^[[:space:]]*$' -e '^DEBUG' \
+        | tail -n 8 | indent
+else
+    fail "Hyprland --verify-config not available or $cfg not readable"
+fi
+

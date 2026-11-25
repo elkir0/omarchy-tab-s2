@@ -1,0 +1,52 @@
+#!/bin/bash
+# t715-omarchy-migrations-hold (SM-T715 arm64 image; the owner's Lenovomarchy
+# port's yt11-omarchy-migrations-hold, with this image's path): mark the
+# configured Omarchy migrations as done without running them. Run it as the
+# user after an in-place Omarchy upgrade, before omarchy-migrate.
+#
+# Reads /usr/share/t715-omarchy/omarchy-migrations.hold (one migration file
+# name per line, an optional ` # reason` comment after the name) and touches
+# each listed migration's marker in Omarchy's per-user migration state, so
+# omarchy-migrate skips it and the login notice stops offering it. Idempotent:
+# a marker that already exists is left alone, and a listed migration that is
+# not in /usr/share/omarchy/migrations/ (an Omarchy update removed or renamed
+# it) is reported and skipped rather than marked.
+
+set -euo pipefail
+
+HOLD_LIST=/usr/share/t715-omarchy/omarchy-migrations.hold
+MIGRATIONS_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/migrations"
+STATE_DIR="${OMARCHY_MIGRATION_STATE:-$HOME/.local/state/omarchy/migrations}"
+
+[[ -r $HOLD_LIST ]] || {
+  echo "$0: no hold list at $HOLD_LIST" >&2
+  exit 1
+}
+[[ -d $MIGRATIONS_DIR ]] || {
+  echo "$0: no Omarchy migrations at $MIGRATIONS_DIR" >&2
+  exit 1
+}
+
+held=0
+while IFS= read -r line || [[ -n $line ]]; do
+  # Strip a trailing ` # reason` comment and surrounding whitespace.
+  name=${line%%#*}
+  name=${name//[[:space:]]/}
+  [[ -n $name ]] || continue
+
+  if [[ ! -f $MIGRATIONS_DIR/$name ]]; then
+    echo "skip  $name (not shipped by this Omarchy)"
+    continue
+  fi
+
+  mkdir -p "$STATE_DIR"
+  if [[ -e $STATE_DIR/$name ]]; then
+    echo "held  $name (already held)"
+  else
+    touch "$STATE_DIR/$name"
+    echo "held  $name"
+  fi
+  held=$((held + 1))
+done <"$HOLD_LIST"
+
+echo "$0: $held migration(s) from $HOLD_LIST are held"

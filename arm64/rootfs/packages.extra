@@ -1,0 +1,45 @@
+# Packages added to Omarchy's list for the SM-T715 (aarch64), one per line,
+# "name  # why". A line is MANDATORY (the build fails when pacman cannot
+# install it) unless the name starts with '?': best-effort packages are
+# skipped when unavailable on aarch64 and listed in the MANIFEST.
+# Adapted from omarchy-tab-s2/image/rootfs/packages.extra: every
+# name of that list exists in the aarch64 repositories (out/package-audit.tsv);
+# the modem, GPS and Waydroid entries are left out until their kernel side
+# exists on arm64.
+
+# --- Memory ---
+zram-generator          # compressed swap in RAM (/etc/systemd/zram-generator.conf)
+
+# --- Display and input ---
+mesa                    # panfrost (Mali-T760) and the exynos kmsro loader
+squeekboard             # on-screen keyboard for a touch-only device (touch layer P1)
+hypridle                # idle timer: screen off after 2 min through t715-keys (t715-idle.service)
+
+# --- Audio ---
+pipewire-audio          # PipeWire's BlueZ SPA plugin (spa-0.2/bluez5): Bluetooth audio
+pipewire-pulse          # the PulseAudio server on PipeWire
+rtkit                   # realtime priority for PipeWire
+
+# --- Camera (omacam): not yet: it needs the t715-camera kernel driver on arm64 ---
+# gstreamer gst-plugins-base gst-plugins-good gst-plugins-ugly gst-plugin-pipewire
+
+# --- Console tools: usbutils, htop, vim, iw and wireless-regdb are in packages.base ---
+
+# --- Diagnostics (GPU and power checks over ssh) ---
+glmark2                  # reproducible GLES load with --validate
+mesa-utils               # eglinfo, es2_info
+i2c-tools                # i2cget: read-only PMIC checks
+busybox                  # devmem: read-only SoC register checks
+
+# --- Best effort ---
+iio-sensor-proxy         # the accelerometer's orientation, for t715-rotate
+?firefox                 # next to Chromium, Omarchy's default browser
+
+# --- Apps of omamobile-apps, left out with it ---
+gnome-calculator
+gnome-clocks
+loupe                    # image viewer: screenshots
+
+# --- Tiles and audio clients ---
+wf-recorder              # the Screen record tile (omamobile-screenrecord)
+pipewire-alsa            # ALSA-only clients go through PipeWire

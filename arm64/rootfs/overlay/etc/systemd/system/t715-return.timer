@@ -1,0 +1,26 @@
+# Galaxy Tab S2 (SM-T715), arm64: the way back during the bring-up.
+#
+# t715.return=MIN on the kernel command line: MIN minutes after the boot,
+# t715-return.service reboots the tablet unless /run/t715-stay exists then
+# (touch /run/t715-stay to keep this boot; it is in RAM: the next boot
+# returns again). With t715.kbootmark=0 the boot was never marked, so the
+# loader hands that reboot back to S-Boot: the arm32 system in BOOT. A
+# half-working arm64 system cannot keep the owner out longer than MIN.
+#
+# Without the knob nothing happens: this timer is enabled only by
+# /etc/systemd/system-generators/t715-return-generator, at each boot, when
+# the command line has t715.return (it also writes MIN into a drop-in,
+# t715-return.timer.d/50-t715-return-cmdline.conf, in the generator's
+# directory). MIN is a whole number of minutes, 1 to 1440; a knob that says
+# anything else keeps the 10 minutes below (fail safe: the knob was meant).
+# The condition is a second guard: started by hand without the knob, the
+# timer does not start.
+[Unit]
+Description=Galaxy Tab S2: return to the arm32 system after t715.return=MIN minutes
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+ConditionKernelCommandLine=t715.return
+
+[Timer]
+OnBootSec=10min
+AccuracySec=1s
+Unit=t715-return.service

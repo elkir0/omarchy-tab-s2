@@ -1,0 +1,399 @@
+SM-T715 tablet: the Mobile data tile back, through NetworkManager.
+
+The modem runs on arm64 now (t715-modem: shannond serves ModemManager, so
+NetworkManager sees it), so the tile is back in the catalogue and the default
+layout (after Bluetooth, as on the 0.2.94 build), driven through
+NetworkManager's gsm connection (t715-mobile) instead of the Pixel's
+omamobile-sit: tile-state.sh probes nmcli, tile-action.sh brings the
+connection up or down. The tile's signal bars (TilesModel.dataIcon) come from
+tile-state.sh's data_signal and the technology from data_status, both read
+from shannond's `shannonctl status` -- the same answers its ModemManager
+facade gives; data=none without a gsm device or connection. Every nmcli probe
+this patch adds runs with LC_ALL=C (the session is French, where nmcli says
+"activé"; the hotspot probe upstream already had matches only the
+connection's name, which nmcli does not localize). test/tile-scripts.sh and
+test/tiles-model.js follow. Ported from
+the armv7h series' 0004-tablet-modem (omamobile-shell 0.2.94). Against
+omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0009; 0.2.147's
+data probe still reads omamobile-sit's state file plus its modem-refused
+marker and modem switch (Pixel pieces), which this replaces.
+
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -12,18 +12,20 @@
+ var VERSION = 1
+ 
+ // Every tile the sheet knows, in the order the "available" list shows them.
+-// SM-T715 tablet, arm64 image (pkg/omamobile-shell): no mobile data, torch,
+-// location or NFC (the modem has no arm64 driver yet, and GNSS, the flash LED
+-// and NFC are not driven), and no fingerprint sensor. Hotspot stays under
+-// "Add tiles" (the Wi-Fi client link drops while it runs). Rotation is the
+-// rotation lock over omamobile-autorotate.service, which the image's
+-// t715-rotate drives (docs/image/ROTATION.md of the owner's repository), and
+-// Rotate a quarter turn by hand through t715-rotate. SD card is the microSD
+-// slot's mount, t715-sdcard (udiskie mounts a card that goes in; the tile
+-// shows and changes the state).
++// SM-T715 tablet, arm64 image (pkg/omamobile-shell): no torch, location or
++// NFC (GNSS, the flash LED and NFC are not driven), and no fingerprint
++// sensor. Mobile data is back through NetworkManager's gsm connection (the
++// modem runs on arm64 now, patch 0010: shannond serves ModemManager). Hotspot
++// stays under "Add tiles" (the Wi-Fi client link drops while it runs).
++// Rotation is the rotation lock over omamobile-autorotate.service, which the
++// image's t715-rotate drives (docs/image/ROTATION.md of the owner's
++// repository), and Rotate a quarter turn by hand through t715-rotate. SD card
++// is the microSD slot's mount, t715-sdcard (udiskie mounts a card that goes
++// in; the tile shows and changes the state).
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
++  { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
+   { id: "sdcard", label: "SD card" },
+   { id: "hotspot", label: "Hotspot" },
+@@ -49,10 +51,10 @@
+ // SM-T715 tablet: the tablet's own tiles only. Stay awake, Microphone,
+ // Hotspot, Screen record and Dictation stay under "Add tiles".
+ var DEFAULT_LAYOUT = [
+-  "wifi", "bluetooth", "dnd", "airplane",
+-  "rotation-lock", "rotate", "battery-saver", "dark-theme",
+-  "night-light", "keyboard", "clipboard", "screenshot",
+-  "sdcard"
++  "wifi", "bluetooth", "mobile-data", "dnd",
++  "airplane", "rotation-lock", "rotate", "battery-saver",
++  "dark-theme", "night-light", "keyboard", "clipboard",
++  "screenshot", "sdcard"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -107,7 +107,12 @@
+     if [ "$want" = on ]; then exec t715-sdcard mount; else exec t715-sdcard eject; fi
+     ;;
+   mobile-data)
+-    exec omamobile-sit data "$want"
++    # SM-T715: the first gsm connection (t715-mobile), through NetworkManager;
++    # omamobile-sit is the Pixel's modem daemon. LC_ALL=C: the session runs
++    # in French, and nmcli's text output is localized.
++    con=$(LC_ALL=C nmcli -t -f NAME,TYPE connection show | awk -F: '$2 == "gsm" { print $1; exit }')
++    [ -n "$con" ] || exit 1
++    if [ "$want" = on ]; then exec nmcli -w 150 connection up "$con"; else exec nmcli connection down "$con"; fi
+     ;;
+   dictation)
+     # The voice bar (omamobile.voice), the same bar as the bottom bar's mic:
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -15,19 +15,10 @@
+ #   nightlight    on while hyprsunset runs warmer than identity
+ #   stayawake     on while Omarchy's stay-awake indicator exists
+ #   record        on while omamobile-screenrecord (wf-recorder) records
+-#   data          on while omamobile-sit-data.service is active; none
+-#                 without omamobile-sitd running
+-#   data_status   the operator's name (never a bare network code) and the
+-#                 technology when registered, else "No signal"; with no
+-#                 modem, the one line omamobile-modem-start left in
+-#                 /run/omamobile/modem-refused when it refused to start
+-#                 the modem this boot (a stale marker from a hang, a phone
+-#                 not yet provisioned), so the tile can say why
++#   data          SM-T715: on while NetworkManager's gsm connection is up;
++#                 none without a gsm device and connection
++#   data_status   the technology, when registered
+ #   data_signal   the signal, 0-100, while registered; -1 otherwise
+-#   data_switch   off when the modem's switch (omamobile-modem-switch, the
+-#                 Mobile network page) has the modem off for this boot: the
+-#                 tile stays dimmed but keeps its chevron, so the page that
+-#                 turns it back on can be reached; absent otherwise
+ #   sdcard        SM-T715: the microSD slot (t715-sdcard): on while the card
+ #                 is mounted, off with a card in and not mounted or with no
+ #                 card; no line without the command, or on a kernel without
+@@ -143,58 +134,42 @@
+   echo "dictation=none"
+ fi
+ 
+-# data: the daemon's public state is world-readable; the bearer service's
+-# state is what "data on|off" switches.
+-# The status names the operator only by name: sitd's "operator" falls back
+-# to the numeric network code, which reads as noise, so a bare code is left
+-# out and the technology stands alone.
+-state=${OMAMOBILE_SIT_STATE:-/run/omamobile-sit/state.json}
+-if have omamobile-sit && [ -r "$state" ] && have python3; then
+-  if systemctl is-active --quiet omamobile-sit-data.service 2>/dev/null; then echo "data=on"; else echo "data=off"; fi
+-  python3 -I -c '
++# data: the NetworkManager gsm connection on the modem (SM-T715: the modem is
++# served by shannond's ModemManager facade, not omamobile-sit). None without a
++# gsm device or connection. LC_ALL=C on every nmcli probe: the session runs in
++# French, and nmcli's text output is localized.
++if have nmcli && [ -n "$(LC_ALL=C t nmcli -t -f TYPE device | grep -x gsm)" ] &&
++   [ -n "$(LC_ALL=C t nmcli -t -f TYPE connection show | grep -x gsm)" ]; then
++  if [ -n "$(LC_ALL=C t nmcli -t -f TYPE connection show --active | grep -x gsm)" ]; then
++    echo "data=on"
++  else
++    echo "data=off"
++  fi
++  # The tile's signal bars (TilesModel.dataIcon) and the technology, from
++  # shannond: the same answers its ModemManager facade gives.
++  if have shannonctl && have python3; then
++    t shannonctl status | python3 -I -c '
+ import json, sys
+ try:
+-    m = json.load(open(sys.argv[1])).get("modem") or {}
+-except (OSError, ValueError):
++    s = json.load(sys.stdin)
++    reg, sig = s["reg"], s["signal"]
++except (KeyError, TypeError, ValueError):
+     sys.exit(0)
+-if not isinstance(m, dict):
++if not isinstance(reg, dict) or not isinstance(sig, dict):
+     sys.exit(0)
+-if m.get("state") != "registered":
++registered = "home" in (reg.get("cs"), reg.get("ps")) or "roaming" in (reg.get("cs"), reg.get("ps"))
++if not registered:
+     print("data_signal=-1")
+-    print("data_status=No signal")
+     sys.exit(0)
+ try:
+-    signal = max(0, min(100, int(m.get("signal") or 0)))
++    print("data_signal=%d" % max(0, min(100, int(sig.get("percent") or 0))))
+ except (TypeError, ValueError):
+-    signal = 0
+-print("data_signal=%d" % signal)
+-name = str(m.get("operator_name", m.get("operator")) or "").strip()
+-if name.replace(" ", "").isdigit():
+-    name = ""
+-words = [w for w in (name, str(m.get("tech") or "").strip()) if w]
+-print("data_status=" + " ".join(words))
+-' "$state"
++    print("data_signal=0")
++tech = {"lte": "LTE", "umts": "3G", "gsm": "2G"}.get(reg.get("rat"))
++if tech:
++    print("data_status=" + tech)
++'
++  fi
+ else
+   echo "data=none"
+-  refused=${OMAMOBILE_MODEM_REFUSED:-/run/omamobile/modem-refused}
+-  why=
+-  if [ -r "$refused" ]; then
+-    why=$(head -n1 "$refused" 2>/dev/null | head -c 48)
+-  fi
+-  # A modem the owner switched off is not "no modem": its page has the
+-  # switch that turns it back on, so the tile keeps its chevron.
+-  switch=${OMAMOBILE_MODEM_SWITCH:-/usr/lib/omamobile-vendor/omamobile-modem-switch}
+-  if [ -x "$switch" ] && have python3 &&
+-     "$switch" status 2>/dev/null | python3 -I -c '
+-import json, sys
+-try:
+-    s = json.load(sys.stdin)
+-except ValueError:
+-    sys.exit(1)
+-sys.exit(0 if isinstance(s, dict) and s.get("available") and not s.get("running") else 1)
+-'; then
+-    echo "data_switch=off"
+-    [ -n "$why" ] || why="Modem off"
+-  fi
+-  if [ -n "$why" ]; then echo "data_status=$why"; fi
+ fi
+diff --git a/test/tile-scripts.sh b/test/tile-scripts.sh
+--- a/test/tile-scripts.sh
++++ b/test/tile-scripts.sh
+@@ -30,13 +30,21 @@
+     awk -v t="$2" -v s="$new" '"'"'$1 == t { $2 = s } { print }'"'"' "$f" >"$f.new" && cat "$f.new" >"$f" ;;
+ esac'
+ # nmcli: logs; SM-T715 tablet build: `radio wifi|wwan [on|off]` keep their
+-# state in a file (airplane mode goes through NetworkManager for both).
++# state in a file (airplane mode goes through NetworkManager for both), and
++# the mobile data probes (patch 0010) read the gsm device, connection and
++# active lists from their own files.
+ stub nmcli 'echo "nmcli $*" >>'"$log"'
+ if [ "$1" = radio ]; then
+   f='"$tmp"'/state/radio-$2
+   case ${3:-} in on) echo enabled >"$f" ;; off) echo disabled >"$f" ;; *) cat "$f" 2>/dev/null || echo enabled ;; esac
+   exit 0
+ fi
++case " $* " in
++  *" -f TYPE device "*) cat '"$tmp"'/state/devices 2>/dev/null; exit 0 ;;
++  *" -f TYPE connection show --active "*) cat '"$tmp"'/state/active 2>/dev/null; exit 0 ;;
++  *" -f TYPE connection show "*) cat '"$tmp"'/state/conns 2>/dev/null; exit 0 ;;
++  *" -f NAME,TYPE connection show "*) cat '"$tmp"'/state/conns-nt 2>/dev/null; exit 0 ;;
++esac
+ [ "$1" = -t ] && cat '"$tmp"'/state/active 2>/dev/null; exit 0'
+ stub omarchy-notification-send 'echo "notify $*" >>'"$log"
+ stub powerprofilesctl 'echo balanced'
+@@ -46,7 +54,6 @@
+ stub hyprsunset 'exit 0'
+ stub omarchy-toggle-idle 'echo "idle $*" >>'"$log"
+ stub omarchy-powerprofiles-set 'echo "powerprofiles $*" >>'"$log"
+-stub omamobile-sit 'echo "sit $*" >>'"$log"
+ stub pgrep 'exit 1'
+ 
+ run() { env -i HOME="$tmp/home" XDG_RUNTIME_DIR="$tmp/run" PATH="$fake:$basic" sh "$@"; }
+@@ -95,89 +102,66 @@
+ 
+ run "$dir/tile-action.sh" battery-saver on
+ run "$dir/tile-action.sh" stay-awake off
++printf 't715-mobile:gsm\n' >"$tmp/state/conns-nt"
+ run "$dir/tile-action.sh" mobile-data on
+ run "$dir/tile-action.sh" hotspot on
+-for line in "powerprofiles autodetect power-saver" "idle allow-idle" "sit data on" \
++for line in "powerprofiles autodetect power-saver" "idle allow-idle" \
++            "nmcli -w 150 connection up t715-mobile" \
+             "nmcli device wifi hotspot con-name Hotspot"; do
+   grep -cxF "$line" "$log" >/dev/null || fail "tile-action.sh runs: $line"
+ done
++run "$dir/tile-action.sh" mobile-data off
++grep -cxF "nmcli connection down t715-mobile" "$log" >/dev/null || fail "tile-action.sh runs: nmcli connection down t715-mobile"
+ pass "tile-action.sh drives battery saver, stay awake, mobile data and hotspot"
+ 
+ if run "$dir/tile-action.sh" wifi on 2>/dev/null; then fail "unknown tiles are refused"; fi
+ if run "$dir/tile-action.sh" airplane maybe 2>/dev/null; then fail "only on and off are accepted"; fi
+ pass "tile-action.sh refuses unknown tiles and states"
+ 
+-# Mobile data: the signal and the status from sitd's public state. A bare
+-# network code never reaches the status; an operator name does.
++# Mobile data (SM-T715 tablet build, patch 0010): on/off from NetworkManager's
++# gsm connection, the signal bars and the technology from shannond's status
++# (shannonctl). No omamobile-sit on this device.
+ ln -sf "$(command -v python3)" "$basic/python3"
+-sit_state() { printf '%s\n' "$1" >"$tmp/state/sit.json"; env -i HOME="$tmp/home" XDG_RUNTIME_DIR="$tmp/run" \
+-  OMAMOBILE_SIT_STATE="$tmp/state/sit.json" PATH="$fake:$basic" sh "$dir/tile-state.sh"; }
++stub shannonctl 'cat '"$tmp"'/state/shannonctl 2>/dev/null'
+ expect() { # output line description
+   grep -cxF "$2" <<<"$1" >/dev/null || fail "$3 (got: $(tr '\n' ' ' <<<"$1"))"
+ }
+-out=$(sit_state '{"modem":{"state":"registered","tech":"LTE","operator":"00101","plmn":"00101","operator_name":"","signal":0}}')
+-expect "$out" "data=off" "mobile data is off while the bearer unit isn't active"
+-expect "$out" "data_status=LTE" "a numeric network code stays out of the status"
+-expect "$out" "data_signal=0" "registered with no reading is signal 0"
+-out=$(sit_state '{"modem":{"state":"registered","tech":"LTE","operator":"Example","plmn":"00101","operator_name":"Example","signal":72}}')
+-expect "$out" "data_status=Example LTE" "an operator name leads the status"
+-expect "$out" "data_signal=72" "the signal comes from sitd's state"
+-out=$(sit_state '{"modem":{"state":"registered","tech":"LTE","operator":"00101","signal":140}}')
+-expect "$out" "data_status=LTE" "an older sitd's code-only operator stays out too"
++printf 'gsm\n' >"$tmp/state/devices"
++printf 'gsm\n' >"$tmp/state/conns"
++: >"$tmp/state/active"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "data=off" "mobile data is off while the gsm connection is not up"
++printf 'gsm\n' >>"$tmp/state/active"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "data=on" "mobile data is on while the gsm connection is up"
++rm -f "$tmp/state/conns"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "data=none" "no gsm connection is no backend for the tile"
++printf 'gsm\n' >"$tmp/state/conns"
++rm -f "$tmp/state/devices"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "data=none" "no gsm device is no backend either"
++printf 'gsm\n' >"$tmp/state/devices"
++
++# The signal and the technology from shannond's status: registered on home or
++# roaming, the percent capped, the RAT named; unregistered is signal -1 with
++# no status, and an unreadable status prints nothing.
++status() { printf '%s\n' "$1" >"$tmp/state/shannonctl"; run "$dir/tile-state.sh"; }
++out=$(status '{"cp":"online","reg":{"cs":"home","ps":"home","rat":"lte"},"signal":{"percent":72,"rssi_dbm":-70}}')
++expect "$out" "data_signal=72" "the signal comes from shannond"
++expect "$out" "data_status=LTE" "the technology is named"
++out=$(status '{"cp":"online","reg":{"cs":"roaming","ps":"idle","rat":"umts"},"signal":{"percent":null}}')
++expect "$out" "data_signal=0" "a null percent reads as 0"
++expect "$out" "data_status=3G" "roaming counts as registered"
++out=$(status '{"cp":"online","reg":{"cs":"home","ps":"home","rat":"gsm"},"signal":{"percent":140}}')
+ expect "$out" "data_signal=100" "the signal is capped at 100"
+-out=$(sit_state '{"modem":{"state":"searching","tech":"","operator":"","signal":0}}')
+-expect "$out" "data_signal=-1" "no network is signal -1"
+-expect "$out" "data_status=No signal" "no network says so"
+-out=$(sit_state 'not json')
+-grep -c '^data' <<<"$out" | grep -cx 1 >/dev/null || fail "an unreadable state prints only data= (got: $(tr '\n' ' ' <<<"$out"))"
+-pass "tile-state.sh reports mobile data's signal and a status without network codes"
+-
+-# No modem: with no state file the tile has no backend (data=none), and the
+-# one line omamobile-modem-start leaves when it refuses to start the modem
+-# (/run/omamobile/modem-refused) becomes the status, cut to a tile's width;
+-# nothing else is printed without that file.
+-no_modem() { env -i HOME="$tmp/home" XDG_RUNTIME_DIR="$tmp/run" OMAMOBILE_SIT_STATE="$tmp/state/missing.json" \
+-  OMAMOBILE_MODEM_REFUSED="$tmp/state/refused" PATH="$fake:$basic" sh "$dir/tile-state.sh"; }
+-rm -f "$tmp/state/refused"
+-out=$(no_modem)
+-expect "$out" "data=none" "no sitd state is no modem"
+-[[ $(grep -c '^data_' <<<"$out") -eq 0 ]] || fail "no reason file: no data_status (got: $(tr '\n' ' ' <<<"$out"))"
+-printf 'Off after a hang or reset\nsecond line ignored\n' > "$tmp/state/refused"
+-out=$(no_modem)
+-expect "$out" "data=none" "a refused start is still no modem (the tile stays dimmed)"
+-expect "$out" "data_status=Off after a hang or reset" "the start script's reason is the status"
+-printf '%s\n' "$(printf 'x%.0s' $(seq 60))" > "$tmp/state/refused"
+-out=$(no_modem)
+-expect "$out" "data_status=$(printf 'x%.0s' $(seq 48))" "the reason is cut to 48 characters"
+-# The modem switched off for this boot on the Mobile network page: still
+-# no modem for the tile, but data_switch=off keeps the chevron to the page
+-# that turns it back on, and the status says so. A switch that reports the
+-# modem running, not available, or nothing readable adds nothing.
+-rm -f "$tmp/state/refused"
+-mkdir -p "$tmp/switch"
+-switch_says() { printf '#!/bin/sh\necho %s\n' "'$1'" > "$tmp/switch/omamobile-modem-switch"; chmod +x "$tmp/switch/omamobile-modem-switch"; }
+-switched() { env -i HOME="$tmp/home" XDG_RUNTIME_DIR="$tmp/run" OMAMOBILE_SIT_STATE="$tmp/state/missing.json" \
+-  OMAMOBILE_MODEM_REFUSED="$tmp/state/refused" OMAMOBILE_MODEM_SWITCH="$tmp/switch/omamobile-modem-switch" \
+-  PATH="$fake:$basic" sh "$dir/tile-state.sh"; }
+-switch_says '{"available": true, "enabled": false, "running": false, "started": false}'
+-out=$(switched)
+-expect "$out" "data=none" "a modem switched off is still no modem for the tile"
+-expect "$out" "data_switch=off" "a modem switched off keeps the page's chevron"
+-expect "$out" "data_status=Modem off" "a modem switched off says so"
+-printf 'Off after a hang or reset\n' > "$tmp/state/refused"
+-out=$(switched)
+-expect "$out" "data_status=Off after a hang or reset" "a refused start's reason wins over the switch's"
+-rm -f "$tmp/state/refused"
+-for says in '{"available": true, "running": true}' '{"available": false, "running": false}' 'not json'; do
+-  switch_says "$says"
+-  out=$(switched)
+-  [[ $(grep -c '^data_' <<<"$out") -eq 0 ]] || fail "the switch saying $says adds nothing (got: $(tr '\n' ' ' <<<"$out"))"
+-done
+-: > "$tmp/state/refused"
+-out=$(no_modem)
+-[[ $(grep -c '^data_' <<<"$out") -eq 0 ]] || fail "an empty reason file prints no status (got: $(tr '\n' ' ' <<<"$out"))"
+-rm -f "$tmp/state/refused"
+-pass "tile-state.sh shows why the modem didn't start when there is no modem"
++expect "$out" "data_status=2G" "GSM names 2G"
++out=$(status '{"cp":"online","reg":{"cs":"searching","ps":"searching","rat":null},"signal":{"percent":10}}')
++expect "$out" "data_signal=-1" "unregistered is signal -1"
++[[ $(grep -c '^data_status' <<<"$out") -eq 0 ]] || fail "unregistered prints no technology (got: $(tr '\n' ' ' <<<"$out"))"
++out=$(status 'not json')
++[[ $(grep -c '^data_signal' <<<"$out") -eq 0 ]] || fail "an unreadable status prints no signal (got: $(tr '\n' ' ' <<<"$out"))"
++pass "tile-state.sh reports mobile data from NetworkManager and shannond"
+ 
+ # Dictation: voxtype is an optional install, so no voxtype is "none", a
+ # stopped user service "down" (whatever its stale state file says), and the
+diff --git a/test/tiles-model.js b/test/tiles-model.js
+--- a/test/tiles-model.js
++++ b/test/tiles-model.js
+@@ -23,21 +23,21 @@
+ })
+ 
+ // SM-T715 tablet: the default is the tablet's own (patch
+-// 0001-tablet-quick-settings-tiles), and the phone's tiles are not even in
+-// the catalog.
++// 0001-tablet-quick-settings-tiles; mobile data is back in 0010), and the
++// phone's other tiles are not even in the catalog.
+ test("the default keeps the tablet's tiles and leads with the most used", () => {
+-  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot", "sdcard"])
++  for (const id of ["wifi", "bluetooth", "mobile-data", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot", "sdcard"])
+     assert.ok(M.DEFAULT_LAYOUT.includes(id), id)
+-  assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "dnd", "airplane"])
+-  for (const id of ["mobile-data", "torch", "location", "nfc", "fingerprint"])
++  assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "mobile-data", "dnd"])
++  for (const id of ["torch", "location", "nfc", "fingerprint"])
+     assert.ok(!M.known(id), id)
+ })
+ 
+ test("Clipboard and Dictation close the default's second page, leaving the first as it was", () => {
+-  // the tablet's default fills one page and starts a second with Night
+-  // light, Keyboard, Clipboard, Screenshot and SD card
++  // the tablet's default fills one page and starts a second with Dark theme,
++  // Night light, Keyboard, Clipboard, Screenshot and SD card
+   assert.deepStrictEqual(M.pages(M.defaults())[0],
+-    ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme"])
++    ["wifi", "bluetooth", "mobile-data", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver"])
+   assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "sdcard")
+   assert.strictEqual(M.pages(M.defaults()).length, 2)
+   assert.strictEqual(M.label("clipboard"), "Clipboard")

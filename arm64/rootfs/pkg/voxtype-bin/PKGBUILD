@@ -1,0 +1,191 @@
+# voxtype-bin — Voxtype 1.3.1 built FROM SOURCE for ARMv8.0-A (aarch64).
+#
+# Why this package exists: Omarchy's stock `voxtype-bin` 1.3.1-1 repackages
+# upstream's release binaries, which are built for newer CPUs. On an ARMv8.0-A
+# tablet (Cortex-A53/A57, Samsung Exynos 5433: fp asimd aes pmull sha1 sha2
+# crc32 cpuid — no LSE atomics, no dotprod, no fp16, no RCpc, no SVE) every
+# one of those binaries dies immediately with SIGILL, e.g. on a `swpalb`
+# (ARMv8.1 LSE atomic) inlined by the build host's compiler. This PKGBUILD
+# rebuilds the exact upstream v1.3.1 sources with an ARMv8.0-A baseline so
+# the package replaces Omarchy's on that hardware while keeping the same
+# name, file layout and metadata (pkgname=voxtype-bin, provides/conflicts
+# voxtype) so Omarchy's own scripts work unchanged.
+#
+# How each binary is built for ARMv8.0-A:
+#   * Rust (voxtype, voxtype-osd, voxtype-osd-quickshell, voxtype-audio-bridge):
+#     built for the default host target aarch64-unknown-linux-gnu whose
+#     target-cpu is `generic` (= ARMv8.0-A). RUSTFLAGS is explicitly cleared so
+#     no `target-cpu=native` (or neoverse-n1, which upstream's
+#     Dockerfile.aarch64-cpu uses and which needs dotprod) can leak in; Arch
+#     ARM's makepkg.conf does not set RUSTFLAGS, but we unset it anyway.
+#   * whisper.cpp/ggml (statically linked into voxtype-cpu via the
+#     whisper-rs-sys crate): whisper-rs-sys 0.15.0 forwards every GGML_* env
+#     var as a cmake -D define, so GGML_NATIVE=OFF plus GGML_CPU_ARM_ARCH=armv8-a
+#     give `-march=armv8-a` and disable all host-CPU feature detection
+#     (dotprod/fp16/sve/i8mm) and -mcpu=native. (makepkg's CFLAGS already
+#     carry -march=armv8-a for the C/C++ parts.)
+#   * Everything else in these four binaries is pure Rust or linked against
+#     Arch ARM's own armv8-a baseline system libraries.
+#
+# Deliberately NOT shipped (optional in Omarchy's package): voxtype-onnx and
+# the voxtype-gguf-worker* binaries. They pull in ONNX Runtime prebuilt
+# binaries (ort's download-binaries) and transcribe.cpp's own ggml build, and
+# upstream's .cargo/config.toml only pins their ISA floor for x86 (AVX2);
+# getting a guaranteed ARMv8.0-A build there needs more work than the tablet
+# needs (its Whisper CPU engine is voxtype-cpu). The GTK4 OSD
+# (voxtype-osd-gtk4) is also left out (needs gtk4/gtk4-layer-shell at build
+# time); the dependency-free voxtype-osd launcher and the Quickshell
+# launcher (voxtype-osd-quickshell) ARE shipped.
+#
+# Maintainer: Omarchy tablet port
+
+pkgname=voxtype-bin
+pkgver=1.3.1
+pkgrel=1.1
+pkgdesc='Push-to-talk voice-to-text for Linux (built from source for ARMv8.0-A)'
+arch=('aarch64')
+url='https://voxtype.io'
+license=('MIT')
+provides=('voxtype')
+conflicts=('voxtype')
+depends=(
+    'alsa-lib'
+    'curl'
+    'gcc-libs'
+    'glibc'
+)
+optdepends=(
+    'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
+    'dotool: keyboard simulation with layout support (KDE/GNOME compatible)'
+    'ydotool: keyboard simulation fallback (X11/TTY support)'
+    'wl-clipboard: clipboard support'
+    'libnotify: desktop notifications'
+    'pipewire: audio server (recommended)'
+    'pipewire-alsa: ALSA compatibility for PipeWire (required if using PipeWire)'
+    'pulseaudio: audio server (alternative to PipeWire)'
+    'ollama: local AI summarization for meeting mode'
+    'gtk4-layer-shell: runtime for the GTK4 on-screen mic visualizer (voxtype-osd-gtk4)'
+    'quickshell: Quickshell-based OSD frontend (opt in via [osd] frontend = "quickshell")'
+)
+makedepends=(
+    'rust'        # provides cargo; rustc defaults to target-cpu=generic (ARMv8.0-A)
+    'clang'       # bindgen (whisper-rs-sys) needs libclang; also used as CC/CXX
+    'cmake'       # builds whisper.cpp inside whisper-rs-sys
+    'pkgconf'
+    'alsa-lib'    # cpal/alsa-sys headers
+    'git'         # cargo fetch of the [patch.crates-io] git dependency
+)
+backup=('etc/voxtype/config.toml')
+options=('!lto' '!debug')
+# This build rootfs's /etc/makepkg.conf defaults to PKGEXT='.pkg.tar.xz';
+# Arch packages (and verify.sh) expect .pkg.tar.zst. Set at the top level —
+# makepkg sources this file after its own config and reads $PKGEXT when it
+# creates the package archive.
+PKGEXT='.pkg.tar.zst'
+
+source=("voxtype-${pkgver}.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('ce3f99db8b716e8eed27bccdafb6441f051dd1d49885019c21ab2a9f144b5d2c')
+
+prepare() {
+    cd "voxtype-${pkgver}"
+    # The tarball has no .git, but do not let build.rs stamp a commit hash
+    # from any enclosing repo.
+    export GIT_CEILING_DIRECTORIES="$srcdir"
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    # Drop the trailing [patch.crates-io] git dependency (openvino-genai
+    # fork). It only serves the optional `openvino-whisper` feature, which
+    # this package does not build, and fetching that git repo pulls the
+    # multi-GB openvino submodules. Everything else stays pinned by the
+    # committed Cargo.lock.
+    sed -i '/^\[patch\.crates-io\]$/,$d' Cargo.toml
+    cargo fetch
+}
+
+build() {
+    cd "voxtype-${pkgver}"
+    export GIT_CEILING_DIRECTORIES="$srcdir"
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+    # --- ARMv8.0-A baseline -------------------------------------------------
+    # Rust: keep the default aarch64-unknown-linux-gnu target-cpu (generic =
+    # ARMv8.0-A). Never set target-cpu=native here: the build host (Apple
+    # Silicon, ARMv8.5+) would emit LSE/dotprod/fp16 code and the binaries
+    # would SIGILL on the Exynos 5433.
+    unset RUSTFLAGS
+    unset CARGO_BUILD_RUSTFLAGS
+    unset CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS
+    # whisper.cpp/ggml (via whisper-rs-sys, which forwards GGML_* env vars as
+    # cmake -D defines): no host-CPU detection, explicit armv8-a baseline.
+    export GGML_NATIVE=OFF
+    export GGML_CPU_ARM_ARCH=armv8-a
+    # makepkg's CFLAGS/CXXFLAGS already carry -march=armv8-a; the cmake crate
+    # passes them through to whisper.cpp as well.
+    # ------------------------------------------------------------------------
+
+    export CC=clang
+    export CXX=clang++
+    export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
+    # LTO/codegen-units=1 from upstream's release profile is slow for no ISA
+    # benefit; build faster like the AUR source package does.
+    export CARGO_PROFILE_RELEASE_LTO=false
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+
+    # CPU Whisper engine (voxtype-cpu) + the GUI-free helper binaries, all
+    # from the same source tree. The gguf features are the marker features
+    # upstream's own aarch64 CPU release builds with (GGUF client only).
+    # (Not --locked: prepare() removed the unused git patch above, so cargo
+    # prunes just that entry from Cargo.lock; all crate versions stay as
+    # locked upstream.)
+    cargo build --release \
+        --features gguf,cohere-gguf,parakeet-gguf \
+        --bin voxtype \
+        --bin voxtype-osd \
+        --bin voxtype-osd-quickshell \
+        --bin voxtype-audio-bridge
+}
+
+package() {
+    cd "voxtype-${pkgver}"
+
+    # --- ELF binaries (ARMv8.0-A) -------------------------------------------
+    install -Dm755 target/release/voxtype \
+        "$pkgdir/usr/lib/voxtype/voxtype-cpu"
+    install -Dm755 target/release/voxtype-osd \
+        "$pkgdir/usr/lib/voxtype/voxtype-osd"
+    install -Dm755 target/release/voxtype-osd-quickshell \
+        "$pkgdir/usr/lib/voxtype/voxtype-osd-quickshell"
+    install -Dm755 target/release/voxtype-audio-bridge \
+        "$pkgdir/usr/bin/voxtype-audio-bridge"
+    # /usr/bin/voxtype dispatches to the CPU engine (Omarchy's install script
+    # does the same on aarch64); ship the symlink directly.
+    ln -sf /usr/lib/voxtype/voxtype-cpu "$pkgdir/usr/bin/voxtype"
+    ln -sf /usr/lib/voxtype/voxtype-osd "$pkgdir/usr/bin/voxtype-osd"
+
+    # --- non-ELF files, all taken from the upstream v1.3.1 source tree ------
+    install -Dm644 config/default.toml "$pkgdir/etc/voxtype/config.toml"
+    install -Dm644 packaging/systemd/voxtype.service \
+        "$pkgdir/usr/lib/systemd/user/voxtype.service"
+    install -Dm755 packaging/scripts/voxtype-configure-launcher \
+        "$pkgdir/usr/bin/voxtype-configure-launcher"
+    install -Dm644 packaging/voxtype-configure.desktop \
+        "$pkgdir/usr/share/applications/voxtype-configure.desktop"
+    install -Dm644 packaging/completions/voxtype.bash \
+        "$pkgdir/usr/share/bash-completion/completions/voxtype"
+    install -Dm644 packaging/completions/voxtype.zsh \
+        "$pkgdir/usr/share/zsh/site-functions/_voxtype"
+    install -Dm644 packaging/completions/voxtype.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/voxtype.fish"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/${pkgname}/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/${pkgname}/LICENSE"
+
+    # Quickshell QML tree, OSD recipes and OSD style packages.
+    install -d "$pkgdir/usr/share/voxtype"
+    cp -r quickshell "$pkgdir/usr/share/voxtype/quickshell"
+    cp -r examples/osd-recipes "$pkgdir/usr/share/voxtype/osd-recipes"
+    cp -r examples/osd-packages "$pkgdir/usr/share/voxtype/osd"
+
+    # Omarchy settings plugin, staged into its packaged versioned layout by
+    # upstream's own script.
+    bash scripts/stage-omarchy-plugin.sh omarchy-plugin \
+        "$pkgdir/usr/share/voxtype/omarchy-plugin"
+}

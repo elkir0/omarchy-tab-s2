@@ -1,0 +1,52 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# omamobile-voice without the network: the model's source is pinned (a commit
+# and a sha256, never a moving branch), it lands where omamobile-setup-user
+# looks for it, and it is Whisper's multilingual base.
+# OMAMOBILE_VOICE_FETCH=1 also asks the server that the pinned file is still
+# the one the sha256 names (a HEAD request, no download).
+# SM-T715 tablet build (pkg-voice): upstream's test/all, adapted. The model
+# is ggml-base.bin, not base.en (the tablet's session is French), and the
+# checks against upstream's repository (its root image's package lists and
+# omamobile-shell's setup) are not carried: this directory stands alone,
+# and the tablet's omamobile-shell build checks its own side (its patch
+# 0014's test/setup-user.sh sets Voxtype up from ggml-base.bin).
+set -euo pipefail
+here=$(cd -- "$(dirname -- "$0")/.." && pwd)
+n=0
+ok() { n=$((n + 1)); echo "ok $n - $1"; }
+fail() { echo "not ok - $1" >&2; exit 1; }
+
+bash -n "$here/PKGBUILD" || fail "PKGBUILD parses"
+# shellcheck disable=SC1091
+eval "$(startdir=$here bash -c 'source "$startdir/PKGBUILD"
+  printf "pkgname=%q pkgver=%q pkgrel=%q commit=%q model=%q url0=%q sum0=%q\n" "$pkgname" "$pkgver" "$pkgrel" "$_commit" "$_model" "${source[0]}" "${sha256sums[0]}"
+  printf "deps=%q nsource=%q nsums=%q src1=%q\n" "${depends[*]:-}" "${#source[@]}" "${#sha256sums[@]}" "${source[1]}"')"
+[[ $pkgname == omamobile-voice && $pkgver == "$(cat "$here/version")" ]] || fail "name and version"
+[[ $pkgrel == 1.1 ]] || fail "the tablet's build of upstream's release (pkgrel 1.1)"
+ok "PKGBUILD parses, version from ./version, pkgrel $pkgrel"
+
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || fail "the source is pinned to a full commit, not a branch: $commit"
+[[ $commit == 5359861c739e955e79d9a303bcbc70fb988958b1 ]] || fail "the same whisper.cpp commit as upstream's base.en"
+[[ $url0 == "$model-$commit::https://huggingface.co/ggerganov/whisper.cpp/resolve/$commit/$model" ]] || fail "the model's URL names the pinned commit: $url0"
+[[ $sum0 =~ ^[0-9a-f]{64}$ ]] || fail "the model has a real sha256, not SKIP"
+[[ $model == ggml-base.bin ]] || fail "Whisper's multilingual base, for the tablet's French session (and English)"
+[[ $nsource == "$nsums" ]] || fail "one sha256sums entry per source entry"
+ok "the model is pinned: $model, commit ${commit:0:12}, sha256 ${sum0:0:12}"
+
+[[ " $deps " != *" voxtype-bin "* ]] || fail "voxtype-bin is not a hard dependency (Remove > Dictation must work)"
+ok "voxtype-bin is optional, so Omarchy's Remove > Dictation can remove it"
+
+grep -c 'pkgdir/usr/share/omamobile/voice/models/\$_model' "$here/PKGBUILD" >/dev/null || fail "installed to /usr/share/omamobile/voice/models"
+[[ $src1 == LICENSE.whisper && -f $here/LICENSE.whisper ]] || fail "Whisper's and whisper.cpp's licences ship"
+grep -c 'pkgdir/usr/share/licenses/\$pkgname/LICENSE.whisper' "$here/PKGBUILD" >/dev/null || fail "the licences are installed"
+grep -c "OpenAI's Whisper base (multilingual)" "$here/LICENSE.whisper" >/dev/null || fail "LICENSE.whisper names the model it ships"
+[[ $(grep -c '^MIT License$' "$here/LICENSE.whisper") == 1 && $(grep -c '^Copyright (c)' "$here/LICENSE.whisper") == 2 ]] ||
+  fail "both copyright notices and the MIT text"
+ok "installed to /usr/share/omamobile/voice/models, with LICENSE.whisper"
+
+if [[ ${OMAMOBILE_VOICE_FETCH:-0} == 1 ]]; then
+  etag=$(curl -sfIL "${url0#*::}" | tr -d '\r' | sed -n 's/^x-linked-etag: "\(.*\)"$/\1/Ip' | sed -n 1p)
+  [[ $etag == "$sum0" ]] || fail "the server's file is the pinned sha256 (got: ${etag:-nothing})"
+  ok "the server's file matches the pinned sha256"
+fi

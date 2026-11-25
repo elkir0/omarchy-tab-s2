@@ -1,0 +1,1138 @@
+#!/usr/bin/env bash
+# t715-arm64-health — read-only on-device health check for the SM-T715
+# (Samsung Galaxy Tab S2 8.0 LTE, Exynos 5433) arm64 Linux 6.12 system.
+#
+# Usage:
+#   t715-arm64-health [--json] [--only NAME[,NAME...]]
+#
+# Environment overrides for off-device testing:
+#   T715_ROOT   Prefix for /sys, /proc, /dev paths (default: empty).
+#   T715_BIN    Directory prepended to PATH for stub commands.
+#
+# Exit status: 0 if no check returns FAIL, 1 if any check returns FAIL,
+#              2 on usage error.
+
+set -u
+
+T715_ROOT="${T715_ROOT:-}"
+T715_ROOT="${T715_ROOT%/}"
+
+if [ -n "${T715_BIN:-}" ]; then
+    PATH="${T715_BIN}:${PATH}"
+    export PATH
+fi
+
+# External commands (overridable via T715_BIN or T715_CMD_* variables).
+CMD_UNAME="${T715_CMD_UNAME:-uname}"
+CMD_SYSTEMCTL="${T715_CMD_SYSTEMCTL:-systemctl}"
+CMD_JOURNALCTL="${T715_CMD_JOURNALCTL:-journalctl}"
+CMD_DMESG="${T715_CMD_DMESG:-dmesg}"
+CMD_IW="${T715_CMD_IW:-iw}"
+CMD_IP="${T715_CMD_IP:-ip}"
+CMD_FINDMNT="${T715_CMD_FINDMNT:-findmnt}"
+CMD_DF="${T715_CMD_DF:-df}"
+CMD_PGREP="${T715_CMD_PGREP:-pgrep}"
+
+ALL_CHECKS=(
+    kernel
+    cpus
+    cpufreq
+    thermal
+    rails
+    display
+    gpu
+    touch
+    keys
+    wifi
+    bluetooth
+    modem
+    audio
+    sensors
+    battery
+    usbnet
+    storage
+    watchdog
+    kboot-mark
+    kernel-log
+    systemd
+    session
+    pstore
+)
+
+JSON_MODE=0
+ONLY_LIST=()
+
+CHECK_NAMES=()
+CHECK_RESULTS=()
+CHECK_DETAILS=()
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+usage() {
+    cat <<'EOF'
+Usage: t715-arm64-health [--json] [--only NAME[,NAME...]]
+
+Read-only hardware and system health check for SM-T715 arm64.
+
+Options:
+  --json                 Print results as a single JSON object.
+  --only NAME[,NAME...]  Run only the comma-separated list of checks.
+  -h, --help             Show this help message.
+EOF
+}
+
+is_known_check() {
+    local want="$1" c
+    for c in "${ALL_CHECKS[@]}"; do
+        [ "$c" = "$want" ] && return 0
+    done
+    return 1
+}
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+read_line() {
+    local path="$1" val=""
+    [ -r "$path" ] || return 1
+    IFS= read -r val < "$path" || [ -n "$val" ] || return 1
+    printf '%s' "$val"
+}
+
+is_uint() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+is_int() {
+    case "${1:-}" in
+        ''|'-') return 1 ;;
+        -*) is_uint "${1#-}" ;;
+        *) is_uint "$1" ;;
+    esac
+}
+
+norm_ws() {
+    printf '%s' "$1" | tr '\r\n\t' '   ' | awk '{$1=$1; print}'
+}
+
+json_escape() {
+    printf '%s' "$1" | tr '\000-\010\013\014\016-\037' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g'
+}
+
+record_result() {
+    local name="$1" res="$2" detail="$3"
+    detail="$(norm_ws "$detail")"
+    CHECK_NAMES+=("$name")
+    CHECK_RESULTS+=("$res")
+    CHECK_DETAILS+=("$detail")
+    case "$res" in
+        PASS) PASS_COUNT=$((PASS_COUNT + 1)) ;;
+        WARN) WARN_COUNT=$((WARN_COUNT + 1)) ;;
+        FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    esac
+    if [ "$JSON_MODE" -eq 0 ]; then
+        printf '%s %s: %s\n' "$res" "$name" "$detail"
+    fi
+}
+
+# Extract a single key=value knob from /proc/cmdline without ever printing
+# the rest of the command line (which contains the device serial number).
+cmdline_knob() {
+    local key="$1" file="${T715_ROOT}/proc/cmdline"
+    [ -r "$file" ] || return 1
+    awk -v k="$key" '{
+        for (i = 1; i <= NF; i++) {
+            if (index($i, k "=") == 1) {
+                print substr($i, length(k) + 2)
+                exit 0
+            }
+        }
+        exit 1
+    }' "$file" 2>/dev/null
+}
+
+# =========================================================================
+# Checks
+# =========================================================================
+
+check_kernel() {
+    if ! has_cmd "$CMD_UNAME"; then
+        record_result "kernel" "WARN" "uname missing"
+        return 0
+    fi
+    local arch rel
+    arch="$("$CMD_UNAME" -m 2>/dev/null || true)"
+    rel="$("$CMD_UNAME" -r 2>/dev/null || true)"
+    if [ "$arch" = "aarch64" ]; then
+        record_result "kernel" "PASS" "aarch64 ${rel:-unknown}"
+    else
+        record_result "kernel" "FAIL" "arch=${arch:-unknown} (expected aarch64), release=${rel:-unknown}"
+    fi
+}
+
+check_cpus() {
+    local online_file="${T715_ROOT}/sys/devices/system/cpu/online"
+    local cpuinfo="${T715_ROOT}/proc/cpuinfo"
+    local online a53 a57 counts reasons=""
+
+    if ! online="$(read_line "$online_file")"; then
+        record_result "cpus" "FAIL" "cannot read /sys/devices/system/cpu/online"
+        return 0
+    fi
+    if [ ! -r "$cpuinfo" ]; then
+        record_result "cpus" "FAIL" "online=${online}, cannot read /proc/cpuinfo"
+        return 0
+    fi
+
+    counts="$(awk -F: '
+        tolower($1) ~ /^[[:space:]]*cpu part[[:space:]]*$/ {
+            v = tolower($2)
+            gsub(/[[:space:]]/, "", v)
+            sub(/^0x0*/, "0x", v)
+            if (v == "0xd03") a53++
+            else if (v == "0xd07") a57++
+        }
+        END { printf "%d %d\n", a53 + 0, a57 + 0 }
+    ' "$cpuinfo" 2>/dev/null)"
+    a53="${counts%% *}"
+    a57="${counts#* }"
+
+    [ "$online" = "0-7" ] || reasons="${reasons}online=${online} (want 0-7); "
+    [ "$a53" -eq 4 ] || reasons="${reasons}Cortex-A53=${a53} (want 4); "
+    [ "$a57" -eq 4 ] || reasons="${reasons}Cortex-A57=${a57} (want 4); "
+
+    if [ -z "$reasons" ]; then
+        record_result "cpus" "PASS" "online=0-7, 4x Cortex-A53 (0xd03), 4x Cortex-A57 (0xd07)"
+    else
+        record_result "cpus" "FAIL" "${reasons%; }"
+    fi
+}
+
+check_cpufreq() {
+    local base="${T715_ROOT}/sys/devices/system/cpu/cpufreq"
+    local p want_cpus want_range dir cpus drv gov cur mn smx cmx
+    local reasons="" summary=""
+
+    for p in policy0 policy4; do
+        if [ "$p" = "policy0" ]; then
+            want_cpus="0 1 2 3"
+            want_range="0-3"
+        else
+            want_cpus="4 5 6 7"
+            want_range="4-7"
+        fi
+        dir="${base}/${p}"
+        if [ ! -d "$dir" ]; then
+            reasons="${reasons}${p} missing; "
+            continue
+        fi
+
+        cpus="$(read_line "${dir}/related_cpus" || read_line "${dir}/affected_cpus" || true)"
+        cpus="$(norm_ws "$cpus")"
+        drv="$(read_line "${dir}/scaling_driver" || true)"
+        gov="$(read_line "${dir}/scaling_governor" || true)"
+        cur="$(read_line "${dir}/scaling_cur_freq" || read_line "${dir}/cpuinfo_cur_freq" || true)"
+        mn="$(read_line "${dir}/scaling_min_freq" || read_line "${dir}/cpuinfo_min_freq" || true)"
+        smx="$(read_line "${dir}/scaling_max_freq" || true)"
+        cmx="$(read_line "${dir}/cpuinfo_max_freq" || true)"
+
+        summary="${summary}${p}(drv=${drv:-?} gov=${gov:-?} cur=${cur:-?} min=${mn:-?} max=${smx:-?}/${cmx:-?}) "
+
+        if [ "$cpus" != "$want_cpus" ] && [ "$cpus" != "$want_range" ]; then
+            reasons="${reasons}${p} cpus='${cpus:-?}' (want '${want_cpus}'); "
+        fi
+        if [ "$drv" != "cpufreq-dt" ]; then
+            reasons="${reasons}${p} driver='${drv:-?}' (want cpufreq-dt); "
+        fi
+        if ! is_uint "$smx"; then
+            reasons="${reasons}${p} scaling_max_freq unreadable; "
+        elif [ "$smx" -gt 1200000 ]; then
+            reasons="${reasons}${p} scaling_max_freq=${smx} > 1200000; "
+        fi
+        if ! is_uint "$cmx"; then
+            reasons="${reasons}${p} cpuinfo_max_freq unreadable; "
+        elif [ "$cmx" -gt 1200000 ]; then
+            reasons="${reasons}${p} cpuinfo_max_freq=${cmx} > 1200000; "
+        fi
+    done
+
+    if [ -z "$reasons" ]; then
+        record_result "cpufreq" "PASS" "${summary% }"
+    else
+        record_result "cpufreq" "FAIL" "${reasons%; } | ${summary% }"
+    fi
+}
+
+check_thermal() {
+    local tdir="${T715_ROOT}/sys/class/thermal"
+    local req_zone z zn ztype temp temp_c
+    local tp_file tp_type tp_idx cdev cbase ctp ctype bound
+    local passive_count bound_count unbound_list
+    local status="PASS" detail="" issues="" notes=""
+
+    for req_zone in atlas0-thermal atlas1-thermal apollo-thermal; do
+        zn=""
+        for z in "${tdir}"/thermal_zone*; do
+            [ -d "$z" ] || continue
+            ztype="$(read_line "${z}/type" || true)"
+            if [ "$ztype" = "$req_zone" ]; then
+                zn="$z"
+                break
+            fi
+        done
+
+        if [ -z "$zn" ]; then
+            status="FAIL"
+            issues="${issues}${req_zone} missing; "
+            continue
+        fi
+
+        temp="$(read_line "${zn}/temp" || true)"
+        if ! is_int "$temp"; then
+            status="FAIL"
+            issues="${issues}${req_zone} temp unreadable; "
+            continue
+        fi
+
+        temp_c="$(awk -v t="$temp" 'BEGIN { printf "%.1fC", t / 1000.0 }')"
+        detail="${detail}${req_zone}=${temp_c} "
+
+        if [ "$temp" -gt 95000 ]; then
+            status="FAIL"
+            issues="${issues}${req_zone} ${temp_c} > 95C; "
+        elif [ "$temp" -gt 80000 ]; then
+            [ "$status" = "FAIL" ] || status="WARN"
+            issues="${issues}${req_zone} ${temp_c} > 80C; "
+        fi
+
+        passive_count=0
+        bound_count=0
+        unbound_list=""
+        for tp_file in "${zn}"/trip_point_*_type; do
+            [ -r "$tp_file" ] || continue
+            tp_type="$(read_line "$tp_file" || true)"
+            [ "$tp_type" = "passive" ] || continue
+            passive_count=$((passive_count + 1))
+            tp_idx="${tp_file##*/trip_point_}"
+            tp_idx="${tp_idx%_type}"
+
+            bound=0
+            for cdev in "${zn}"/cdev*; do
+                [ -e "$cdev" ] || continue
+                cbase="${cdev##*/}"
+                case "$cbase" in
+                    cdev[0-9]|cdev[0-9][0-9]|cdev[0-9][0-9][0-9]) ;;
+                    *) continue ;;
+                esac
+                ctp="$(read_line "${zn}/${cbase}_trip_point" || true)"
+                [ "$ctp" = "$tp_idx" ] || continue
+                ctype="$(read_line "${cdev}/type" || true)"
+                case "$ctype" in
+                    cpufreq-cpu*)
+                        bound=1
+                        break
+                        ;;
+                esac
+            done
+
+            if [ "$bound" -eq 0 ]; then
+                unbound_list="${unbound_list}${tp_idx},"
+            else
+                bound_count=$((bound_count + 1))
+            fi
+        done
+
+        # A passive trip without a cpufreq map can be on purpose: stage 1 deletes the A57
+        # 1.2 GHz map (the cap makes it moot), which leaves atlas' 81 C trip unbound. What must
+        # hold is that each zone has at least one passive trip that throttles.
+        if [ "$passive_count" -eq 0 ]; then
+            status="FAIL"
+            issues="${issues}${req_zone} no passive trips; "
+        elif [ "$bound_count" -eq 0 ]; then
+            status="FAIL"
+            issues="${issues}${req_zone} no passive trip bound to cpufreq-cpu*; "
+        elif [ -n "$unbound_list" ]; then
+            notes="${notes}${req_zone} passive trip(s) ${unbound_list%,} without a map; "
+        fi
+    done
+
+    if [ -n "$issues" ]; then
+        record_result "thermal" "$status" "${detail}${issues%; }"
+    elif [ -n "$notes" ]; then
+        record_result "thermal" "$status" "${detail% } (each zone has a passive trip bound to cpufreq-cpu*; ${notes%; })"
+    else
+        record_result "thermal" "$status" "${detail% } (passive trips bound to cpufreq-cpu*)"
+    fi
+}
+
+check_rails() {
+    local rdir="${T715_ROOT}/sys/class/regulator"
+    local want reg rname uv found_str="" missing=""
+
+    for want in vdd_kfc vdd_eagle; do
+        uv=""
+        for reg in "${rdir}"/*; do
+            [ -d "$reg" ] || continue
+            rname="$(read_line "${reg}/name" || true)"
+            if [ "$rname" = "$want" ]; then
+                uv="$(read_line "${reg}/microvolts" || true)"
+                break
+            fi
+        done
+        if is_uint "$uv"; then
+            found_str="${found_str}${want}=${uv}uV "
+        else
+            missing="${missing}${want} "
+        fi
+    done
+
+    if [ -z "$missing" ]; then
+        record_result "rails" "PASS" "${found_str% }"
+    else
+        record_result "rails" "FAIL" "missing/unreadable: ${missing% }${found_str:+ (found: ${found_str% })}"
+    fi
+}
+
+check_display() {
+    local drm_dir="${T715_ROOT}/sys/class/drm"
+    local dri_dir="${T715_ROOT}/dev/dri"
+    local cards="" d base conn status_val conn_found="" reasons=""
+
+    for d in "${dri_dir}"/card*; do
+        [ -e "$d" ] || continue
+        base="${d##*/}"
+        case "$base" in
+            card[0-9]|card[0-9][0-9]) cards="${cards}${base}," ;;
+        esac
+    done
+
+    for conn in "${drm_dir}"/card*-DSI-*; do
+        [ -d "$conn" ] || continue
+        status_val="$(read_line "${conn}/status" || true)"
+        if [ "$status_val" = "connected" ] && [ -r "${conn}/modes" ] && grep -qx '1536x2048' "${conn}/modes" 2>/dev/null; then
+            conn_found="${conn##*/}"
+            break
+        fi
+    done
+
+    [ -n "$cards" ] || reasons="${reasons}/dev/dri/card* absent; "
+    [ -n "$conn_found" ] || reasons="${reasons}no connected DSI connector with 1536x2048 mode; "
+
+    if [ -z "$reasons" ]; then
+        record_result "display" "PASS" "${conn_found} connected 1536x2048 (dev=${cards%,})"
+    else
+        record_result "display" "FAIL" "${reasons%; }"
+    fi
+}
+
+check_gpu() {
+    local render="${T715_ROOT}/dev/dri/renderD128"
+    local pdrv="${T715_ROOT}/sys/bus/platform/drivers/panfrost"
+    local has_render=0 bound_devs="" e base reasons=""
+
+    [ -e "$render" ] && has_render=1
+
+    if [ -d "$pdrv" ]; then
+        for e in "${pdrv}"/*; do
+            [ -d "$e" ] || continue
+            base="${e##*/}"
+            case "$base" in
+                bind|unbind|uevent|module) continue ;;
+                *) bound_devs="${bound_devs}${base}," ;;
+            esac
+        done
+    fi
+
+    [ "$has_render" -eq 1 ] || reasons="${reasons}/dev/dri/renderD128 absent; "
+    [ -n "$bound_devs" ] || reasons="${reasons}panfrost driver not bound; "
+
+    if [ -z "$reasons" ]; then
+        record_result "gpu" "PASS" "renderD128 present, panfrost bound (${bound_devs%,})"
+    else
+        record_result "gpu" "WARN" "${reasons%; }"
+    fi
+}
+
+check_touch() {
+    local devfile="${T715_ROOT}/proc/bus/input/devices"
+    local found
+
+    if [ ! -r "$devfile" ]; then
+        record_result "touch" "FAIL" "cannot read /proc/bus/input/devices"
+        return 0
+    fi
+
+    found="$(awk '
+        BEGIN { RS = ""; FS = "\n" }
+        {
+            name = ""; phys = ""; sysfs = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^N: Name=/) {
+                    name = $i
+                    sub(/^N: Name="/, "", name)
+                    sub(/"$/, "", name)
+                } else if ($i ~ /^P: Phys=/) {
+                    phys = substr($i, 9)
+                } else if ($i ~ /^S: Sysfs=/) {
+                    sysfs = substr($i, 10)
+                }
+            }
+            if (tolower(name) ~ /synaptics|rmi4/ || tolower(phys) ~ /rmi4|synaptics/ || tolower(sysfs) ~ /rmi4|synaptics/) {
+                print name
+                exit 0
+            }
+        }
+    ' "$devfile" 2>/dev/null)"
+
+    if [ -n "$found" ]; then
+        record_result "touch" "PASS" "${found}"
+    else
+        record_result "touch" "FAIL" "Synaptics RMI4 touchscreen not found in /proc/bus/input/devices"
+    fi
+}
+
+check_keys() {
+    local devfile="${T715_ROOT}/proc/bus/input/devices"
+    local found
+
+    if [ ! -r "$devfile" ]; then
+        record_result "keys" "FAIL" "cannot read /proc/bus/input/devices"
+        return 0
+    fi
+
+    found="$(awk '
+        BEGIN { RS = ""; FS = "\n" }
+        {
+            name = ""; phys = ""; sysfs = ""; has_key = 0
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^N: Name=/) {
+                    name = $i
+                    sub(/^N: Name="/, "", name)
+                    sub(/"$/, "", name)
+                } else if ($i ~ /^P: Phys=/) {
+                    phys = substr($i, 9)
+                } else if ($i ~ /^S: Sysfs=/) {
+                    sysfs = substr($i, 10)
+                } else if ($i ~ /^B: KEY=/) {
+                    has_key = 1
+                }
+            }
+            lname = tolower(name)
+            lphys = tolower(phys)
+            lsysfs = tolower(sysfs)
+            if (lname ~ /^gpio[-_]keys$/ || ((lphys ~ /gpio[-_]keys/ || lsysfs ~ /gpio[-_]keys/) && lname !~ /hall/ && has_key)) {
+                print name
+                exit 0
+            }
+        }
+    ' "$devfile" 2>/dev/null)"
+
+    if [ -n "$found" ]; then
+        record_result "keys" "PASS" "${found}"
+    else
+        record_result "keys" "FAIL" "gpio-keys device not found in /proc/bus/input/devices"
+    fi
+}
+
+check_wifi() {
+    local bdir drv_dir e base bound_devs="" wif="" ifdir
+    local link_out oper
+
+    # The wireless interface by what it is, not by name: wlan0 on the 32-bit image, wlp1s0 on
+    # arm64 (systemd's predictable name for the PCIe chip). wlan0 when there is none.
+    for e in "${T715_ROOT}"/sys/class/net/*; do
+        { [ -e "${e}/phy80211" ] || [ -d "${e}/wireless" ]; } || continue
+        wif="${e##*/}"
+        break
+    done
+    wif="${wif:-wlan0}"
+    ifdir="${T715_ROOT}/sys/class/net/${wif}"
+
+    for bdir in "${T715_ROOT}/sys/bus/pci/drivers/brcmfmac" "${T715_ROOT}"/sys/bus/*/drivers/brcmfmac; do
+        [ -d "$bdir" ] || continue
+        drv_dir="$bdir"
+        for e in "${drv_dir}"/*; do
+            [ -d "$e" ] || continue
+            base="${e##*/}"
+            case "$base" in
+                bind|unbind|uevent|module|new_id|remove_id) continue ;;
+                *) bound_devs="${bound_devs}${base}," ;;
+            esac
+        done
+        [ -n "$bound_devs" ] && break
+    done
+
+    if [ -z "$bound_devs" ] || [ ! -d "$ifdir" ]; then
+        local reasons=""
+        [ -n "$bound_devs" ] || reasons="${reasons}brcmfmac not bound; "
+        [ -d "$ifdir" ] || reasons="${reasons}no wireless interface (${wif}); "
+        record_result "wifi" "FAIL" "${reasons%; }"
+        return 0
+    fi
+
+    if has_cmd "$CMD_IW"; then
+        link_out="$("$CMD_IW" dev "$wif" link 2>/dev/null || true)"
+        if printf '%s\n' "$link_out" | grep -qi '^Connected to '; then
+            record_result "wifi" "PASS" "brcmfmac(${bound_devs%,}) ${wif} associated"
+        else
+            record_result "wifi" "WARN" "brcmfmac(${bound_devs%,}) ${wif} not associated"
+        fi
+    else
+        oper="$(read_line "${ifdir}/operstate" || true)"
+        if [ "$oper" = "up" ]; then
+            record_result "wifi" "PASS" "brcmfmac(${bound_devs%,}) ${wif} operstate=up (iw missing)"
+        else
+            record_result "wifi" "WARN" "brcmfmac(${bound_devs%,}) ${wif} operstate=${oper:-unknown} (iw missing)"
+        fi
+    fi
+}
+
+check_bluetooth() {
+    if [ -e "${T715_ROOT}/sys/class/bluetooth/hci0" ]; then
+        record_result "bluetooth" "PASS" "hci0 present"
+    else
+        record_result "bluetooth" "WARN" "hci0 absent"
+    fi
+}
+
+# The SS333 modem (package t715-modem): the CP online and shannond running, or switched off
+# on purpose (t715-modem-power's cut flag). Never FAIL: a modem that did not come up is a WARN,
+# the system itself is fine. Reads nothing that identifies the line or the device.
+check_modem() {
+    local state="" sd=""
+
+    if [ ! -e "${T715_ROOT}/usr/bin/shannon-loader" ]; then
+        record_result "modem" "WARN" "t715-modem not installed"
+        return 0
+    fi
+    if [ -e "${T715_ROOT}/run/t715-modem-power/cut" ]; then
+        record_result "modem" "PASS" "switched off (t715-modem-power)"
+        return 0
+    fi
+    state="$(cat "${T715_ROOT}/run/shannon/cp-state" 2>/dev/null || true)"
+    state="${state##*state=}"
+    if has_cmd "$CMD_SYSTEMCTL"; then
+        sd="$("$CMD_SYSTEMCTL" is-active shannond.service 2>/dev/null || true)"
+    fi
+    if [ "$state" = online ] && [ "$sd" = active ]; then
+        record_result "modem" "PASS" "CP online, shannond active"
+    else
+        record_result "modem" "WARN" "CP ${state:-not started}, shannond ${sd:-unknown}$([ -d "${T715_ROOT}/sys/module/sec_modem_v1" ] || printf ', sec_modem_v1 not loaded')"
+    fi
+}
+
+check_audio() {
+    local cards="${T715_ROOT}/proc/asound/cards"
+    local match all_cards
+
+    if [ ! -r "$cards" ]; then
+        record_result "audio" "WARN" "/proc/asound/cards unreadable or absent"
+        return 0
+    fi
+
+    match="$(awk '
+        /^[[:space:]]*[0-9]+[[:space:]]+\[/ {
+            if (tolower($0) ~ /wm1814|wm8998/) {
+                $1 = $1
+                print $0
+                exit 0
+            }
+        }
+    ' "$cards" 2>/dev/null)"
+
+    if [ -n "$match" ]; then
+        record_result "audio" "PASS" "$match"
+    else
+        all_cards="$(awk '/^[[:space:]]*[0-9]+[[:space:]]+\[/ { $1=$1; s = (s ? s "; " : "") $0 } END { print s }' "$cards" 2>/dev/null)"
+        if [ -n "$all_cards" ]; then
+            record_result "audio" "WARN" "WM1814/WM8998 card absent (found: ${all_cards})"
+        else
+            record_result "audio" "WARN" "no ALSA cards"
+        fi
+    fi
+}
+
+check_sensors() {
+    local iio_dir="${T715_ROOT}/sys/bus/iio/devices"
+    local dev dname lsm="" yas="" missing=""
+
+    for dev in "${iio_dir}"/iio:device*; do
+        [ -d "$dev" ] || continue
+        dname="$(read_line "${dev}/name" || true)"
+        case "$dname" in
+            lsm6ds*) lsm="${lsm}${dname}," ;;
+            yas*) yas="${yas}${dname}," ;;
+        esac
+    done
+
+    [ -n "$lsm" ] || missing="${missing}lsm6ds* "
+    [ -n "$yas" ] || missing="${missing}yas* "
+
+    if [ -z "$missing" ]; then
+        record_result "sensors" "PASS" "imu=${lsm%,} mag=${yas%,}"
+    else
+        record_result "sensors" "WARN" "missing: ${missing% }${lsm:+ (imu=${lsm%,})}${yas:+ (mag=${yas%,})}"
+    fi
+}
+
+check_battery() {
+    local ps_dir="${T715_ROOT}/sys/class/power_supply"
+    local fg="${ps_dir}/sm5703-fuelgauge"
+    local cand ptype cap st uv mv
+
+    if [ ! -d "$fg" ]; then
+        fg=""
+        for cand in "${ps_dir}"/*sm5703*; do
+            [ -d "$cand" ] || continue
+            ptype="$(read_line "${cand}/type" || true)"
+            if [ "$ptype" = "Battery" ]; then
+                fg="$cand"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$fg" ]; then
+        record_result "battery" "FAIL" "sm5703 fuel gauge absent"
+        return 0
+    fi
+
+    cap="$(read_line "${fg}/capacity" || true)"
+    st="$(read_line "${fg}/status" || true)"
+    uv="$(read_line "${fg}/voltage_now" || true)"
+
+    if ! is_int "$cap" || [ -z "$st" ] || ! is_uint "$uv"; then
+        record_result "battery" "FAIL" "${fg##*/} unreadable (cap=${cap:-?} status=${st:-?} uv=${uv:-?})"
+        return 0
+    fi
+
+    mv=$((uv / 1000))
+    record_result "battery" "PASS" "${fg##*/} capacity=${cap}% status=${st} voltage=${mv}mV"
+}
+
+check_usbnet() {
+    local ifdir="${T715_ROOT}/sys/class/net/usb0"
+    local oper ip_out is_up=0 has_ip=0 reasons=""
+
+    if [ ! -d "$ifdir" ]; then
+        record_result "usbnet" "FAIL" "usb0 absent"
+        return 0
+    fi
+
+    if ! has_cmd "$CMD_IP"; then
+        record_result "usbnet" "WARN" "ip missing (usb0 present)"
+        return 0
+    fi
+
+    oper="$(read_line "${ifdir}/operstate" || true)"
+    ip_out="$("$CMD_IP" -4 addr show dev usb0 2>/dev/null || true)"
+
+    if [ "$oper" = "up" ]; then
+        is_up=1
+    elif [ "$oper" != "down" ] && printf '%s\n' "$ip_out" | grep -Eq '(state UP|<([^>]*,)?UP(,[^>]*)?>)'; then
+        if ! printf '%s\n' "$ip_out" | grep -q 'state DOWN'; then
+            is_up=1
+        fi
+    fi
+
+    if printf '%s\n' "$ip_out" | grep -Eq 'inet[[:space:]]+172\.16\.42\.1(/|[[:space:]]|$)'; then
+        has_ip=1
+    fi
+
+    [ "$is_up" -eq 1 ] || reasons="${reasons}usb0 not up (operstate=${oper:-?}); "
+    [ "$has_ip" -eq 1 ] || reasons="${reasons}address 172.16.42.1 missing; "
+
+    if [ -z "$reasons" ]; then
+        record_result "usbnet" "PASS" "usb0 up 172.16.42.1"
+    else
+        record_result "usbnet" "FAIL" "${reasons%; }"
+    fi
+}
+
+check_storage() {
+    local src="?" fstype="?" avail_kb="" free_str="?" sd_state="absent"
+    local status="PASS" issues="" fm_out df_out
+
+    if [ -d "${T715_ROOT}/sys/block/mmcblk1" ] || [ -e "${T715_ROOT}/dev/mmcblk1" ]; then
+        sd_state="present"
+    fi
+
+    if has_cmd "$CMD_FINDMNT"; then
+        fm_out="$("$CMD_FINDMNT" -no SOURCE,FSTYPE / 2>/dev/null | head -n 1 || true)"
+        if [ -n "$fm_out" ]; then
+            src="$(printf '%s\n' "$fm_out" | awk '{print $1}')"
+            fstype="$(printf '%s\n' "$fm_out" | awk '{print $2}')"
+        else
+            status="WARN"
+            issues="${issues}findmnt / empty; "
+        fi
+    else
+        status="WARN"
+        issues="${issues}findmnt missing; "
+    fi
+
+    if has_cmd "$CMD_DF"; then
+        df_out="$("$CMD_DF" -kP / 2>/dev/null | awk 'NR == 2 { print $4 }')"
+        if is_uint "$df_out"; then
+            avail_kb="$df_out"
+            free_str="$(awk -v k="$avail_kb" 'BEGIN {
+                if (k >= 1048576) printf "%.2fGiB", k / 1048576.0
+                else printf "%dMiB", int(k / 1024)
+            }')"
+            if [ "$avail_kb" -lt 1048576 ]; then
+                status="WARN"
+                issues="${issues}free space ${free_str} < 1GiB; "
+            fi
+        else
+            status="WARN"
+            issues="${issues}df / unreadable; "
+        fi
+    else
+        status="WARN"
+        issues="${issues}df missing; "
+    fi
+
+    if [ -n "$issues" ]; then
+        record_result "storage" "$status" "root=${src} (${fstype}) free=${free_str} microsd=${sd_state} (${issues%; })"
+    else
+        record_result "storage" "$status" "root=${src} (${fstype}) free=${free_str} microsd=${sd_state}"
+    fi
+}
+
+check_watchdog() {
+    local has_dev=0 svc_state="" reasons=""
+
+    [ -e "${T715_ROOT}/dev/watchdog0" ] && has_dev=1
+
+    if ! has_cmd "$CMD_SYSTEMCTL"; then
+        record_result "watchdog" "WARN" "systemctl missing (watchdog0=$([ "$has_dev" -eq 1 ] && printf present || printf absent))"
+        return 0
+    fi
+
+    svc_state="$("$CMD_SYSTEMCTL" is-active t715-watchdog-keeper.service 2>/dev/null || true)"
+
+    [ "$has_dev" -eq 1 ] || reasons="${reasons}/dev/watchdog0 absent; "
+    [ "$svc_state" = "active" ] || reasons="${reasons}t715-watchdog-keeper.service=${svc_state:-inactive}; "
+
+    if [ -z "$reasons" ]; then
+        record_result "watchdog" "PASS" "/dev/watchdog0 present, t715-watchdog-keeper.service active"
+    else
+        record_result "watchdog" "WARN" "${reasons%; }"
+    fi
+}
+
+check_kboot_mark() {
+    local log_out="" got_log=0 kbm=""
+
+    if has_cmd "$CMD_JOURNALCTL"; then
+        if log_out="$("$CMD_JOURNALCTL" -k -b --no-pager 2>/dev/null)" && [ -n "$log_out" ]; then
+            got_log=1
+        fi
+    fi
+
+    if [ "$got_log" -eq 0 ] && has_cmd "$CMD_DMESG"; then
+        if log_out="$("$CMD_DMESG" 2>/dev/null)"; then
+            got_log=1
+        fi
+    fi
+
+    if [ "$got_log" -eq 0 ]; then
+        record_result "kboot-mark" "WARN" "journalctl and dmesg missing or failed"
+        return 0
+    fi
+
+    if printf '%s\n' "$log_out" | grep -qF 'KBOOT: up'; then
+        record_result "kboot-mark" "PASS" "KBOOT: up present"
+        return 0
+    fi
+
+    kbm="$(cmdline_knob "t715.kbootmark" || true)"
+    if [ "$kbm" = "0" ]; then
+        record_result "kboot-mark" "WARN" "KBOOT: up absent (disabled on purpose via t715.kbootmark=0)"
+    else
+        record_result "kboot-mark" "WARN" "KBOOT: up absent"
+    fi
+}
+
+check_kernel_log() {
+    local raw_dmesg findings
+
+    if ! has_cmd "$CMD_DMESG"; then
+        record_result "kernel-log" "WARN" "dmesg missing"
+        return 0
+    fi
+
+    if ! raw_dmesg="$("$CMD_DMESG" 2>/dev/null)"; then
+        record_result "kernel-log" "WARN" "dmesg failed"
+        return 0
+    fi
+
+    # Never inspect or print "Kernel command line" (holds device serial number).
+    findings="$(printf '%s\n' "$raw_dmesg" | awk '
+        BEGIN {
+            n = 9
+            kinds[1] = "Oops"
+            kinds[2] = "Internal error"
+            kinds[3] = "BUG:"
+            kinds[4] = "WARNING: CPU"
+            kinds[5] = "rcu.*stall"
+            kinds[6] = "soft lockup"
+            kinds[7] = "hung_task"
+            kinds[8] = "Unable to handle"
+            kinds[9] = "Call trace"
+        }
+        {
+            gsub(/\r/, "")
+            low = tolower($0)
+            if (low ~ /kernel command line/) next
+
+            if ($0 ~ /(^|[^A-Za-z])Oops([^A-Za-z]|$)/) {
+                cnt[1]++; if (!(1 in first)) first[1] = substr($0, 1, 160)
+            }
+            if (index($0, "Internal error") > 0) {
+                cnt[2]++; if (!(2 in first)) first[2] = substr($0, 1, 160)
+            }
+            if (index($0, "BUG:") > 0) {
+                cnt[3]++; if (!(3 in first)) first[3] = substr($0, 1, 160)
+            }
+            if (index($0, "WARNING: CPU") > 0) {
+                cnt[4]++; if (!(4 in first)) first[4] = substr($0, 1, 160)
+            }
+            if (low ~ /rcu.*stall/) {
+                cnt[5]++; if (!(5 in first)) first[5] = substr($0, 1, 160)
+            }
+            if (low ~ /soft lockup/) {
+                cnt[6]++; if (!(6 in first)) first[6] = substr($0, 1, 160)
+            }
+            if (low ~ /hung_task/) {
+                cnt[7]++; if (!(7 in first)) first[7] = substr($0, 1, 160)
+            }
+            if (index($0, "Unable to handle") > 0) {
+                cnt[8]++; if (!(8 in first)) first[8] = substr($0, 1, 160)
+            }
+            if (low ~ /call trace/) {
+                cnt[9]++; if (!(9 in first)) first[9] = substr($0, 1, 160)
+            }
+        }
+        END {
+            out = ""
+            for (i = 1; i <= n; i++) {
+                if (cnt[i] > 0) {
+                    seg = kinds[i] "(" cnt[i] "): " first[i]
+                    out = (out == "" ? seg : out "; " seg)
+                }
+            }
+            if (out != "") print out
+        }
+    ')"
+
+    if [ -z "$findings" ]; then
+        record_result "kernel-log" "PASS" "no kernel error signatures in dmesg"
+    else
+        record_result "kernel-log" "FAIL" "$findings"
+    fi
+}
+
+check_systemd() {
+    local state failed_out failed_units
+
+    if ! has_cmd "$CMD_SYSTEMCTL"; then
+        record_result "systemd" "WARN" "systemctl missing"
+        return 0
+    fi
+
+    state="$("$CMD_SYSTEMCTL" is-system-running 2>/dev/null || true)"
+    failed_out="$("$CMD_SYSTEMCTL" --failed --plain --no-legend 2>/dev/null || true)"
+    failed_units="$(printf '%s\n' "$failed_out" | awk 'NF { s = (s ? s "," : "") $1 } END { print s }')"
+
+    if [ -n "$failed_units" ]; then
+        record_result "systemd" "FAIL" "state=${state:-unknown} failed=${failed_units}"
+    elif [ "$state" = "running" ]; then
+        record_result "systemd" "PASS" "running (0 failed)"
+    else
+        record_result "systemd" "WARN" "state=${state:-unknown} (0 failed)"
+    fi
+}
+
+check_session() {
+    local hypr_pid sddm_state reasons=""
+
+    if ! has_cmd "$CMD_PGREP"; then
+        record_result "session" "WARN" "pgrep missing"
+        return 0
+    fi
+    if ! has_cmd "$CMD_SYSTEMCTL"; then
+        record_result "session" "WARN" "systemctl missing"
+        return 0
+    fi
+
+    hypr_pid="$("$CMD_PGREP" -u 1000 -x Hyprland 2>/dev/null | head -n 1 || true)"
+    sddm_state="$("$CMD_SYSTEMCTL" is-active sddm 2>/dev/null || true)"
+
+    [ -n "$hypr_pid" ] || reasons="${reasons}Hyprland(uid=1000) not running; "
+    [ "$sddm_state" = "active" ] || reasons="${reasons}sddm=${sddm_state:-inactive}; "
+
+    if [ -z "$reasons" ]; then
+        record_result "session" "PASS" "Hyprland(pid=${hypr_pid}, uid=1000) sddm=active"
+    else
+        record_result "session" "WARN" "${reasons%; }"
+    fi
+}
+
+check_pstore() {
+    local pdir="${T715_ROOT}/sys/fs/pstore"
+    local e base entries=""
+
+    if [ ! -d "$pdir" ]; then
+        record_result "pstore" "WARN" "/sys/fs/pstore absent"
+        return 0
+    fi
+
+    for e in "${pdir}"/*; do
+        [ -e "$e" ] || continue
+        base="${e##*/}"
+        entries="${entries}${base} "
+    done
+
+    if [ -z "$entries" ]; then
+        record_result "pstore" "PASS" "empty"
+    else
+        record_result "pstore" "WARN" "${entries% }"
+    fi
+}
+
+# =========================================================================
+# Argument parsing & runner
+# =========================================================================
+
+parse_args() {
+    local item
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --json)
+                JSON_MODE=1
+                shift
+                ;;
+            --only)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "error: --only requires a comma-separated list of check names" >&2
+                    exit 2
+                fi
+                IFS=',' read -r -a _parts <<< "$2"
+                for item in "${_parts[@]}"; do
+                    [ -n "$item" ] || continue
+                    if ! is_known_check "$item"; then
+                        echo "error: unknown check '${item}'" >&2
+                        exit 2
+                    fi
+                    ONLY_LIST+=("$item")
+                done
+                shift 2
+                ;;
+            --only=*)
+                local val="${1#--only=}"
+                if [ -z "$val" ]; then
+                    echo "error: --only requires a comma-separated list of check names" >&2
+                    exit 2
+                fi
+                IFS=',' read -r -a _parts <<< "$val"
+                for item in "${_parts[@]}"; do
+                    [ -n "$item" ] || continue
+                    if ! is_known_check "$item"; then
+                        echo "error: unknown check '${item}'" >&2
+                        exit 2
+                    fi
+                    ONLY_LIST+=("$item")
+                done
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "error: unknown option '$1'" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
+emit_output() {
+    if [ "$JSON_MODE" -eq 0 ]; then
+        printf 'SUMMARY pass=%d warn=%d fail=%d\n' "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+    else
+        local i n="${#CHECK_NAMES[@]}"
+        printf '{"checks":['
+        i=0
+        while [ "$i" -lt "$n" ]; do
+            [ "$i" -gt 0 ] && printf ','
+            printf '{"name":"%s","result":"%s","detail":"%s"}' \
+                "$(json_escape "${CHECK_NAMES[$i]}")" \
+                "$(json_escape "${CHECK_RESULTS[$i]}")" \
+                "$(json_escape "${CHECK_DETAILS[$i]}")"
+            i=$((i + 1))
+        done
+        printf '],"summary":{"pass":%d,"warn":%d,"fail":%d}}\n' \
+            "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+    fi
+}
+
+run_check() {
+    case "$1" in
+        kernel) check_kernel ;;
+        cpus) check_cpus ;;
+        cpufreq) check_cpufreq ;;
+        thermal) check_thermal ;;
+        rails) check_rails ;;
+        display) check_display ;;
+        gpu) check_gpu ;;
+        touch) check_touch ;;
+        keys) check_keys ;;
+        wifi) check_wifi ;;
+        bluetooth) check_bluetooth ;;
+        modem) check_modem ;;
+        audio) check_audio ;;
+        sensors) check_sensors ;;
+        battery) check_battery ;;
+        usbnet) check_usbnet ;;
+        storage) check_storage ;;
+        watchdog) check_watchdog ;;
+        kboot-mark) check_kboot_mark ;;
+        kernel-log) check_kernel_log ;;
+        systemd) check_systemd ;;
+        session) check_session ;;
+        pstore) check_pstore ;;
+    esac
+}
+
+main() {
+    parse_args "$@"
+
+    local checks_to_run=()
+    if [ "${#ONLY_LIST[@]}" -gt 0 ]; then
+        checks_to_run=("${ONLY_LIST[@]}")
+    else
+        checks_to_run=("${ALL_CHECKS[@]}")
+    fi
+
+    local c
+    for c in "${checks_to_run[@]}"; do
+        run_check "$c"
+    done
+
+    emit_output
+
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+        exit 1
+    fi
+    exit 0
+}
+
+main "$@"

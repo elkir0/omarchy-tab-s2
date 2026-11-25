@@ -1,0 +1,4 @@
+# SM-T715: brcmfmac takes its MAC address from an NVRAM file shared by every
+# tablet; t715-wifi-addr gives the interface a stable generated one instead
+# (see that script).  Runs while the interface is still down.
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", RUN+="/usr/local/sbin/t715-wifi-addr %E{IFINDEX}"

@@ -1,0 +1,600 @@
+SM-T715 tablet: the first-run onboarding ships, adapted to the tablet.
+
+Upstream's bin/omamobile-onboarding, dropped from this build until now, comes
+in for the arm64 image, with the tablet's differences:
+- The image ships the account with a placeholder password (0007's text names
+  it); on the tablet it counts as no PIN, so the login nudge asks for setup
+  and --inner makes the user choose a PIN or password (omamobile-set-pin
+  --inner). has_pin tests it through unix_chkpwd exactly like the empty
+  password: unix_chkpwd reads the candidate it checks from stdin
+  NUL-terminated (a trailing newline would be part of the password; EOF
+  without a NUL reads as an empty one), so the placeholder is sent with a
+  NUL and nothing else, and never printed, logged or stored anywhere new.
+- No fingerprint stack (/usr/lib/omamobile-fp absent): upstream already
+  skips silently without its runner; test/onboarding-fingerprint.sh passes
+  unchanged.
+- The modem line is the tablet's, over shannond instead of the phone's
+  omamobile-mobile-network: nothing when shannonctl is missing or does not
+  answer within 10 s; "No SIM card." when the SIM is absent; when it is
+  ready, the operator if shannond knows it (status --identifiers; a redacted
+  one is not known) and that the APN is set in Réseau mobile (the app's
+  name, t715-mobile-settings) from the app drawer; when the modem's own
+  switch is off (t715-modem-power status --json), how to switch it on (the
+  Modem tile). Every probe runs with LC_ALL=C and a timeout, as the tablet's
+  other patches do.
+- Golden's AI step, in --inner only, after the PIN and before the agent
+  invitation, every choice optional and skippable: the AI desktop apps in one
+  `gum choose --no-limit` (an app already installed is not offered,
+  omarchy-pkg-present claude-desktop / openai-codex-desktop; they are
+  downloaded from Omarchy's repository and need the network; a failed
+  install says so and carries on), the language voice input uses
+  ([whisper] language in ~/.config/voxtype/config.toml, shown as the
+  language's own name for the ones the voice settings list, the code
+  otherwise; nothing when Voxtype is not set up) with Setup > Voice changing
+  it, and the default coding agent when none is set (omarchy-default-agent
+  prints it, empty when none): one gum choose among Claude Code, Codex,
+  OpenCode, Gemini, GitHub Copilot, Grok and Later; a choice runs
+  omarchy-default-agent --install NAME, and Later falls back to upstream's
+  invitation.
+Tests: test/onboarding-mobile.sh follows the tablet's modem line;
+test/onboarding-tablet.sh (new) covers the placeholder (nudge and --inner,
+and the NUL-terminated candidate, read from the script rather than restated)
+and the AI step; test/onboarding-identity.sh and
+test/onboarding-fingerprint.sh pass as upstream's. Against omarchy-mobile
+8991845 (omamobile-shell 0.2.147), after 0001-0014.
+
+diff --git a/bin/omamobile-onboarding b/bin/omamobile-onboarding
+index 355243a..3fc2b74 100644
+--- a/bin/omamobile-onboarding
++++ b/bin/omamobile-onboarding
+@@ -18,6 +18,13 @@
+ # is ready, which on a new install is after tools/phone-provision and its
+ # restart), never again after an answer: Setup > Security > Fingerprint
+ # stays the place to add or remove fingers.
++#
++# SM-T715 tablet build (patch 0015): the image's placeholder password (0007's
++# text names it) counts as no PIN; the modem line reads the tablet's shannond
++# (shannonctl, and t715-modem-power for the modem's own switch) instead of the
++# phone's modem daemon; and Golden's AI step in --inner offers
++# the AI desktop apps, says which language voice input uses, and lets the
++# user pick the default coding agent right there.
+ set -u
+ 
+ omarchy_path=${OMARCHY_PATH:-/usr/share/omarchy}
+@@ -26,6 +33,12 @@ fp_image=${OMAMOBILE_FP_IMAGE:-/usr/lib/omamobile-fp/root}
+ # the runner says here why it refused (off-reason: data-check recurs every boot)
+ fp_uidir=${OMAMOBILE_FP_UIDIR:-/run/omamobile-fp-ui}
+ fp_offered=${XDG_STATE_HOME:-$HOME/.local/state}/omamobile/fingerprint-offered
++# The password the image ships the account with (0007's text names it). On
++# the tablet it counts as no PIN. unix_chkpwd reads the candidate it tests
++# from stdin NUL-terminated (a trailing newline would be part of the
++# password; EOF without a NUL reads as an empty one), so it is sent with a
++# NUL, like the empty test in has_pin, and never printed or stored anywhere.
++placeholder_pw='changeme'
+ 
+ has_identity() {
+   [[ -n $(git config --global user.name) && -n $(git config --global user.email) ]]
+@@ -52,8 +65,12 @@ save_identity() {
+   fi
+ }
+ 
++# A PIN or password is set -- or only the image's placeholder password is,
++# which on the tablet counts as none.
+ has_pin() {
+-  ! printf '' | unix_chkpwd "$USER" nullok 2>/dev/null
++  printf '' | unix_chkpwd "$USER" nullok 2>/dev/null && return 1
++  printf '%s\0' "$placeholder_pw" | unix_chkpwd "$USER" nullok 2>/dev/null && return 1
++  return 0
+ }
+ 
+ # Omarchy's hook: one notification, only while no agent is chosen, never twice.
+@@ -124,37 +141,155 @@ offer_fingerprint() {
+   fp_mark_offered
+ }
+ 
+-# The SIM, when the modem stack runs: the carrier, and that mobile data is
+-# set up on its own (sitd picks the APN from the SIM). Nothing to type; the
+-# rare SIM without an APN is pointed at Setup > Mobile network. Silent with
+-# no modem stack (the release image has none yet) or before it has started.
++# The modem and the SIM on the tablet's stack (shannond), where the phone's
++# line went through its own modem daemon: nothing when shannonctl is missing or
++# does not answer within 10 s (no modem stack, or it has not started), and
++# nothing when the modem's own switch is on but the daemon is down either;
++# "No SIM card." when the SIM is absent; when it is ready, the operator if
++# shannond knows it (--identifiers; a redacted one is not known) and that the
++# APN is set in Réseau mobile, the app's name, from the app drawer; when the
++# modem's switch is off (t715-modem-power status --json), how to switch it on
++# (the Modem tile). LC_ALL=C and a timeout, as the tablet's other probes.
++modem_off_line="The modem is off. Switch it on with the Modem tile in quick settings for calls, texts and mobile data."
+ mobile_network_line() {
+-  command -v omamobile-mobile-network >/dev/null || return 0
+-  timeout 10 omamobile-mobile-network status 2>/dev/null | python3 -c '
++  local sw
++  if command -v t715-modem-power >/dev/null 2>&1; then
++    sw=$(LC_ALL=C timeout 10 t715-modem-power status --json 2>/dev/null) || sw=""
++    case $sw in
++      *'"installed":true'*'"modem":"off"'*) echo "$modem_off_line"; return 0 ;;
++    esac
++  fi
++  command -v shannonctl >/dev/null 2>&1 || return 0
++  LC_ALL=C timeout 10 shannonctl status --identifiers 2>/dev/null | python3 -I -c '
+ import json, sys
++off_line = sys.argv[1]
+ try:
+     s = json.load(sys.stdin)
+ except ValueError:
+     sys.exit(0)
+-if not s.get("installed") or not s.get("running"):
++if not isinstance(s, dict):
+     sys.exit(0)
+-sim = (s.get("sim") or {}).get("state")
+-apn = (s.get("apn") or {}).get("source", "")
+-Q = chr(39)
+-carrier = s.get("carrier") or ""
+-if sim == "absent":
+-    print("No SIM card. Put one in and restart the phone for calls, texts and mobile data.")
+-elif sim in ("pin", "puk", "network-locked"):
+-    print("Your SIM is locked, and this phone cannot unlock it yet: turn the SIM PIN off in another phone, then restart.")
+-elif sim == "ready":
+-    head = "Mobile network: " + carrier + "." if carrier else "Your SIM is ready."
+-    if apn == "none":
+-        print(head + " Calls and texts work. Mobile data needs your carrier" + Q + "s APN: Setup > Mobile network.")
+-    elif apn == "manual":
+-        print(head + " Mobile data uses the APN set in Setup > Mobile network.")
+-    else:
+-        print(head + " Mobile data is set up automatically from your SIM; there" + Q + "s nothing to type.")
+-' 2>/dev/null || true
++if s.get("power") == "off":
++    print(off_line)
++    sys.exit(0)
++sim = s.get("sim") if isinstance(s.get("sim"), dict) else {}
++if sim.get("state") == "absent":
++    print("No SIM card. Put one in and restart the tablet for calls, texts and mobile data.")
++elif sim.get("state") == "ready":
++    reg = s.get("reg") if isinstance(s.get("reg"), dict) else {}
++    op = str(reg.get("operator") or "").strip()
++    head = "Mobile network: " + op + "." if op and op != "<redacted>" else "Your SIM is ready."
++    print(head + " The APN is set in Réseau mobile, from the app drawer.")
++' "$modem_off_line" 2>/dev/null || true
++}
++
++# Golden's AI step, in --inner only, after the PIN and before the agent
++# invitation. Every choice is optional and can be skipped.
++
++# The AI desktop apps, in one multi-choice: an app already installed is not
++# offered (omarchy-pkg-present). They are downloaded from Omarchy's
++# repository, so the network is needed; a failed install says so and carries
++# on.
++ai_apps() {
++  local apps=() app cmd chosen
++  omarchy-pkg-present claude-desktop 2>/dev/null || apps+=("Claude Desktop")
++  omarchy-pkg-present openai-codex-desktop 2>/dev/null || apps+=("ChatGPT Desktop")
++  (( ${#apps[@]} )) || return 0
++  echo
++  echo "The AI desktop apps are downloaded from Omarchy's repository, so the network is needed."
++  chosen=$(printf '%s\n' "${apps[@]}" | gum choose --no-limit --header "Install an AI desktop app") || chosen=""
++  while IFS= read -r app; do
++    [[ -n $app ]] || continue
++    case $app in
++      "Claude Desktop")  cmd=omarchy-install-ai-claude ;;
++      "ChatGPT Desktop") cmd=omarchy-install-ai-chatgpt ;;
++      *) continue ;;
++    esac
++    if command -v "$cmd" >/dev/null 2>&1 && "$cmd"; then
++      echo "$app installed."
++    else
++      echo "$app was not installed now; try again later (Install > AI)."
++    fi
++  done <<<"$chosen"
++}
++
++# Which language voice input uses, when Voxtype is set up: [whisper]'s
++# language in ~/.config/voxtype/config.toml (Voxtype's default, English, when
++# it names none), as the language's own name for the ones the voice settings
++# list, the code otherwise. Setup > Voice changes it.
++voice_language_line() {
++  local cfg=$HOME/.config/voxtype/config.toml lang name
++  [[ -f $cfg ]] || return 0
++  lang=$(python3 -I -c '
++import re, sys
++section = ""
++for line in open(sys.argv[1], encoding="utf-8"):
++    line = line.strip()
++    m = re.match(r"^\[([^\]]+)\]$", line)
++    if m:
++        section = m.group(1).strip()
++        continue
++    if section != "whisper":
++        continue
++    m = re.match(r"^language\s*=\s*(.*?)\s*$", line)
++    if m:
++        v = m.group(1)
++        q = re.match("^\"([^\"]*)\"", v)
++        print(q.group(1) if q else v.split("#", 1)[0].strip())
++        break
++' "$cfg" 2>/dev/null) || lang=""
++  [[ -n $lang ]] || lang=en
++  case $lang in
++    auto) name="Automatic" ;;
++    en)   name="English" ;;
++    fr)   name="Français" ;;
++    de)   name="Deutsch" ;;
++    es)   name="Español" ;;
++    it)   name="Italiano" ;;
++    pt)   name="Português" ;;
++    nl)   name="Nederlands" ;;
++    *)    name=$lang ;;
++  esac
++  echo "Voice input uses $name. Change it any time in Setup > Voice."
++}
++
++# The default coding agent, when none is set (omarchy-default-agent prints
++# it, empty when none): one choice among the agents, installed if needed
++# (omarchy-default-agent --install). "Later" leaves Omarchy's own invitation
++# (invite_agent, below).
++pick_default_agent() {
++  local current choice agent
++  command -v omarchy-default-agent >/dev/null 2>&1 || return 0
++  current=$(omarchy-default-agent 2>/dev/null) || current=""
++  [[ -n ${current//[[:space:]]/} ]] && return 0
++  echo
++  choice=$(gum choose --header "Default coding agent" \
++    "Claude Code" "Codex" "OpenCode" "Gemini" "GitHub Copilot" "Grok" "Later") || choice="Later"
++  case $choice in
++    "Claude Code")    agent=claude ;;
++    "Codex")          agent=codex ;;
++    "OpenCode")       agent=opencode ;;
++    "Gemini")         agent=gemini ;;
++    "GitHub Copilot") agent=copilot ;;
++    "Grok")           agent=grok ;;
++    *) return 0 ;;
++  esac
++  if omarchy-default-agent --install "$agent" 2>/dev/null; then
++    echo "$choice is the default coding agent now."
++  else
++    echo "$choice was not set as the default agent; pick one later in Setup > Default agent."
++  fi
++}
++
++ai_step() {
++  local line
++  ai_apps
++  line=$(voice_language_line)
++  if [[ -n $line ]]; then
++    echo
++    echo "$line"
++  fi
++  pick_default_agent
+ }
+ 
+ case "${1:-}" in
+@@ -202,6 +337,7 @@ case "${1:-}" in
+       echo "$line"
+     fi
+     offer_fingerprint
++    ai_step
+     invite_agent
+     ;;
+   "")
+diff --git a/test/onboarding-mobile.sh b/test/onboarding-mobile.sh
+index c340155..4761ba7 100644
+--- a/test/onboarding-mobile.sh
++++ b/test/onboarding-mobile.sh
+@@ -1,40 +1,90 @@
+ #!/bin/bash
+ # SPDX-License-Identifier: MIT
+-# omamobile-onboarding's SIM line against a fake omamobile-mobile-network:
+-# the carrier and "set up automatically" with a SIM, a pointer to Setup >
+-# Mobile network when no APN was found, and silence without the modem stack.
++# omamobile-onboarding's modem line on the SM-T715 tablet (patch 0015),
++# against fakes: shannond's `shannonctl status` (LC_ALL=C, timeout 10) with
++# the SIM absent, ready with an operator, ready with none known; silence when
++# shannonctl is missing or does not answer within the timeout; and the modem's
++# own switch off (t715-modem-power status --json) saying how to switch it on
++# (the Modem tile).
+ set -euo pipefail
+ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
++fail() { printf 'not ok - %s\n' "$1" >&2; [[ -f ${t:-}/out ]] && cat "$t/out" >&2; exit 1; }
+ pass() { printf 'ok - %s\n' "$1"; }
+ t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+ F=$t/fakes; mkdir -p "$F" "$t/home"
+ fake() { printf '#!/bin/bash\n%s\n' "$2" >"$F/$1"; chmod +x "$F/$1"; }
+ fake git 'echo set'
+ fake unix_chkpwd 'exit 1'
+-fake gum 'case $1 in input) echo ;; confirm) exit 1 ;; esac'
++fake gum 'case $1 in input) echo ;; choose) [[ ! -t 0 ]] && cat >/dev/null; true ;; confirm) exit 1 ;; esac'
+ fake omamobile-set-pin 'case $1 in --type) echo PIN ;; esac'
+-fake timeout 'shift; "$@"'
+-fake omamobile-mobile-network '[[ -e $T/status ]] && cat "$T/status"; true'
++# a real timeout, shortened: the probes' 10 s become 2 s, so a shannonctl
++# that never answers is really cut off
++fake timeout 'secs=$1; shift; [[ $secs -gt 2 ]] && secs=2; exec /usr/bin/timeout "$secs" "$@"'
++# shannonctl: the JSON in $T/status, or a hang when $T/hang exists
++fake shannonctl '[[ -e $T/hang ]] && { sleep 30; exit 0; }; [[ -e $T/status ]] && cat "$T/status"; true'
++# t715-modem-power: the JSON in $T/power
++fake t715-modem-power '[[ -e $T/power ]] && cat "$T/power"; true'
+ ob() {
+   env -u XDG_STATE_HOME T="$t" HOME="$t/home" USER=alice OMARCHY_PATH="$t/none" OMAMOBILE_FP_RUNNER="$t/none" \
+     PATH="$F:/usr/bin:/bin" bash bin/omamobile-onboarding --inner >"$t/out" 2>&1
+ }
+-status() {
+-  printf '{"installed": true, "running": true, "carrier": "%s", "sim": {"state": "%s"}, "apn": {"source": "%s"}}\n' "$1" "$2" "$3" >"$t/status"
++status() { printf '%s\n' "$1" >"$t/status"; }
++power() { printf '%s\n' "$1" >"$t/power"; }
++no_line() {
++  if grep -qE 'SIM|modem|Modem|Mobile network|APN|Réseau' "$t/out"; then
++    fail "$1 (got: $(grep -E 'SIM|modem|Modem|Mobile network|APN|Réseau' "$t/out" | tr '\n' ' '))"
++  fi
+ }
+ 
+-status Example ready carrier-database; ob
+-grep -c "^Mobile network: Example. Mobile data is set up automatically from your SIM; there's nothing to type.$" "$t/out" >/dev/null ||
+-  { cat "$t/out"; fail "a SIM: the carrier, and nothing to type"; }
+-status "" ready override; ob
+-grep -c "^Your SIM is ready. Mobile data is set up automatically" "$t/out" >/dev/null || fail "not registered yet: still automatic"
+-status Example ready none; ob
+-grep -c "Mobile data needs your carrier's APN: Setup > Mobile network." "$t/out" >/dev/null || fail "no APN found: points at the page"
+-status "" absent ""; ob
+-grep -c "No SIM card" "$t/out" >/dev/null || fail "no SIM: says so"
+-rm -f "$t/status"; ob
+-grep -cE "Mobile network:|Your SIM|No SIM|Mobile data" "$t/out" >/dev/null && fail "no modem stack: nothing about the SIM"
+-printf '{"installed": false}\n' >"$t/status"; ob
+-grep -cE "Mobile network:|Your SIM|No SIM|Mobile data" "$t/out" >/dev/null && fail "not installed: nothing about the SIM"
+-pass "setup: the SIM's carrier and automatic mobile data, nothing to type"
++# No shannonctl and no t715-modem-power: nothing about the modem
++rm -f "$t/status" "$t/power" "$t/hang" "$F/shannonctl" "$F/t715-modem-power"
++ob; no_line "no shannonctl: nothing about the modem"
++fake shannonctl '[[ -e $T/hang ]] && { sleep 30; exit 0; }; [[ -e $T/status ]] && cat "$T/status"; true'
++fake t715-modem-power '[[ -e $T/power ]] && cat "$T/power"; true'
++
++# The modem's switch on, shannonctl missing: nothing
++power '{"installed":true,"modem":"on","cp":"online","standby":"keep","cut":false}'
++rm -f "$F/shannonctl"
++ob; no_line "shannonctl missing with the modem on: nothing"
++fake shannonctl '[[ -e $T/hang ]] && { sleep 30; exit 0; }; [[ -e $T/status ]] && cat "$T/status"; true'
++
++# shannonctl does not answer within the timeout: nothing
++touch "$t/hang"; ob; no_line "shannonctl silent past the timeout: nothing"
++rm -f "$t/hang"
++
++# Unreadable status: nothing
++status 'not json'; ob; no_line "an unreadable status: nothing"
++
++# The SIM absent
++status '{"cp":"online","power":"on","sim":{"state":"absent"},"reg":{"cs":"idle","ps":"idle"},"signal":{"percent":0}}'
++ob
++grep -qxF "No SIM card. Put one in and restart the tablet for calls, texts and mobile data." "$t/out" ||
++  fail "no SIM: says so ($(grep -i sim "$t/out"))"
++
++# The SIM ready, with an operator
++status '{"cp":"online","power":"on","sim":{"state":"ready"},"reg":{"cs":"home","ps":"home","rat":"lte","operator":"Example"},"signal":{"percent":72}}'
++ob
++grep -qxF "Mobile network: Example. The APN is set in Réseau mobile, from the app drawer." "$t/out" ||
++  fail "a SIM with an operator: the operator, and the APN in Réseau mobile ($(grep -i 'mobile network' "$t/out"))"
++
++# The SIM ready, no operator known (redacted without --identifiers)
++status '{"cp":"online","power":"on","sim":{"state":"ready"},"reg":{"cs":"home","ps":"home","operator":"<redacted>"},"signal":{"percent":10}}'
++ob
++grep -qxF "Your SIM is ready. The APN is set in Réseau mobile, from the app drawer." "$t/out" ||
++  fail "a SIM with no operator known: no operator, still the APN line ($(grep -i 'SIM is ready' "$t/out"))"
++
++# The modem's own switch off: how to switch it on, without asking shannond
++power '{"installed":true,"modem":"off","cp":"off","standby":"keep","cut":false}'
++rm -f "$t/status"
++ob
++grep -qxF "The modem is off. Switch it on with the Modem tile in quick settings for calls, texts and mobile data." "$t/out" ||
++  fail "the modem off: says how to switch it on ($(grep -i modem "$t/out"))"
++
++# The switch off is said even when shannond would answer (power off)
++power '{"installed":true,"modem":"off","cp":"off","standby":"keep","cut":false}'
++status '{"cp":"offline","power":"off","sim":{"state":"absent"},"reg":{},"signal":{}}'
++ob
++grep -qxF "The modem is off. Switch it on with the Modem tile in quick settings for calls, texts and mobile data." "$t/out" ||
++  fail "power off in the status: the same line ($(grep -i modem "$t/out"))"
++grep -c 'No SIM card' "$t/out" >/dev/null && fail "power off: not the SIM line"
++pass "setup: the tablet's modem line over shannond, silence without it, the Modem tile when it is off"
+diff --git a/test/onboarding-tablet.sh b/test/onboarding-tablet.sh
+new file mode 100644
+index 0000000..7569a17
+--- /dev/null
++++ b/test/onboarding-tablet.sh
+@@ -0,0 +1,198 @@
++#!/bin/bash
++# SPDX-License-Identifier: MIT
++# The SM-T715 tablet's omamobile-onboarding (patch 0015) against fakes:
++# - the image's placeholder password counts as no PIN: the nudge asks for
++#   setup and --inner makes the user choose a PIN or password
++#   (omamobile-set-pin --inner); the candidate is sent to unix_chkpwd
++#   NUL-terminated, like the empty-password test (a trailing newline would be
++#   part of the password), and it is the script's own placeholder -- read
++#   from it here, not restated;
++# - Golden's AI step in --inner: the AI desktop apps in one multi-choice (an
++#   installed one is not offered, a failed install says so and carries on),
++#   the language voice input uses, and the default coding agent when none is
++#   set ("Later" falls back to Omarchy's invitation).
++set -euo pipefail
++cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
++fail() { printf 'not ok - %s\n' "$1" >&2; [[ -f ${t:-}/out ]] && cat "$t/out" >&2; exit 1; }
++pass() { printf 'ok - %s\n' "$1"; }
++t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
++F=$t/fakes; mkdir -p "$F" "$t/home" "$t/omarchy/install/user/first-run"
++fake() { printf '#!/bin/bash\n%s\n' "$2" >"$F/$1"; chmod +x "$F/$1"; }
++# the placeholder the script carries, read from the script itself
++want=$(sed -n "s/^placeholder_pw='\(.*\)'\$/\\1/p" bin/omamobile-onboarding)
++[[ -n $want ]] || fail "the script does not carry its placeholder"
++# unix_chkpwd: reads the candidate from stdin NUL-terminated; empty input is
++# the no-password test, anything else the placeholder test. What it answers
++# comes from $T/empty-rc / $T/cand-rc; the format is recorded in $T/chk-fmt.
++cat >"$F/unix_chkpwd" <<'PY'
++#!/usr/bin/env python3
++import os
++import sys
++data = sys.stdin.buffer.read()
++t = os.environ["T"]
++want = os.environ["CHKPW_WANT"].encode()
++if data == b"":
++    fmt, key = "empty", "empty-rc"
++elif data == want + b"\0" and b"\n" not in data:
++    fmt, key = "ok", "cand-rc"
++else:
++    fmt, key = "bad", "cand-rc"
++with open(os.path.join(t, "chk-fmt"), "a") as f:
++    f.write(fmt + "\n")
++try:
++    rc = int(open(os.path.join(t, key)).read().strip())
++except OSError:
++    rc = 1
++sys.exit(rc)
++PY
++chmod +x "$F/unix_chkpwd"
++fake git 'echo set'
++fake gum 'case $1 in
++  input) n=$(cat "$T/asked" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$T/asked"; sed -n "${n}p" "$T/answers" ;;
++  choose) printf "%s\n" "$*" >>"$T/choose-args"; [[ ! -t 0 ]] && cat >>"$T/choose-stdin"
++          case $* in *--no-limit*) [[ -e $T/chosen-apps ]] && cat "$T/chosen-apps" ;;
++          *) [[ -e $T/chosen-agent ]] && cat "$T/chosen-agent" ;; esac ;;
++  confirm) exit 1 ;;
++esac'
++fake omamobile-set-pin 'case $1 in --type) echo PIN ;; --inner) echo "set-pin --inner" >>"$T/log" ;; esac'
++fake omarchy-notification-send 'echo "notify $*" >>"$T/log"'
++printf 'echo "invite-agent" >>"$T/log"\n' >"$t/omarchy/install/user/first-run/setup-agent.hook"
++fake omarchy-pkg-present 'if [[ -e $T/present ]] && grep -qx "$1" "$T/present"; then exit 0; fi; exit 1'
++fake omarchy-install-ai-claude 'echo "install-claude" >>"$T/log"; [[ ! -e $T/fail-claude ]]'
++fake omarchy-install-ai-chatgpt 'echo "install-chatgpt" >>"$T/log"; [[ ! -e $T/fail-chatgpt ]]'
++fake omarchy-default-agent 'if [[ ${1:-} == --install ]]; then echo "set-agent $2" >>"$T/log"; if [[ -e $T/fail-agent ]]; then exit 1; fi; else [[ -e $T/agent ]] && cat "$T/agent"; fi; exit 0'
++# a real timeout, shortened: the probes' 10 s become 2 s
++fake timeout 'secs=$1; shift; [[ $secs -gt 2 ]] && secs=2; exec /usr/bin/timeout "$secs" "$@"'
++ob() {
++  : >"$t/log"; rm -f "$t/asked" "$t/choose-stdin" "$t/choose-args" "$t/chk-fmt"
++  printf '%s\n%s\n' "" "" >"$t/answers"
++  env -u XDG_STATE_HOME T="$t" CHKPW_WANT="$want" HOME="$t/home" USER=alice \
++    OMARCHY_PATH="$t/omarchy" OMAMOBILE_FP_RUNNER="$t/none" \
++    PATH="$F:/usr/bin:/bin" bash bin/omamobile-onboarding "$@" >"$t/out" 2>&1
++}
++# a password scenario: empty-rc / cand-rc are what unix_chkpwd answers to the
++# empty and the placeholder candidate
++pin_real()   { echo 1 >"$t/empty-rc"; echo 1 >"$t/cand-rc"; }
++pin_place()  { echo 1 >"$t/empty-rc"; echo 0 >"$t/cand-rc"; }
++pin_none()   { echo 0 >"$t/empty-rc"; echo 1 >"$t/cand-rc"; }
++
++# The placeholder password: the nudge asks for setup, and the candidate was
++# sent NUL-terminated, equal to the script's placeholder
++pin_place
++ob --nudge
++grep -q 'Finish setting up' "$t/log" || fail "the placeholder counts as no PIN: the nudge asks for setup"
++grep -q 'invite-agent' "$t/log" && fail "the placeholder: no agent invitation yet"
++grep -q '^empty$' "$t/chk-fmt" || fail "the empty-password test ran"
++grep -q '^ok$' "$t/chk-fmt" || fail "the placeholder was sent NUL-terminated and matched the script's own ($(cat "$t/chk-fmt"))"
++grep -q '^bad$' "$t/chk-fmt" && fail "a candidate was sent in a format unix_chkpwd does not read"
++# --inner makes the user choose a PIN or password
++ob --inner
++grep -q 'set-pin --inner' "$t/log" || fail "--inner with only the placeholder: omamobile-set-pin --inner runs"
++grep -q 'already has a' "$t/out" && fail "--inner with only the placeholder: not 'already has a PIN'"
++pass "the placeholder counts as no PIN: the nudge asks, --inner forces a PIN or password, sent NUL-terminated"
++
++# A real PIN: the nudge goes to the agent invitation, --inner says the PIN is there
++pin_real
++ob --nudge
++grep -q 'Finish setting up' "$t/log" && fail "a real PIN: no setup nudge"
++grep -q 'invite-agent' "$t/log" || fail "a real PIN: the agent invitation"
++grep -q '^ok$' "$t/chk-fmt" || fail "a real PIN: the placeholder was still tested ($(cat "$t/chk-fmt"))"
++ob --inner
++grep -q 'already has a' "$t/out" || fail "--inner with a PIN: says it already has one"
++grep -q 'set-pin --inner' "$t/log" && fail "--inner with a PIN: does not run set-pin again"
++# No password at all: only the empty test runs
++pin_none
++ob --nudge
++grep -q 'Finish setting up' "$t/log" || fail "no password: the nudge asks for setup"
++[[ $(wc -l <"$t/chk-fmt") == 1 ]] || fail "no password: the placeholder is not tested ($(cat "$t/chk-fmt"))"
++pass "a real PIN or none: the nudge and --inner behave as upstream's"
++
++# Golden's AI step: the apps, offered in one multi-choice, installed
++pin_real
++rm -f "$t/present" "$t/fail-claude" "$t/fail-chatgpt" "$t/agent" "$t/fail-agent" "$t/chosen-agent"
++printf 'Claude Desktop\nChatGPT Desktop\n' >"$t/chosen-apps"
++ob --inner
++grep -qxF "The AI desktop apps are downloaded from Omarchy's repository, so the network is needed." "$t/out" ||
++  fail "the apps step says where the apps come from and that the network is needed"
++grep -q -- '--no-limit' "$t/choose-args" || fail "the apps are one gum choose --no-limit"
++grep -qxF 'Claude Desktop' "$t/choose-stdin" || fail "Claude Desktop is offered"
++grep -qxF 'ChatGPT Desktop' "$t/choose-stdin" || fail "ChatGPT Desktop is offered"
++grep -q 'install-claude' "$t/log" && grep -q 'install-chatgpt' "$t/log" || fail "both choices install their app"
++grep -qxF 'Claude Desktop installed.' "$t/out" || fail "a successful install is said"
++grep -qxF 'ChatGPT Desktop installed.' "$t/out" || fail "the second install too"
++
++# An app already installed is not offered; both installed: no choice at all
++printf 'claude-desktop\nopenai-codex-desktop\n' >"$t/present"
++ob --inner
++grep -q -- '--no-limit' "$t/choose-args" && fail "both installed: no apps choice"
++grep -q 'AI desktop apps' "$t/out" && fail "both installed: nothing said about the apps"
++rm -f "$t/present"; printf 'claude-desktop\n' >"$t/present"
++ob --inner
++grep -qxF 'ChatGPT Desktop' "$t/choose-stdin" || fail "Claude Desktop installed: only ChatGPT Desktop is offered"
++grep -qxF 'Claude Desktop' "$t/choose-stdin" && fail "Claude Desktop installed: not offered"
++
++# A failed install says so and carries on
++rm -f "$t/present"; touch "$t/fail-claude"
++printf 'Claude Desktop\nChatGPT Desktop\n' >"$t/chosen-apps"
++ob --inner
++grep -qxF 'Claude Desktop was not installed now; try again later (Install > AI).' "$t/out" ||
++  fail "a failed install says so"
++grep -qxF 'ChatGPT Desktop installed.' "$t/out" || fail "a failed install carries on"
++grep -q 'invite-agent' "$t/log" || fail "after a failed install the run goes on"
++pass "the AI apps: offered in one multi-choice, installed ones not offered, a failure carries on"
++
++# The language voice input uses, from Voxtype's config
++rm -f "$t/fail-claude" "$t/chosen-apps"
++vox() { mkdir -p "$t/home/.config/voxtype"; printf '%s' "$1" >"$t/home/.config/voxtype/config.toml"; }
++vox '[whisper]
++language = "fr"
++'
++ob --inner
++grep -qxF 'Voice input uses Français. Change it any time in Setup > Voice.' "$t/out" ||
++  fail "language fr: its own name, and Setup > Voice ($(grep 'Voice input' "$t/out"))"
++vox '[whisper]
++language = "sv"
++'
++ob --inner
++grep -qxF 'Voice input uses sv. Change it any time in Setup > Voice.' "$t/out" ||
++  fail "a language the settings do not list: the code itself"
++vox '[other]
++language = "de"
++[whisper]
++model = "base"
++'
++ob --inner
++grep -qxF 'Voice input uses English. Change it any time in Setup > Voice.' "$t/out" ||
++  fail "no [whisper] language: Voxtype's default, English; another section's language is not read"
++vox '[whisper]
++language = "auto"
++'
++ob --inner
++grep -qxF 'Voice input uses Automatic. Change it any time in Setup > Voice.' "$t/out" || fail "auto: Automatic"
++rm -rf "$t/home/.config"
++ob --inner
++grep -q 'Voice input' "$t/out" && fail "no Voxtype config: nothing about the language"
++pass "the voice-input language: from [whisper] language, its own name or the code, nothing without Voxtype"
++
++# The default coding agent, when none is set
++printf 'claude\n' >"$t/agent"
++ob --inner
++grep -q 'Default coding agent' "$t/choose-args" && fail "an agent already set: no choice"
++grep -q 'set-agent' "$t/log" && fail "an agent already set: nothing installed"
++rm -f "$t/agent"
++printf 'Codex\n' >"$t/chosen-agent"
++ob --inner
++grep -qF -- '--header Default coding agent Claude Code Codex OpenCode Gemini GitHub Copilot Grok Later' "$t/choose-args" ||
++  fail "the agent choice offers the agents and Later ($(cat "$t/choose-args"))"
++grep -q 'set-agent codex' "$t/log" || fail "a choice runs omarchy-default-agent --install"
++grep -qxF 'Codex is the default coding agent now.' "$t/out" || fail "a set agent is said"
++printf 'Later\n' >"$t/chosen-agent"
++ob --inner
++grep -q 'set-agent' "$t/log" && fail "Later: nothing installed"
++grep -q 'invite-agent' "$t/log" || fail "Later falls back to Omarchy's invitation"
++printf 'Grok\n' >"$t/chosen-agent"; touch "$t/fail-agent"
++ob --inner
++grep -qxF 'Grok was not set as the default agent; pick one later in Setup > Default agent.' "$t/out" ||
++  fail "a failed agent install says so"
++grep -q 'invite-agent' "$t/log" || fail "a failed agent install carries on to the invitation"
++pass "the default coding agent: picked when none is set, installed, Later falls back to the invitation"

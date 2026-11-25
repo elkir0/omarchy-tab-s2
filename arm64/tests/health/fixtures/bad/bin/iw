@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+cat <<IEOF
+Connected to 02:00:00:00:00:01 (on wlan0)
+	SSID: test-ap
+	freq: 5180
+	signal: -54 dBm
+IEOF

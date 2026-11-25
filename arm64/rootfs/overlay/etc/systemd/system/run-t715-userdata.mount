@@ -1,0 +1,26 @@
+# Galaxy Tab S2 (SM-T715), arm64: USERDATA as a whole at /run/t715/userdata, where the 32-bit system
+# has it too. tools/t715-arm64-install (the owner's, from the Mac over ssh) works there on either
+# system: the roots it writes, and the 32-bit root (USERDATA/omarchy) it reads. The root itself is the
+# directory USERDATA/omarchy-arm64, which the initramfs binds as /; this is a second mount of the same
+# file system, without exec, suid or device nodes.
+#
+# Not ordered before local-fs.target (DefaultDependencies=no, wanted by multi-user.target): nothing
+# in this image may hold the boot waiting for a device (/etc/fstab is empty for that reason).
+#
+# Until 2026-11-25 the initramfs bound it into the new root's /run, which its own /run then covered
+# at the handoff (and the directory was never made): it was never there on the tablet.
+[Unit]
+Description=Galaxy Tab S2: USERDATA at /run/t715/userdata (the installer's view)
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=/dev/disk/by-partlabel/USERDATA
+Where=/run/t715/userdata
+Type=ext4
+Options=noatime,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,834 @@
+SM-T715 tablet: the voice bar in other languages than English.
+
+Upstream's voice bar (omamobile.voice, shipped again by 0004) is English
+only: its settings offer Whisper's tiny.en, base.en and small.en,
+omamobile-voice-preview hard-codes language "en" and the .en models, and
+omamobile-setup-user sets Voxtype up only when omamobile-voice ships
+ggml-base.en.bin. The tablet's session runs in French, and the tablet's
+omamobile-voice ships Whisper's multilingual base (ggml-base.bin) instead.
+- VoiceModel.js, Voice.qml: a Language choice at the top of the voice
+  settings (Automatic, English, Français, Deutsch, Español, Italiano,
+  Português, Nederlands), written to Voxtype's config ([whisper] language:
+  auto, en, fr, ...) through Voxtype's own setter, key by key as upstream
+  sets the model, so the user's other settings stay; the daemon restarts
+  to load it. The speech models follow the language: English, the .en ones
+  as upstream; any other language or Automatic, the multilingual tiny,
+  base and small, as the same Fast, Balanced and Accurate rows. A new
+  language takes the same size in the other family (downloaded through
+  Voxtype first when it is not on disk), the language and the model set in
+  the order that never leaves the daemon a model deaf to its language. A
+  language set by hand that the list lacks shows as a row of its own.
+- omamobile-voice-preview: its own config carries the configured language
+  (no longer "en"), with a model that hears it: for English tiny.en, else
+  the multilingual tiny, else the daemon's base.en or base; for any other
+  language or auto, tiny, else the daemon's base; never a .en model.
+- omamobile-setup-user: Voxtype is set up out of the box when ggml-base.bin
+  or ggml-base.en.bin is in /usr/share/omamobile/voice/models (whichever
+  are there are linked). The config that first setup creates hears the
+  session's language: LC_ALL, then LC_MESSAGES, then LANG (then
+  /etc/locale.conf's, for a run outside a session such as the image's
+  build), its first two letters when the settings offer that language,
+  else en; its model is base for another language than English when
+  ggml-base.bin is shipped, base.en for English when ggml-base.en.bin is,
+  and otherwise whichever is shipped, with the language that model hears
+  (base.en: en). Only [whisper]'s model and language lines change (the two
+  lines alone without Omarchy's config); a config the user has stays.
+- Tests: test/voice-model.js, test/voice-preview.py and test/setup-user.sh
+  (its run() passes the locale variables and a locale.conf) cover all of
+  it; test/all's voice section checks the settings' wiring.
+Against omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0013.
+
+diff --git a/bin/omamobile-setup-user b/bin/omamobile-setup-user
+--- a/bin/omamobile-setup-user
++++ b/bin/omamobile-setup-user
+@@ -588,15 +588,86 @@ fi
+ # own marker, set only when it succeeds, so a failed one (firstboot carries
+ # on without a user manager) is tried again at the next login. A user who
+ # removes Dictation (Remove > Dictation takes voxtype-bin out) gets nothing.
++#
++# SM-T715 tablet build: the tablet's omamobile-voice ships Whisper's
++# multilingual base (ggml-base.bin) instead of base.en, since its session
++# is French; either one (or both) sets Voxtype up, and whichever is there is
++# linked. The config this step creates hears the session's language
++# (voice_language): base for a language other than English when it is
++# shipped, base.en for English when it is, and otherwise whichever is
++# shipped, with the language set to what that model hears (base.en: English
++# only). A config the user already has stays as it is, language and all;
++# the voice settings change the language later (Setup > Voice).
+ voxconf=~/.config/voxtype/config.toml
+ voxmodels=${OMAMOBILE_VOICE_MODELS:-/usr/share/omamobile/voice/models}
+-if command -v "${OMAMOBILE_VOXTYPE:-voxtype}" >/dev/null && [[ -f $voxmodels/ggml-base.en.bin ]]; then
++# The session's language as the voice settings name it: LC_ALL, then
++# LC_MESSAGES, then LANG, its first two letters when the settings offer
++# that language, else en. With none of them set (a run outside a session,
++# such as the image's build), LC_MESSAGES and then LANG from
++# /etc/locale.conf, the session's own source.
++voice_language() {
++  local locale=${LC_ALL:-${LC_MESSAGES:-${LANG:-}}} conf=${OMAMOBILE_LOCALE_CONF:-/etc/locale.conf}
++  local line conf_messages="" conf_lang=""
++  if [[ -z $locale && -r $conf ]]; then
++    while IFS= read -r line || [[ -n $line ]]; do
++      case $line in
++        LC_MESSAGES=*) conf_messages=${line#LC_MESSAGES=} ;;
++        LANG=*) conf_lang=${line#LANG=} ;;
++      esac
++    done <"$conf"
++    locale=${conf_messages:-$conf_lang}
++    locale=${locale#[\"\']}
++  fi
++  case ${locale:0:2} in
++    en | fr | de | es | it | pt | nl) printf '%s\n' "${locale:0:2}" ;;
++    *) printf 'en\n' ;;
++  esac
++}
++# key = "value" under [whisper] in Voxtype's config: the key's line changed
++# in place, else added under [whisper], else a [whisper] table added at the
++# end. Every other line stays as it is.
++voxtype_whisper_set() {
++  local file=$1 key=$2 value=$3
++  if sed -n '/^\[whisper\]$/,/^\[/p' "$file" | grep -c "^[[:space:]]*$key[[:space:]]*=" >/dev/null; then
++    sed -i "/^\[whisper\]\$/,/^\[/s/^[[:space:]]*$key[[:space:]]*=.*/$key = \"$value\"/" "$file"
++  elif grep -c '^\[whisper\]$' "$file" >/dev/null; then
++    sed -i "/^\[whisper\]\$/a $key = \"$value\"" "$file"
++  else
++    printf '\n[whisper]\n%s = "%s"\n' "$key" "$value" >>"$file"
++  fi
++}
++# The new config's language and model (see above); the config is
++# Omarchy's copy, or these two lines alone without one.
++voxtype_first_language() {
++  local language model
++  language=$(voice_language)
++  if [[ $language != en && -f $voxmodels/ggml-base.bin ]]; then
++    model=base
++  elif [[ $language == en && -f $voxmodels/ggml-base.en.bin ]]; then
++    model=base.en
++  elif [[ -f $voxmodels/ggml-base.bin ]]; then
++    model=base
++  else
++    model=base.en language=en
++  fi
++  if [[ -f $voxconf ]]; then
++    voxtype_whisper_set "$voxconf" model "$model" && voxtype_whisper_set "$voxconf" language "$language"
++  else
++    mkdir -p "${voxconf%/*}" && printf '[whisper]\nmodel = "%s"\nlanguage = "%s"\n' "$model" "$language" >"$voxconf"
++  fi
++}
++if command -v "${OMAMOBILE_VOXTYPE:-voxtype}" >/dev/null &&
++   [[ -f $voxmodels/ggml-base.bin || -f $voxmodels/ggml-base.en.bin ]]; then
+   if omarchy-done ensure omamobile-voxtype-setup; then
+     omarchy-done mark voxtype-install-invitation
+     voxdefault=${OMARCHY_PATH:-/usr/share/omarchy}/default/voxtype/config.toml
+-    if [[ ! -f $voxconf && -f $voxdefault ]]; then
+-      { mkdir -p "${voxconf%/*}" && cp "$voxdefault" "$voxconf"; } ||
+-        echo "omamobile-setup-user: could not copy Omarchy's Voxtype config" >&2
++    if [[ ! -f $voxconf ]]; then
++      if [[ -f $voxdefault ]]; then
++        { mkdir -p "${voxconf%/*}" && cp "$voxdefault" "$voxconf"; } ||
++          echo "omamobile-setup-user: could not copy Omarchy's Voxtype config" >&2
++      fi
++      voxtype_first_language ||
++        echo "omamobile-setup-user: could not set Voxtype's language and model" >&2
+     fi
+     mkdir -p ~/.local/share/voxtype/models || true
+     for model in "$voxmodels"/ggml-*.bin; do
+diff --git a/bin/omamobile-voice-preview b/bin/omamobile-voice-preview
+--- a/bin/omamobile-voice-preview
++++ b/bin/omamobile-voice-preview
+@@ -13,6 +13,12 @@ disk) and transcribes it in chunks with `voxtype transcribe`, the Fast model
+ records the real thing. The daemon's transcript, from the user's own model,
+ replaces the preview when it is done.
+ 
++SM-T715 tablet build: the preview hears the daemon's language ([whisper]
++language in the user's config: a code, or auto), with a model that can:
++for English, tiny.en or else Whisper's multilingual tiny, else the
++daemon's own base.en or base; for any other language and for auto, tiny,
++else the daemon's own base (Whisper's .en models hear English only).
++
+ Chunks: the audio since the last commit is transcribed again each time
+ STEP seconds of new audio have come in. Once it is COMMIT seconds long it is
+ cut at its quietest point near the end, that part's text is kept, and the
+@@ -69,7 +75,27 @@ def pass_timeout(step):
+ # keeps up comfortably; base.en takes about twice as long a pass, so half as
+ # often; anything bigger would lag behind the speech.
+ STEPS = [("tiny.en", 1.2), ("base.en", 2.5)]
+-CONFIG = "[whisper]\nlanguage = \"en\"\ncontext_window_optimization = true\nthreads = 4\n"
++# SM-T715 tablet build: Whisper's multilingual tiny and base, the same sizes
++# at the same pace, for the other languages.
++MULTILINGUAL_STEPS = [("tiny", 1.2), ("base", 2.5)]
++# Voxtype's language when its config names none (and Omarchy's).
++DEFAULT_LANGUAGE = "en"
++
++
++def config_for(language):
++    """The preview's own voxtype config: the language, Whisper's context cut
++    to the chunk, four threads."""
++    return "[whisper]\nlanguage = \"%s\"\ncontext_window_optimization = true\nthreads = 4\n" % normal_language(language)
++
++
++def normal_language(value):
++    """A code of two or three letters in lower case, or auto; anything else
++    (a list of languages, say) lets Whisper choose: auto."""
++    v = str(value if value is not None else "").strip().lower()
++    return v if re.match(r"^(auto|[a-z]{2,3})$", v) else "auto"
++
++
++CONFIG = config_for(DEFAULT_LANGUAGE)
+ NOISE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*")
+ 
+ 
+@@ -91,14 +117,39 @@ def daemon_model(config_text):
+     return "base.en"
+ 
+ 
++def daemon_language(config_text):
++    """[whisper]'s language in the user's voxtype config (normal_language),
++    or Voxtype's default, English."""
++    section = ""
++    for line in str(config_text or "").split("\n"):
++        line = line.strip()
++        m = re.match(r"^\[([^\]]+)\]$", line)
++        if m:
++            section = m.group(1).strip()
++            continue
++        if section == "whisper":
++            m = re.match(r"^language\s*=\s*(.*)$", line)
++            if m:
++                q = re.match(r'^"([^"]*)"', m.group(1))
++                return normal_language(q.group(1)) if q else "auto"
++    return DEFAULT_LANGUAGE
++
++
+ def pick_model(installed, config_text):
+-    """(model, step seconds) for the preview, or None: tiny.en when it is
+-    downloaded, else the daemon's own model when it is base.en."""
++    """(model, step seconds) for the preview, or None: a tiny model when it
++    is downloaded, else the daemon's own model when it is a base one.
++    SM-T715 tablet build: the models are the language's. English: tiny.en,
++    else Whisper's multilingual tiny; else the daemon's base.en or base.
++    Any other language (or auto): tiny, else the daemon's base, since a .en
++    model hears English only."""
+     have = set(installed)
+-    if "tiny.en" in have:
+-        return ("tiny.en", STEPS[0][1])
+     own = daemon_model(config_text)
+-    for name, step in STEPS:
++    english = daemon_language(config_text) == "en"
++    steps = (STEPS if english else []) + MULTILINGUAL_STEPS
++    for name, step in steps:
++        if name.startswith("tiny") and name in have:
++            return (name, step)
++    for name, step in steps:
+         if name == own and name in have:
+             return (name, step)
+     return None
+@@ -278,9 +329,9 @@ class Capture:
+ CURRENT = []
+ 
+ 
+-def transcribe(voxtype, model_path, pcm, timeout):
++def transcribe(voxtype, model_path, pcm, timeout, config=CONFIG):
+     r, wfd = os.pipe()
+-    os.write(wfd, CONFIG.encode())
++    os.write(wfd, config.encode())
+     os.close(wfd)
+     try:
+         p = subprocess.Popen([voxtype, "-q", "-c", "/dev/fd/%d" % r, "--model", model_path, "transcribe", "/dev/stdin"],
+@@ -319,6 +370,7 @@ def run(args):
+         return 0
+     model, step = picked
+     model_path = os.path.join(models_dir, "ggml-%s.bin" % model)
++    config = config_for(daemon_language(config_text))
+     if not any(os.access(os.path.join(d, voxtype), os.X_OK) for d in os.environ.get("PATH", "").split(":")) \
+             and not os.access(voxtype, os.X_OK):
+         emit({"status": "no-voxtype"})
+@@ -363,7 +415,7 @@ def run(args):
+             continue
+         t0 = time.monotonic()
+         try:
+-            text = transcribe(voxtype, model_path, piece, pass_timeout(step))
++            text = transcribe(voxtype, model_path, piece, pass_timeout(step), config)
+         except (OSError, ValueError, subprocess.TimeoutExpired):
+             text = None
+         if STOP[0]:
+diff --git a/plugins/omamobile.voice/Voice.qml b/plugins/omamobile.voice/Voice.qml
+--- a/plugins/omamobile.voice/Voice.qml
++++ b/plugins/omamobile.voice/Voice.qml
+@@ -53,6 +53,13 @@ import "../omamobile.launcher/LauncherModel.js" as LauncherModel
+ // settings`, the Dictation tile's chevron, Setup > Voice): the model, Power +
+ // Volume Up, the live preview and the check before Ask, in
+ // ~/.config/omamobile/voice.json.
++//
++// SM-T715 tablet build: the settings also choose the language Voxtype
++// hears (Automatic, English, Français, Deutsch, Español, Italiano,
++// Português, Nederlands: [whisper] language in its config), and the speech
++// models follow it: the .en ones for English, Whisper's multilingual ones
++// for the others and for Automatic. A language whose model isn't on disk
++// downloads it first, through Voxtype as for a model.
+ Item {
+   id: root
+ 
+@@ -181,10 +188,20 @@ Item {
+   property string downloading: ""
+   property string downloadText: ""
+   property string modelError: ""
+-  readonly property var modelRows: VoiceModel.modelRows(modelId, installed)
++  // SM-T715 tablet build: the rows are the language's models (the one
++  // being switched to while its model downloads).
++  readonly property var modelRows: VoiceModel.modelRows(modelId, installed, pendingLanguage || language)
+   readonly property string modelsDir: Quickshell.env("HOME") + "/.local/share/voxtype/models"
+ 
++  // SM-T715 tablet build: the language Voxtype hears, from the same config
++  // ([whisper] language), and the one waiting for its model's download.
++  property string language: VoiceModel.DEFAULT_LANGUAGE
++  property string pendingLanguage: ""
++  property string languageError: ""
++  readonly property var languageRows: VoiceModel.languageRows(language)
++
+   FileView {
++    id: voxtypeConfig
+     path: Quickshell.env("HOME") + "/.config/voxtype/config.toml"
+     watchChanges: true
+     printErrors: false
+@@ -192,10 +209,12 @@ Item {
+     onLoaded: {
+       root.modelId = VoiceModel.configModel(text())
+       root.maxSeconds = VoiceModel.configMaxSeconds(text())
++      root.language = VoiceModel.configLanguage(text())
+     }
+     onLoadFailed: {
+       root.modelId = "base.en"
+       root.maxSeconds = VoiceModel.MAX_SECONDS
++      root.language = VoiceModel.DEFAULT_LANGUAGE
+     }
+   }
+ 
+@@ -247,6 +266,37 @@ Item {
+     switchProc.running = true
+   }
+ 
++  // SM-T715 tablet build: a language, with the model it needs (the same
++  // size in the other family), downloaded first when it isn't on disk.
++  function chooseLanguage(id) {
++    if (downloading || id === language) return
++    languageError = ""
++    modelError = ""
++    var change = VoiceModel.languageChange(modelId, installed, id)
++    if (!change.download) { switchLanguage(id, change.model); return }
++    pendingLanguage = id
++    downloading = change.model
++    downloadText = "Starting"
++    downloadProc.command = VoiceModel.downloadArgv(change.model)
++    downloadProc.running = true
++  }
++
++  function switchLanguage(id, model) {
++    language = id
++    modelId = model
++    languageProc.command = VoiceModel.languageArgv(id, model)
++    languageProc.running = true
++  }
++
++  Process {
++    id: languageProc
++    onExited: function(exitCode) {
++      if (exitCode === 0) return
++      root.languageError = "Voxtype didn't take the language (exit " + exitCode + ")."
++      voxtypeConfig.reload()
++    }
++  }
++
+   Process {
+     id: downloadProc
+     stdout: SplitParser {
+@@ -257,10 +307,14 @@ Item {
+     }
+     onExited: function(exitCode) {
+       var id = root.downloading
++      var lang = root.pendingLanguage
+       root.downloading = ""
+       root.downloadText = ""
++      root.pendingLanguage = ""
+       root.refreshModels()
+-      if (exitCode === 0) root.switchModel(id)
++      if (exitCode === 0 && lang !== "") root.switchLanguage(lang, id)
++      else if (exitCode === 0) root.switchModel(id)
++      else if (lang !== "") root.languageError = "The download stopped (exit " + exitCode + "). Check the connection and try again."
+       else root.modelError = "The download stopped (exit " + exitCode + "). Check the connection and try again."
+     }
+   }
+@@ -337,7 +391,7 @@ Item {
+                             pushToTalk: pushToTalk, elapsed: Math.floor(elapsed), agent: agentId,
+                             agentInFront: agentInFront, appOnScreen: appOnScreen, chars: transcript.length,
+                             preview: previewProc.running, partialChars: partial.length,
+-                            model: modelId, settings: settings })
++                            model: modelId, language: language, settings: settings })
+   }
+ 
+   // ---------------------------------------------------------------- calls (VoiceLink.js, IPC, omamobile-voice)
+@@ -1055,6 +1109,33 @@ Item {
+               wrapMode: Text.Wrap
+             }
+ 
++            // SM-T715 tablet build: the language comes first, since the
++            // speech models below follow it.
++            SectionLabel { text: "Language" }
++
++            Repeater {
++              model: root.languageRows
++              delegate: ModelRow {
++                required property var modelData
++                width: settingsColumn.width
++                objectName: "language-" + modelData.id
++                title: modelData.name
++                line: root.pendingLanguage === modelData.id ? modelData.line + " · downloading " + root.downloadText : modelData.line
++                chosen: modelData.chosen
++                badge: modelData.chosen ? "In use" : root.pendingLanguage === modelData.id ? root.downloadText : ""
++                enabled: root.downloading === ""
++                onTapped: root.chooseLanguage(modelData.id)
++              }
++            }
++
++            InfoRow {
++              width: parent.width
++              visible: root.languageError !== ""
++              glyph: "󰀦"
++              text: root.languageError
++              urgent: true
++            }
++
+             SectionLabel { text: "Speech model" }
+ 
+             Repeater {
+diff --git a/plugins/omamobile.voice/VoiceModel.js b/plugins/omamobile.voice/VoiceModel.js
+--- a/plugins/omamobile.voice/VoiceModel.js
++++ b/plugins/omamobile.voice/VoiceModel.js
+@@ -395,6 +395,117 @@ var MODELS = [
+   { id: "small.en", name: "Accurate", detail: "small", size: "466 MB", note: "slower" }
+ ]
+ 
++// SM-T715 tablet build: the voice bar in other languages than English.
++// Whisper's .en models hear English only; its multilingual tiny, base and
++// small (the same sizes) hear the others, and English too. The language is
++// Voxtype's own ([whisper] language in the user's config.toml: a code, or
++// "auto" for Whisper to tell each recording's language), and the models
++// the settings offer follow it: English, the .en ones as upstream; any
++// other language or Automatic, the multilingual ones, as the same Fast /
++// Balanced / Accurate choices.
++var ENGLISH_MODELS = MODELS
++var MULTILINGUAL_MODELS = [
++  { id: "tiny", name: "Fast", detail: "tiny", size: "75 MB", note: "quickest, rougher" },
++  { id: "base", name: "Balanced", detail: "base", size: "142 MB", note: "the default" },
++  { id: "small", name: "Accurate", detail: "small", size: "466 MB", note: "slower" }
++]
++// The languages the settings offer, by their own names; line: what the
++// row says under the name.
++var LANGUAGES = [
++  { id: "auto", name: "Automatic", line: "the language of each recording · multilingual models" },
++  { id: "en", name: "English", line: "English-only models" },
++  { id: "fr", name: "Français", line: "French · multilingual models" },
++  { id: "de", name: "Deutsch", line: "German · multilingual models" },
++  { id: "es", name: "Español", line: "Spanish · multilingual models" },
++  { id: "it", name: "Italiano", line: "Italian · multilingual models" },
++  { id: "pt", name: "Português", line: "Portuguese · multilingual models" },
++  { id: "nl", name: "Nederlands", line: "Dutch · multilingual models" }
++]
++// Voxtype's language when its config names none (and Omarchy's).
++var DEFAULT_LANGUAGE = "en"
++
++// A language as the settings use it: a code of two or three letters in
++// lower case, or "auto"; anything else Voxtype was told (a list of
++// languages, say) lets Whisper choose, so it counts as "auto".
++function normalLanguage(value) {
++  var v = String(value === undefined || value === null ? "" : value).trim().toLowerCase()
++  return /^(auto|[a-z]{2,3})$/.test(v) ? v : "auto"
++}
++
++// The daemon's language from the user's voxtype config.toml: [whisper]'s
++// `language = "..."`, or Voxtype's default (English).
++function configLanguage(text) {
++  var lines = String(text || "").split("\n")
++  var section = ""
++  for (var i = 0; i < lines.length; i++) {
++    var line = lines[i].trim()
++    var sec = line.match(/^\[([^\]]+)\]$/)
++    if (sec) { section = sec[1].trim(); continue }
++    if (section !== "whisper") continue
++    var m = line.match(/^language\s*=\s*(.*)$/)
++    if (!m) continue
++    var q = m[1].match(/^"([^"]*)"/)
++    return q ? normalLanguage(q[1]) : "auto"
++  }
++  return DEFAULT_LANGUAGE
++}
++
++// English-only (a .en model)?
++function englishOnly(id) {
++  return /\.en$/.test(String(id || ""))
++}
++
++// The models the settings offer for a language.
++function modelsFor(language) {
++  return language === "en" ? ENGLISH_MODELS : MULTILINGUAL_MODELS
++}
++
++// The model a language needs, keeping the size: English takes the .en twin
++// of tiny, base and small; any other language (or Automatic) a
++// multilingual one, so a .en model loses its suffix. Anything else (a
++// larger model, multilingual already) stays.
++function modelForLanguage(model, language) {
++  var id = String(model || "base.en")
++  var size = id.replace(/\.en$/, "")
++  if (language === "en") return ["tiny", "base", "small"].indexOf(size) >= 0 ? size + ".en" : id
++  return size
++}
++
++// What choosing a language does: the model it needs, and whether that
++// model has to be downloaded first (it isn't the one in use and isn't on
++// disk).
++function languageChange(model, installed, language) {
++  var target = modelForLanguage(model, language)
++  return { model: target, download: target !== String(model || "") && (installed || []).indexOf(target) < 0 }
++}
++
++// Each language's row: chosen, and its line. A language the config names
++// that the list doesn't offer gets a row of its own at the end, chosen, so
++// the settings never show nothing in use.
++function languageRows(current) {
++  var cur = normalLanguage(current)
++  var rows = LANGUAGES.map(function(l) {
++    return { id: l.id, name: l.name, line: l.line, chosen: l.id === cur }
++  })
++  if (!rows.some(function(r) { return r.chosen }))
++    rows.push({ id: cur, name: cur, line: "set in Voxtype's config · multilingual models", chosen: true })
++  return rows
++}
++
++// The language goes into the user's voxtype config through Voxtype's own
++// setter (as the model does), key by key, so the rest of the file stays as
++// the user has it; then the daemon restarts to load it. The model the
++// language needs is set in the same run, in the order that never leaves
++// the daemon a language its model can't hear: towards English the language
++// first (a multilingual model hears English), otherwise the model first.
++function languageArgv(language, model) {
++  var setLanguage = 'voxtype config set whisper.language "$1"'
++  var setModel = 'voxtype config set whisper.model "$2"'
++  var steps = String(language) === "en" ? [setLanguage, setModel] : [setModel, setLanguage]
++  return ["sh", "-c", steps.join(" && ") + " && exec systemctl --user try-restart voxtype.service",
++          "sh", String(language), String(model)]
++}
++
+ function modelFile(id) {
+   return "ggml-" + String(id) + ".bin"
+ }
+@@ -459,9 +570,12 @@ function installedModels(listing) {
+ }
+ 
+ // Each model's row: chosen, downloaded, and its line under the name.
+-function modelRows(current, installed) {
++// SM-T715 tablet build: the rows are the language's models (modelsFor);
++// without a language, the family of the model in use.
++function modelRows(current, installed, language) {
+   var have = installed || []
+-  return MODELS.map(function(m) {
++  var list = language === undefined ? (englishOnly(current) ? ENGLISH_MODELS : MULTILINGUAL_MODELS) : modelsFor(language)
++  return list.map(function(m) {
+     var downloaded = have.indexOf(m.id) >= 0
+     return {
+       id: m.id, name: m.name, chosen: m.id === current, downloaded: downloaded, size: m.size,
+@@ -524,6 +638,10 @@ if (typeof module !== "undefined") {
+     durationArgv: durationArgv, installedModels: installedModels, modelRows: modelRows,
+     downloadArgv: downloadArgv, switchArgv: switchArgv, parseProgress: parseProgress,
+     HAPTIC_ARGV: HAPTIC_ARGV, ticks: ticks, DELIVERED_MS: DELIVERED_MS, PREVIEW_ARGV: PREVIEW_ARGV,
+-    parsePartial: parsePartial, partialTail: partialTail, previewRuns: previewRuns, liveLine: liveLine
++    parsePartial: parsePartial, partialTail: partialTail, previewRuns: previewRuns, liveLine: liveLine,
++    ENGLISH_MODELS: ENGLISH_MODELS, MULTILINGUAL_MODELS: MULTILINGUAL_MODELS, LANGUAGES: LANGUAGES,
++    DEFAULT_LANGUAGE: DEFAULT_LANGUAGE, normalLanguage: normalLanguage, configLanguage: configLanguage,
++    englishOnly: englishOnly, modelsFor: modelsFor, modelForLanguage: modelForLanguage,
++    languageChange: languageChange, languageRows: languageRows, languageArgv: languageArgv
+   }
+ }
+diff --git a/test/all b/test/all
+--- a/test/all
++++ b/test/all
+@@ -1077,6 +1077,13 @@ awk '/objectName: "liveText"/,/Accessible.name/' "$v" | grep -c 'color: root.liv
+   fail "the preview is in the theme's muted colour, the final words in the text colour"
+ if grep -nE '#[0-9a-fA-F]{6}' "$v" | grep -vE '^\S+:\s*//'; then fail "Voice.qml uses theme tokens, no colours of its own"; fi
+ grep -c 'voxtype record start' bin/omamobile-voice-preview >/dev/null && fail "the preview never starts a recording of its own"
++# SM-T715 tablet build (0014): the settings' Language rows come before the
++# speech models, which follow the language (VoiceModel's own checks are in
++# test/voice-model.js, the preview's language in test/voice-preview.py).
++awk '/SectionLabel \{ text: "Language" \}/,/SectionLabel \{ text: "Speech model" \}/' "$v" |
++  grep -c 'onTapped: root.chooseLanguage(modelData.id)' >/dev/null || fail "the voice settings choose the language, before the speech model"
++grep -c 'VoiceModel.modelRows(modelId, installed, pendingLanguage || language)' "$v" >/dev/null || fail "the speech models follow the language"
++grep -c 'root.language = VoiceModel.configLanguage(text())' "$v" >/dev/null || fail "the language is Voxtype's own, from its config"
+ # Offscreen review shots in the OWL container only (test/voice-render).
+ if [[ -n ${OMAMOBILE_VOICE_RENDER:-} ]]; then
+   bash test/voice-render "$OMAMOBILE_VOICE_RENDER" >/dev/null || fail "voice bar render"
+diff --git a/test/setup-user.sh b/test/setup-user.sh
+--- a/test/setup-user.sh
++++ b/test/setup-user.sh
+@@ -75,6 +75,8 @@ run() {
+     OMAMOBILE_SQUEEKBOARD_SHARE="$pkg/squeekboard/keyboards" \
+     GSETTINGS_NO_CLICK_POLICY="${GSETTINGS_NO_CLICK_POLICY:-}" \
+     OMAMOBILE_VOICE_MODELS="${RUN_VOICE_MODELS:-$t/no-voice-models}" OMAMOBILE_VOXTYPE="${RUN_VOXTYPE:-voxtype}" \
++    LC_ALL="${RUN_LC_ALL:-}" LC_MESSAGES="${RUN_LC_MESSAGES:-}" LANG="${RUN_LANG:-}" \
++    OMAMOBILE_LOCALE_CONF="${RUN_LOCALE_CONF:-$t/no-locale-conf}" \
+     OMARCHY_PATH="${RUN_OMARCHY_PATH:-$t/omarchy}" \
+     OMAMOBILE_USER_UNITS="${RUN_USER_UNITS:-$t/no-user-units}" \
+     OMAMOBILE_AUTO_SLEEP_DEFAULT="${RUN_AUTO_SLEEP:-$t/no-auto-sleep-default}" \
+@@ -426,9 +428,93 @@ for case in novox nomodel; do
+   [[ ! -e $hx/.config/omarchy/defaults/dictation ]] || fail "$case: no dictation default is recorded"
+   if grep -c 'enable voxtype' "$hx/calls" >/dev/null 2>&1; then fail "$case: voxtype.service isn't enabled"; fi
+ done
+-rm "$F/voxtype"
+ pass "voice out of the box: Omarchy's config and the shipped base.en once, the daemon enabled until it works, a removal kept"
+ 
++# SM-T715 tablet build (0014): the tablet's omamobile-voice ships the
++# multilingual base (ggml-base.bin); either model sets Voxtype up, and the
++# new config hears the session's language (LC_ALL, then LC_MESSAGES, then
++# LANG; then /etc/locale.conf's; else English) with the model that hears it,
++# the rest of Omarchy's config kept as it is. A config the user has stays.
++VB=$t/voice-models-multi; mkdir -p "$VB"; echo model >"$VB/ggml-base.bin"
++VBOTH=$t/voice-models-both; mkdir -p "$VBOTH"; echo model >"$VBOTH/ggml-base.bin"; echo model >"$VBOTH/ggml-base.en.bin"
++printf '# Omarchy'"'"'s Voxtype config\nstate_file = "auto"\n\n[audio]\nmax_duration_secs = 60\n\n[whisper]\n# the model\nmodel = "base.en"\nlanguage = "en"\n\n[output]\nmode = "type"\n' \
++  >"$t/omarchy/default/voxtype/config.toml"
++vl() { vc "$1" | sed -n 's/^language = "\(.*\)"$/\1/p'; }
++vm() { vc "$1" | sed -n 's/^model = "\(.*\)"$/\1/p'; }
++# case: models, then the locale variables (LC_ALL LC_MESSAGES LANG), the
++# language and the model expected
++for case in \
++  "en|||fr_FR.UTF-8|en|base.en" \
++  "multi|||en_US.UTF-8|en|base" \
++  "multi|||C.UTF-8|en|base" \
++  "both|||de_DE.UTF-8|de|base" \
++  "both|||en_GB.UTF-8|en|base.en" \
++  "both|||ja_JP.UTF-8|en|base.en" \
++  "both||||en|base.en" \
++  "both|it_IT.UTF-8||fr_FR.UTF-8|it|base" \
++  "both||es_ES.UTF-8|fr_FR.UTF-8|es|base" \
++  "both||nl_NL.UTF-8||nl|base" \
++  "both|pt_BR.UTF-8|en_US.UTF-8|en_US.UTF-8|pt|base" \
++  "both|||fr_FR.UTF-8|fr|base" \
++  "multi|||fr_FR.UTF-8|fr|base"; do
++  IFS='|' read -r models lc_all lc_messages lang want_lang want_model <<<"$case"
++  case $models in multi) dir=$VB ;; both) dir=$VBOTH ;; en) dir=$VM ;; esac
++  hl=$t/voice-lang; rm -rf "$hl"; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++  RUN_HOME=$hl RUN_VOICE_MODELS=$dir RUN_LC_ALL=$lc_all RUN_LC_MESSAGES=$lc_messages RUN_LANG=$lang run
++  [[ $(vl "$hl") == "$want_lang" && $(vm "$hl") == "$want_model" ]] ||
++    fail "$case: Voxtype hears $want_lang with $want_model (got $(vl "$hl") with $(vm "$hl"))"
++  [[ $(vc "$hl" | grep -c '^language = ') == 1 && $(vc "$hl" | grep -c '^model = ') == 1 ]] || fail "$case: one language and one model line"
++  for f in "$dir"/ggml-*.bin; do
++    [[ $(readlink "$hl/.local/share/voxtype/models/${f##*/}") == "$f" ]] || fail "$case: the shipped ${f##*/} is linked"
++  done
++  [[ $(find "$hl/.local/share/voxtype/models" -name 'ggml-*.bin' | wc -l) == $(find "$dir" -name 'ggml-*.bin' | wc -l) ]] || fail "$case: only the shipped models are linked"
++  [[ $(grep -cx 'systemctl --user enable voxtype.service' "$hl/calls") == 1 ]] || fail "$case: voxtype.service is enabled"
++done
++# Omarchy's other settings stay as they were, around the two lines (the
++# last case: French, the tablet's)
++grep -cx 'state_file = "auto"' "$hl/.config/voxtype/config.toml" >/dev/null &&
++  [[ $(vc "$hl" | grep -v -e '^$' -e '^# Omamobile' -e '^context_window_optimization' | head -4 | tr '\n' '|') == '[whisper]|# the model|model = "base"|language = "fr"|' ]] &&
++  grep -cx '# the model' "$hl/.config/voxtype/config.toml" >/dev/null &&
++  sed -n '/^\[audio\]$/,/^\[/p' "$hl/.config/voxtype/config.toml" | grep -cx 'max_duration_secs = 60' >/dev/null &&
++  sed -n '/^\[output\]$/,/^\[/p' "$hl/.config/voxtype/config.toml" | grep -cx 'mode = "type"' >/dev/null ||
++  fail "the rest of Omarchy's Voxtype config stays"
++vc "$hl" | grep -cx 'context_window_optimization = true' >/dev/null || fail "the new config gets the context cut too"
++# No LC_ALL, LC_MESSAGES or LANG (a run before any session, such as the
++# image's build): /etc/locale.conf's LC_MESSAGES, then its LANG
++printf 'LANG="de_DE.UTF-8"\n' >"$t/locale.conf"
++hl=$t/voice-lang-conf; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LOCALE_CONF=$t/locale.conf run
++[[ $(vl "$hl") == de && $(vm "$hl") == base ]] || fail "locale.conf's LANG when the session sets none"
++printf 'LANG=de_DE.UTF-8\nLC_MESSAGES=fr_FR.UTF-8\n' >"$t/locale.conf"
++hl=$t/voice-lang-conf2; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LOCALE_CONF=$t/locale.conf run
++[[ $(vl "$hl") == fr ]] || fail "locale.conf's LC_MESSAGES before its LANG"
++hl=$t/voice-lang-conf3; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LOCALE_CONF=$t/locale.conf RUN_LANG=it_IT.UTF-8 run
++[[ $(vl "$hl") == it ]] || fail "the session's own LANG before locale.conf"
++# A [whisper] table without a language line gets one, under its header
++printf 'state_file = "auto"\n\n[whisper]\nmodel = "base.en"\n\n[output]\nmode = "type"\n' >"$t/omarchy/default/voxtype/config.toml"
++hl=$t/voice-lang-nokey; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LANG=fr_FR.UTF-8 run
++[[ $(vl "$hl") == fr && $(vm "$hl") == base ]] || fail "a language line is added under [whisper]"
++sed -n '/^\[output\]$/,/^\[/p' "$hl/.config/voxtype/config.toml" | grep -c '^language' >/dev/null && fail "only [whisper] changes"
++# Without Omarchy's config, the two lines alone
++hl=$t/voice-lang-nodefault; vhome "$hl"; rm -rf "$hl/.config/voxtype" "$hl/.local/share/voxtype"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LANG=fr_FR.UTF-8 RUN_OMARCHY_PATH=$t/no-omarchy run
++[[ $(vl "$hl") == fr && $(vm "$hl") == base ]] || fail "without Omarchy's config, Voxtype still gets the language and the model"
++# A user's own config stays, language and all; the model is linked
++hl=$t/voice-lang-own; vhome "$hl"; rm -rf "$hl/.local/share/voxtype"
++printf '[whisper]\nmodel = "small.en"\nlanguage = "en"\n' >"$hl/.config/voxtype/config.toml"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LANG=fr_FR.UTF-8 run
++[[ $(vl "$hl") == en && $(vm "$hl") == small.en ]] || fail "a user's own Voxtype config keeps its language and model"
++[[ -L $hl/.local/share/voxtype/models/ggml-base.bin ]] || fail "the shipped base is linked for a user with a config"
++# Set up once: a language the user changes later stays
++sed -i 's/^language = "en"$/language = "de"/' "$hl/.config/voxtype/config.toml"
++RUN_HOME=$hl RUN_VOICE_MODELS=$VB RUN_LANG=fr_FR.UTF-8 run
++[[ $(vl "$hl") == de ]] || fail "the language is chosen once; the user's later choice stays"
++rm "$F/voxtype"
++pass "tablet voice (0014): base or base.en sets Voxtype up, in the session's language, once; the rest of the config and a user's own stay"
++
+ # The keyboard: every layout the package carries linked (the terminal's, and
+ # each language's from squeekboard/generate), the theme written at every
+ # login, its gtk.css import and theme-set hook added once (H ran three times).
+diff --git a/test/voice-model.js b/test/voice-model.js
+--- a/test/voice-model.js
++++ b/test/voice-model.js
+@@ -207,6 +207,78 @@ test("models: Voxtype's own download and switch, nothing interpolated", () => {
+   assert.strictEqual(M.parseProgress("Downloading..."), null)
+ })
+ 
++// SM-T715 tablet build (0014): the voice bar in other languages than English.
++test("languages: the config's [whisper] language, the settings' eight, a language the list lacks", () => {
++  assert.strictEqual(M.configLanguage('[whisper]\nmodel = "base"\nlanguage = "fr"\n'), "fr")
++  assert.strictEqual(M.configLanguage('[audio]\nlanguage = "de"\n[whisper]\nmodel = "base.en"\n'), "en", "only [whisper]'s; Voxtype's default otherwise")
++  assert.strictEqual(M.configLanguage(""), "en")
++  assert.strictEqual(M.configLanguage('[whisper]\nlanguage = "auto"\n'), "auto")
++  assert.strictEqual(M.configLanguage('[whisper]\nlanguage = " FR "\n'), "fr")
++  assert.strictEqual(M.configLanguage('[whisper]\nlanguage = ["en", "fr"]\n'), "auto", "a list lets Whisper choose")
++  assert.strictEqual(M.configLanguage('[whisper]\nlanguage = "fr\\"; rm"\n'), "auto", "nothing odd gets through")
++  assert.deepStrictEqual(M.LANGUAGES.map((l) => l.id), ["auto", "en", "fr", "de", "es", "it", "pt", "nl"])
++  assert.deepStrictEqual(M.LANGUAGES.map((l) => l.name),
++    ["Automatic", "English", "Français", "Deutsch", "Español", "Italiano", "Português", "Nederlands"])
++  const rows = M.languageRows("fr")
++  assert.strictEqual(rows.length, 8)
++  assert.deepStrictEqual(rows.filter((r) => r.chosen).map((r) => r.id), ["fr"])
++  assert.ok(rows.every((r) => r.line), "every row has its line")
++  const other = M.languageRows("ja")
++  assert.strictEqual(other.length, 9)
++  assert.deepStrictEqual(other[8], { id: "ja", name: "ja", line: other[8].line, chosen: true }, "a language set by hand shows, chosen")
++  assert.deepStrictEqual(M.languageRows("auto").filter((r) => r.chosen).map((r) => r.id), ["auto"])
++})
++
++test("languages: the models follow the language, Fast / Balanced / Accurate in each family", () => {
++  assert.deepStrictEqual(M.modelsFor("en").map((m) => m.id), ["tiny.en", "base.en", "small.en"])
++  for (const lang of ["fr", "de", "auto", "ja"])
++    assert.deepStrictEqual(M.modelsFor(lang).map((m) => m.id), ["tiny", "base", "small"], lang)
++  assert.deepStrictEqual(M.MULTILINGUAL_MODELS.map((m) => [m.name, m.size]),
++    [["Fast", "75 MB"], ["Balanced", "142 MB"], ["Accurate", "466 MB"]])
++  const fr = M.modelRows("base", ["base", "tiny.en"], "fr")
++  assert.deepStrictEqual(fr.map((r) => [r.id, r.name, r.chosen, r.downloaded]),
++    [["tiny", "Fast", false, false], ["base", "Balanced", true, true], ["small", "Accurate", false, false]])
++  assert.strictEqual(fr[0].line, "tiny · 75 MB · download", "tiny.en on disk isn't tiny")
++  assert.deepStrictEqual(M.modelRows("base.en", [], "en").map((r) => r.id), ["tiny.en", "base.en", "small.en"])
++  assert.deepStrictEqual(M.modelRows("base", []).map((r) => r.id), ["tiny", "base", "small"], "without a language, the model's family")
++  assert.deepStrictEqual(M.modelRows("small.en", []).map((r) => r.id), ["tiny.en", "base.en", "small.en"])
++  assert.strictEqual(M.modelShort("base"), "base")
++})
++
++test("languages: a change keeps the size in the other family, downloading only what is missing", () => {
++  assert.strictEqual(M.modelForLanguage("base.en", "fr"), "base")
++  assert.strictEqual(M.modelForLanguage("tiny.en", "auto"), "tiny")
++  assert.strictEqual(M.modelForLanguage("small.en", "de"), "small")
++  assert.strictEqual(M.modelForLanguage("base", "en"), "base.en")
++  assert.strictEqual(M.modelForLanguage("small", "en"), "small.en")
++  assert.strictEqual(M.modelForLanguage("base", "nl"), "base", "multilingual to multilingual: no change")
++  assert.strictEqual(M.modelForLanguage("base.en", "en"), "base.en")
++  assert.strictEqual(M.modelForLanguage("medium.en", "fr"), "medium", "any .en model loses its suffix")
++  assert.strictEqual(M.modelForLanguage("large-v3", "en"), "large-v3", "a multilingual model outside the three hears English")
++  assert.strictEqual(M.modelForLanguage("", "fr"), "base", "Voxtype's default base.en")
++  assert.deepStrictEqual(M.languageChange("base.en", ["base.en", "base"], "fr"), { model: "base", download: false })
++  assert.deepStrictEqual(M.languageChange("base.en", ["base.en"], "fr"), { model: "base", download: true })
++  assert.deepStrictEqual(M.languageChange("base", ["base"], "de"), { model: "base", download: false })
++  assert.deepStrictEqual(M.languageChange("base", ["base"], "en"), { model: "base.en", download: true })
++  assert.deepStrictEqual(M.languageChange("base", ["base"], "auto"), { model: "base", download: false })
++})
++
++test("languages: Voxtype's own setter, key by key, in an order that never leaves a model deaf to the language", () => {
++  const fr = M.languageArgv("fr", "base")
++  assert.deepStrictEqual(fr.slice(0, 2), ["sh", "-c"])
++  assert.deepStrictEqual(fr.slice(3), ["sh", "fr", "base"])
++  assert.ok(fr[2].indexOf('voxtype config set whisper.model "$2"') < fr[2].indexOf('voxtype config set whisper.language "$1"'),
++    "away from English: the multilingual model first")
++  assert.ok(fr[2].endsWith(" && exec systemctl --user try-restart voxtype.service"))
++  const en = M.languageArgv("en", "base.en")
++  assert.ok(en[2].indexOf('voxtype config set whisper.language "$1"') < en[2].indexOf('voxtype config set whisper.model "$2"'),
++    "towards English: the language first, while the model is still multilingual")
++  assert.deepStrictEqual(en.slice(3), ["sh", "en", "base.en"])
++  const odd = M.languageArgv("fr; rm -rf ~", "base")
++  assert.strictEqual(odd[4], "fr; rm -rf ~", "nothing interpolated")
++  assert.ok(!odd[2].includes("rm -rf"))
++})
++
+ test("the delivered words stay through the daemon's idle, then the timer closes the bar", () => {
+   assert.deepStrictEqual(M.step("delivered", true, "idle"), { phase: "delivered", read: false })
+   assert.deepStrictEqual(M.step("delivered", false, "idle"), { phase: "delivered", read: false })
+diff --git a/test/voice-preview.py b/test/voice-preview.py
+--- a/test/voice-preview.py
++++ b/test/voice-preview.py
+@@ -57,6 +57,31 @@ def models():
+     assert vp.pick_model([], "") is None
+ 
+ 
++def languages():
++    """SM-T715 tablet build (0014): the daemon's language, and a model that
++    hears it: .en ones for English only."""
++    assert vp.daemon_language("") == "en", "Voxtype's default"
++    assert vp.daemon_language('[whisper]\nmodel = "base"\nlanguage = "fr"\n') == "fr"
++    assert vp.daemon_language('[audio]\nlanguage = "de"\n[whisper]\nmodel = "base"\n') == "en", "only [whisper]'s"
++    assert vp.daemon_language('[whisper]\nlanguage = "auto"\n') == "auto"
++    assert vp.daemon_language('[whisper]\nlanguage = ["en", "fr"]\n') == "auto", "a list lets Whisper choose"
++    assert vp.daemon_language('[whisper]\nlanguage = "FR"\n') == "fr"
++    assert 'language = "fr"' in vp.config_for("fr") and "context_window_optimization = true" in vp.config_for("fr")
++    assert 'language = "auto"' in vp.config_for('fr"\nmodel = "x'), "nothing odd reaches the preview's config"
++    assert vp.CONFIG == vp.config_for("en")
++    fr = '[whisper]\nmodel = "base"\nlanguage = "fr"\n'
++    assert vp.pick_model(["tiny", "base"], fr) == ("tiny", 1.2), "French: the multilingual tiny"
++    assert vp.pick_model(["base"], fr) == ("base", 2.5), "else the daemon's own base"
++    assert vp.pick_model(["tiny.en", "base.en"], fr) is None, "never a .en model for French"
++    assert vp.pick_model(["base", "small"], '[whisper]\nmodel = "small"\nlanguage = "de"\n') is None, "not the daemon's small, nor a base it doesn't run"
++    assert vp.pick_model(["tiny"], '[whisper]\nmodel = "base"\nlanguage = "auto"\n') == ("tiny", 1.2), "auto: multilingual"
++    assert vp.pick_model(["tiny.en"], '[whisper]\nmodel = "base"\nlanguage = "auto"\n') is None
++    en = '[whisper]\nmodel = "base"\nlanguage = "en"\n'
++    assert vp.pick_model(["base"], en) == ("base", 2.5), "English on the multilingual base"
++    assert vp.pick_model(["tiny", "base"], en) == ("tiny", 1.2)
++    assert vp.pick_model(["tiny.en", "tiny"], en) == ("tiny.en", 1.2), "English: tiny.en first"
++
++
+ def planning():
+     step = 1.2
+     assert vp.plan(int(0.5 * RATE), 0, 0, step) is None, "under a second: wait"
+@@ -146,6 +171,29 @@ def whole_loop():
+         assert len(log) == len(lines), "silence is never transcribed: %d passes, %d lines" % (len(log), len(lines))
+ 
+ 
++def whole_loop_french():
++    """SM-T715 tablet build (0014): the daemon hears French, so the preview
++    runs the multilingual tiny with language = "fr", never tiny.en."""
++    with tempfile.TemporaryDirectory() as tmp:
++        env, home = env_for(tmp)
++        with open(os.path.join(home, ".config/voxtype/config.toml"), "w") as f:
++            f.write('state_file = "auto"\n\n[whisper]\nmodel = "base"\nlanguage = "fr"\n')
++        models = os.path.join(home, ".local/share/voxtype/models")
++        open(os.path.join(models, "ggml-tiny.en.bin"), "w").close()
++        r = subprocess.run([sys.executable, tool, "--from", "-"], input=vp.wav_bytes(tone(1)), env=env,
++                           stdout=subprocess.PIPE, timeout=20)
++        assert json.loads(r.stdout.decode().splitlines()[0]) == {"status": "no-model"}, "tiny.en can't hear French"
++        open(os.path.join(models, "ggml-tiny.bin"), "w").close()
++        r = subprocess.run([sys.executable, tool, "--from", "-", "--speed", "8"], input=vp.wav_bytes(tone(3)), env=env,
++                           stdout=subprocess.PIPE, timeout=60)
++        lines = [json.loads(l) for l in r.stdout.decode().splitlines()]
++        assert lines and all(l.get("model") == "tiny" for l in lines), lines
++        log = open(env["FAKE_LOG"]).read().splitlines()
++        argv, cfg, _ = log[0].split("|")
++        assert argv.endswith("ggml-tiny.bin transcribe /dev/stdin"), argv
++        assert 'language = "fr"' in cfg and 'language = "en"' not in cfg, cfg
++
++
+ def stops_at_once():
+     with tempfile.TemporaryDirectory() as tmp:
+         env, home = env_for(tmp, sleep="30")
+@@ -251,10 +299,12 @@ def the_kernels_limit():
+ 
+ 
+ check("its model: tiny.en, else the daemon's base.en, else none", models)
++check("its language: the daemon's, with a model that hears it", languages)
+ check("the chunk plan: a pass per step of new audio, a commit past 8 s", planning)
+ check("audio: the cut in the pause, silence, the WAV", audio)
+ check("text: Whisper's tags out, the transcript from voxtype's output", text)
+ check("the whole loop against a fake voxtype", whole_loop)
++check("the whole loop in French: the multilingual tiny, language fr", whole_loop_french)
+ check("SIGTERM stops a pass under way", stops_at_once)
+ check("SIGTERM stops a loop that only waits, whenever it lands", stops_whenever)
+ check("the stop handler takes no lock", handler_takes_no_lock)

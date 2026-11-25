@@ -1,0 +1,25 @@
+SM-T715 tablet: no Speaker toggle on the call card.
+
+The tablet has no earpiece, so the toggle switched nothing and read "off"
+with the sound on the speaker: it is hidden. Carried forward now that this
+build ships omamobile.call again (0004) and the call watchers run
+(tablet-shell.json's callWatch). The armv7h series'
+0007-tablet-tiles-that-work, its call-card hunk only -- the patch's scripts'
+part (airplane mode through NetworkManager, the Hotspot password
+notification) is already 0006 here, and its README lines named the Pixel's
+modem stack. Against omarchy-mobile 8991845 (omamobile-shell 0.2.147), after
+0001-0012; the Toggle sits five lines lower after upstream's ringing-visible
+comment, and the hunk ports unchanged.
+
+diff --git a/plugins/omamobile.call/CallCard.qml b/plugins/omamobile.call/CallCard.qml
+--- a/plugins/omamobile.call/CallCard.qml
++++ b/plugins/omamobile.call/CallCard.qml
+@@ -320,6 +320,8 @@
+       }
+       Toggle {
+         objectName: "speakerToggle"
++        // SM-T715: no earpiece, so there is nothing to switch.
++        visible: false
+         glyph: 0xF057E
+         label: "Speaker"
+         on: card.route === "speaker"

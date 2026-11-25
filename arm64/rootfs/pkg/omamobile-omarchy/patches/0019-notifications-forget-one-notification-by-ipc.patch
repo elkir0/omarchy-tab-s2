@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT
+# Notifications: forget one notification by IPC. Omamobile's quick
+# settings list the toasts on screen and the history under the sheet, and a
+# sideways swipe on a row there takes away that one notification. The
+# service has calls for all toasts (dismissAll), all history (clear) and
+# toasts by summary text, but none for one entry, and every way a toast
+# leaves the screen moves its file into history, so a toast swiped away in
+# the shade would come straight back as a history row. Deleting a history
+# file from outside isn't safe either: archives, trims and replays run on the
+# service's serialized file queue, and a move still queued for that
+# notification would put the file back. `forget <timestamp>-<id>.json` now
+# closes a toast with that file name (a history replay of it too) at its
+# sender without archiving it, then deletes the history entry and its image
+# copies on the same queue, after anything already queued. A name that isn't
+# a notification file name does nothing.
+#
+# Against Omarchy 4.0.6 (edge 4.0.6-1) with 0015 and 0017 applied.
+#
+# Omarchy 4.5: Forget keyed live and history records without sender actions or
+# re-archiving. Sender-owned image paths are not deleted.
+
+diff --git i/shell/plugins/notifications/Service.qml w/shell/plugins/notifications/Service.qml
+--- i/shell/plugins/notifications/Service.qml
++++ w/shell/plugins/notifications/Service.qml
+@@ -826,7 +826,7 @@
+     delete heights[key]
+     delete fresh[key]
+     // A placeholder (the empty-history notice) was never recorded.
+-    if (key.indexOf("placeholder") !== 0) storeClose(key, reason)
++    if (key.indexOf("placeholder") !== 0 && reason !== "forget") storeClose(key, reason)
+     layoutRevision += 1
+   }
+ 
+@@ -1218,6 +1218,21 @@
+   }
+ 
+   // A row that closes moves from live to history.
++  // Key-based4.5 store deletion. Never construct an arbitrary path or run
++  // notification actions; forget removes only the named logical record.
++  function forgetNotification(name) {
++    var key = String(name || "")
++    if (!Store.KEY.test(key)) return "none"
++    var exists = !!liveKeys[key] || !!Store.liveEntry(liveEntries, key)
++        || historyEntries.some(function(entry) { return entry.key === key })
++    if (!exists) return "ok"
++    storeDrop(key)
++    historyEntries = historyEntries.filter(function(entry) { return entry.key !== key })
++    saveSoon("history")
++    closeToast(key, "forget", true)
++    return "ok"
++  }
++
+   function storeClose(key, reason) {
+     var entry = Store.liveEntry(liveEntries, key)
+     if (!entry) return
+@@ -1428,6 +1443,8 @@
+ 
+     function ping(): string { return "ok" }
+ 
++    function forget(name: string): string { return service.forgetNotification(name) }
++
+     function isDnd(): string { return service.doNotDisturb ? "on" : "off" }
+ 
+     function toggleDnd(): string {

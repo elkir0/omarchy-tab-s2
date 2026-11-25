@@ -1,0 +1,28 @@
+#!/bin/sh
+# 50-t715-hotspot-firewall — open ufw for the Hotspot tile's clients while it is on
+# (omarchy-tab-s2, docs/image/ROOTFS.md "Firewall"). NetworkManager's shared mode
+# serves DHCP and DNS and masquerades, and ufw would drop all of it: DHCP and DNS
+# on the Wi-Fi interface, and forwarding out to the modem or to anything else.
+# SSH stays closed on that interface.
+#
+# Straight into ufw's user chains: a rule added with the ufw command stays in user.rules
+# past a crash, open on the next Wi-Fi network. These end with the boot.
+[ "$CONNECTION_ID" = Hotspot ] || exit 0
+# A network whose SSID is Hotspot gets a profile of that name too.
+[ "$(nmcli -g 802-11-wireless.mode connection show uuid "$CONNECTION_UUID")" = ap ] || exit 0
+
+rules() {
+    for family in iptables:ufw ip6tables:ufw6; do
+        ipt=${family%:*} chain=${family#*:}
+        "$ipt" "$1" "$chain-user-input" -i "$DEVICE_IFACE" -p udp --dport 67 -j ACCEPT
+        "$ipt" "$1" "$chain-user-input" -i "$DEVICE_IFACE" -p udp --dport 53 -j ACCEPT
+        "$ipt" "$1" "$chain-user-input" -i "$DEVICE_IFACE" -p tcp --dport 53 -j ACCEPT
+        "$ipt" "$1" "$chain-user-forward" -i "$DEVICE_IFACE" -j ACCEPT
+    done
+}
+
+case "$2" in
+    up) rules -I ;;
+    down | pre-down) rules -D ;;
+esac
+exit 0

@@ -1,0 +1,39 @@
+#!/bin/sh
+# t715-kboot-mark: tell the loader that this arm64 system got up (Galaxy Tab S2
+# 8.0 LTE, SM-T715; the loader's design, elkir0/bnuuyloader's t715/docs/PRODUCTION-LOADER.md).
+#
+# The loader logs its start in S-Boot's RAM ring.  At the next boot, a start
+# without the mark below means that the attempt failed, and the loader hands
+# back to S-Boot for that one boot.  The kernel's console (console=sec_log)
+# mirrors the kernel log into that ring, so the mark is one line written to
+# /dev/kmsg at log level 3.
+#
+# A console prints the levels below its loglevel: level 3 needs 4 or more.
+# The kernel command line (loglevel=3, quiet loglevel=3) or a sysctl may have
+# left it lower, in which case the mark would never reach the ring and every
+# boot would look failed: the loglevel is raised to 4 then, never lowered.
+#
+# Unit: t715-kboot-mark.service, once sshd, the USB link and the watchdog
+# keeper are up (it requires all three); not at all with t715.kbootmark=0.
+# Usage: t715-kboot-mark [FILE]    FILE is /dev/kmsg; another path is for tests.
+set -u
+
+target="${1:-/dev/kmsg}"
+
+if read -r level _ </proc/sys/kernel/printk 2>/dev/null; then
+    case "$level" in
+        '' | *[!0-9]*) ;;
+        *)
+            if [ "$level" -lt 4 ]; then
+                # A subshell: where this is not permitted (a container), the
+                # shell's own complaint is dropped with the command's.
+                (echo "4 4 1 7" >/proc/sys/kernel/printk) 2>/dev/null || true
+            fi
+            ;;
+    esac
+fi
+
+exec 3>"$target" || exit 1
+printf '<3>KBOOT: up\n' >&3
+exec 3>&-
+exit 0

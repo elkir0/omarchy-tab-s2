@@ -1,0 +1,118 @@
+SM-T715 tablet: the Rotate tile.
+
+Adds Rotate, a quarter turn by hand through t715-rotate (in the root image),
+next to Rotation (upstream's rotation lock, over omamobile-autorotate.service,
+which the image's unit runs as t715-rotate). The sheet closes first, so the
+turn is not of the sheet; the lock's state is read again after the turn.
+The SM-T715's 0.2.94 series' 0005-tablet-rotation, rebased. Against
+omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0004.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+index 5896318..edb7bd5 100644
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -275,7 +275,7 @@ Item {
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+     "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane,
+-    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock,
++    "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+     "screen-record": screenRecord, "fingerprint": fingerprint, "keyboard": keyboard,
+@@ -1131,6 +1131,36 @@ Item {
+     onExited: rotationLock.refresh()
+   }
+ 
++  // SM-T715 tablet: a quarter turn by hand, with or without the sensor
++  // (t715-rotate turn). It locks the rotation, or the sensor would turn the
++  // screen back. The sheet closes first, so the turn is not of the sheet.
++  QtObject {
++    id: rotate
++    readonly property bool available: true
++    readonly property bool enabled: false
++    readonly property string icon: "󰑧"
++    readonly property string status: "Turn"
++    function toggle() {
++      root.dismiss()
++      rotateLater.restart()
++    }
++  }
++
++  Timer {
++    id: rotateLater
++    interval: 450
++    onTriggered: {
++      Quickshell.execDetached(["t715-rotate", "turn"])
++      rotationRefresh.restart()
++    }
++  }
++
++  Timer {
++    id: rotationRefresh
++    interval: 600
++    onTriggered: rotationLock.refresh()
++  }
++
+   // Location over omamobile-gnss (package omamobile-gnss): on lets apps ask
+   // GeoClue for positions and runs the receiver only while one does; off
+   // stops it and lets nothing start it. As the user, on/off go through
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+index 6521323..da2c8cf 100644
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -17,13 +17,15 @@ var VERSION = 1
+ // and NFC are not driven), and no fingerprint sensor. Hotspot stays under
+ // "Add tiles" (the Wi-Fi client link drops while it runs). Rotation is the
+ // rotation lock over omamobile-autorotate.service, which the image's
+-// t715-rotate drives (docs/image/ROTATION.md of the owner's repository).
++// t715-rotate drives (docs/image/ROTATION.md of the owner's repository), and
++// Rotate a quarter turn by hand through t715-rotate.
+ var CATALOG = [
+   { id: "wifi", label: "Wi-Fi" },
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "airplane", label: "Airplane mode" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
++  { id: "rotate", label: "Rotate" },
+   { id: "dnd", label: "Do not disturb" },
+   { id: "battery-saver", label: "Battery saver" },
+   { id: "dark-theme", label: "Dark theme" },
+@@ -45,8 +47,8 @@ var CATALOG = [
+ // Hotspot, Screen record and Dictation stay under "Add tiles".
+ var DEFAULT_LAYOUT = [
+   "wifi", "bluetooth", "dnd", "airplane",
+-  "rotation-lock", "battery-saver", "dark-theme", "night-light",
+-  "keyboard", "clipboard", "screenshot"
++  "rotation-lock", "rotate", "battery-saver", "dark-theme",
++  "night-light", "keyboard", "clipboard", "screenshot"
+ ]
+ 
+ var QUICK_COUNT = 4
+diff --git a/test/tiles-model.js b/test/tiles-model.js
+index ba810a7..8569768 100644
+--- a/test/tiles-model.js
++++ b/test/tiles-model.js
+@@ -26,7 +26,7 @@ test("the sheet has a backend for every catalog tile", () => {
+ // 0001-tablet-quick-settings-tiles), and the phone's tiles are not even in
+ // the catalog.
+ test("the default keeps the tablet's tiles and leads with the most used", () => {
+-  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot"])
++  for (const id of ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot"])
+     assert.ok(M.DEFAULT_LAYOUT.includes(id), id)
+   assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "dnd", "airplane"])
+   for (const id of ["mobile-data", "torch", "location", "nfc", "fingerprint"])
+@@ -34,10 +34,10 @@ test("the default keeps the tablet's tiles and leads with the most used", () =>
+ })
+ 
+ test("Clipboard and Dictation close the default's second page, leaving the first as it was", () => {
+-  // the tablet's default fills one page and starts a second with Keyboard,
+-  // Clipboard and Screenshot
++  // the tablet's default fills one page and starts a second with Night
++  // light, Keyboard, Clipboard and Screenshot
+   assert.deepStrictEqual(M.pages(M.defaults())[0],
+-    ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "battery-saver", "dark-theme", "night-light"])
++    ["wifi", "bluetooth", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme"])
+   assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "screenshot")
+   assert.strictEqual(M.pages(M.defaults()).length, 2)
+   assert.strictEqual(M.label("clipboard"), "Clipboard")

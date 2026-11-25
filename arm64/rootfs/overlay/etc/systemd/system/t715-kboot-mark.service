@@ -1,0 +1,50 @@
+# Galaxy Tab S2 (SM-T715), arm64: the boot mark of the loader.
+#
+# The loader (in PARAM) logs its start in S-Boot's RAM ring; this unit writes
+# "KBOOT: up" into the kernel log once the system is up, and the kernel's
+# console (console=sec_log) mirrors it into the same ring.  At the next boot
+# the loader reads the ring: a start without the mark was a failed attempt,
+# and it hands back to S-Boot for that one boot (the arm32 system).
+#
+# When (2026-11-24, with the Omarchy 4.5 image): once the owner can reach the
+# system, that is once sshd.service and usb-rndis.service (the USB link,
+# 172.16.42.1) are active: required and ordered after both, so a boot whose
+# USB link or sshd fails is not marked, and the next boot falls back.  Before
+# this the mark came right after sysinit.target; "up" now means: the kernel is
+# up, / is mounted read-write, the multi-user boot got as far as the way in.
+#
+# The mark must never outlive the system's means to keep the watchdog fed:
+# a boot that is marked and then reset, because nothing could feed the
+# watchdog, would be tried again by the loader at every boot, for ever. So:
+#   - no watchdog device in the kernel, no mark (such a kernel neither feeds
+#     nor stops the watchdog the loader armed: it will be reset, and the next
+#     boot must fall back). A kernel that has the driver but was started
+#     without s3c2410_wdt.tmr_atboot=1 has the device and gets the mark;
+#   - the keeper must run: required and ordered before the mark (it starts
+#     early, before basic.target, on its own), and its --check must pass
+#     (ExecStartPre), or there is no mark.
+# A failure is retried and never fatal: without the mark the next boot simply
+# hands back once, the safe side.
+#
+# Bring-up: t715.kbootmark=0 on the kernel command line, and this unit does
+# not run at all (its condition): no boot is ever marked, so every next boot
+# goes back to the arm32 system, whatever this one did (t715.return=MIN makes
+# this one end by itself: t715-return.timer).
+[Unit]
+Description=Galaxy Tab S2: mark the arm64 boot as up for the loader (KBOOT: up)
+Documentation=file:///usr/share/doc/t715-arm64/README.md
+Requires=sshd.service usb-rndis.service t715-watchdog-keeper.service
+After=sshd.service usb-rndis.service t715-watchdog-keeper.service
+ConditionPathExists=/dev/watchdog
+ConditionKernelCommandLine=!t715.kbootmark=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/local/sbin/t715-watchdog-keeper --check
+ExecStart=/usr/local/sbin/t715-kboot-mark
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

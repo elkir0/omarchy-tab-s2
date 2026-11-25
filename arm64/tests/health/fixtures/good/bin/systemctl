@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+case "${1:-}" in
+    is-active)
+        case "${2:-}" in
+            t715-watchdog-keeper.service|sddm|shannond.service) echo "active"; exit 0 ;;
+            *) echo "inactive"; exit 3 ;;
+        esac
+        ;;
+    is-system-running)
+        echo "running"
+        exit 0
+        ;;
+    --failed)
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

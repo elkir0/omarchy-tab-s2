@@ -1,0 +1,22 @@
+# omamobile-pins — the Omarchy Mobile packages this image takes from the
+# project's signed repository (https://pkgs.omamobile.org/stable/aarch64),
+# one per line: name<TAB>upstream_filename<TAB>sha256. tools/fetch-omamobile
+# downloads exactly these files, checks each against its pin, against the
+# signed repository index omamobile.db (the pin must be the digest the index
+# carries) and against its detached signature, made by a key of
+# omamobile-keyring (itself pinned here: the first line), whose keys must all
+# be listed in omamobile-trusted.fpr.
+#
+# The pins are the owner's other tablet port's (Lenovomarchy,
+# image/tools/repack.omamobile.pins and the keyring pin of its
+# tools/repack-omamobile), checked again on 2026-11-24. Taken for the SM-T715:
+#   wlrctl              the virtual pointer and keyboard omamobile-remote uses
+# omamobile-settings and omamobile-remote came from here too, until 2026-11-25:
+# they are built from omarchy-mobile 899184543d60 now (pkg/omamobile-settings
+# 0.1.4, pkg/omamobile-remote 0.1.3), the signed stable channel still being at
+# 0.1.2.
+# Not taken: omacam (no camera driver on arm64 yet), the phone's packages.
+#
+# name	upstream_filename	sha256
+omamobile-keyring	omamobile-keyring-20261026-1-any.pkg.tar.zst	83684eeda2ae7e1929109b0a65ede42bc174e7f00fa093dc69243714a2b125a0
+wlrctl	wlrctl-0.2.2-1-aarch64.pkg.tar.zst	ed897fd2c06de4e66b91d8e96c8c78f03bdc5fb57b301df380e77f242cbefb09

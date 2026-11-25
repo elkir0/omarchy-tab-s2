@@ -1,0 +1,70 @@
+# SM-T715 (armv7h) rebuild of Arch's hyprgraphics 0.6.0-2 with one fix.
+#
+# Why: Hyprland deadlocks on the tablet when it renders text (debug overlay,
+# error bar, notifications): CAsyncResourceGatherer::await() loses the wakeup
+# when the gather thread finishes the resource between enqueue() and await().
+# Upstream issue https://github.com/hyprwm/hyprgraphics/issues/53 (PR #52),
+# still unfixed in 0.6.0: upstream main's AsyncResourceGatherer.cpp is
+# unchanged from 0.5.1, so the fix is ours, ported unchanged (the patch's
+# before/after blob ids match the 0.5.1 patch exactly). The 0.6.0 rebuild is
+# needed anyway: ALARM's Hyprland 0.57.0-3 depends on libhyprgraphics.so=5,
+# which only this version provides. On-device report:
+# docs/journal/ONDEVICE-2026-10-28.md (blocker 2); package notes:
+# docs/image/PACKAGES.md. The patch only touches
+# src/resource/AsyncResourceGatherer.cpp: same SONAME and ABI.
+#
+# Base: https://gitlab.archlinux.org/archlinux/packaging/packages/hyprgraphics
+# tag 0.6.0-2, which ALARM builds unchanged for armv7h (rebuilt for
+# libjxl 0.13). Changes: pkgrel 2.1, armv7h added to arch, the patch in
+# source=() and prepare().
+# Build: tools/build-pkg hyprgraphics. Test: tests/test_hyprgraphics.sh.
+
+# Maintainer: Caleb Maclennan <caleb@alerque.com>
+
+pkgname=hyprgraphics
+pkgver=0.6.0
+pkgrel=2.1
+pkgdesc='hyprland graphics resources and utilities'
+arch=(x86_64 aarch64 armv7h)
+url="https://github.com/hyprwm/$pkgname"
+license=(BSD-3-Clause)
+depends=(cairo # libcairo.so
+         file libmagic.so
+         libgcc # libgcc_s.so
+         'libstdc++' # libstdc++.so
+         glibc # libc.so libm.so
+         hyprutils libhyprutils.so
+         libjpeg-turbo libjpeg.so
+         libjxl libjxl.so libjxl_threads.so
+         libpng # libpng.so
+         librsvg
+         libwebp libwebp.so
+         libglvnd
+         pango libpangocairo-1.0.so
+         pixman)
+makedepends=(cmake)
+provides=("lib$pkgname.so")
+_archive="$pkgname-$pkgver"
+source=("$url/archive/v$pkgver/$_archive.tar.gz"
+        hyprgraphics-0.6.0-fix-await-lost-wakeup.patch)
+sha256sums=('27e9e19ff59ba75a2963d72c3dcb5c0840b266b90d7fca6d5df7cac105419b08'
+            '66d357fd18311962aae3b35e08102e7fe63beec5c56ec1c5b5ffe3de7cd59421')
+
+prepare() {
+	cd "$_archive"
+	patch -Np1 -i ../hyprgraphics-0.6.0-fix-await-lost-wakeup.patch
+}
+
+build() {
+	cd "$_archive"
+	cmake -B build \
+		-D CMAKE_INSTALL_PREFIX=/usr \
+		-D CMAKE_BUILD_TYPE=Release
+	cmake --build build
+}
+
+package() {
+	cd "$_archive"
+	DESTDIR="$pkgdir" cmake --install build
+	install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE
+}

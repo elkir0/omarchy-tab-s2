@@ -1,0 +1,6 @@
+#!/bin/sh
+# SM-T715: Hyprland with the dmabuf-check shim (omarchy-tab-s2,
+# rootfs/shim/, docs/journal/ONDEVICE-2026-10-28.md). start-hyprland finds this
+# wrapper first in PATH; the shim drops LD_PRELOAD so that Hyprland's
+# children do not inherit it.
+LD_PRELOAD=/usr/local/lib/t715-dmabuf-check-shim.so exec /usr/bin/Hyprland "$@"

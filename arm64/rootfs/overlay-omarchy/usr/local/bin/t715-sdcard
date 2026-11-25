@@ -1,0 +1,421 @@
+#!/bin/bash
+# t715-sdcard: the microSD card in the Omarchy session.
+#
+# The kernel drives the slot at 15560000.mmc (a separate kernel series);
+# the device tree's aliases fix the card as mmcblk1 beside the eMMC's
+# mmcblk0, and the slot's card-detect pin hot-plugs it.  Omarchy's
+# session runs udiskie --automount (its autostart.lua, not ours), which
+# mounts each partition as it is added, silently, at
+# /run/media/alarm/<LABEL> -- but it acts on add events only, so a card
+# already in the slot at the session's start is never mounted.  This
+# script closes that gap and adds what a removable card needs on a
+# tablet:
+#
+#   state   the card as key=value lines, in this order: slot, card,
+#           device, fs, label, mounted, mountpoint, size, free.  The
+#           quick settings tile parses them: the keys and their order
+#           are an interface.
+#   mount   the card's file system through udisksctl, as the session
+#           user (polkit asks no password); exit 0 when already mounted,
+#           non-zero with a message on stderr when nothing is mountable.
+#   eject   unmount every mounted partition of the card, then power it
+#           off (a refusal of that is ignored, as it may be for an SD
+#           card) and notify that it can be removed; a partition that
+#           will not unmount (busy) stops it with a notification.
+#   open    the card in Files (nautilus --new-window MOUNTPOINT),
+#           mounting first when needed; in Disks
+#           (gnome-disks --block-device /dev/mmcblk1) when a card is in
+#           but nothing on it is mountable.
+#   watch   the notifier, run by t715-sdcard.service: event-driven, on
+#           udev block events (udevadm monitor) and mount-table changes
+#           (findmnt --poll) only -- no timer, nothing runs while the
+#           slot is quiet (the tablet idles at 0.75 W with the screen
+#           off).  On insertion it waits T715_SDCARD_SETTLE seconds (5)
+#           for udiskie to mount the card, and for the kernel to finish
+#           scanning partitions, then mounts it itself; a card with
+#           nothing mountable is announced as not readable, with a tap
+#           through to Disks.  A card that disappears while still
+#           mounted brings a critical warning; one that leaves after an
+#           eject is silent: eject leaves a marker in the state
+#           directory, and watch sees the unmounts anyway.  A card in
+#           the slot at the session's start is mounted at once.  One log
+#           line per transition (logger -t t715-sdcard).
+#
+# The partition to act on is the first whose file system is one of vfat,
+# exfat, ext4, ext3, ext2, f2fs, btrfs or ntfs3; a card formatted
+# without a partition table uses the whole disk; otherwise the first
+# partition is named even when its file system is empty or unknown.
+# Labels and mount points come from the card: everything is quoted,
+# nothing is ever eval'd.
+#
+# Usage: t715-sdcard state|mount|eject|open|watch|--help
+# No argument or an unknown one: the usage on stderr, exit 2.
+#
+# Test hooks (image/tests/test_t715_sdcard.sh): T715_SDCARD_SYSFS (/sys)
+# for the slot's discovery, T715_SDCARD_STATE_DIR (the session's runtime
+# directory + /t715-sdcard) for the watch FIFO and the eject marker,
+# T715_SDCARD_SETTLE (5) for udiskie's window, and every external
+# command through PATH.
+set -u
+
+SYSFS=${T715_SDCARD_SYSFS:-/sys}
+HOST=$SYSFS/devices/platform/soc@0/15560000.mmc
+STATE_DIR=${T715_SDCARD_STATE_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/t715-sdcard}
+SETTLE=${T715_SDCARD_SETTLE:-5}
+FIFO=$STATE_DIR/events
+GLYPH_SD=󰑹
+GLYPH_EJECT=󰇪
+MOUNTABLE_FS="vfat exfat ext4 ext3 ext2 f2fs btrfs ntfs3"
+
+usage() {
+    printf 'usage: t715-sdcard state\n' >&2
+    printf '       t715-sdcard mount\n' >&2
+    printf '       t715-sdcard eject\n' >&2
+    printf '       t715-sdcard open\n' >&2
+    printf '       t715-sdcard watch\n' >&2
+}
+
+# log TEXT: to the journal, or to stderr where there is no logger (the
+# test's stub collects what the script has to say).
+log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t t715-sdcard "$*"
+    else
+        printf 't715-sdcard: %s\n' "$*" >&2
+    fi
+}
+
+# lsblk_val COLUMN DEV / findmnt_val COLUMN DEV: one value, or nothing.
+lsblk_val() { lsblk -d -nrno "$1" "$2" 2>/dev/null; }
+findmnt_val() { findmnt -nrno "$1" -S "$2" 2>/dev/null || true; }
+
+# fs_mountable TYPE: one of the file systems this tablet mounts from a card.
+fs_mountable() {
+    case " $MOUNTABLE_FS " in
+    *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# compute_state: the whole discovery, into the S_* variables (see state):
+#   S_SLOT S_CARD S_DISK S_PARTS (the card's partitions, bare names,
+#   numeric order) S_DEV S_FS S_LABEL S_MOUNTED S_MP S_SIZE S_FREE and
+#   S_ANY (yes when any partition of the card is mounted -- the removal
+#   warning is for a card that was in use, not only for `device`).
+compute_state() {
+    S_SLOT=no S_CARD=no S_DISK='' S_PARTS='' S_DEV='' S_FS='' S_LABEL=''
+    S_MOUNTED=no S_MP='' S_SIZE='' S_FREE='' S_ANY=no
+    [ -d "$HOST/mmc_host" ] || return 0
+    S_SLOT=yes
+    # the card is a child of the host: mmc_host/mmc1/mmc1:<RCA>/block/mmcblk1
+    for _cs_d in "$HOST"/mmc_host/mmc*/mmc*:*/block/*; do
+        [ -d "$_cs_d" ] || continue
+        S_DISK=${_cs_d##*/}
+        break
+    done
+    [ -n "$S_DISK" ] || return 0
+    S_CARD=yes
+    _cs_list=
+    for _cs_p in "$SYSFS/class/block/$S_DISK"p*; do
+        [ -d "$_cs_p" ] || continue
+        _cs_list="$_cs_list${_cs_list:+ }${_cs_p##*/}"
+    done
+    if [ -n "$_cs_list" ]; then
+        # numeric order (mmcblk1p10 after mmcblk1p9): the number is the
+        # second 'p'-separated field of a partition's name
+        # shellcheck disable=SC2086  # the partition names cannot split
+        S_PARTS=$(printf '%s\n' $_cs_list | sort -t p -k2n | tr '\n' ' ')
+        S_PARTS=${S_PARTS% }
+        # shellcheck disable=SC2086  # idem
+        for _cs_p in $S_PARTS; do
+            _cs_fs=$(lsblk_val FSTYPE "/dev/$_cs_p")
+            if fs_mountable "$_cs_fs"; then
+                S_DEV=/dev/$_cs_p
+                S_FS=$_cs_fs
+                break
+            fi
+        done
+        if [ -z "$S_DEV" ]; then
+            # nothing mountable: the first partition anyway (fs empty or
+            # unknown), so the tile can name it and Disks can open it
+            S_DEV=/dev/${S_PARTS%% *}
+            S_FS=$(lsblk_val FSTYPE "$S_DEV")
+        fi
+    else
+        # no partition table: the file system sits on the whole disk
+        S_DEV=/dev/$S_DISK
+        S_FS=$(lsblk_val FSTYPE "$S_DEV")
+    fi
+    S_LABEL=$(lsblk_val LABEL "$S_DEV")
+    S_SIZE=$(lsblk_val SIZE "$S_DEV")
+    S_MP=$(findmnt_val TARGET "$S_DEV")
+    if [ -n "$S_MP" ]; then
+        S_MOUNTED=yes
+        S_FREE=$(findmnt_val AVAIL "$S_DEV")
+    fi
+    # shellcheck disable=SC2086  # the disk and partition names cannot split
+    for _cs_d in $S_DISK $S_PARTS; do
+        [ -n "$(findmnt_val TARGET "/dev/$_cs_d")" ] && S_ANY=yes
+    done
+    return 0
+}
+
+cmd_state() {
+    compute_state
+    printf 'slot=%s\ncard=%s\ndevice=%s\nfs=%s\nlabel=%s\nmounted=%s\nmountpoint=%s\nsize=%s\nfree=%s\n' \
+        "$S_SLOT" "$S_CARD" "$S_DEV" "$S_FS" "$S_LABEL" "$S_MOUNTED" "$S_MP" "$S_SIZE" "$S_FREE"
+}
+
+# do_mount: `mount` -- udisksctl as the session user, never a password.
+do_mount() {
+    compute_state
+    if [ "$S_CARD" != yes ] || [ -z "$S_DEV" ]; then
+        printf 't715-sdcard: no card in the slot\n' >&2
+        return 1
+    fi
+    if ! fs_mountable "$S_FS"; then
+        printf 't715-sdcard: %s has no file system this tablet can mount\n' "$S_DEV" >&2
+        return 1
+    fi
+    [ -z "$S_MP" ] || return 0
+    udisksctl mount -b "$S_DEV"
+}
+
+# do_eject: `eject` -- everything back off the card, then its power.
+do_eject() {
+    compute_state
+    if [ "$S_CARD" != yes ]; then
+        printf 't715-sdcard: no card in the slot\n' >&2
+        return 1
+    fi
+    _ej_failed=
+    # shellcheck disable=SC2086  # the disk and partition names cannot split
+    for _ej_d in $S_DISK $S_PARTS; do
+        [ -n "$(findmnt_val TARGET "/dev/$_ej_d")" ] || continue
+        if ! udisksctl unmount -b "/dev/$_ej_d"; then
+            _ej_failed=/dev/$_ej_d
+            break
+        fi
+    done
+    if [ -n "$_ej_failed" ]; then
+        notify_sd -u normal -g "$GLYPH_EJECT" "SD card not ejected" \
+            "$_ej_failed could not be unmounted: a file may be open on it. Close it and eject again."
+        log "eject: $_ej_failed would not unmount, the card stays"
+        return 1
+    fi
+    # may be refused for an SD card: ignore it, the card is safe to
+    # remove once every file system is back off
+    udisksctl power-off -b "/dev/$S_DISK" || true
+    # watch stays quiet when the card now leaves: it sees the unmounts,
+    # and this marker covers a removal that outruns them
+    mkdir -p "$STATE_DIR" && : >"$STATE_DIR/ejected" 2>/dev/null || true
+    notify_sd -u normal -g "$GLYPH_EJECT" "SD card ejected" \
+        "You can remove it now."
+    log "card ejected: every partition unmounted, power off asked for $S_DISK"
+    return 0
+}
+
+# do_open: `open` -- Files on the card, Disks when it holds nothing mountable.
+do_open() {
+    compute_state
+    if [ "$S_CARD" != yes ]; then
+        printf 't715-sdcard: no card in the slot\n' >&2
+        return 1
+    fi
+    if [ -n "$S_MP" ]; then
+        nautilus --new-window "$S_MP"
+        return $?
+    fi
+    if fs_mountable "$S_FS"; then
+        do_mount || return 1
+        compute_state
+        if [ -n "$S_MP" ]; then
+            nautilus --new-window "$S_MP"
+            return $?
+        fi
+        printf 't715-sdcard: %s did not mount\n' "$S_DEV" >&2
+        return 1
+    fi
+    gnome-disks --block-device "/dev/$S_DISK"
+}
+
+# notify_sd ARGS...: the card's notifications replace one another
+# (omarchy-notification-send -r with the last id, -p to learn the new one,
+# kept in the state directory that eject and watch share): a card put back
+# replaces the removal warning instead of queueing behind it, and the
+# history keeps the card's latest state rather than every step.
+notify_sd() {
+    _ns_id=$(cat "$STATE_DIR/notify-id" 2>/dev/null) || _ns_id=
+    case $_ns_id in '' | *[!0-9]*) _ns_id=0 ;; esac
+    _ns_out=$(omarchy-notification-send -p -r "$_ns_id" "$@") || return 0
+    case $_ns_out in
+    '' | *[!0-9]*) ;;
+    *) mkdir -p "$STATE_DIR" && printf '%s\n' "$_ns_out" >"$STATE_DIR/notify-id" 2>/dev/null ;;
+    esac
+    return 0
+}
+
+# notify_inserted: the card is in and mounted -- say what came in, with
+# a tap that opens it.  A label leads the description; without one the
+# file system and size move into the headline.
+notify_inserted() {
+    if [ -n "$S_LABEL" ]; then
+        notify_sd -u normal -g "$GLYPH_SD" "SD card" \
+            "$S_LABEL ($S_FS, $S_SIZE): $S_FREE free." --exec t715-sdcard open
+    else
+        notify_sd -u normal -g "$GLYPH_SD" "SD card ($S_FS, $S_SIZE)" \
+            "$S_FREE free." --exec t715-sdcard open
+    fi
+}
+
+# wait_notifier: at the session's start the shell's notification server
+# may not be on the bus yet: on the tablet the card was mounted 0.2 s
+# before the shell started, and its notification was lost.  Wait for the
+# org.freedesktop.Notifications name, once per watch and at most
+# T715_SDCARD_NOTIFY_WAIT seconds (30); 0 skips the wait.
+wait_notifier() {
+    _wn_left=${T715_SDCARD_NOTIFY_WAIT:-30}
+    while :; do
+        busctl --user status org.freedesktop.Notifications >/dev/null 2>&1 && return 0
+        [ "$_wn_left" -gt 0 ] || return 1
+        sleep 1
+        _wn_left=$((_wn_left - 1))
+    done
+}
+
+# watch_run: `watch` -- block on udev block events and mount-table
+# changes, act on the card's transitions.  W_CARD and W_ANY hold the
+# last snapshot: the removal warning is for a card that was in use.
+watch_run() {
+    mkdir -p "$STATE_DIR" || {
+        printf 't715-sdcard: cannot create %s\n' "$STATE_DIR" >&2
+        return 1
+    }
+    rm -f "$FIFO"
+    mkfifo "$FIFO" || return 1
+    # read-write: the open cannot block (a read-only open would wait for
+    # a writer that only the lines below start) and, with this end held,
+    # the stream never ends on its own: the monitors' health is checked
+    # per event instead (below), and watch exits 1 for Restart=on-failure
+    # to start a fresh one when either has died.
+    exec 3<>"$FIFO"
+    udevadm monitor --udev --subsystem-match=block >&3 &
+    W_MON1=$!
+    findmnt --poll >&3 &
+    W_MON2=$!
+    compute_state
+    W_CARD=$S_CARD
+    W_ANY=$S_ANY
+    if [ "$S_CARD" = yes ] && [ "$S_MOUNTED" != yes ] && fs_mountable "$S_FS" &&
+        [ ! -e "$STATE_DIR/ejected" ]; then
+        # udiskie mounts add events only: a card already in the slot
+        # when the session starts waits for ever -- mount it here.  An
+        # eject marker means the owner asked the card off: leave it so.
+        if udisksctl mount -b "$S_DEV" && compute_state && [ "$S_MOUNTED" = yes ]; then
+            wait_notifier || log "no notification server on the bus yet: the card's notification may be lost"
+            notify_inserted
+            log "card in at start: udiskie mounts add events only, mounted ${S_LABEL:-an unlabelled card} ($S_FS) at $S_MP"
+        else
+            log "card in at start: could not mount $S_DEV"
+        fi
+        compute_state
+        W_CARD=$S_CARD
+        W_ANY=$S_ANY
+    fi
+    while IFS= read -r _ev <&3; do
+        # a dead monitor means half the story is missing: restart, so the
+        # fresh watch sees every event again (kill -0 on a reaped child
+        # also fails; the monitors are ours, nothing else reaps them)
+        if ! kill -0 "$W_MON1" 2>/dev/null || ! kill -0 "$W_MON2" 2>/dev/null; then
+            printf 't715-sdcard: a monitor exited, restarting\n' >&2
+            return 1
+        fi
+        compute_state
+        if [ "$S_CARD" != "$W_CARD" ]; then
+            if [ "$S_CARD" = yes ]; then
+                rm -f "$STATE_DIR/ejected"
+                card_in
+            else
+                card_out
+            fi
+            compute_state
+        fi
+        # mounted again after an eject (the tile, Files): the card is in
+        # use once more, so a removal must warn again
+        [ "$S_ANY" = yes ] && rm -f "$STATE_DIR/ejected"
+        W_CARD=$S_CARD
+        W_ANY=$S_ANY
+    done
+    # EOF cannot happen with fd 3 held read-write; if it ever does, the
+    # exit asks Restart=on-failure for a fresh watch
+    printf 't715-sdcard: the block event stream ended\n' >&2
+    return 1
+}
+
+# card_in: a card just appeared.  Give udiskie and the kernel's
+# partition scan T715_SDCARD_SETTLE seconds (reading events while they
+# run), then mount the card ourselves, or call it not readable.
+card_in() {
+    _ci_deadline=$((SECONDS + SETTLE))
+    while :; do
+        if [ "$S_CARD" != yes ]; then
+            log "card in: gone again before it settled"
+            return 0
+        fi
+        if [ "$S_MOUNTED" = yes ]; then
+            notify_inserted
+            log "card in: udiskie mounted ${S_LABEL:-an unlabelled card} ($S_FS) at $S_MP"
+            return 0
+        fi
+        _ci_left=$((_ci_deadline - SECONDS))
+        if [ "$_ci_left" -le 0 ]; then
+            if fs_mountable "$S_FS"; then
+                if udisksctl mount -b "$S_DEV" && compute_state && [ "$S_MOUNTED" = yes ]; then
+                    notify_inserted
+                    log "card in: udiskie did not mount it, mounted ${S_LABEL:-an unlabelled card} ($S_FS) at $S_MP"
+                else
+                    log "card in: could not mount $S_DEV"
+                fi
+            else
+                notify_sd -u normal -g "$GLYPH_SD" "SD card not readable" \
+                    "No file system this tablet can open. Tap to format it in Disks." \
+                    --exec t715-sdcard open
+                log "card in: no file system this tablet can mount"
+            fi
+            return 0
+        fi
+        IFS= read -r -t "$_ci_left" _ev <&3 || true
+        compute_state
+    done
+}
+
+# card_out: the card left the slot.  W_ANY says whether it was in use.
+card_out() {
+    if [ -e "$STATE_DIR/ejected" ]; then
+        rm -f "$STATE_DIR/ejected"
+        log "card removed (it was ejected)"
+    elif [ "$W_ANY" = yes ]; then
+        notify_sd -u critical -g "$GLYPH_SD" "SD card removed" \
+            "It was not ejected: files being written may be lost."
+        log "card removed while mounted"
+    else
+        log "card removed"
+    fi
+    return 0
+}
+
+case ${1:-} in
+state) cmd_state ;;
+mount) do_mount ;;
+eject) do_eject ;;
+open) do_open ;;
+watch) watch_run ;;
+--help | -h)
+    usage 2>&1
+    exit 0
+    ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

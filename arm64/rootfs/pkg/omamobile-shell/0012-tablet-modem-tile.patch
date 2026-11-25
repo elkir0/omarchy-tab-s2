@@ -1,0 +1,276 @@
+SM-T715 tablet: the Modem tile, over t715-modem-power.
+
+The modem's own switch, next to Airplane mode in the catalogue and at the end
+of the default layout: off powers the CP down and keeps it off across a
+reboot, on boots it again (t715-modem-power, package t715-modem, through
+polkit). A long press opens Réseau mobile, which also holds the modem's
+standby setting (off with the screen). The Mobile data tile says "Modem off"
+rather than "Set up" while the switch is off. tile-state.sh reads the switch's
+JSON with the shell's own patterns -- no text output is parsed, so there is
+no locale to pin down there (the nmcli probes of 0010 already run with
+LC_ALL=C). test/tile-scripts.sh and test/tiles-model.js follow. Ported from
+the armv7h series' 0011-tablet-modem-tile (omamobile-shell 0.2.94). Against
+omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0011; the
+modemStatus() helper joins TilesModel.js next to dictationStatus() and is
+exported like it, and the tile's backend sits in the stubs section beside
+mobileData as in 0.2.94.
+
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -274,7 +274,7 @@
+   // status, icon and toggle(); details (a chevron and a page) or longPress
+   // (related settings) come with openDetails().
+   readonly property var backends: ({
+-    "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane,
++    "wifi": wifi, "bluetooth": bluetooth, "mobile-data": mobileData, "airplane": airplane, "modem": modem,
+     "sdcard": sdcard, "hotspot": hotspot, "dnd": dnd, "torch": torch, "rotation-lock": rotationLock, "rotate": rotate,
+     "location": location, "nfc": nfc, "battery-saver": batterySaver, "dark-theme": darkTheme,
+     "night-light": nightLight, "stay-awake": stayAwake, "mic": mic, "screenshot": screenshot,
+@@ -1065,7 +1065,7 @@
+     // Bars from the signal shannond reports; crossed out with no modem, data
+     // off, or no network (TilesModel.dataIcon).
+     readonly property string icon: TilesModel.dataIcon(available, enabled, root.probed.data_signal)
+-    readonly property string status: !available ? "Set up"
++    readonly property string status: !available ? (root.probed.modem === "off" ? "Modem off" : "Set up")
+       : !enabled ? "Off" : (root.probed.data_status || "On")
+     readonly property bool longPress: true
+     function toggle() {
+@@ -1082,6 +1082,37 @@
+     }
+   }
+ 
++  // SM-T715 tablet: the modem itself (t715-modem-power, package t715-modem).
++  // Off powers the CP down, and it stays off across a reboot; on boots it
++  // again, about 10 s to the network, and the sheet looks again 12 s later.
++  // A long press opens Réseau mobile, which also has the modem's standby
++  // setting (off with the screen). "No modem" without the command or on a
++  // kernel without the modem.
++  QtObject {
++    id: modem
++    readonly property bool available: root.probedHas("modem")
++    readonly property bool enabled: available && root.probedOn("modem", "modem")
++    readonly property string icon: enabled ? "󰠕" : "󰥐"
++    readonly property string status: !available ? "No modem" : !enabled ? "Off"
++      : root.optimistic["modem"] !== undefined ? "Starting…" : TilesModel.modemStatus(root.probed.modem_cp)
++    readonly property bool longPress: true
++    function toggle() {
++      if (!available) return
++      root.runTileAction("modem", !enabled)
++      if (!enabled) modemProbeLater.restart()
++    }
++    function openDetails() {
++      root.dismiss()
++      Quickshell.execDetached(["t715-mobile-settings"])
++    }
++  }
++
++  Timer {
++    id: modemProbeLater
++    interval: 12000
++    onTriggered: root.refreshProbe()
++  }
++
+   // SM-T715 tablet: the microSD slot (t715-sdcard, in the root image's
+   // overlay). The session's udiskie already mounts a card that goes in, so
+   // the tile shows and changes the state rather than owning it. A tap mounts
+diff --git a/plugins/omamobile.quicksettings/TilesModel.js b/plugins/omamobile.quicksettings/TilesModel.js
+--- a/plugins/omamobile.quicksettings/TilesModel.js
++++ b/plugins/omamobile.quicksettings/TilesModel.js
+@@ -15,7 +15,8 @@
+ // SM-T715 tablet, arm64 image (pkg/omamobile-shell): no torch, location or
+ // NFC (GNSS, the flash LED and NFC are not driven), and no fingerprint
+ // sensor. Mobile data is back through NetworkManager's gsm connection (the
+-// modem runs on arm64 now, patch 0010: shannond serves ModemManager). Hotspot
++// modem runs on arm64 now, patch 0010: shannond serves ModemManager), and the
++// Modem tile (patch 0012) is the modem's own switch, t715-modem-power. Hotspot
+ // stays under "Add tiles" (the Wi-Fi client link drops while it runs).
+ // Rotation is the rotation lock over omamobile-autorotate.service, which the
+ // image's t715-rotate drives (docs/image/ROTATION.md of the owner's
+@@ -27,6 +28,7 @@
+   { id: "bluetooth", label: "Bluetooth" },
+   { id: "mobile-data", label: "Mobile data" },
+   { id: "airplane", label: "Airplane mode" },
++  { id: "modem", label: "Modem" },
+   { id: "sdcard", label: "SD card" },
+   { id: "hotspot", label: "Hotspot" },
+   { id: "rotation-lock", label: "Rotation" },
+@@ -54,7 +56,7 @@
+   "wifi", "bluetooth", "mobile-data", "dnd",
+   "airplane", "rotation-lock", "rotate", "battery-saver",
+   "dark-theme", "night-light", "keyboard", "clipboard",
+-  "screenshot", "sdcard"
++  "screenshot", "sdcard", "modem"
+ ]
+ 
+ var QUICK_COUNT = 4
+@@ -216,6 +218,20 @@
+   return "Not installed"
+ }
+ 
++// The Modem tile's status while it is on, from tile-state.sh's modem_cp (the
++// CP's state as t715-modem-power reads it): online, booting, waiting (the
++// battery gate before a boot), crashed or offline (the loader's silent
++// reset), stopping, off (the loader stopped: a refused boot, or the standby's
++// cut).
++function modemStatus(cp) {
++  if (cp === "online") return "On"
++  if (cp === "booting" || cp === "waiting") return "Starting…"
++  if (cp === "crashed" || cp === "offline") return "Restarting…"
++  if (cp === "stopping") return "Stopping…"
++  if (cp === "off") return "Not running"
++  return "On"
++}
++
+ function themeName(name) {
+   return String(name || "").split("-").filter(function(part) { return part.length > 0 })
+     .map(function(part) { return part.charAt(0).toUpperCase() + part.slice(1) }).join(" ")
+@@ -266,6 +282,7 @@
+     parseProbe: parseProbe,
+     powerStatus: powerStatus,
+     dictationStatus: dictationStatus,
++    modemStatus: modemStatus,
+     themeName: themeName,
+     dataSignal: dataSignal,
+     dataIcon: dataIcon
+diff --git a/plugins/omamobile.quicksettings/tile-action.sh b/plugins/omamobile.quicksettings/tile-action.sh
+--- a/plugins/omamobile.quicksettings/tile-action.sh
++++ b/plugins/omamobile.quicksettings/tile-action.sh
+@@ -106,6 +106,11 @@
+     # second; ejecting unmounts and says so.
+     if [ "$want" = on ]; then exec t715-sdcard mount; else exec t715-sdcard eject; fi
+     ;;
++  modem)
++    # SM-T715: the modem's own switch (t715-modem-power, through polkit). Off
++    # powers the CP down and keeps it off across a reboot; on boots it again.
++    exec t715-modem-power "$want"
++    ;;
+   mobile-data)
+     # SM-T715: the first gsm connection (t715-mobile), through NetworkManager;
+     # omamobile-sit is the Pixel's modem daemon. LC_ALL=C: the session runs
+diff --git a/plugins/omamobile.quicksettings/tile-state.sh b/plugins/omamobile.quicksettings/tile-state.sh
+--- a/plugins/omamobile.quicksettings/tile-state.sh
++++ b/plugins/omamobile.quicksettings/tile-state.sh
+@@ -19,6 +19,11 @@
+ #                 none without a gsm device and connection
+ #   data_status   the technology, when registered
+ #   data_signal   the signal, 0-100, while registered; -1 otherwise
++#   modem         SM-T715: on while the modem's switch is on (t715-modem-power),
++#                 off when it is off; none without the command, or on a kernel
++#                 without the modem
++#   modem_cp      the CP's state while it is on: online, booting, waiting,
++#                 crashed, offline, stopping or off
+ #   sdcard        SM-T715: the microSD slot (t715-sdcard): on while the card
+ #                 is mounted, off with a card in and not mounted or with no
+ #                 card; no line without the command, or on a kernel without
+@@ -134,6 +139,22 @@
+   echo "dictation=none"
+ fi
+ 
++# modem: the switch's state from t715-modem-power's JSON (no text probe, so no
++# locale to pin down), read with the shell's own patterns (no other process).
++if have t715-modem-power; then
++  json=$(t t715-modem-power status --json)
++  case $json in
++    *'"installed":true'*)
++      case $json in *'"modem":"on"'*) echo "modem=on" ;; *) echo "modem=off" ;; esac
++      cp=${json#*\"cp\":\"}
++      echo "modem_cp=${cp%%\"*}"
++      ;;
++    *) echo "modem=none" ;;
++  esac
++else
++  echo "modem=none"
++fi
++
+ # data: the NetworkManager gsm connection on the modem (SM-T715: the modem is
+ # served by shannond's ModemManager facade, not omamobile-sit). None without a
+ # gsm device or connection. LC_ALL=C on every nmcli probe: the session runs in
+diff --git a/test/tile-scripts.sh b/test/tile-scripts.sh
+--- a/test/tile-scripts.sh
++++ b/test/tile-scripts.sh
+@@ -54,6 +54,7 @@
+ stub hyprsunset 'exit 0'
+ stub omarchy-toggle-idle 'echo "idle $*" >>'"$log"
+ stub omarchy-powerprofiles-set 'echo "powerprofiles $*" >>'"$log"
++stub t715-modem-power 'echo "modem-power $*" >>'"$log"'; cat '"$tmp"'/state/modem-power 2>/dev/null'
+ stub pgrep 'exit 1'
+ 
+ run() { env -i HOME="$tmp/home" XDG_RUNTIME_DIR="$tmp/run" PATH="$fake:$basic" sh "$@"; }
+@@ -65,7 +66,7 @@
+ 
+ out=$(run "$dir/tile-state.sh")
+ for line in airplane=off hotspot=off powerprofile=balanced theme_mode=dark theme_name=tokyo-night \
+-            nightlight=off stayawake=off record=none data=none dictation=none; do
++            nightlight=off stayawake=off record=none data=none modem=none dictation=none; do
+   grep -cx "$line" <<<"$out" >/dev/null || fail "tile-state.sh prints $line (got: $(tr '\n' ' ' <<<"$out"))"
+ done
+ pass "tile-state.sh reads every probed tile"
+@@ -163,6 +164,26 @@
+ [[ $(grep -c '^data_signal' <<<"$out") -eq 0 ]] || fail "an unreadable status prints no signal (got: $(tr '\n' ' ' <<<"$out"))"
+ pass "tile-state.sh reports mobile data from NetworkManager and shannond"
+ 
++# The Modem tile (SM-T715 tablet build, patch 0012): on/off and the CP's state
++# from t715-modem-power's JSON; none without the command or on a kernel
++# without the modem.
++printf '{"installed":true,"modem":"on","cp":"online","standby":"keep","cut":false}\n' >"$tmp/state/modem-power"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "modem=on" "the modem is on while the switch is on"
++expect "$out" "modem_cp=online" "the CP's state is read"
++printf '{"installed":true,"modem":"off","cp":"off","standby":"keep","cut":false}\n' >"$tmp/state/modem-power"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "modem=off" "the modem is off while the switch is off"
++expect "$out" "modem_cp=off" "a stopped loader reads off"
++printf '{"installed":false,"modem":"off","cp":"off","standby":"keep","cut":false}\n' >"$tmp/state/modem-power"
++out=$(run "$dir/tile-state.sh")
++expect "$out" "modem=none" "a kernel without the modem is no backend for the tile"
++run "$dir/tile-action.sh" modem on
++grep -cxF "modem-power on" "$log" >/dev/null || fail "tile-action.sh runs: modem-power on"
++run "$dir/tile-action.sh" modem off
++grep -cxF "modem-power off" "$log" >/dev/null || fail "tile-action.sh runs: modem-power off"
++pass "the Modem tile follows t715-modem-power"
++
+ # Dictation: voxtype is an optional install, so no voxtype is "none", a
+ # stopped user service "down" (whatever its stale state file says), and the
+ # daemon's own state file otherwise.
+diff --git a/test/tiles-model.js b/test/tiles-model.js
+--- a/test/tiles-model.js
++++ b/test/tiles-model.js
+@@ -26,7 +26,7 @@
+ // 0001-tablet-quick-settings-tiles; mobile data is back in 0010), and the
+ // phone's other tiles are not even in the catalog.
+ test("the default keeps the tablet's tiles and leads with the most used", () => {
+-  for (const id of ["wifi", "bluetooth", "mobile-data", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot", "sdcard"])
++  for (const id of ["wifi", "bluetooth", "mobile-data", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver", "dark-theme", "night-light", "keyboard", "clipboard", "screenshot", "sdcard", "modem"])
+     assert.ok(M.DEFAULT_LAYOUT.includes(id), id)
+   assert.deepStrictEqual(M.quickRow(M.defaults()), ["wifi", "bluetooth", "mobile-data", "dnd"])
+   for (const id of ["torch", "location", "nfc", "fingerprint"])
+@@ -35,10 +35,10 @@
+ 
+ test("Clipboard and Dictation close the default's second page, leaving the first as it was", () => {
+   // the tablet's default fills one page and starts a second with Dark theme,
+-  // Night light, Keyboard, Clipboard, Screenshot and SD card
++  // Night light, Keyboard, Clipboard, Screenshot, SD card and Modem
+   assert.deepStrictEqual(M.pages(M.defaults())[0],
+     ["wifi", "bluetooth", "mobile-data", "dnd", "airplane", "rotation-lock", "rotate", "battery-saver"])
+-  assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "sdcard")
++  assert.strictEqual(M.DEFAULT_LAYOUT.slice(-1)[0], "modem")
+   assert.strictEqual(M.pages(M.defaults()).length, 2)
+   assert.strictEqual(M.label("clipboard"), "Clipboard")
+   assert.strictEqual(M.label("dictation"), "Dictation")
+@@ -164,6 +164,15 @@
+   assert.strictEqual(M.dictationStatus("down"), "Not running")
+   assert.strictEqual(M.dictationStatus("none"), "Not installed")
+   assert.strictEqual(M.dictationStatus(undefined), "Not installed")
++  // The Modem tile's status from tile-state.sh's modem_cp (patch 0012).
++  assert.strictEqual(M.modemStatus("online"), "On")
++  assert.strictEqual(M.modemStatus("booting"), "Starting…")
++  assert.strictEqual(M.modemStatus("waiting"), "Starting…")
++  assert.strictEqual(M.modemStatus("crashed"), "Restarting…")
++  assert.strictEqual(M.modemStatus("offline"), "Restarting…")
++  assert.strictEqual(M.modemStatus("stopping"), "Stopping…")
++  assert.strictEqual(M.modemStatus("off"), "Not running")
++  assert.strictEqual(M.modemStatus(undefined), "On")
+ })
+ 
+ let failed = 0

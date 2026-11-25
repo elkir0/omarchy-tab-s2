@@ -1,0 +1,412 @@
+SM-T715 tablet: no phone leftovers in the user's setup or the shell log.
+
+The owner's Lenovomarchy port's 0004-tablet-phone-leftovers, reworded, with
+two changes for this tablet:
+- omamobile-setup-user's steps never add the plugins this build does not
+  ship (fingerprint, update, access, mobilenetwork), remove them and
+  their links and menu rows from a user an earlier build set up; quick
+  settings never probe the hardware of a tile the catalogue dropped
+  (omamobile-gnss, omamobile-fp-enroll, rfkill's nfc line, brightnessctl's
+  torch). omamobile.call is shipped again (the arm64 image has the modem
+  stack now; its UI patches are 0010-0013 and the call card's Speaker
+  toggle is hidden in 0013), and so is omamobile.voice (the voice bar;
+  0014 makes it hear other languages than English): their steps below add
+  them, Setup > Voice and the Voxtype setup as upstream's do, and the
+  cleanup pass leaves them, their links and Setup > Voice alone. The
+  launcher loads the voice link as upstream's does (Lenovomarchy's guard
+  for a missing voice plugin is not carried: the plugin ships).
+- SM-T715: the suspend-off step stays upstream's (the arm64 image masks the
+  sleep targets, and sets the toggle at build time); Lenovomarchy's removes
+  the toggle, for its tablet's verified s2idle.
+- SM-T715: the guard on a dropped tile's refresh takes the catalogue id
+  (tileRefresh(tile, "rotation-lock")): Lenovomarchy's read tile.id, which a
+  QML object's id is not, and its rotation guard asked for "rotationLock";
+  harmless there (both tiles dropped), it would stop the Rotation tile that
+  this build keeps from ever reading its state.
+Against omarchy-mobile 8991845 (omamobile-shell 0.2.147), after 0001-0003.
+
+diff --git a/bin/omamobile-setup-user b/bin/omamobile-setup-user
+--- a/bin/omamobile-setup-user
++++ b/bin/omamobile-setup-user
+@@ -70,7 +70,80 @@ if not any(isinstance(p, dict) and p.get("id") == plugin for p in plugins):
+     os.replace(path + ".new", path)
+ PY
+ }
+-if omarchy-done ensure omamobile-fingerprint-plugin; then
++
++# SM-T715 tablet build: the plugins this package does not
++# ship (fingerprint, update sheet, permission portal, modem page).
++# Never added by the steps below (each asks is_unshipped first), and taken
++# out of an existing shell.json at every login, so a user set up
++# by the phone build (or by the prebuilt 0.2.94) keeps no entry for a
++# plugin whose folder is gone: the host shell would log a load failure for
++# each, and a stale link under ~/.config/omarchy/plugins/ would point at
++# nothing. The links are removed in the same pass. omamobile.call is
++# shipped again (the arm64 image has the modem stack now, 0010-0013), and
++# so is omamobile.voice (the voice bar, in other languages than English
++# with 0014): neither is in the list, and their steps below add them as
++# upstream's do.
++unshipped=" omamobile.fingerprint omamobile.update omamobile.access omamobile.mobilenetwork "
++is_unshipped() { [[ $unshipped == *" $1 "* ]]; }
++
++remove_unshipped() {
++  python3 - "$config/shell.json" $unshipped <<'PY'
++import json, sys
++path = sys.argv[1]
++drop = set(sys.argv[2:])
++try:
++    with open(path) as f:
++        config = json.load(f)
++except (FileNotFoundError, ValueError):
++    sys.exit(0)
++plugins = config.get("plugins")
++if not isinstance(plugins, list):
++    sys.exit(0)
++kept = [p for p in plugins if not (isinstance(p, dict) and p.get("id") in drop)]
++if kept == plugins:
++    sys.exit(0)
++config["plugins"] = kept
++with open(path + ".new", "w") as f:
++    json.dump(config, f, indent=2)
++    f.write("\n")
++import os
++os.replace(path + ".new", path)
++PY
++  local plugin link removed=0
++  for plugin in $unshipped; do
++    link="$config/plugins/$plugin"
++    if [[ -L $link || -e $link ]]; then
++      rm -f "$link"
++      removed=$((removed + 1))
++    fi
++  done
++  if ((removed)); then
++    echo "omamobile-setup-user: removed $removed stale plugin link(s) this build does not ship"
++  fi
++  return 0
++}
++# The phone build's menu rows, removed from an existing extension file the
++# same way: each was seeded as one line naming its plugin, and the plugins
++# are not shipped. A row the owner rewrote (not the seeded line) stays.
++remove_unshipped
++remove_phone_menu_rows() {
++  local extension=~/.config/omarchy/extensions/omarchy-menu.jsonc row
++  [[ -s $extension ]] || return 0
++  local changed=0
++  for row in '"setup.mobile-network"' '"setup.security.fingerprint"' '"update.omarchy"'; do
++    if grep -qF "$row" "$extension"; then
++      grep -vF "$row" "$extension" >"$extension.new" || true
++      mv -f "$extension.new" "$extension"
++      changed=1
++    fi
++  done
++  if ((changed)); then
++    echo "omamobile-setup-user: removed phone-only menu rows this build does not serve"
++  fi
++}
++remove_phone_menu_rows
++# SM-T715 tablet build: no fingerprint sensor; the plugin is not shipped
++if ! is_unshipped omamobile.fingerprint && omarchy-done ensure omamobile-fingerprint-plugin; then
+   add_plugin omamobile.fingerprint
+ fi
+ if omarchy-done ensure omamobile-keyboard-plugin; then
+@@ -284,6 +357,8 @@ fi
+ 
+ # Suspend isn't supported on the phone's kernel yet: take it out of the system
+ # menu with Omarchy's own toggle (omarchy-toggle-suspend brings it back).
++# SM-T715 tablet build: as upstream; the arm64 image masks the sleep targets
++# too (no suspend on its kernel yet) and sets this toggle at build time.
+ if omarchy-done ensure omamobile-suspend-off; then
+   mkdir -p ~/.local/state/omarchy/toggles
+   touch ~/.local/state/omarchy/toggles/suspend-off
+@@ -320,6 +395,13 @@ if [[ -e ${OMAMOBILE_AUTO_SLEEP_DEFAULT:-/usr/share/omamobile/auto-sleep-default
+    omarchy-done ensure omamobile-auto-sleep-on; then
+   mkdir -p ~/.local/state/omarchy/toggles
+   touch ~/.local/state/omarchy/toggles/omamobile-sleep
++else
++  # SM-T715 tablet build: omamobile-sleepd is not shipped, so the sleep
++  # toggle would name a daemon that never runs. Remove one a phone build
++  # left (the device flag above never exists here), once.
++  if omarchy-done ensure omamobile-no-auto-sleep; then
++    rm -f ~/.local/state/omarchy/toggles/omamobile-sleep
++  fi
+ fi
+ 
+ # Lock screen: Omarchy's lock with a number pad (lock-keypad toggle, see
+@@ -349,7 +431,8 @@ fi
+ # libfprint-git. On the phone it opens Omamobile's enrollment screen instead
+ # (omamobile.fingerprint, through fprintd), once, through the same menu
+ # extension file (a reused id replaces the entry).
+-if omarchy-done ensure omamobile-menu-fingerprint; then
++# SM-T715 tablet build: no fingerprint sensor; its menu row points at the unshipped plugin
++if ! is_unshipped omamobile.fingerprint && omarchy-done ensure omamobile-menu-fingerprint; then
+   extension=~/.config/omarchy/extensions/omarchy-menu.jsonc
+   mkdir -p "$(dirname "$extension")"
+   [[ -s $extension ]] || printf '{\n}\n' >"$extension"
+@@ -436,17 +519,22 @@ fi
+ # extension file. Update > Firmware (fwupd) and Update > Config > Plymouth
+ # (an initramfs rebuild) are hidden: the phone boots from boot_b, which
+ # bin/omamobile push writes, and its firmware is Google's.
+-if omarchy-done ensure omamobile-update-plugin; then
++# SM-T715 tablet build: needs omamobile-update (omamobile-omarchy), not shipped here
++if ! is_unshipped omamobile.update && omarchy-done ensure omamobile-update-plugin; then
+   add_plugin omamobile.update
+ fi
+ # The permission sheet (omamobile.access): the question xdg-desktop-portal
+ # asks before an app first uses the camera or the location, shown by
+ # omamobile-portal-access in place of GTK's desktop dialog.
+-if omarchy-done ensure omamobile-access-plugin; then
++# SM-T715 tablet build: the permission portal backend is not shipped; Omarchy's stock portal stays
++if ! is_unshipped omamobile.access && omarchy-done ensure omamobile-access-plugin; then
+   add_plugin omamobile.access
+ fi
+ # Calls (omamobile.call): incoming calls over the lock, a heads-up card when
+ # unlocked and the in-call controls, from omatel's agent when it runs.
++# SM-T715 tablet build: shipped again now that the arm64 image has the
++# modem stack (shannond serves ModemManager, t715-modem); the call card's
++# Speaker toggle is hidden (patch 0013: no earpiece).
+ if omarchy-done ensure omamobile-call-plugin; then
+   add_plugin omamobile.call
+ fi
+@@ -457,16 +545,21 @@ fi
+ # Voice input (omamobile.voice): hold the home pill to ask the agent, the
+ # keyboard strip's mic key to dictate, through Voxtype (in the root image,
+ # set up below; or Install > AI > Dictation); without it the sheet says so.
++# SM-T715 tablet build: shipped again; it hears other languages than
++# English (0014), and the image's omamobile-voice ships Whisper's
++# multilingual base model for it.
+ if omarchy-done ensure omamobile-voice-plugin; then
+   add_plugin omamobile.voice
+ fi
+ # The Mobile network page (omamobile.mobilenetwork): carrier, mobile data,
+ # roaming, the APN and the SIM PIN lock; and Setup > Mobile network in
+ # Omarchy's menu, shown only where the modem stack is installed. Once each.
+-if omarchy-done ensure omamobile-mobilenetwork-plugin; then
++# SM-T715 tablet build: no modem; the plugin is not shipped
++if ! is_unshipped omamobile.mobilenetwork && omarchy-done ensure omamobile-mobilenetwork-plugin; then
+   add_plugin omamobile.mobilenetwork
+ fi
+-if omarchy-done ensure omamobile-menu-mobilenetwork; then
++# SM-T715 tablet build: no modem; its menu row points at the unshipped plugin
++if ! is_unshipped omamobile.mobilenetwork && omarchy-done ensure omamobile-menu-mobilenetwork; then
+   extension=~/.config/omarchy/extensions/omarchy-menu.jsonc
+   if [[ -f $extension ]] && ! grep -q '"setup.mobile-network"' "$extension"; then
+     sed -i '0,/^{/s//{\n  "setup.mobile-network": {"icon":"\xf3\xb0\x9e\x83","label":"Mobile network","description":"Carrier, mobile data, roaming and the APN","when":"test -x \/usr\/lib\/omamobile-sit\/omamobile-sit-config","action":"omarchy-shell shell summon omamobile.mobilenetwork '"'"'{}'"'"'"},/' "$extension"
+@@ -474,6 +567,7 @@ if omarchy-done ensure omamobile-menu-mobilenetwork; then
+ fi
+ # Setup > Voice in Omarchy's menu opens the voice settings (omamobile.voice),
+ # through the menu extension file. Added once.
++# SM-T715 tablet build: as upstream, now that the voice plugin ships again.
+ if omarchy-done ensure omamobile-menu-voice; then
+   extension=~/.config/omarchy/extensions/omarchy-menu.jsonc
+   if [[ -f $extension ]] && ! grep -q '"setup.voice"' "$extension"; then
+@@ -584,13 +678,14 @@ if [[ -f $voxconf ]]; then
+     systemctl --user try-restart voxtype.service || true
+   fi
+ fi
+-if omarchy-done ensure omamobile-menu-update; then
+-  extension=~/.config/omarchy/extensions/omarchy-menu.jsonc
+-  mkdir -p "$(dirname "$extension")"
+-  [[ -s $extension ]] || printf '{\n}\n' >"$extension"
+-  if ! grep -q '"update.omarchy"' "$extension"; then
+-    sed -i '0,/^{/s//{\n  \/\/ Omamobile: updates through the phone'"'"'s update sheet; no fwupd or Plymouth rebuilds\n  "update.omarchy": {"icon": "\xee\xa4\x80", "iconFont": "omarchy", "label": "Omarchy", "action": "omarchy-shell shell summon omamobile.update '"'"'{}'"'"'"},\n  "update.firmware": {"when": "false"},\n  "update.config.plymouth": {"when": "false"},/' "$extension"
+-  fi
++# SM-T715 tablet build: the update sheet needs omamobile-update
++# (omamobile-omarchy), not shipped here, so Update > Omarchy keeps
++# Omarchy's own row and this step adds nothing. The two rows it hid for
++# the phone (fwupd firmware updates, a Plymouth rebuild) are equally
++# wrong here -- no fwupd, no Plymouth -- and are hidden with the other
++# menu rows below, not through this step.
++if ! is_unshipped omamobile.update && omarchy-done ensure omamobile-menu-update; then
++  :
+ fi
+ 
+ # Menu rows that break the phone or can't work on it (TOUCH-PLAN 0.2, 0.3,
+@@ -648,6 +743,9 @@ menu_hide "no dock and no other kernel on a phone (Omarchy 4.5)" \
+   appearance.dock appearance.dock.always-on appearance.dock.autohide appearance.dock.position \
+   appearance.dock.position.bottom appearance.dock.position.left appearance.dock.position.right appearance.dock.position.top \
+   update.kernel
++# No fwupd firmware updates and no Plymouth rebuild on this image either
++# (the phone hid them with its update sheet; the reasons hold without it).
++menu_hide "no fwupd or Plymouth rebuilds here" update.firmware update.config.plymouth
+ menu_hide "x86_64-only installers" \
+   install.windows install.browser.chrome install.browser.edge \
+   install.service.dropbox install.service.spotify install.service.nordvpn \
+diff --git a/plugins/omamobile.quicksettings/QuickSettings.qml b/plugins/omamobile.quicksettings/QuickSettings.qml
+--- a/plugins/omamobile.quicksettings/QuickSettings.qml
++++ b/plugins/omamobile.quicksettings/QuickSettings.qml
+@@ -98,6 +98,18 @@ Item {
+     openRefreshIndex = -1
+   }
+ 
++  // SM-T715 tablet build: a tile dropped from the catalog never refreshes,
++  // so the process behind it (omamobile-gnss status, omamobile-fp-enroll
++  // list, rfkill's nfc line, brightnessctl's torch device) is never spawned.
++  // Without this, every sheet open logged "Process failed to start" for
++  // binaries this device will never have. The catalog id is passed: a QML
++  // object's id is not a property (tile.id would be undefined), and the
++  // rotation lock, which this build keeps, must still refresh.
++  function tileRefresh(tile, catalogId) {
++    if (!TilesModel.known(catalogId)) return
++    tile.refresh()
++  }
++
+   function runOpenRefresh() {
+     if (!opened || openRefreshMoving || openRefreshIndex < 0) return
+     var index = openRefreshIndex++
+@@ -107,11 +119,11 @@ Item {
+       case 1: refreshDnd(); break
+       case 2: brightness.refresh(); break
+       case 3: refreshProbe(); break
+-      case 4: torch.refresh(); break
+-      case 5: rotationLock.refresh(); break
+-      case 6: location.refresh(); break
+-      case 7: nfc.refresh(); break
+-      case 8: fingerprint.refresh(); break
++      case 4: tileRefresh(torch, "torch"); break
++      case 5: tileRefresh(rotationLock, "rotation-lock"); break
++      case 6: tileRefresh(location, "location"); break
++      case 7: tileRefresh(nfc, "nfc"); break
++      case 8: tileRefresh(fingerprint, "fingerprint"); break
+       case 9: keyboard.refresh(); break
+       case 10: if (!clockFormatRead.running) clockFormatRead.running = true; break
+     }
+@@ -1084,6 +1096,7 @@ Item {
+     readonly property string status: !available ? "No sensor" : enabled ? "Locked" : "Auto-rotate"
+ 
+     function refresh() {
++      if (!TilesModel.known("rotation-lock")) return  // only while the catalog has the tile
+       if (!rotationRead.running) rotationRead.running = true
+     }
+ 
+@@ -1132,6 +1145,7 @@ Item {
+     readonly property string status: !available ? "No GNSS" : !enabled ? "Off" : running ? "In use" : "On"
+ 
+     function refresh() {
++      if (!TilesModel.known("location")) return  // tablet build: no omamobile-gnss
+       if (!locationRead.running) locationRead.running = true
+     }
+ 
+@@ -1176,6 +1190,7 @@ Item {
+     readonly property string status: !available ? "No NFC" : enabled ? "On" : "Off"
+ 
+     function refresh() {
++      if (!TilesModel.known("nfc")) return  // tablet build: no rfkill nfc
+       if (!nfcRead.running) nfcRead.running = true
+     }
+ 
+@@ -1220,6 +1235,7 @@ Item {
+       : count === 0 ? "Set up" : count === 1 ? "1 added" : count + " added"
+ 
+     function refresh() {
++      if (!TilesModel.known("fingerprint")) return  // tablet build: no omamobile-fp-enroll
+       if (!fingerprintRead.running) fingerprintRead.running = true
+     }
+ 
+@@ -1301,6 +1317,7 @@ Item {
+     readonly property string status: !available ? "No flash LED" : enabled ? "On" : "Off"
+ 
+     function refresh() {
++      if (!TilesModel.known("torch")) return  // tablet build: no brightnessctl torch
+       if (!torchRead.running) torchRead.running = true
+     }
+ 
+diff --git a/test/setup-user.sh b/test/setup-user.sh
+--- a/test/setup-user.sh
++++ b/test/setup-user.sh
+@@ -110,9 +110,13 @@ for id in update.channel update.channel.stable update.channel.rc update.channel.
+   [[ $(grep -c "\"$id\"" "$ext") == 1 ]] || fail "Menu row $id is named once after two logins"
+ done
+ grep -qx 'system.logout true' <<<"$menu" || fail "a row the user set is left as they set it"
+-for id in style.bar.position.top appearance.top-bar.position.top appearance.top-bar.indicators update.omarchy install.gaming.retroarch; do
++for id in style.bar.position.top appearance.top-bar.position.top appearance.top-bar.indicators install.gaming.retroarch; do
+   grep -q "^$id false" <<<"$menu" && fail "Menu row $id stays"
+ done
++# SM-T715 tablet build: the update sheet is not shipped, so the phone's
++# Update > Omarchy row must not be seeded, and one the phone build left is
++# taken out again.
++grep -q '"update.omarchy"' "$ext" && fail "the phone build's update.omarchy row is removed"
+ pass "menu rows that break the phone are hidden once, by content, and a user's own entry is kept"
+ 
+ U=$H/.local/share/applications
+@@ -544,6 +548,80 @@ done
+ rm -f "$F/gliff-server"
+ pass "Omarchy's remote session is off on every phone, once, with or without gliff, and a user can turn it back on"
+ 
++# SM-T715 tablet build cleanup: a user set up by the phone build (or the
++# prebuilt 0.2.94) has the phone plugins in shell.json, links to them under
++# ~/.config/omarchy/plugins/, and the phone's menu rows. One login takes the
++# unshipped ones out and keeps everything else, including the plugins this
++# build ships -- omamobile.call and omamobile.voice among them now (0004
++# ships them again), with Setup > Voice.
++# A user the phone build set up: the profile step is done (the phone seeded
++# its shell.json; the setup must not overwrite what it holds), and the file
++# carries the phone plugins, with our own among them.
++ph=$t/phone-user
++mkdir -p "$ph/.config/hypr" "$ph/.config/omarchy/extensions" "$ph/.config/omarchy/plugins" "$ph/.local/state/omarchy/done"
++cp "$H"/.config/hypr/*.lua "$ph/.config/hypr/"
++touch "$ph/.local/state/omarchy/done/omamobile-shell-profile"
++cat >"$ph/.config/omarchy/shell.json" <<'JSON'
++{
++  "version": 1,
++  "plugins": [
++    {"id": "omamobile.quicksettings"},
++    {"id": "omamobile.home"},
++    {"id": "omamobile.mobilenetwork"},
++    {"id": "omamobile.update"},
++    {"id": "omamobile.voice"},
++    {"id": "omamobile.call"},
++    {"id": "omamobile.access"},
++    {"id": "omamobile.fingerprint"},
++    {"id": "omamobile.launcher", "columns": 6}
++  ],
++  "disabledPlugins": ["omarchy.clock"]
++}
++JSON
++for plugin in omamobile.mobilenetwork omamobile.voice omamobile.call omamobile.home; do
++  ln -s "/usr/share/omamobile/shell/plugins/$plugin" "$ph/.config/omarchy/plugins/$plugin"
++done
++cat >"$ph/.config/omarchy/extensions/omarchy-menu.jsonc" <<'JSONC'
++{
++  // Omarchy Mobile: updates through the phone's update sheet
++  "update.omarchy": {"icon": "", "label": "Omarchy", "action": "omarchy-shell shell summon omamobile.update '{}'"},
++  "setup.mobile-network": {"icon": "", "label": "Mobile network", "when": "test -x /usr/lib/omamobile-sit/omamobile-sit-config", "action": "omarchy-shell shell summon omamobile.mobilenetwork '{}'"},
++  "setup.voice": {"icon": "", "label": "Voice", "action": "omarchy-shell shell summon omamobile.voice '{\"page\":\"settings\"}'"},
++  "setup.security.fingerprint": {"icon": "", "label": "Fingerprint", "when": "test -x /usr/lib/omamobile-fp/omamobile-fp-chroot", "action": "omarchy-shell shell summon omamobile.fingerprint '{\"page\":\"enroll\"}'"},
++  "system.pin": {"icon": "", "label": "PIN", "action": "omamobile-set-pin"}
++}
++JSONC
++RUN_HOME=$ph run
++python3 -I - "$ph/.config/omarchy/shell.json" <<'PY' || fail "the unshipped phone plugins are gone from shell.json and the rest stays"
++import json, sys
++config = json.load(open(sys.argv[1]))
++ids = [p.get("id") for p in config["plugins"]]
++gone = {"omamobile.mobilenetwork", "omamobile.update", "omamobile.access", "omamobile.fingerprint"}
++assert not (set(ids) & gone), set(ids) & gone
++assert "omamobile.quicksettings" in ids and "omamobile.home" in ids, ids
++assert "omamobile.call" in ids, ids  # shipped again by this build (0004)
++assert ids.count("omamobile.voice") == 1, ids  # shipped again (0004); its own step finds it there
++launcher = [p for p in config["plugins"] if p.get("id") == "omamobile.launcher"]
++assert launcher and launcher[0].get("columns") == 6, launcher
++off = config.get("disabledPlugins")
++assert "omarchy.clock" in off, off
++assert "omarchy.remote-session" in off, off  # added by the no-remote-session step
++PY
++[[ ! -e $ph/.config/omarchy/plugins/omamobile.mobilenetwork ]] || fail "the stale link to omamobile.mobilenetwork is removed"
++[[ -e $ph/.config/omarchy/plugins/omamobile.home ]] || fail "a shipped plugin's link stays"
++[[ -e $ph/.config/omarchy/plugins/omamobile.call ]] || fail "the shipped call plugin's link stays"
++[[ -e $ph/.config/omarchy/plugins/omamobile.voice ]] || fail "the shipped voice plugin's link stays"
++for row in setup.mobile-network setup.security.fingerprint update.omarchy; do
++  ! grep -qF "\"$row\"" "$ph/.config/omarchy/extensions/omarchy-menu.jsonc" || fail "the phone's $row menu row is removed"
++done
++[[ $(grep -cF '"setup.voice"' "$ph/.config/omarchy/extensions/omarchy-menu.jsonc") == 1 ]] || fail "Setup > Voice stays, once (the voice plugin ships)"
++grep -qF '"system.pin"' "$ph/.config/omarchy/extensions/omarchy-menu.jsonc" || fail "the tablet's own PIN row stays"
++# A second login changes nothing more (the pass is idempotent).
++before=$(cat "$ph/.config/omarchy/shell.json")
++RUN_HOME=$ph run
++[[ $(cat "$ph/.config/omarchy/shell.json") == "$before" ]] || fail "the cleanup runs once and changes nothing on the second login"
++pass "tablet cleanup: the unshipped phone plugins, their stale links and their menu rows go, everything else (the call and voice plugins too) stays"
++
+ # Auto-sleep: on once where the device package says suspend is verified;
+ # off by default elsewhere; a user who turns it off keeps it off.
+ ha=$t/auto-sleep; mkdir -p "$ha/.config/hypr" "$ha/.local/state/omarchy/done"

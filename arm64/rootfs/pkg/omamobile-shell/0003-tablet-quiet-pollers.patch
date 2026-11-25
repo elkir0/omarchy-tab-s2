@@ -1,0 +1,311 @@
+SM-T715 tablet: no do-not-disturb poll, no modem or call watcher.
+
+The home toggles watch the notification service's state files instead of a
+`qs ipc` call every 30 s, and the bar starts its modem and call watchers
+only when the bar's cellWatch / callWatch setting is true (true in
+tablet-shell.json, default off; in 0.2.147 cellWatchEnabled gates upstream's
+new showCell so bar.statusIcons.cell continues to work on top of it, and
+callWatch follows the same non-bound lifecycle); the idle block a profile
+without one gets is the tablet's (both timers 0). The owner's Lenovomarchy
+port's 0003-tablet-quiet-pollers, reworded (the SM-T715's 0.2.94 series had
+the first two parts). Against omarchy-mobile 8991845 (omamobile-shell
+0.2.147), after 0001-0002.
+
+diff --git a/bin/omamobile-setup-user b/bin/omamobile-setup-user
+--- a/bin/omamobile-setup-user
++++ b/bin/omamobile-setup-user
+@@ -670,14 +670,16 @@ try:
+         config = json.load(f)
+ except FileNotFoundError:
+     sys.exit(1)
+-phone = {"screensaver": 0, "lock": 60}
++# The SM-T715 tablet keeps both idle timers off (its profile seeds it;
++# t715-style idle handling is the image's own): lock 0 too, not the phone's 60.
++phone = {"screensaver": 0, "lock": 0}
+ if "idle" not in config:
+     config["idle"] = phone
+     with open(path + ".new", "w") as f:
+         json.dump(config, f, indent=2)
+         f.write("\n")
+     os.replace(path + ".new", path)
+-# The toggle follows when the idle block is the phone's (seeded now, or
++# The toggle follows when the idle block is the tablet's (seeded now, or
+ # from the profile)
+ sys.exit(0 if config["idle"] == phone else 1)
+ PY
+diff --git a/omamobile-shell.install b/omamobile-shell.install
+--- a/omamobile-shell.install
++++ b/omamobile-shell.install
+@@ -1,29 +1,15 @@
+ # SPDX-License-Identifier: MIT
+ post_install() {
+-  echo "Run 'omamobile-setup-user' as each phone user (Omamobile's first run does this)."
+-}
+-
+-# Hyprland reads hypr/phone.lua (the phone's key binds and layer rules) when
+-# it starts and on `hyprctl reload`, not when the file changes: after the
+-# 0.2.61 upgrade the running session kept binds for calls the package had
+-# removed (the keyboard's Mic key did nothing) until a reload by hand. So
+-# every running Hyprland is reloaded, as its own user. A reload re-reads the
+-# config; windows and the shell stay as they are.
+-reload_hyprland() {
+-  command -v hyprctl >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1 || return 0
+-  local root=${OMAMOBILE_RUNTIME_ROOT:-/run/user} dir uid user sig
+-  for dir in "$root"/*/hypr/*/; do
+-    [ -S "${dir}.socket.sock" ] || continue
+-    uid=$(stat -c %u "$dir") || continue
+-    user=$(id -nu "$uid" 2>/dev/null) || continue
+-    sig=$(basename "$dir")
+-    runuser -u "$user" -- env XDG_RUNTIME_DIR="$root/$uid" HYPRLAND_INSTANCE_SIGNATURE="$sig" \
+-      hyprctl reload >/dev/null 2>&1 || true
+-  done
+-  return 0
++  echo "Run 'omamobile-setup-user --adopt' as each user (the SM-T715 image does it at build time)."
+ }
+ 
++# Upstream reloads every running Hyprland here, because its phone.lua binds
++# change between releases and a running session kept dead binds. This build
++# installs no Hyprland file at all (the image's tablet.lua holds the rules),
++# so there is nothing to reload: the shell's own surfaces (the bar, the
++# drawer) are Quickshell windows that re-read their files at the next shell
++# start, and omamobile-setup-user.service (or a manual 'omamobile-setup-user')
++# brings new plugins and profile keys to each user.
+ post_upgrade() {
+-  reload_hyprland
+-  echo "New phone shell plugins and settings reach each user at their next login (omamobile-setup-user.service), or now with 'omamobile-setup-user'."
++  echo "New shell plugins and settings reach a user with 'omamobile-setup-user' (at their next login, or now by hand)."
+ }
+diff --git a/plugins/README.md b/plugins/README.md
+--- a/plugins/README.md
++++ b/plugins/README.md
+@@ -616,8 +616,10 @@ pages are a `ListView` inside it. Apps cover it when open; nothing renders
+ while they do.
+ 
+ Smoothness. Widgets are plain rectangles and text: no blur, shadow or
+-`layer.enabled`, and only the clock (once a minute), the media widget (while
+-playing) and the toggles' do-not-disturb poll (30 s) change while you look.
++`layer.enabled`, and only the clock (once a minute) and the media widget
++(while playing) change while you look. The toggles' do-not-disturb follows
++the notification service's state files through a file watch, not a poll
++(the SM-T715 tablet build's change).
+ Every layout edit rebuilds the page's delegates, so the weather answer and
+ command output are cached per widget id and an edit is not a new request.
+ 
+diff --git a/plugins/omamobile.bar/Bar.qml b/plugins/omamobile.bar/Bar.qml
+--- a/plugins/omamobile.bar/Bar.qml
++++ b/plugins/omamobile.bar/Bar.qml
+@@ -62,7 +62,13 @@ Item {
+   readonly property string batteryStyle: StatusModel.batteryStyle(barConfig)
+   readonly property bool showBluetooth: StatusModel.iconShown(barConfig, "bluetooth")
+   readonly property bool showWifi: StatusModel.iconShown(barConfig, "wifi")
+-  readonly property bool showCell: StatusModel.iconShown(barConfig, "cell")
++  // SM-T715 tablet: the modem and call watchers start only when the bar's
++  // `cellWatch` / `callWatch` setting is true (default off; true in
++  // tablet-shell.json). Gating showCell keeps upstream's statusIcons.cell
++  // switch working on top of it.
++  readonly property bool cellWatchEnabled: setting("cellWatch", false) === true
++  readonly property bool callWatchEnabled: setting("callWatch", false) === true
++  readonly property bool showCell: StatusModel.iconShown(barConfig, "cell") && cellWatchEnabled
+   readonly property bool showDnd: StatusModel.iconShown(barConfig, "dnd")
+   readonly property bool showUnread: StatusModel.iconShown(barConfig, "unread")
+   readonly property string quickSettingsId: String(setting("quickSettings", "omamobile.quicksettings"))
+@@ -127,11 +133,14 @@ Item {
+   Process {
+     id: callWatch
+     command: ["omamobile-call-watch", "--observe"]
+-    running: true
++    // Driven from callWatchEnabled below, not bound: the restart timer sets
++    // running, which would break a binding.
+     stdout: SplitParser { onRead: function(line) { root.callLine = String(line) } }
+-    onExited: { root.callLine = ""; callRestart.restart() }
++    onExited: { root.callLine = ""; if (root.callWatchEnabled) callRestart.restart() }
++    Component.onCompleted: running = root.callWatchEnabled
+   }
+-  Timer { id: callRestart; interval: 5000; onTriggered: callWatch.running = true }
++  Timer { id: callRestart; interval: 5000; onTriggered: if (root.callWatchEnabled) callWatch.running = true }
++  onCallWatchEnabledChanged: { if (!callWatchEnabled) callRestart.stop(); callWatch.running = callWatchEnabled }
+   Timer {
+     interval: 1000
+     repeat: true
+diff --git a/plugins/omamobile.home/TogglesWidget.qml b/plugins/omamobile.home/TogglesWidget.qml
+--- a/plugins/omamobile.home/TogglesWidget.qml
++++ b/plugins/omamobile.home/TogglesWidget.qml
+@@ -10,8 +10,8 @@ import qs.Commons as Commons
+ // A row of quick-settings toggles. Taps go through quick settings' own IPC
+ // (`toggleTile`), so each one does exactly what its tile does; "More" opens
+ // the sheet. Wi-Fi and Bluetooth state come straight from Quickshell;
+-// do-not-disturb is asked of the notification service when the widget
+-// appears, after a tap, and every 30 s.
++// do-not-disturb comes from the notification service's state files,
++// watched rather than polled (the tablet build's change).
+ Item {
+   id: widget
+ 
+@@ -45,27 +45,49 @@ Item {
+     toggleProc.running = true
+   }
+ 
++  // A tap goes through quick settings' toggleTile; the notification
++  // service rewrites its state file, and the FileView below hears it.
+   Process {
+     id: toggleProc
+-    onExited: dndRead.restart()
+   }
+ 
+-  Process {
+-    id: dndProc
+-    // isDnd on Omarchy 4.5, dndState on 4.0 (QuickSettings.qml has the same line)
+-    command: ["sh", "-c", "for m in isDnd dndState; do v=$(qs ipc -p \"$1\" call notifications $m 2>/dev/null); case $v in on|off) echo $v; exit 0;; esac; done", "sh", Quickshell.shellDir]
+-    stdout: StdioCollector {
+-      waitForEnd: true
+-      onStreamFinished: {
+-        var t = String(text || "").trim().toLowerCase()
+-        widget.dnd = t === "on" || t === "true" || t === "1"
+-      }
++  // Do-not-disturb from the notification service's own state files, watched:
++  // no `qs ipc` client per read and no 30 s poll (SM-T715 tablet build).
++  // Omarchy 4.0 keeps the flag in ~/.local/state/omarchy/notifications.json
++  // ({"dnd": ...}); Omarchy 4.5 keeps it in notifications/quiet.json
++  // ({"snoozes": ..., "dnd": ...}), which patch 0023 of omamobile-omarchy
++  // also reads. Whichever file exists wins; neither (never turned on) is off.
++  // Both services rewrite their file on every change with an atomic rename
++  // that FileView follows. Nothing at all runs while hidden (upstream's
++  // `shown`), because a watch needs no timer.
++  FileView {
++    path: Quickshell.env("HOME") + "/.local/state/omamobile/notifications/quiet.json"
++    watchChanges: true
++    printErrors: false
++    onFileChanged: reload()
++    onLoaded: {
++      try {
++        var settings = JSON.parse(text())
++        widget.dnd = !!settings && settings.dnd === true
++      } catch (e) {}
+     }
++    onLoadFailed: dndLegacy.reload()
+   }
+ 
+-  Timer { id: dndRead; interval: 400; onTriggered: if (!dndProc.running) dndProc.running = true }
+-  // Started again when shown, and triggeredOnStart reads it at once then.
+-  Timer { interval: 30000; repeat: true; running: widget.shown; triggeredOnStart: true; onTriggered: dndRead.restart() }
++  FileView {
++    id: dndLegacy
++    path: Quickshell.env("HOME") + "/.local/state/omamobile/notifications.json"
++    watchChanges: true
++    printErrors: false
++    onFileChanged: reload()
++    onLoaded: {
++      try {
++        var settings = JSON.parse(text())
++        widget.dnd = !!settings && settings.dnd === true
++      } catch (e) {}
++    }
++    onLoadFailed: widget.dnd = false
++  }
+ 
+   Grid {
+     anchors.centerIn: parent
+diff --git a/test/dnd-state.sh b/test/dnd-state.sh
+--- a/test/dnd-state.sh
++++ b/test/dnd-state.sh
+@@ -18,8 +18,14 @@ print(json.loads(m.group(1)), end="")
+ PY
+ }
+ qs_line=$(line plugins/omamobile.quicksettings/QuickSettings.qml) || fail "found the tile's read"
+-home_line=$(line plugins/omamobile.home/TogglesWidget.qml) || fail "found the home toggles' read"
+-[[ $qs_line == "$home_line" ]] || fail "the tile and the home toggles read Do Not Disturb the same way"
++# The home toggles read the service's state files instead (the SM-T715
++# tablet build's change): what the tile still asks over IPC, they watch.
++if grep -q 'notifications/quiet.json' plugins/omamobile.home/TogglesWidget.qml; then
++  pass_note="the home toggles watch the notification service's state files (tablet build)"
++else
++  home_line=$(line plugins/omamobile.home/TogglesWidget.qml) || fail "found the home toggles' read"
++  [[ $qs_line == "$home_line" ]] || fail "the tile and the home toggles read Do Not Disturb the same way"
++fi
+ mkdir -p "$t/bin"
+ cat > "$t/bin/qs" <<'QS'
+ #!/bin/sh
+@@ -33,4 +39,4 @@ ask() { : > "$t/calls"; T=$t HAVE=$1 STATE=$2 PATH="$t/bin:$PATH" sh -c "$qs_lin
+ [[ $(ask isDnd off) == off ]] || fail "Omarchy 4.5: off is read as off"
+ [[ $(ask dndState on) == on && $(tr '\n' ' ' < "$t/calls") == "isDnd dndState " ]] || fail "Omarchy 4.0: dndState is asked when isDnd isn't there"
+ [[ -z $(ask neither on) ]] || fail "neither name: nothing is printed, so the tile keeps its state"
+-pass "Do Not Disturb is read with isDnd on Omarchy 4.5 and dndState on 4.0, the same way in both places"
++pass "Do Not Disturb is read with isDnd on Omarchy 4.5 and dndState on 4.0, the same way in both places; $pass_note"
+diff --git a/test/install-hook.sh b/test/install-hook.sh
+--- a/test/install-hook.sh
++++ b/test/install-hook.sh
+@@ -1,10 +1,10 @@
+ #!/bin/bash
+ # SPDX-License-Identifier: MIT
+-# omamobile-shell.install's post_upgrade: every running Hyprland (a socket
+-# under /run/user/<uid>/hypr/<signature>/) reloads its config as its own
+-# user, so a new hypr/phone.lua takes effect without a login; a directory
+-# with no socket is left alone. Stand-ins for hyprctl and runuser record
+-# what was asked.
++# omamobile-shell.install's post_upgrade. Upstream reloads every running
++# Hyprland (a socket under /run/user/<uid>/hypr/<signature>/) so a new
++# hypr/phone.lua takes effect without a login; the SM-T715 tablet build
++# ships no Hyprland file, so it must touch nothing. Stand-ins for hyprctl
++# and runuser would record what was asked.
+ set -euo pipefail
+ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+@@ -18,12 +18,10 @@ mkdir -p "$t/run/$uid/hypr/sigA" "$t/run/$uid/hypr/stale"
+ # bound by its short name from inside its folder: a socket path is limited
+ # to about 108 bytes, and the build folder on a phone is longer than that
+ (cd "$t/run/$uid/hypr/sigA" && python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.bind(".socket.sock")')
+-out=$(PATH="$t/bin:$PATH" OMAMOBILE_RUNTIME_ROOT="$t/run" bash -c 'source "$1"; post_upgrade' sh "$here/omamobile-shell.install")
+-grep -c "omamobile-setup-user" <<<"$out" >/dev/null || fail "post_upgrade still says how settings arrive"
+-[[ $(cat "$t/calls") == "runuser -u $user -- env XDG_RUNTIME_DIR=$t/run/$uid HYPRLAND_INSTANCE_SIGNATURE=sigA hyprctl reload" ]] \
+-  || { cat "$t/calls" >&2; fail "the running Hyprland reloads, as its user; the stale directory is skipped"; }
+-rm -f "$t/calls"
+-PATH="$t/bin:$PATH" OMAMOBILE_RUNTIME_ROOT="$t/empty" bash -c 'source "$1"; post_upgrade' sh "$here/omamobile-shell.install" >/dev/null \
+-  || fail "no Hyprland running is fine"
+-[[ ! -e $t/calls ]] || fail "nothing to reload, nothing run"
+-echo "ok - post_upgrade reloads every running Hyprland, so a new phone.lua's binds take effect"
++# The SM-T715 tablet build installs no Hyprland file (the image's
++# tablet.lua holds the window rules), so its post_upgrade reloads nothing;
++# a running Hyprland must not be touched.
++PATH="$t/bin:$PATH" OMAMOBILE_RUNTIME_ROOT="$t/run" bash -c 'source "$1"; post_upgrade' sh "$here/omamobile-shell.install" >/dev/null \
++  || fail "post_upgrade succeeds with a Hyprland running"
++[[ ! -e $t/calls ]] || { cat "$t/calls" >&2; fail "the tablet build reloads no Hyprland (no phone.lua shipped)"; }
++echo "ok - post_upgrade reloads nothing on the tablet build (no Hyprland file ships)"
+diff --git a/test/setup-user.sh b/test/setup-user.sh
+--- a/test/setup-user.sh
++++ b/test/setup-user.sh
+@@ -155,10 +155,11 @@ run
+ [[ ! -e $U/dev.tensaku.Tensaku.desktop ]] || fail "a user who removes the Tensaku override keeps Tensaku's own entry"
+ pass "Tensaku's entry opens without the on-screen keyboard, once"
+ 
+-# Idle: a new user gets the profile's block and the screensaver toggle
++# Idle: a new user gets the profile's block (the tablet's: both off, patch 0003's
++# profile choice)
+ idle() { python3 -I -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1])).get("idle")))' "$1/.config/omarchy/shell.json"; }
+ toggle() { [[ -e $1/.local/state/omarchy/toggles/screensaver-off ]]; }
+-[[ $(idle "$H") == '{"screensaver": 0, "lock": 60}' ]] || fail "a new user's profile has the phone's idle block"
++[[ $(idle "$H") == '{"screensaver": 0, "lock": 0}' ]] || fail "a new user's profile has the tablet's idle block"
+ toggle "$H" || fail "a new user's screensaver is off"
+ # Users set up before this: one without an idle block, one with their own
+ for who in plain own; do
+@@ -170,7 +171,7 @@ done
+ echo '{"version": 1, "plugins": [], "idle": {"screensaver": 300, "lock": 0}}' >"$t/own/.config/omarchy/shell.json"
+ RUN_HOME=$t/plain run
+ RUN_HOME=$t/own run
+-[[ $(idle "$t/plain") == '{"screensaver": 0, "lock": 60}' ]] && toggle "$t/plain" || fail "an earlier user without an idle block gets the phone's"
++[[ $(idle "$t/plain") == '{"screensaver": 0, "lock": 0}' ]] && toggle "$t/plain" || fail "an earlier user without an idle block gets the tablet's"
+ [[ $(idle "$t/own") == '{"screensaver": 300, "lock": 0}' ]] && ! toggle "$t/own" || fail "a user's own idle block is kept, and their screensaver"
+ pass "idle: lock after a minute, no screensaver, unless the user set their own"
+ 
+@@ -523,7 +524,11 @@ pass "without Omarchy's keyring step the setup still succeeds"
+ # Omarchy's remote-session service (a gliff remote desktop, probed at every
+ # screencast event): off on every phone, once, gliff installed or not
+ off() { python3 -I -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1])).get("disabledPlugins", [])))' "$1/.config/omarchy/shell.json"; }
+-[[ $(off "$H") == omarchy.remote-session ]] || fail "a new user's disabledPlugins has omarchy.remote-session once, after several logins"
++# The tablet's profile ships a longer disabledPlugins list (the Omarchy bar
++# widgets, omarchy.idle, omarchy.remote-session); the setup only adds
++# omarchy.remote-session, once, to what the profile carried.
++[[ $(off "$H") == *omarchy.remote-session* ]] || fail "a new user's disabledPlugins has omarchy.remote-session once, after several logins"
++[[ $(off "$H" | tr ' ' '\n' | grep -cx omarchy.remote-session) == 1 ]] || fail "omarchy.remote-session is disabled exactly once"
+ python3 -I -c 'import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["disabledPlugins"] = []; json.dump(d, open(p, "w"))' "$H/.config/omarchy/shell.json"
+ run
+ [[ -z $(off "$H") ]] || fail "a user who takes the remote session out of disabledPlugins keeps it on"

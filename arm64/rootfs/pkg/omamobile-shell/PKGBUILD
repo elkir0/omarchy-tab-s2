@@ -1,0 +1,453 @@
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64 port) build of omamobile's
+# omamobile-shell 0.2.147 for Omarchy 4.5, after the owner's other tablet port
+# (Lenovomarchy, image/pkg/omamobile-shell 0.2.133-3, which runs on its tablet
+# over Omarchy 4.5.0-3) with the SM-T715's own tablet patches carried forward
+# from its 0.2.94/0.2.133 builds.
+#
+# Upstream: https://github.com/derekross/omamobile, packages/
+# omamobile-shell 0.2.147 at commit 899184543d60fd78f0a418f403463d628165a3ed,
+# tarball checked by sha256 (top directory omamobile-<commit>).
+#
+# What it is: ordinary Omarchy shell plugins (QML) that turn Omarchy's shell
+# into a touch shell: a status bar with a pull-down quick-settings sheet
+# (omamobile.bar replaces omarchy.bar), the dock, app drawer and search bar
+# (omamobile.launcher), recent apps (omamobile.switcher), home screens
+# (omamobile.home, built-in widgets only), the call card (omamobile.call),
+# the keyboard's show/hide calls and language sheet (omamobile.keyboard),
+# the edge back swipe (omamobile.back) and the voice bar (omamobile.voice:
+# speech to text through Voxtype, in the session's language);
+# omamobile-setup-user links them into the user's config. Nothing here is
+# compiled and nothing patches Hyprland (the image's rootfs/t715-tablet.lua
+# has the window rules; upstream's hypr/phone.lua is not installed).
+#
+# The series (this directory; each patch's header says more):
+#   0001 tablet-quick-settings-tiles  no torch, location, NFC or fingerprint
+#        tiles (Mobile data comes back in 0010); Hotspot under "Add tiles";
+#        Rotation in the default layout (Lenovomarchy's 0001, with the
+#        SM-T715's tiles)
+#   0002 tablet-wifi-wpa2-without-sae  WPA2-PSK for a WPA3/WPA2 SSID: the
+#        BCM4358 firmware has no SAE (Lenovomarchy's 0002; the SM-T715's 0002)
+#   0003 tablet-quiet-pollers  no do-not-disturb poll; the modem and call
+#        watchers only when the profile asks (true in tablet-shell.json;
+#        rebased on 0.2.147's bar.statusIcons.cell/showCell; Lenovomarchy's 0003)
+#   0004 tablet-phone-leftovers  no unshipped plugin, menu row or probe
+#        (Lenovomarchy's 0004), with upstream's suspend-off step kept and its
+#        tile-refresh guard fixed for the Rotation tile this build keeps;
+#        omamobile.call is shipped again (the modem runs on arm64 now), and
+#        omamobile.voice too, with Setup > Voice and the Voxtype setup
+#   0005 tablet-rotate-tile  Rotate: a quarter turn by hand (t715-rotate)
+#   0006 tablet-airplane-and-hotspot  Airplane mode through nmcli radio for
+#        Wi-Fi and the modem; Hotspot shows its password (stray .orig hunk dropped)
+#   0007 tablet-set-pin  "tablet" wording; sudo asks once a PIN is set (rebased
+#        onto 0.2.147's --change/PTY PIN helper)
+#   0008 tablet-back-gesture  the swipe is the Back key's (t715-keys), with
+#        upstream's Escape as the fallback
+#   0009 tablet-sdcard-tile  the SD card tile over t715-sdcard
+#   0010 tablet-modem  the Mobile data tile back, through NetworkManager's
+#        gsm connection (t715-mobile); signal bars and technology from
+#        shannonctl status (the SM-T715's 0.2.94 series' 0004)
+#   0011 tablet-mobile-settings  the Mobile data tile's long press, or a tap
+#        while no connection exists, opens t715-mobile-settings (the 0.2.94
+#        series' 0006)
+#   0012 tablet-modem-tile  the Modem tile over t715-modem-power; the Mobile
+#        data tile says "Modem off" while it is off (the 0.2.94 series' 0011)
+#   0013 tablet-call-card  no Speaker toggle on the call card (no earpiece;
+#        the 0.2.94 series' 0007's call-card hunk)
+#   0014 tablet-voice-language  the voice bar in other languages than
+#        English: a Language choice in the voice settings (Automatic and
+#        seven languages, Voxtype's [whisper] language), the models
+#        following it (.en for English, the multilingual tiny/base/small
+#        otherwise), the live preview in that language, and Voxtype set up
+#        out of the box with ggml-base.bin or ggml-base.en.bin, in the
+#        session's language (the tablet's omamobile-voice, pkg-voice, ships
+#        the multilingual base)
+#   0015 tablet-onboarding  bin/omamobile-onboarding ships, adapted to the
+#        tablet: the image's placeholder password (0007 names it) counts as
+#        no PIN, so the login nudge asks for setup and --inner makes the user
+#        choose a PIN or password; the modem line over shannond (shannonctl
+#        status, t715-modem-power for the modem's own switch; the APN is set
+#        in Réseau mobile, the Modem tile switches the modem on); Golden's
+#        AI step in --inner (the AI desktop apps in one multi-choice, the
+#        voice-input language, the default coding agent). The image starts
+#        the nudge itself (omamobile-onboarding --nudge at login; hypr/
+#        phone.lua, which does it on the phone, is not installed from here)
+# Not carried forward from the SM-T715's 0.2.94 series, for the arm64 image
+# (the commands they drive are not in it): 0010 tablet-location-tile (no
+# t715-gps) and 0013 tablet-android-tile (no Waydroid on the arm64 kernel
+# yet). Upstream did what the 0.2.94 series' 0009 worked around (Escape by
+# name): 0008 keeps upstream's fix as its fallback.
+#
+# The profiles: profile/shell.json is tablet-shell.json (only the plugins
+# shipped here, the call card and the voice bar among them, the drawer at 6
+# columns, Omarchy's idle timers at 0 (off; t715-idle turns the screen off),
+# the modem and call watchers on (the modem runs on arm64 now), the 18
+# bar-widget-only Omarchy plugins and omarchy.remote-session in
+# disabledPlugins; omarchy.idle stays, as on the 0.2.94 build) and
+# profile/home.json is tablet-home.json (Lenovomarchy's 6x8 home grid with
+# the image's apps).
+#
+# Shipped from 0.2.147's new pieces: bin/omamobile-browser-setup (replaces the
+# inline Chromium/Grok Bot steps in omamobile-setup-user and is invoked by
+# omamobile.bar's Bar.qml at shell start; Python stdlib only) and
+# plugins/omamobile.bar/BatteryIndicator.qml (installed with omamobile.bar).
+# Shipped again since 0.2.147-2.1: the voice bar (plugins/omamobile.voice,
+# bin/omamobile-voice for the Dictation tile and scripts,
+# bin/omamobile-voice-preview for its live words), which Lenovomarchy's
+# build and this one's 0.2.147-1.1 left out, with 0014 for the tablet's
+# French session. Voxtype (voxtype-bin) and the model (omamobile-voice, the
+# tablet's build in pkg-voice: Whisper's multilingual base) stay optional,
+# as upstream has them; without Voxtype the voice settings say so. The ways
+# in from here: a hold on the home pill and the Dictation tile (under "Add
+# tiles", 0001); the keyboard's Mic key is the image's to bind (upstream's
+# squeekboard layouts and hypr/phone.lua are not installed from here).
+# Dropped from upstream's install, as Lenovomarchy drops them (its PKGBUILD
+# has every reason): the plugins omamobile.fingerprint, .update, .access,
+# .mobilenetwork; the bins for fingerprint enrolment, NFC, the
+# phone's keys, sleep and double-tap daemons, the permission
+# portal, intents, weather, mobile network and the update sheet's
+# reboot; hypr/phone.lua, squeekboard's layouts (including 0.2.147's Greek
+# terminal layouts) and their generator (the image ships its own terminal
+# layouts with Esc), the keyboard theme hook, the OSK and fcitx5 environment
+# files, the portal drop-ins, the desktop entries and omamobile-osk-guard.
+# bin/omamobile-onboarding ships (0015, adapted to the tablet); the image
+# starts its --nudge at login itself, as hypr/phone.lua does on the phone
+# (that file is not installed from here). Not
+# depended on: omamobile-apps (the dialer, SMS, NFC and maps),
+# omamobile-omarchy (the image installs it anyway), omamobile-owl-widgets
+# (off), omatel-agent (the image keeps it; the call plugin and both watchers
+# ship again, 0004 and 0013).
+#
+# Build: tools/build-pkg omamobile-shell (rootfs/build.sh does it). Image:
+# rootfs/install-mobile.sh, rootfs/omarchy-user-setup.sh; checks: the smoke
+# check.
+
+# Maintainer (upstream): Derek Ross <derekross@gmail.com>
+
+pkgname=omamobile-shell
+pkgver=0.2.147
+pkgrel=3.1
+pkgdesc="Omamobile's touch shell for Omarchy: status bar, quick settings, launcher, recents, home, back swipe, voice bar (SM-T715 tablet build)"
+arch=(any)
+url="https://github.com/derekross/omamobile"
+license=(MIT)
+depends=(
+  'omarchy>=4.0.6'
+  bash python python-dbus python-gobject   # osk-watch, bt-agent, keyboard-languages, widget
+  squeekboard                               # the on-screen keyboard (sm.puri.OSK0)
+  quickshell                                # the host shell (qs); pulled by omarchy already
+  qt6-declarative                           # the QML runtime the plugins import
+  bluez bluez-utils                         # Bluetooth panel and rfkill
+  networkmanager iw                         # Wi-Fi panel, the SAE probe (patch 0002)
+  util-linux                                # busctl (keyboard tile), rfkill
+  jq                                        # BackModel's terminal sniff, omamobile-launch
+  inotify-tools                             # the home screen's user-widget watch
+  wtype                                     # the back gesture's Escape (its fallback here); voice typing
+  which                                     # voice: Voxtype finds wtype and wl-copy with it
+  wf-recorder                               # the Screen record tile
+  libnotify                                 # omamobile-screenrecord's fallback toast
+  brightnessctl                             # the brightness slider
+  gum                                       # omamobile-onboarding's and omamobile-set-pin's prompts
+)
+optdepends=(
+  'loupe: what a screenshot toast opens (omamobile-screenshot-open); the image installs it'
+  'khal: events in the home screen calendar widget'
+  'playerctl: the home screen media widget'
+  'power-profiles-daemon: the Battery saver tile (dimmed "No power profiles" without it)'
+  'hyprsunset: the Night light tile (dimmed "No hyprsunset" without it)'
+  "omamobile-settings: Omarchy Mobile's Settings app (independent of the shell; the image installs it)"
+  'foot: a terminal for omamobile-launch cmd and the agent prompt (any xdg-terminal-exec works)'
+  'voxtype-bin: the voice bar (speech to text; or Install > AI > Dictation)'
+  "omamobile-voice: Whisper's model for Voxtype, voice with no download (the tablet's: multilingual base)"
+)
+checkdepends=(nodejs diffutils patch python python-dbus python-gobject jq util-linux)
+install=omamobile-shell.install
+
+_commit=899184543d60fd78f0a418f403463d628165a3ed
+_tarball="omamobile-${_commit:0:7}.tar.gz"
+_dir="omamobile-${_commit}/packages/omamobile-shell"
+_patches=(
+  0001-tablet-quick-settings-tiles.patch
+  0002-tablet-wifi-wpa2-without-sae.patch
+  0003-tablet-quiet-pollers.patch
+  0004-tablet-phone-leftovers.patch
+  0005-tablet-rotate-tile.patch
+  0006-tablet-airplane-and-hotspot.patch
+  0007-tablet-set-pin.patch
+  0008-tablet-back-gesture.patch
+  0009-tablet-sdcard-tile.patch
+  0010-tablet-modem.patch
+  0011-tablet-mobile-settings.patch
+  0012-tablet-modem-tile.patch
+  0013-tablet-call-card.patch
+  0014-tablet-voice-language.patch
+  0015-tablet-onboarding.patch
+)
+source=(
+  "${_tarball}::${url}/archive/${_commit}.tar.gz"
+  omamobile-shell.install
+  tablet-shell.json
+  tablet-home.json
+  "${_patches[@]}"
+)
+noextract=("${_tarball}")
+sha256sums=(
+  '45cac52479602f0fbf04654abade311bca1ec88b779e0ad43e27cf6ad625f1d9'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+# What this build keeps of upstream's install script's output.
+_plugins=(omamobile.bar omamobile.quicksettings omamobile.call omamobile.launcher
+          omamobile.switcher omamobile.home omamobile.keyboard omamobile.back
+          omamobile.voice)
+_bins=(omamobile-setup-user omamobile-browser-setup omamobile-launch omamobile-home omamobile-osk-watch
+       omamobile-bt-agent omamobile-screenrecord omamobile-widget
+       omamobile-call-watch omamobile-cell-watch
+       omamobile-keyboard-languages omamobile-set-pin
+       omamobile-screenshot-open omamobile-screenshot-edit
+       omamobile-voice omamobile-voice-preview
+       omamobile-onboarding)
+
+prepare() {
+  bsdtar -xf "$srcdir/$_tarball" "$_dir"
+  cd "$srcdir/$_dir"
+  [[ $(cat version) == "$pkgver" ]] || { echo "upstream version is not $pkgver" >&2; return 1; }
+  local p
+  for p in "${_patches[@]}"; do
+    patch -Np1 --fuzz=0 -i "$srcdir/$p"
+  done
+  cp "$srcdir/tablet-shell.json" profile/shell.json
+  cp "$srcdir/tablet-home.json" profile/home.json
+}
+
+check() {
+  cd "$srcdir/$_dir"
+  local f p
+  # Every shipped bin parses under its own interpreter.
+  for f in "${_bins[@]}"; do
+    case "$(head -n1 "bin/$f")" in
+      *python3*) python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "bin/$f" ;;
+      *bash*|*sh*) bash -n "bin/$f" ;;
+      *)         echo "bin/$f: unknown interpreter" >&2; return 1 ;;
+    esac
+  done
+  for f in plugins/omamobile.quicksettings/tile-state.sh plugins/omamobile.quicksettings/tile-action.sh \
+           plugins/omamobile.home/locate.sh; do
+    bash -n "$f"
+  done
+  # The plugins this build ships have valid manifests with the ids we expect.
+  for p in "${_plugins[@]}"; do
+    python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); assert m["id"] == sys.argv[2], m["id"]' \
+      "plugins/$p/manifest.json" "$p"
+  done
+  # The tablet profile: only shipped plugins named, the drawer at 6 columns,
+  # both modem watchers on, idle timers off, and disabledPlugins only
+  # Omarchy's bar-widget-only plugins and omarchy.remote-session: never
+  # omarchy.menu, omarchy.media or a service the tablet uses (omarchy.idle).
+  python3 - profile/shell.json "${_plugins[@]}" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+shipped = set(sys.argv[2:])
+named = {config["bar"]["id"], config["bar"]["quickSettings"]} | {p["id"] for p in config["plugins"]}
+assert named <= shipped, sorted(named - shipped)
+assert [p.get("columns") for p in config["plugins"] if p["id"] == "omamobile.launcher"] == [6]
+assert config["bar"].get("cellWatch", False) and config["bar"].get("callWatch", False)
+assert config["idle"] == {"screensaver": 0, "lock": 0}, config["idle"]
+disabled = config["disabledPlugins"]
+assert isinstance(disabled, list) and len(set(disabled)) == len(disabled), disabled
+kept = {"omarchy." + k for k in "menu media background lock notifications polkit idle battery "
+        "nightlight clipboard image-picker osd".split()}
+assert not set(disabled) & kept, sorted(set(disabled) & kept)
+widgets = {"omarchy." + w for w in "agents active-window indicators keyboard-layout microphone spacer "
+           "system-update tray workspaces audio bluetooth clock dropbox monitor network power "
+           "tailscale weather remote-session".split()}
+assert set(disabled) <= widgets, sorted(set(disabled) - widgets)
+PY
+  python3 -c 'import json, sys; h = json.load(open(sys.argv[1])); assert h["grid"] == {"columns": 6, "rows": 8}' profile/home.json
+  # The home layout survives HomeModel.normalize unchanged in its grid and items.
+  node - <<'JS'
+const H = require("./plugins/omamobile.home/HomeModel.js")
+const fs = require("fs")
+const raw = JSON.parse(fs.readFileSync("profile/home.json", "utf8"))
+const layout = H.normalize(raw, H.REGISTRY)
+if (!layout) throw new Error("profile/home.json is not a layout")
+if (layout.grid.columns !== 6 || layout.grid.rows !== 8) throw new Error("grid clamped: " + JSON.stringify(layout.grid))
+const items = (p) => p.items.map((i) => i.id).join(",")
+if (layout.pages.map(items).join("|") !== raw.pages.map(items).join("|")) throw new Error("items moved")
+JS
+  # The SM-T715's own patches are in (0005-0013).
+  grep -q '{ id: "rotate", label: "Rotate" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q '"t715-rotate", "turn"' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'tileRefresh(rotationLock, "rotation-lock")' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q '{ id: "sdcard", label: "SD card" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'exec t715-sdcard mount; else exec t715-sdcard eject' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q '"sdcard": sdcard' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'have t715-sdcard' plugins/omamobile.quicksettings/tile-state.sh
+  grep -q 'nmcli radio wwan off' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q 'signal=SIGHUP t715-keys.service' plugins/omamobile.back/BackModel.js
+  grep -q 'Quickshell.execDetached(BackModel.BACK_ARGV)' plugins/omamobile.back/Back.qml
+  grep -q 't715-sudo-asks-password' bin/omamobile-set-pin
+  grep -q 'touch ~/.local/state/omarchy/toggles/suspend-off' bin/omamobile-setup-user
+  # The Mobile data tile over NetworkManager and shannond (0010), its long
+  # press opening Réseau mobile (0011), and the Modem tile over
+  # t715-modem-power (0012).
+  grep -q '{ id: "mobile-data", label: "Mobile data" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q '{ id: "modem", label: "Modem" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'modemStatus: modemStatus' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'LC_ALL=C nmcli -t -f NAME,TYPE connection show' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q 'connection up "$con"' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q 'exec t715-modem-power "$want"' plugins/omamobile.quicksettings/tile-action.sh
+  grep -q 'LC_ALL=C t nmcli -t -f TYPE device' plugins/omamobile.quicksettings/tile-state.sh
+  grep -q 't shannonctl status' plugins/omamobile.quicksettings/tile-state.sh
+  grep -q 'have t715-modem-power' plugins/omamobile.quicksettings/tile-state.sh
+  grep -q '"modem": modem' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'id: modem' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'Modem off' plugins/omamobile.quicksettings/QuickSettings.qml
+  grep -q 'Quickshell.execDetached(\["t715-mobile-settings"\])' plugins/omamobile.quicksettings/QuickSettings.qml
+  # The bar's rebased watcher gates (0003) and 0.2.147's BatteryIndicator.
+  grep -q 'readonly property bool cellWatchEnabled: setting("cellWatch", false) === true' plugins/omamobile.bar/Bar.qml
+  grep -q 'readonly property bool callWatchEnabled: setting("callWatch", false) === true' plugins/omamobile.bar/Bar.qml
+  grep -q 'BatteryIndicator {' plugins/omamobile.bar/Bar.qml
+  # The call card's Speaker toggle is hidden (0013): no earpiece.
+  sed -n '/objectName: "speakerToggle"/,+2p' plugins/omamobile.call/CallCard.qml | grep -q 'visible: false'
+  # The voice bar in other languages than English (0014): the settings'
+  # Language rows and the models that follow them, the preview's language,
+  # and Voxtype set up with either base model in the session's language.
+  grep -q '{ id: "fr", name: "Français", line: "French · multilingual models" }' plugins/omamobile.voice/VoiceModel.js
+  grep -q '{ id: "base", name: "Balanced", detail: "base", size: "142 MB", note: "the default" }' plugins/omamobile.voice/VoiceModel.js
+  grep -q 'function languageArgv(language, model)' plugins/omamobile.voice/VoiceModel.js
+  grep -q 'SectionLabel { text: "Language" }' plugins/omamobile.voice/Voice.qml
+  grep -q 'onTapped: root.chooseLanguage(modelData.id)' plugins/omamobile.voice/Voice.qml
+  grep -q 'VoiceModel.modelRows(modelId, installed, pendingLanguage || language)' plugins/omamobile.voice/Voice.qml
+  grep -q 'config = config_for(daemon_language(config_text))' bin/omamobile-voice-preview
+  if grep -n 'language = \\"en\\"\\ncontext' bin/omamobile-voice-preview; then
+    echo "omamobile-voice-preview still hard-codes English" >&2
+    return 1
+  fi
+  grep -q '\[\[ -f $voxmodels/ggml-base.bin || -f $voxmodels/ggml-base.en.bin \]\]; then' bin/omamobile-setup-user
+  grep -q 'local locale=${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}' bin/omamobile-setup-user
+  grep -q '    en | fr | de | es | it | pt | nl) printf' bin/omamobile-setup-user
+  # The voice bar ships again (0004): its steps, Setup > Voice, the
+  # launcher's direct link; and the Dictation tile is in the catalogue
+  # (under "Add tiles", 0001) and opens the bar.
+  grep -q '^if omarchy-done ensure omamobile-voice-plugin; then$' bin/omamobile-setup-user
+  grep -q '^if omarchy-done ensure omamobile-menu-voice; then$' bin/omamobile-setup-user
+  if grep -n 'omamobile.voice' <<<"$(sed -n 's/^unshipped=//p' bin/omamobile-setup-user)"; then
+    echo "omamobile-setup-user still treats the voice plugin as unshipped" >&2
+    return 1
+  fi
+  grep -q 'source: Qt.resolvedUrl("../omamobile.voice/VoiceLinkClient.qml")' plugins/omamobile.launcher/Launcher.qml
+  grep -q '{ id: "dictation", label: "Dictation" }' plugins/omamobile.quicksettings/TilesModel.js
+  grep -q 'if \[ "$want" = on \]; then exec omamobile-voice start; else exec omamobile-voice done; fi' plugins/omamobile.quicksettings/tile-action.sh
+  if grep -nE '"(torch|nfc|fingerprint|location)"' plugins/omamobile.quicksettings/TilesModel.js; then
+    echo "TilesModel.js still lists a phone tile" >&2
+    return 1
+  fi
+  if grep -nE '(exec|have) omamobile-sit' plugins/omamobile.quicksettings/tile-action.sh plugins/omamobile.quicksettings/tile-state.sh; then
+    echo "the mobile data tile still calls omamobile-sit" >&2
+    return 1
+  fi
+  if grep -rniE 'yt-j706f|yoga tab|mt7663' bin plugins test; then
+    echo "another tablet's wording left" >&2
+    return 1
+  fi
+  # The onboarding ships, adapted to the tablet (0015): the image's
+  # placeholder password counts as no PIN (tested through unix_chkpwd like
+  # the empty password, NUL-terminated), the modem line over shannond and
+  # t715-modem-power, and Golden's AI step in --inner.
+  grep -q 'unix_chkpwd "$USER" nullok' bin/omamobile-onboarding
+  grep -q 'placeholder_pw' bin/omamobile-onboarding
+  grep -q 'LC_ALL=C timeout 10 t715-modem-power status --json' bin/omamobile-onboarding
+  grep -q 'LC_ALL=C timeout 10 shannonctl status' bin/omamobile-onboarding
+  grep -q 'No SIM card' bin/omamobile-onboarding
+  grep -q 'Réseau mobile' bin/omamobile-onboarding
+  grep -q 'Modem tile' bin/omamobile-onboarding
+  grep -q 'gum choose --no-limit' bin/omamobile-onboarding
+  grep -q 'omarchy-pkg-present claude-desktop' bin/omamobile-onboarding
+  grep -q 'omarchy-pkg-present openai-codex-desktop' bin/omamobile-onboarding
+  grep -q 'omarchy-install-ai-claude' bin/omamobile-onboarding
+  grep -q 'omarchy-install-ai-chatgpt' bin/omamobile-onboarding
+  grep -q 'omarchy-default-agent --install' bin/omamobile-onboarding
+  grep -q 'Setup > Voice' bin/omamobile-onboarding
+  if grep -q 'omamobile-mobile-network' bin/omamobile-onboarding; then
+    echo "the onboarding still calls the phone's omamobile-mobile-network" >&2
+    return 1
+  fi
+  # The modem pieces are on: the call plugin and both watchers (0004, 0013,
+  # tablet-shell.json).
+  python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); assert c["bar"]["cellWatch"] and c["bar"]["callWatch"]; assert {"id": "omamobile.call"} in c["plugins"]' profile/shell.json
+  # The voice bar is on (0004, 0014, tablet-shell.json).
+  python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); assert {"id": "omamobile.voice"} in c["plugins"]' profile/shell.json
+  # Upstream's own suite, the parts this build ships (as Lenovomarchy runs it).
+  bash test/tile-scripts.sh
+  bash test/dnd-state.sh
+  bash test/setup-user.sh
+  for t in tiles-model wifi-model bluetooth-model gesture-model home-model \
+           back-model back-link switcher-model notifications-model media-model \
+           keyboard-model status-model battery-state voice-model; do
+    node "test/$t.js" >/dev/null
+  done
+  bash test/install-hook.sh
+  bash test/osk-guard.sh
+  bash test/keyboard-theme.sh >/dev/null
+  bash test/home-command.sh
+  bash test/reboot-command.sh
+  bash test/onboarding-identity.sh
+  bash test/onboarding-mobile.sh
+  bash test/onboarding-fingerprint.sh
+  bash test/onboarding-tablet.sh
+  python3 -B test/browser-setup.py
+  python3 -B test/launch.py
+  python3 -B test/widget-tool.py
+  python3 -B test/bt-agent.py
+  python3 -B test/doubletap.py
+  python3 -B test/voice-preview.py
+}
+
+package() {
+  cd "$srcdir/$_dir"
+  local f p share="$pkgdir/usr/share/omamobile/shell"
+  for f in "${_bins[@]}"; do
+    install -Dm755 "bin/$f" "$pkgdir/usr/bin/$f"
+  done
+  for p in "${_plugins[@]}"; do
+    while IFS= read -r -d '' f; do
+      install -Dm644 "$f" "$share/$f"
+    done < <(find "plugins/$p" -type f -print0)
+  done
+  install -Dm644 plugins/README.md "$share/plugins/README.md"
+  while IFS= read -r -d '' f; do
+    install -Dm644 "$f" "$share/$f"
+  done < <(find profile branding -type f -print0)
+  install -Dm644 widgets/WIDGETS.md "$share/WIDGETS.md"
+  install -Dm644 widgets/OWL.md "$share/OWL.md"
+  while IFS= read -r -d '' f; do
+    install -Dm644 "$f" "$share/widget-${f#widgets/}"
+  done < <(find widgets/template widgets/examples -type f -print0)
+  install -Dm644 systemd/user/omamobile-setup-user.service "$pkgdir/usr/lib/systemd/user/omamobile-setup-user.service"
+  install -d "$pkgdir/usr/lib/systemd/user/graphical-session-pre.target.wants"
+  ln -sfn ../omamobile-setup-user.service \
+    "$pkgdir/usr/lib/systemd/user/graphical-session-pre.target.wants/omamobile-setup-user.service"
+  install -Dm644 environment.d/30-omamobile-screenshot.conf \
+    "$pkgdir/usr/lib/environment.d/30-omamobile-screenshot.conf"
+  install -Dm644 polkit/49-omamobile-admin-self.rules "$pkgdir/usr/share/polkit-1/rules.d/49-omamobile-admin-self.rules"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 widgets/LICENSE-owl-guide "$pkgdir/usr/share/licenses/$pkgname/LICENSE-owl-guide"
+  install -Dm644 version "$share/version"
+}

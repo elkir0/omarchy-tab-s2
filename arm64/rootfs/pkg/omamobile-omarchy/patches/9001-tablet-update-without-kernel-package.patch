@@ -1,0 +1,92 @@
+# SM-T715 (Galaxy Tab S2 8.0 LTE, arm64), tablet-only: the update path with no
+# packaged kernel and no yay.
+#
+# omarchy-update-restart (4.5) decides "kernel updated" by looking for a
+# pacman-owned modules.builtin matching uname -r. The tablet's kernel is not
+# a pacman package: its modules are unpacked into /usr/lib/modules/<release>
+# by the image build and the boot image is flashed by hand, so the probe
+# would report a kernel update on every run and offer a reboot every time.
+# A reboot is asked for only when Omarchy itself set reboot-required (as on
+# a desktop), and Hyprland's (deleted) exe check below is kept.
+#
+# omarchy-update-aur-pkgs runs yay when any foreign package is installed;
+# the tablet has no yay (and its [t715-omarchy] packages must not be rebuilt
+# from the AUR), so it lists them instead. With yay installed the desktop
+# behaviour is unchanged.
+#
+# omarchy-update-keyring reinstalls omarchy-keyring with pacman -S; the
+# tablet has the package (from the image's build-time repository) but no
+# sync repository carries it, so the update stopped there with "target not
+# found". It is kept current only where a repository offers it.
+#
+# Carried forward from the 0.1.32 tablet series (update-without-kernel-package
+# and the yay guard of 0026 there); rebased against Omarchy 4.5.0 (4.5.0-3):
+# 4.5 split the restart step into --services-only / --reboot-only halves and
+# moved the kernel probe into the --reboot-only half this patch rewrites.
+--- i/bin/omarchy-update-restart
++++ w/bin/omarchy-update-restart
+@@ -22,24 +22,11 @@
+ }
+ 
+ if [[ $mode != "--services-only" ]]; then
+-  running_kernel=$(uname -r)
+-  kernel_updated=true
+-
+-  # Every kernel package owns modules.builtin; Arch Linux ARM's ships no vmlinuz here (#12440).
+-  for kernel in "$kernel_modules_path"/*/modules.builtin; do
+-    if [[ -f $kernel ]] && pacman -Qo "$kernel" &>/dev/null; then
+-      installed_kernel=$(basename "$(dirname "$kernel")")
+-
+-      if [[ $installed_kernel == $running_kernel ]]; then
+-        kernel_updated=false
+-        break
+-      fi
+-    fi
+-  done
+-
+-  if [[ $kernel_updated == "true" ]]; then
+-    confirm_reboot "$(omarchy-i18n update.kernelReboot)"
+-  elif [[ -f $HOME/.local/state/omarchy/reboot-required ]]; then
++  # SM-T715: no pacman package owns the kernel (it lives in a slot of the
++  # CACHE partition, its modules are put into /usr/lib/modules/<release> by
++  # hand), so the packaged-kernel probe below would always
++  # ask for a reboot. A reboot is needed only when Omarchy asked for one.
++  if [[ -f $HOME/.local/state/omarchy/reboot-required ]]; then
+     confirm_reboot "$(omarchy-i18n update.rebootRequired)"
+   fi
+ 
+--- i/bin/omarchy-update-aur-pkgs
++++ w/bin/omarchy-update-aur-pkgs
+@@ -9,13 +9,14 @@
+ # whichever go is on PATH uses its own root.
+ unset GOROOT GOBIN
+ 
++# SM-T715: no yay on the tablet; list foreign packages instead.
+ if pacman -Qem >/dev/null; then
+-  if omarchy-pkg-aur-accessible; then
++  if command -v yay >/dev/null && omarchy-pkg-aur-accessible; then
+     echo -e "\e[32m\nUpdate AUR packages\e[0m"
+     yay -Sua --noconfirm --cleanafter --ignore gcc14,gcc14-libs || exit 1
+     echo
+   else
+-    echo -e "\e[31m\nAUR is unavailable (so skipping updates)\e[0m"
++    echo -e "\e[33m\nAUR packages not updated (no yay on this tablet); update them by hand.\e[0m"
+     echo
+   fi
+ fi
+--- i/bin/omarchy-update-keyring
++++ w/bin/omarchy-update-keyring
+@@ -52,7 +52,12 @@
+ # went in, so reinstalling the same one only repeats that populate.
+ # An aarch64 machine's Arch Linux ARM repositories are signed with keys of
+ # their own, so its keyring is kept current the same way.
+-keyrings=(archlinux-keyring omarchy-keyring)
++keyrings=(archlinux-keyring)
++# SM-T715: omarchy-keyring comes from the image's build-time
++# repository; no sync repository on the tablet carries it.
++if pacman -Si omarchy-keyring &>/dev/null; then
++  keyrings+=(omarchy-keyring)
++fi
+ if omarchy-hw-aarch64 && { omarchy-pkg-present archlinuxarm-keyring || (( alarm_keyring_missing )); }; then
+   keyrings+=(archlinuxarm-keyring)
+ fi
