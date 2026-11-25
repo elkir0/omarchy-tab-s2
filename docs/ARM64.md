@@ -107,5 +107,6 @@ Desktop, Claude Code, mise, Ollama, OpenCode and Grok start on the tablet.
 **Not yet**, where the 32-bit release has it: **suspend to RAM**, **Android apps** (the 32-bit
 Waydroid image cannot run there), **the A57 cores above 1.2 GHz** and their hot-unplug, **the
 modem with a SIM** (registration, mobile data, SMS, calls), the camera's user space. The 64-bit
-port's own roadmap:
-[ROADMAP.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/ROADMAP.md), in the fork.
+port's roadmaps: toward the
+turnkey release, [arm64/docs/ROADMAP.md](../arm64/docs/ROADMAP.md); the boot side's,
+[ROADMAP.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/ROADMAP.md) in the fork.

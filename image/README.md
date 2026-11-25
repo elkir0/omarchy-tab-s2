@@ -1,5 +1,9 @@
 # image/: the Omarchy root image
 
+> **Legacy.** The 32-bit release's root image (1.0.x), no longer developed. The 64-bit image is
+> built from [arm64/](../arm64/README.md).
+
+
 Builds `image/out/rootfs-omarchy.img` (raw ext4, `armv7h`) in Docker; the
 Mac only moves whole files. Steps and commands: `docs/DEPLOY.md` section 8;
 what the image contains and why: `docs/image/ROOTFS.md`; Android apps through

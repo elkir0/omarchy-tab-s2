@@ -1,5 +1,9 @@
 # Roadmap
 
+> **Legacy.** This is the roadmap of the 32-bit release (1.0.x), which is no longer developed. The
+> project's main line is the 64-bit system: its roadmap is [arm64/docs/ROADMAP.md](../arm64/docs/ROADMAP.md).
+
+
 Where the port stands and what comes next. The dated working journals behind it are not
 published (`docs/journal/README.md`); what they established is in `docs/hardware/`,
 `docs/image/` and `docs/DEPLOY.md`.

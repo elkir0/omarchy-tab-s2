@@ -1,390 +1,167 @@
-# Omarchy on the Samsung Galaxy Tab S2
+# Omarchy on the Samsung Galaxy Tab S2, in 64 bits
 
-[Omarchy](https://omarchy.org) (Hyprland and the Omarchy shell) with the
-[omarchy-mobile](https://github.com/derekross/omarchy-mobile) touch layer, as a full tablet
-desktop on the Samsung Galaxy Tab S2 8.0 LTE (SM-T715), on a mainline Linux 6.12 kernel. LTE,
-calls and SMS included.
+A 2015 tablet whose bootloader only starts 32-bit kernels now runs a modern **64-bit Linux
+desktop**: [Omarchy](https://omarchy.org) 4.5 with the
+[Omarchy Mobile](https://github.com/derekross/omarchy-mobile) touch layer, on all **eight cores**
+of its Exynos 5433, on mainline Linux 6.12, with **AI built in**: Claude Code one question away
+in the search bar, Claude Desktop and ChatGPT Desktop, dictation in your own language that never
+leaves the tablet, and local models with Ollama.
 
-**Version 1.0.5.** It runs daily on one tablet. The published image went through its first boot on
-that tablet, on a persistent root of its own next to its owner's system, and was checked there
-before publication. No install by anyone else has been reported yet, and the install from stock
-Android or TWRP has never been run end to end: see [the install guide](docs/INSTALL.md).
+**Golden, in progress.** It is the daily system of the reference tablet, a Galaxy Tab S2 8.0 LTE
+(SM-T715), since 2026-11-25. The turnkey install (download, flash, it boots) is being finished;
+today the install is for power users. [Where it stands](#install).
 
-An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
+An unofficial port: not affiliated with Omarchy, Omarchy Mobile or Samsung.
 
-![The 1.0 Beta 1 on the tablet: home screen, app drawer, quick settings, the Omarchy menu, Chromium, fastfetch, Phone and Messages side by side, btop, recent apps, then nine Omarchy themes](assets/demo.gif)
+![On the tablet, in 64 bits: home screen, app drawer, aarch64 and eight cores in fastfetch and btop, Ask Claude Code from the search bar, dictation and its languages, the first-run setup with the AI apps and the coding agent, Omarchy's AI menu, Ollama answering offline, quick settings](assets/arm64/demo.gif)
 
-| Home | Apps | Chromium |
+## Why it is worth a look
+
+- **64 bits on a tablet locked to 32.** Samsung's bootloader starts the Exynos 5433 in AArch32,
+  always. A loader of our own, in the PARAM partition, switches it to AArch64 at every boot and
+  starts a 64-bit kernel, behind a boot screen drawn by the bootloader itself. It hands back to
+  the bootloader whenever something is wrong, and a rescue in BOOT and RECOVERY puts it back if
+  it is ever lost. ([The boot brick](https://github.com/elkir0/bnuuyloader), a fork of
+  [bnuuyloader](https://github.com/meowybnuuy/bnuuyloader).)
+- **All eight cores**, four Cortex-A53 and four Cortex-A57, with frequency scaling and thermal
+  limits from the board's own tables. A soak of three hours with all eight busy passed.
+- **Omarchy 4.5 and Omarchy Mobile at their latest**, built for this tablet: Hyprland, the
+  Omarchy shell, a touch shell with an app drawer, gestures, quick settings and an on-screen
+  keyboard, Omarchy's themes and menus. And the arm64 world: current packages from Arch Linux ARM
+  and from Omarchy's own aarch64 channel.
+- **AI, everywhere it fits.**
+  - *Ask Claude Code* straight from the search bar: type a question instead of an app's name.
+  - Claude Code, Claude Desktop, ChatGPT Desktop with Codex, OpenCode, Grok and the rest of
+    Omarchy's AI menu, installed on the tablet from their official sources.
+  - Dictation and a voice bar in your language, transcribed on the tablet by Whisper: nothing you
+    say leaves it. Rebuilt for this tablet's CPU, which Omarchy's own build does not run on.
+  - Local models with Ollama: a 0.6B model answers at about 10 tokens per second, offline.
+  - A first-run setup that asks your name and a PIN, offers the AI apps and lets you pick your
+    coding agent.
+- **The tablet's own hardware**: the LTE modem, Wi-Fi, Bluetooth, sound, the motion sensors and
+  rotation, the microSD card, the battery, the hardware and touch keys, the cover, the vibrator.
+
+| Home | Apps | Quick settings |
 |---|---|---|
-| ![Home screen](assets/home.png) | ![App drawer](assets/apps.png) | ![Chromium on omarchy.org](assets/chromium.png) |
+| ![Home screen](assets/arm64/home.png) | ![App drawer](assets/arm64/apps.png) | ![Quick settings with the Modem and SD card tiles](assets/arm64/quick-settings.png) |
 
-| Quick settings | System menu | Terminal and on-screen keyboard |
+| aarch64, eight cores | All eight at work | Local AI |
 |---|---|---|
-| ![Quick settings](assets/quick-settings.png) | ![System menu](assets/system-menu.png) | ![fastfetch in foot](assets/terminal.png) |
+| ![uname, nproc and fastfetch](assets/arm64/fastfetch.png) | ![btop with the eight cores busy](assets/arm64/btop.png) | ![Ollama answering offline at about 10 tokens per second](assets/arm64/ollama.png) |
 
-> **Do not rely on this tablet for an emergency call.** `shannond` refuses emergency numbers, and
-> no emergency call was ever tried under Linux. Use a phone.
+| Ask Claude Code | Dictation, in your language | First run: the AI apps |
+|---|---|---|
+| ![Ask Claude Code from the search bar](assets/arm64/ask-claude-code.png) | ![The voice settings and their languages](assets/arm64/voice.png) | ![The first-run setup offering Claude Desktop and ChatGPT Desktop](assets/arm64/onboarding-ai.png) |
 
 ## What works
 
+On the reference tablet, in 64 bits, since 2026-11-25.
+
 | Area | State |
 |---|---|
-| Boot | Omarchy at power-on, with the Omarchy splash and a read-write root; the first boot sets itself up with its progress on screen; a read-only rescue in RECOVERY |
-| Desktop | Hyprland 0.57 and the Omarchy shell at scale 2 on the 1536x2048 panel; status bar, quick settings, app drawer, recents, home screens, back swipe, on-screen keyboard |
-| Keys | Power, Home, cover, and the Back and Recent touch keys |
-| Modem | LTE, calls, SMS, mobile data, airplane mode, Wi-Fi hotspot over LTE; a Modem tile and a switch to turn it off, now and at boot, or only while the screen is off |
-| Wi-Fi, Bluetooth | WPA2 (the firmware has no WPA3); pairing from quick settings; keyboards, mice and audio over Bluetooth, with a pointer for the mouse; a Wi-Fi that fails to start is brought back by itself in seconds |
-| Sound | speaker and microphone through PipeWire; vibration motor |
-| Cameras | both, through libcamera's software ISP on the CPU: the Camera app with a preview, tap to focus, photos and video; Photo and Selfie in the drawer; the sensors' tables made at the first boot from your tablet's own firmware |
-| GPS | position from the satellites through GeoClue, offline, the receiver on only while an app asks; a cold fix in about a minute under a clear sky, none indoors; a Location tile, off by default |
-| Charging | stock Android's currents: about 1 A into the battery on a fast charger, 450 mA from a computer's port; stock's thermal rules on the battery thermistor |
-| Power | 754 mW with the screen off, about 20 hours: the A57 cores offline, the GPU's power domain off while it idles, the Wi-Fi link asleep; the A53 cores scale from 400 MHz to 1.2 GHz, and since 1.0.1 the A57 cores from 800 MHz to 1.5 GHz and the GPU from 160 to 700 MHz |
-| Sleep | suspend to RAM a minute after the screen goes dark on battery; Power, Home, the cover and a 12-hour battery check wake it; Wi-Fi, Bluetooth and the modem are off while it sleeps; its power draw is not measured yet |
-| Security | ufw on, only SSH and DHCP on the USB cable come in; a screen lock you turn on by choosing a password |
-| Browsers | Chromium on the GPU by default, Firefox beside it |
-| Coding agents | Pi preinstalled; Claude Code through an opt-in installer in the app drawer (unofficial, 2.1.270 at most on 32-bit ARM) |
-| Android apps | opt-in through Waydroid (LineageOS 20, Android 13) on the GPU, Google Play with the GAPPS image; 32-bit apps only, no cameras, sensors or telephony inside Android ([setup](docs/image/ANDROID.md)) |
+| Boot | the loader in PARAM starts the 64-bit kernel at every power-on, behind a boot screen drawn by the bootloader; user space in about 13 s; a failed attempt hands the next boots to the rescue, then tries again |
+| CPU | eight cores in AArch64: A53 from 400 MHz to 1.2 GHz, A57 from 800 MHz to 1.2 GHz, schedutil, thermal trips from the board's tables |
+| Desktop | Hyprland 0.57 and the Omarchy shell on the 2048x1536 panel, GPU through Panfrost (Mali-T760); the touch shell: drawer, home, recents, quick settings, back gesture, on-screen keyboard; rotation |
+| AI | Claude Code, Claude Desktop, ChatGPT Desktop, mise, Ollama, OpenCode and Grok start on the tablet; dictation and the voice bar in your language; Ask Claude Code from the search bar; the first-run setup |
+| Keys | Power, Home, the cover, and the Back and Recent touch keys |
+| Wi-Fi, Bluetooth | Wi-Fi (WPA2) and Bluetooth up at every boot |
+| Modem | the LTE modem's processor online at every boot, with its interface: the Modem tile, the mobile network settings, the call card; a SIM is not tested yet in 64 bits |
+| Sound | the WM1814 codec through PipeWire; the microphone feeds dictation |
+| Sensors, storage | accelerometer, gyroscope and magnetometer; the microSD card |
+| Battery | the fuel gauge, charging over USB |
+| Security | ufw on; a PIN or password from the first-run setup, and the screen lock |
+| Way back | the loader hands back to the bootloader when it has nothing sound to start; the rescue in BOOT and RECOVERY puts a known loader back into PARAM by itself |
 
-Not yet: hardware video decoding, headphone detection, the fingerprint reader. The tablet runs a
-32-bit userland: its bootloader starts the CPU in AArch32.
+**Not yet in 64 bits**, where the 32-bit release had them: suspend to RAM, Android apps
+(Waydroid), the cameras' user space, the A57 cores above 1.2 GHz, and the modem with a SIM
+(registration, data, SMS, calls) tested end to end. [The roadmap](arm64/docs/ROADMAP.md) has the
+order.
 
-A 64-bit port exists for the same tablet, as a second brick. On 2026-11-25 it is not released:
-[the 64-bit port](docs/ARM64.md).
-
-Only one tablet was tested: SM-T715, bootloader `T715XXU2CRH1`, hardware revision 9. Other Tab S2
+One tablet was tested: SM-T715, bootloader `T715XXU2CRH1`, hardware revision 9. Other Tab S2
 models are not covered.
 
-## Roadmap
+> **Do not rely on this tablet for an emergency call.** No emergency call was ever tried under
+> Linux. Use a phone.
 
-Sleep came in 1.0.4, and Android apps in 1.0.5. What comes next, in this order;
-[the roadmap](docs/ROADMAP.md) has each step's details, measurements and cost, and
-[the changelog](CHANGELOG.md) what each release brought.
+## Install
 
-- **Now:** the power drawn asleep, measured over a night on battery; the Wi-Fi chip's own
-  failure to start after a power-off, which the guard now brings back in seconds.
-- **Next:** a modem that sleeps (about 150 mW less with the screen off and the modem on;
-  validated without a SIM, calls and SMS still to test with one), automatic brightness,
-  headphone and headset detection.
-- **Later:** USB host (OTG), bus and memory clocks, deep CPU idle states, telephony features
-  (MMS, USSD, SIM PIN, network choice), hardware video decoding.
-- **Studies first:** the grip sensors, MHL video out, the fingerprint reader, calls without 2G
-  and 3G (VoLTE).
-- **Alongside:** the Camera app's GPU faults, Omarchy's shortcuts on a Bluetooth keyboard,
-  Omarchy 4.5 once omarchy-mobile's touch patches follow it, installs on other tablets.
+| Route | For | State |
+|---|---|---|
+| **Download, flash, it boots** | anyone with the tablet | **coming**: the installer, which builds the loader on the tablet from the tablet's own PARAM, is being written; a release of this repository will then bring the image and the installer |
+| **The long route** | power users, today | it works: from the 32-bit release, with a computer, the USB cable and Docker; every step keeps a way back. [The guide, in order](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md) |
 
-## Install Omarchy
+[docs/ARM64.md](docs/ARM64.md) tells both routes and why the loader cannot ship as a file: PARAM
+is Samsung's firmware and holds one tablet's own data, so the loader is built on each tablet from
+its own PARAM.
 
-Two ways: flash the prebuilt ROM ([the install guide](docs/INSTALL.md)), or build
-everything from source.
+> **Read this first.** Either route blows the Knox warranty bit for good, and the 64-bit port
+> writes PARAM, CACHE, BOOT and RECOVERY. **Never write** BOOTLOADER, EFS, m9kefs1-3 or RADIO:
+> EFS holds your IMEI, and the modem's boot code programs eFuses. Back up EFS first. This comes
+> with no warranty: you can lose your data and your tablet.
 
-> **Read this first.**
-> - Both blow the tablet's Knox warranty bit for good.
-> - **The ROM replaces Android.** Your Android data stays on the tablet, unused.
-> - **Never write** BOOTLOADER, EFS, m9kefs1-3, RADIO, CDMA-RADIO, PARAM or BOTA. EFS holds your
->   IMEI, and the modem's boot code programs eFuses.
-> - Leave Linux with `systemctl reboot`. Do not hold hardware keys down to force a restart.
-> - This comes with no warranty. You can lose your data and your tablet.
+## Two bricks, two repositories
 
-### Flash the ROM
+| Brick | Where | What |
+|---|---|---|
+| **The boot** | [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader) | the loader in PARAM, its boot screen, the 64-bit kernel's patches and configuration, the rescue, and what was found about the tablet's bootloader |
+| **The system** | this repository: [arm64/](arm64/README.md) | the Omarchy 4.5 image for arm64: its build, the packages patched for the tablet, the AI integration, the tools and tests, and its releases |
 
-**Status:** a first build of this release was installed fresh on the reference tablet, booted from
-RECOVERY: its first boot, its copy to internal storage, the session, both cameras and the modem's
-switch were checked there. The published image was then booted read-only and checked again, Wi-Fi
-and Bluetooth included (`CHANGELOG.md` has what was tested). That tablet has no Android left,
-so the Odin, Heimdall and TWRP steps were never run against a stock tablet. You would be the first:
-expect rough edges, and report them.
+## Build it yourself
 
-[**The install guide**](docs/INSTALL.md) has every step. In short:
-
-1. You need an SM-T715 on firmware `T715XXU2CRH1`, hardware revision 9 or later, not encrypted, with
-   about 11 GB free on its internal storage, and a computer with Odin or
-   [Heimdall](https://git.sr.ht/~grimler/Heimdall). Another firmware may boot, but the modem only
-   accepts this exact RADIO image.
-2. From the [latest release](https://github.com/elkir0/omarchy-tab-s2/releases), download the files.
-   Unpack the image, make its checksum file, which the first boot checks the copy against, then
-   check everything:
-
-   ```bash
-   xz -dk rootfs-omarchy.img.xz
-   ```
-
-   ```bash
-   grep '  rootfs-omarchy.img$' SHA256SUMS > rootfs-omarchy.img.sha256
-   ```
-
-   ```bash
-   shasum -a 256 -c SHA256SUMS
-   ```
-
-   On Windows, follow [the install guide](docs/INSTALL.md#2-put-the-image-on-the-tablet) instead.
-3. Copy both files into `linux/` on the tablet's internal storage (`/sdcard/linux/`), and your SSH
-   public key as `linux/authorized_keys` if you want to log in over SSH: the image has none.
-4. Flash, in Download mode: Odin with `omarchy-tab-s2-1.0.5-AP.tar.md5`, or Heimdall:
-
-   ```bash
-   heimdall flash --BOOT boot.img --RECOVERY recovery.img
-   ```
-
-   From TWRP, flash `boot.img` to Boot and keep TWRP in RECOVERY.
-5. The first boot copies the system into internal storage, about 4 minutes, with its progress on
-   screen. It also takes the Wi-Fi and Bluetooth files from your tablet's own Android system
-   partition, and the cameras' tables from its firmware. Then Omarchy starts.
-
-Then:
-- **Wi-Fi:** quick settings, Wi-Fi tile.
-- **Mobile data and LTE:** open `Réseau mobile` in the app drawer and set your operator's APN.
-  Without a SIM, turn the modem off with the Modem tile: it saves a fifth of the standby draw.
-- **Password:** hold Power, then the PIN row. The default password is `alarm`, and `sudo` asks for
-  nothing until you choose yours: choosing it turns on the screen lock, and `sudo` asks for it from
-  then on.
-- **Touch:** tap or pull down the top bar for quick settings. Swipe up from the home pill for home,
-  swipe in from a side edge for back. Power: screen off and on.
-- **Coding agents:** Pi is in the drawer; sign in with `/login` or an API key, never a Claude
-  subscription. The drawer's Claude Code installer asks before it downloads anything.
-
-To go back to Android, flash the stock firmware for your tablet.
-
-### Build from source
-
-From a stock tablet to the first boot, keeping Android at first. This is the short path;
-[docs/DEPLOY.md](docs/DEPLOY.md) has each step in full, with what can go wrong. These steps ran on
-the reference tablet, but nobody has followed them from a clean clone yet.
-
-#### What you need
-
-- An SM-T715 on Android 7.0, firmware `T715XXU2CRH1`, hardware revision 9, not encrypted.
-- A Mac on Apple silicon. Linux hosts are untested, and a few scripts use macOS commands.
-- Docker with arm/v7 emulation, `adb`, `dtc`, `python3`, `cmake`, `libusb`, `nc`, and an SSH key.
-- A USB cable, and one to two hours of build time.
-
-#### 1. Prepare the tablet
-
-On the tablet, turn on Developer options, USB debugging and OEM unlocking, and accept the RSA
-prompt. Connect it to the same Wi-Fi network as your Mac. Then check it:
+The image builds in arm64 containers, on a Mac with Apple silicon or an aarch64 Linux machine:
 
 ```bash
-S=<serial from adb devices -l>
+cd arm64/rootfs
+bash build.sh --target omarchy --ssh-pubkey ~/.ssh/id_ed25519.pub
 ```
 
-```bash
-for p in ro.product.model ro.boot.hw_rev ro.bootloader ro.crypto.state; do printf '%s: ' "$p"; adb -s "$S" shell getprop "$p"; done
-```
-
-Expect `SM-T715`, `9` or more, `T715XXU2CRH1`, `unencrypted`.
-
-#### 2. Get the sources
-
-The kernel tree needs a case-sensitive volume on macOS.
-
-```bash
-git clone https://github.com/elkir0/omarchy-tab-s2 && cd omarchy-tab-s2
-```
-
-```bash
-hdiutil create -type SPARSEBUNDLE -fs "Case-sensitive APFS" -size 80g -volname smt715src .src.sparsebundle
-```
-
-```bash
-mkdir -p src && hdiutil attach -mountpoint src .src.sparsebundle
-```
-
-```bash
-git clone --branch v6.12.114 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git src/linux-6.12
-```
-
-```bash
-git -C src/linux-6.12 switch -c t715-camera-mc
-```
-
-```bash
-for s in bringup modem parity gps charger camera-af cpufreq power camera-mc; do git -C src/linux-6.12 am "$PWD"/kernel/patches/t715-$s/*.patch; done
-```
-
-Then build Heimdall into `src/heimdall`, as in
-[docs/DEPLOY.md, 3.4](docs/DEPLOY.md#34-heimdall).
-
-#### 3. Save what is unique to your tablet
-
-The vendor files are not in this repository: they are Samsung's, so the build takes them from your
-own tablet. This script writes nothing to the tablet:
-
-```bash
-ANDROID_SERIAL="$S" bash device/android/phase1_extract_noroot.sh
-```
-
-Then flash TWRP for `gts28ltexx` to RECOVERY, and back up Boot, EFS, m9kefs1-3, Modem and System
-from its touch interface. USB does not work under TWRP on this tablet: copy the backup off under
-Android. **Keep it: it is the only way back if EFS is ever damaged.** Put `boot.emmc.win` at
-`dumps/stock/boot.img` ([docs/DEPLOY.md, 5.3](docs/DEPLOY.md#53-the-stock-boot-image-twrp)).
-
-#### 4. Keep Android from rewriting RECOVERY
-
-```bash
-bash boot/patch-stock-boot.sh
-```
-
-```bash
-adb -s "$S" reboot download
-```
-
-```bash
-src/heimdall/build/bin/heimdall flash --BOOT out/stock-patched/boot.img
-```
-
-#### 5. Build everything
-
-The kernel, the release's configuration ([kernel/README.md](kernel/README.md) also gives its fixed
-build identity):
-
-```bash
-KBUILD_SKIP_ARM64=1 bash kernel/kbuild-mainline.sh --fragment gts28ltexx_cpufreq.config
-```
-
-The initramfs and the RECOVERY image:
-
-```bash
-bash boot/build-initramfs.sh --out out/initramfs-daily --knobs "t715.usbfn=ecm t715.failwait=300 t715.telnet=1" --modules out/mainline-cpufreq/modules.tar.xz
-```
-
-```bash
-bash boot/pack-test-recovery.sh --initramfs out/initramfs-daily/initramfs.cpio.gz --out out/test-recovery-daily out/mainline-cpufreq
-```
-
-`t715.telnet=1` gives a development image the root shell on the USB link; releases leave it off.
-
-The packages and the root image. The image takes your SSH key, and the two vendor files of step 3:
-
-```bash
-image/tools/repack-omarchy
-```
-
-```bash
-for p in hyprgraphics omamobile-omarchy omatel-agent omaphone omamessages omamobile-shell libcamera omacam t715-camera t715-chromium t715-gps t715-claude-code pi-coding-agent; do image/tools/build-pkg $p; done
-```
-
-```bash
-make -C modem/loader docker-cross && image/tools/stage-t715-modem && image/tools/build-pkg t715-modem
-```
-
-```bash
-image/tools/build-rootfs --ssh-pubkey ~/.ssh/id_ed25519.pub
-```
-
-```bash
-image/tests/verify-rootfs.sh "$PWD/image/out/rootfs-omarchy.img" ~/.ssh/id_ed25519.pub
-```
-
-The last line must say `RESULT: PASS`.
-
-#### 6. Flash and boot
-
-```bash
-adb -s "$S" shell mkdir -p /sdcard/linux
-```
-
-Flash RECOVERY. Its first boot finds no image yet and returns to Android by itself:
-
-```bash
-bash device/flash-daily.sh
-```
-
-Push the image, which then boots it. Keep the USB cable in:
-
-```bash
-T715_ADB_WIFI=<tablet-ip>:5555 bash device/push-rootfs-image.sh --select image/out/rootfs-omarchy.img rootfs-omarchy.img "$(md5 -q image/out/rootfs-omarchy.img)"
-```
-
-#### 7. First boot
-
-The Samsung logo, then Omarchy's session, which logs in by itself. SSH answers on the USB cable:
-
-```bash
-device/tssh
-```
-
-- **Touch:** tap or pull down the top bar for quick settings. Swipe up from the home pill for home,
-  swipe in from a side edge for back. Power: screen off and on. Power held: the system menu.
-- **Wi-Fi:** quick settings, Wi-Fi tile. In this first mode the root is in RAM, so nothing survives
-  a reboot, and `systemctl reboot` goes back to Android.
-- **Check it:** `systemctl --failed`, and `/usr/lib/t715-omarchy/smoke-check` on the tablet.
-
-The image starts in English with QWERTY first and AZERTY in the keyboard's layout menu, on UTC. To
-change that on the tablet:
-
-```bash
-sudo localectl set-locale LANG=fr_FR.UTF-8
-```
-
-```bash
-sudo timedatectl set-timezone Region/City
-```
-
-#### 8. Make it permanent
-
-Three steps, each in the guide. The second one replaces Android, and removing its data cannot be
-undone:
-
-1. [A persistent root](docs/DEPLOY.md#116-making-it-permanent-the-persistent-root): settings and
-   Wi-Fi networks survive reboots.
-2. [Linux in BOOT, a rescue in RECOVERY](docs/DEPLOY.md#117-without-android-linux-in-boot-androids-data-removed):
-   Omarchy starts at power-on.
-3. [The modem](docs/DEPLOY.md#118-with-the-modem): LTE, calls and SMS (the kernel above has the
-   modem series). The first boot reads your NV data from EFS, read-only. It stays on the tablet.
-
-Then set a password from the system menu's PIN row: it turns on the screen lock, and `sudo` asks
-for it from then on. The default user is `alarm`, password `alarm`.
+[arm64/README.md](arm64/README.md) has what is in it and how to change it;
+[arm64/docs/ROOTFS.md](arm64/docs/ROOTFS.md) everything about the image.
 
 ## What we found
 
-Everything we learned about this hardware is public, register addresses included.
+Everything learned about this hardware is public, register addresses included.
 
 | Topic | Read |
 |---|---|
+| The 64-bit boot: the loader in PARAM through the boot logo's vulnerability, the eight cores without PSCI, the bootloader's own code | [the fork's findings](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/FINDINGS.md), [ARM64](docs/ARM64.md) |
+| The 64-bit image, and why some of Omarchy's aarch64 packages do not run on this CPU (ARMv8.0) | [arm64/](arm64/README.md), [ROOTFS](arm64/docs/ROOTFS.md) |
 | Hardware map: SoC blocks, GPIOs, I2C and SPI addresses, partitions | [HARDWARE_MAP](docs/hardware/HARDWARE_MAP.md), [BOARD_DT](docs/hardware/BOARD_DT.md), [DT_M2](docs/hardware/DT_M2.md) |
 | Modem: Shannon SS333 over MIPI LLI, its boot and IPC protocol | [MODEM](docs/hardware/MODEM.md), [research/modem/](research/modem/) |
 | Display, GPU, memory | [DISPLAY_M3](docs/hardware/DISPLAY_M3.md), [GPU](docs/hardware/GPU.md), [IOMMU](docs/hardware/IOMMU.md) |
 | Cameras with no ISP, fingerprint reader | [CAMERA](docs/hardware/CAMERA.md), [FINGERPRINT](docs/hardware/FINGERPRINT.md) |
 | Audio, Wi-Fi and Bluetooth, input, sensors | [AUDIO_M6](docs/hardware/AUDIO_M6.md), [WIFI_BT_M5](docs/hardware/WIFI_BT_M5.md), [INPUT_M4](docs/hardware/INPUT_M4.md), [SENSORS_M7](docs/hardware/SENSORS_M7.md) |
-| GPS: the BCM4752, its boot protocol, Samsung's `gpsd` offline | [GPS](docs/hardware/GPS.md) |
+| GPS: the BCM4752, its boot protocol | [GPS](docs/hardware/GPS.md) |
 | Power: battery, CPU, thermal, watchdog, SMP | [BATTERY](docs/hardware/BATTERY.md), [CPUFREQ](docs/hardware/CPUFREQ.md), [THERMAL](docs/hardware/THERMAL.md), [WATCHDOG](docs/hardware/WATCHDOG.md), [SMP_BRINGUP](docs/hardware/SMP_BRINGUP.md) |
-| The 64-bit port: a loader in PARAM through the boot logo's vulnerability, the kernel in 64 bits, and what was found about the bootloader | [ARM64](docs/ARM64.md), then the findings in the fork |
-| The 64-bit Omarchy image: its build, its packages, its tools | [arm64/](arm64/README.md) |
-| Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, since 1.0.5) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
-
-### Drivers
-
-All of them are in [kernel/patches/](kernel/patches/): the release kernel is `v6.12.114` plus 66
-patches in nine series, listed in [kernel/README.md](kernel/README.md).
-
-| Part | Driver |
-|---|---|
-| Exynos 5433 in 32-bit mode | SoC support, clocks, watchdog, CPU frequency scaling, the A57 cores' hot-unplug |
-| Panel | `panel-samsung-s6e3ha2-tabs2` |
-| Audio | `gts28-wm1814` machine driver, WM8998 and baseband link changes |
-| Battery | `sm5703` fuel gauge, read-only, with the battery thermistor, and `sm5703` charger |
-| Modem | `exynos5433-mipi-lli`, and `modem_v1`, Samsung's 3.10 driver ported to 6.12 |
-| Touch keys, vibration | `tc300k`, `pwm-vibra` |
-| Cameras | `t715-sensor`, the S5K4H5 and S5K6B2 sensors and the DW9807 focus motor as V4L2 subdevices, and `t715-camera`, raw capture with one media device per camera, for libcamera's software ISP |
-
-The modem's userspace is in [modem/](modem/): `shannon-loader`, and `shannond`, which speaks
-Samsung's IPC to the modem and ModemManager's D-Bus API to the desktop.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `docs/` | the deployment guide, the hardware findings, the image |
-| `kernel/` | the kernel as patch series, and its Docker build |
-| `boot/` | the initramfs, the BOOT and RECOVERY image packer, sboot tools |
-| `image/` | the root image: build steps, overlay, patched packages, tests |
-| `device/` | scripts that drive the tablet |
-| `modem/` | the modem stack: loader, daemon, units, call audio |
+| `arm64/` | **the 64-bit system**: the image's build, its packages, tools and tests |
+| `boot/` | the initramfs and the BOOT and RECOVERY images: the 64-bit port's rescue, and the 32-bit release's boot |
+| `kernel/` | the kernel as patch series (the 64-bit kernel adds the fork's patches) |
+| `modem/` | the modem stack: loader, daemon, units, call audio, packaged for both |
+| `device/` | scripts that drive the tablet over the USB cable |
+| `docs/` | the 64-bit port's page, the hardware findings, the legacy release's guides |
+| `image/` | the 32-bit release's root image (legacy) |
 | `research/` | the modem's reverse engineering, the camera bring-up, the UCM generator |
+
+## Legacy: the 32-bit release
+
+The project began as a 32-bit (ARMv7) port, released from 1.0.0 to 1.0.5: LTE, calls and SMS,
+both cameras, GPS, suspend, Android apps through Waydroid. It is no longer developed, and stays
+downloadable and documented: [docs/LEGACY-ARM32.md](docs/LEGACY-ARM32.md), with
+[its install guide](docs/INSTALL.md) and [the changelog](CHANGELOG.md).
 
 ## Credits and license
 
-Built on [Omarchy](https://omarchy.org), [omarchy-mobile](https://github.com/derekross/omarchy-mobile)
-by Derek Ross, Arch Linux ARM, and the Linux kernel. Written by
+Built on [Omarchy](https://omarchy.org),
+[Omarchy Mobile](https://github.com/derekross/omarchy-mobile) by Derek Ross, Arch Linux ARM and
+the Linux kernel. The 64-bit boot is a port of
+[bnuuyloader](https://github.com/meowybnuuy/bnuuyloader) by bnuuy: the entry through the boot
+logo and the monitor call that makes 64 bits possible are theirs
+([who made what](https://github.com/elkir0/bnuuyloader/blob/main/CREDITS.md)). Written by
 [elkir0](https://github.com/elkir0) with Claude Code.
 
 GPL-2.0-or-later, with some parts under other licenses: see [NOTICE.md](NOTICE.md). No Samsung

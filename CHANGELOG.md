@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The 64-bit system is the project's main line.** The README presents Omarchy 4.5 on arm64,
+  Golden in progress: what works, the AI layer, the two install routes, a new demo GIF and
+  screenshots taken on the reference tablet (`assets/arm64/`). Golden's roadmap:
+  [arm64/docs/ROADMAP.md](arm64/docs/ROADMAP.md). The 32-bit release (1.0.x) is legacy, no
+  longer developed, kept downloadable and documented: [docs/LEGACY-ARM32.md](docs/LEGACY-ARM32.md).
 - **The loader's rescue (`t715.paramrescue`).** For a tablet whose only system is started by a
   loader in PARAM, as the 64-bit port needs: an initramfs built with
   `boot/build-initramfs.sh --paramrescue` looks at PARAM at each boot and, when the loader it

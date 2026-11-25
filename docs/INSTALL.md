@@ -1,5 +1,10 @@
 # Installing Omarchy on the Samsung Galaxy Tab S2
 
+> **Legacy.** This guide installs the 32-bit release (1.0.5), which is no longer developed. It is
+> also the starting point of the 64-bit port's long route today; the 64-bit system and how to
+> install it: [the README](../README.md) and [ARM64.md](ARM64.md).
+
+
 The install guide for the 1.0 releases, 1.0 Beta 1, then 1.0.1, then 1.0.2,
 then 1.0.3, then 1.0.4, then 1.0.5; the steps name 1.0.5's files. It takes a
 Samsung Galaxy Tab S2 8.0 LTE (SM-T715) from stock Android, or from a tablet

@@ -29,6 +29,7 @@ tablet's bootloader. The two bricks are told together in [docs/ARM64.md](../docs
 | `tools/t715-isa-audit` | finds the programs that may not run on the tablet's CPU (below) |
 | `tools/claude-code` | installs Anthropic's signed arm64 build of Claude Code, checked against Anthropic's release key |
 | `tests/` | the off-device suites of the two tools |
+| `docs/ROADMAP.md` | Golden: what is done, and what is left before the turnkey release |
 | `docs/ROOTFS.md` | everything about the image: what it contains and why, the boot mark and the watchdog keeper, what the kernel must provide, the boot arguments, writing the image to the tablet, the risks |
 
 ## Building the image
