@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **The loader's rescue (`t715.paramrescue`).** For a tablet whose only system is started by a
+  loader in PARAM, as the 64-bit port needs: an initramfs built with
+  `boot/build-initramfs.sh --paramrescue` looks at PARAM at each boot and, when the loader it
+  finds there is not one known to work, writes the one that is and restarts. Off by default;
+  the release's images do not have it ([boot/README.md](boot/README.md), "The loader's rescue").
+- **The 64-bit port, a page.** [docs/ARM64.md](docs/ARM64.md): where it stands, for whoever
+  wants it without reading more (nothing to download yet) and for power users. The 64-bit
+  port itself is not released.
+
 ## 1.0.5, pre-release
 
 Everything since 1.0.4: Android apps beside Linux apps through Waydroid (LineageOS 20, Android 13,

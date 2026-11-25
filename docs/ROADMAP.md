@@ -359,6 +359,10 @@ them. Study what the CP firmware and stock's IMS stack would need; likely out of
 - **Installs on other tablets**: the Odin, Heimdall and TWRP paths of `docs/INSTALL.md` were
   never run end to end; a first-boot wizard; a TWRP zip; a USB link Windows can use (RNDIS or
   NCM) and a USB vendor ID of our own instead of the one the gadget borrows.
+- **The 64-bit port (arm64)**: a second brick for the same tablet, since 2026-11-25 the daily
+  system of the reference tablet. Its boot is in
+  [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), with its own roadmap; its image
+  is built from the fork's sources today and not released: `docs/ARM64.md` says where it stands.
 
 ### Not planned
 

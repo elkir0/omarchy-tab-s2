@@ -48,6 +48,9 @@ An unofficial port: not affiliated with Omarchy, omarchy-mobile or Samsung.
 Not yet: hardware video decoding, headphone detection, the fingerprint reader. The tablet runs a
 32-bit userland: its bootloader starts the CPU in AArch32.
 
+A 64-bit port exists for the same tablet, as a second brick. On 2026-11-25 it is not released:
+[the 64-bit port](docs/ARM64.md).
+
 Only one tablet was tested: SM-T715, bootloader `T715XXU2CRH1`, hardware revision 9. Other Tab S2
 models are not covered.
 
@@ -344,6 +347,7 @@ Everything we learned about this hardware is public, register addresses included
 | Audio, Wi-Fi and Bluetooth, input, sensors | [AUDIO_M6](docs/hardware/AUDIO_M6.md), [WIFI_BT_M5](docs/hardware/WIFI_BT_M5.md), [INPUT_M4](docs/hardware/INPUT_M4.md), [SENSORS_M7](docs/hardware/SENSORS_M7.md) |
 | GPS: the BCM4752, its boot protocol, Samsung's `gpsd` offline | [GPS](docs/hardware/GPS.md) |
 | Power: battery, CPU, thermal, watchdog, SMP | [BATTERY](docs/hardware/BATTERY.md), [CPUFREQ](docs/hardware/CPUFREQ.md), [THERMAL](docs/hardware/THERMAL.md), [WATCHDOG](docs/hardware/WATCHDOG.md), [SMP_BRINGUP](docs/hardware/SMP_BRINGUP.md) |
+| The 64-bit port: a loader in PARAM through the boot logo's vulnerability, the kernel in 64 bits, and what was found about the bootloader | [ARM64](docs/ARM64.md), then the findings in the fork |
 | Android apps beside Linux apps: LineageOS 20 in Waydroid on Panfrost, Google Play included (opt-in, since 1.0.5) | [ANDROID](docs/image/ANDROID.md), with [the images' download links](docs/image/ANDROID.md#android-images-the-official-downloads) |
 
 ### Drivers
