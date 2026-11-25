@@ -27,10 +27,23 @@
 #                          kernel build (modules.dep, aliases), which /init
 #                          copies into the root's tmpfs layer so that udev
 #                          loads Bluetooth, Wi-Fi... (the image has none)
+#   /lib/t715-paramrescue/ only with --paramrescue: the part of a PARAM image
+#                          that is a loader known to work (param.img.gz,
+#                          gzipped), two sha256 (loader.sha256, stock.sha256)
+#                          and its length (extent); with --paramrescue-also,
+#                          also.sha256, the sha256 of loaders only left
+#                          alone.  /init then puts the first loader back in
+#                          PARAM when that part of PARAM holds none of them
+#                          (t715.paramrescue, on by default with the option).
+#                          A tablet's own PARAM is never published: keep
+#                          such a build private.
 #   empty dirs             proc sys run tmp newroot userdata ...
 #
 # Usage: bash boot/build-initramfs.sh [--out DIR] [--knobs "t715.shell=1 ..."]
 #                                        [--modules BUILD/modules.tar.xz]
+#                                        [--paramrescue PARAM_IMG --paramrescue-stock SHA256
+#                                         [--paramrescue-extent BYTES]
+#                                         [--paramrescue-also PARAM_IMG ...]]
 #
 # Everything runs in Docker (native arm64 Debian trixie, pinned by digest):
 # hash-checked download, `file`/`readelf` checks, applet list, cpio
@@ -45,6 +58,10 @@ INIT_SRC="$ROOT/boot/initramfs/init"
 CPIO_PY="$ROOT/boot/cpio_newc.py"
 KNOBS=""
 MODULES_TAR=""
+PARAMRESCUE=""
+PARAMRESCUE_STOCK=""
+PARAMRESCUE_EXTENT=""
+PARAMRESCUE_ALSO=()
 
 # Debian trixie image index (multi-arch), pinned; used as linux/arm64.
 BASE_IMAGE="debian@sha256:8c4733a92aacd0bcff3779eadc35a4a5147f36cb20a5fcb56504cbc740212259"
@@ -64,7 +81,7 @@ FSCK_URLS=(
   "http://snapshot.debian.org/archive/debian/20261020T000000Z/pool/main/e/e2fsprogs/e2fsck-static_1.47.2-3%2Bb12_armhf.deb"
 )
 
-usage() { sed -n '2,33p' "$0"; }
+usage() { sed -n '2,43p' "$0"; }
 die() { echo "error: $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
@@ -73,6 +90,14 @@ while [[ $# -gt 0 ]]; do
     --out=*) OUT="${1#--out=}"; shift ;;
     --knobs) [[ $# -ge 2 ]] || die "--knobs needs a value"; KNOBS="$2"; shift 2 ;;
     --modules) [[ $# -ge 2 ]] || die "--modules needs a value"; MODULES_TAR="$2"; shift 2 ;;
+    --paramrescue) [[ $# -ge 2 ]] || die "--paramrescue needs a value"; PARAMRESCUE="$2"; shift 2 ;;
+    --paramrescue=*) PARAMRESCUE="${1#--paramrescue=}"; shift ;;
+    --paramrescue-stock) [[ $# -ge 2 ]] || die "--paramrescue-stock needs a value"; PARAMRESCUE_STOCK="$2"; shift 2 ;;
+    --paramrescue-stock=*) PARAMRESCUE_STOCK="${1#--paramrescue-stock=}"; shift ;;
+    --paramrescue-extent) [[ $# -ge 2 ]] || die "--paramrescue-extent needs a value"; PARAMRESCUE_EXTENT="$2"; shift 2 ;;
+    --paramrescue-extent=*) PARAMRESCUE_EXTENT="${1#--paramrescue-extent=}"; shift ;;
+    --paramrescue-also) [[ $# -ge 2 ]] || die "--paramrescue-also needs a value"; PARAMRESCUE_ALSO+=("$2"); shift 2 ;;
+    --paramrescue-also=*) PARAMRESCUE_ALSO+=("${1#--paramrescue-also=}"); shift ;;
     --knobs=*) KNOBS="${1#--knobs=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -82,6 +107,8 @@ done
 for w in $KNOBS; do
   [[ "$w" =~ ^t715\.[a-z]+(=[^[:space:]]*)?$ ]] || die "--knobs: '$w' is not a t715.* knob"
 done
+ALSO_NOTE=
+[[ ${#PARAMRESCUE_ALSO[@]} -eq 0 || -n "$PARAMRESCUE" ]] || die "--paramrescue-also goes with --paramrescue"
 [[ -f "$INIT_SRC" ]] || die "missing $INIT_SRC"
 [[ -f "$CPIO_PY" ]] || die "missing $CPIO_PY"
 mkdir -p "$OUT" "$CACHE"
@@ -91,6 +118,54 @@ sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+
+# --- the loader the rescue puts back (t715.paramrescue) --------------------
+# --paramrescue IMG --paramrescue-stock SHA256: IMG is a PARAM image with a
+# loader known to work; SHA256 is that of the tablet's stock PARAM, which the
+# rescue leaves alone.  Without that hash the rescue would take the stock
+# image for a loader that did not run.  The option turns the knob on unless
+# --knobs sets it.
+# --paramrescue-extent BYTES: only the first BYTES of the image are the
+# loader (the archive S-Boot reads its logo from), and both sha256 are of
+# those bytes.  S-Boot writes its own data at the end of PARAM whenever it
+# boots a kernel itself (seen 2026-11-25), so a loader followed by such
+# data would else be taken for none.  The rest of PARAM is then never read
+# nor written by the rescue.  Default: the whole image.
+# --paramrescue-also IMG (more than once): other PARAM images with loaders
+# that work, of the same extent: the rescue leaves them alone too (their
+# sha256 go to also.sha256) and never writes them.
+PRDIR="$(mktemp -d)"
+PRSHA=""
+if [[ -n "$PARAMRESCUE" ]]; then
+  [[ -f "$PARAMRESCUE" ]] || die "--paramrescue: $PARAMRESCUE not found"
+  [[ "$PARAMRESCUE_STOCK" =~ ^[0-9a-fA-F]{64}$ ]] || die "--paramrescue needs --paramrescue-stock SHA256 (that of the stock PARAM)"
+  PARAMRESCUE="$(cd "$(dirname "$PARAMRESCUE")" && pwd)/$(basename "$PARAMRESCUE")"
+  if [[ -z "$PARAMRESCUE_EXTENT" ]]; then
+    PARAMRESCUE_EXTENT=$(wc -c <"$PARAMRESCUE" | tr -d ' ')
+  fi
+  [[ "$PARAMRESCUE_EXTENT" =~ ^[1-9][0-9]*$ && "$PARAMRESCUE_EXTENT" -le "$(wc -c <"$PARAMRESCUE" | tr -d ' ')" ]] \
+    || die "--paramrescue-extent: a number of bytes, at most the image's ($(wc -c <"$PARAMRESCUE" | tr -d ' '))"
+  head -c "$PARAMRESCUE_EXTENT" "$PARAMRESCUE" >"$PRDIR/param.img"
+  gzip -n -9 -c "$PRDIR/param.img" >"$PRDIR/param.img.gz"
+  PRSHA="$(sha256_of "$PRDIR/param.img")"
+  rm -f "$PRDIR/param.img"
+  printf '%s\n' "$PRSHA" >"$PRDIR/loader.sha256"
+  printf '%s\n' "$PARAMRESCUE_STOCK" | tr 'A-F' 'a-f' >"$PRDIR/stock.sha256"
+  printf '%s\n' "$PARAMRESCUE_EXTENT" >"$PRDIR/extent"
+  # shellcheck disable=SC2207  # the idiom for a possibly empty array under set -u, bash 3.2 included
+  for also in ${PARAMRESCUE_ALSO[@]+"${PARAMRESCUE_ALSO[@]}"}; do
+    [[ -f "$also" ]] || die "--paramrescue-also: $also not found"
+    head -c "$PARAMRESCUE_EXTENT" "$also" >"$PRDIR/also.img"
+    sha256_of "$PRDIR/also.img" >>"$PRDIR/also.sha256"
+  done
+  rm -f "$PRDIR/also.img"
+  ALSO_NOTE=
+  if [[ ${#PARAMRESCUE_ALSO[@]} -gt 0 ]]; then ALSO_NOTE=", ${#PARAMRESCUE_ALSO[@]} left alone"; fi
+  case " $KNOBS " in
+  *" t715.paramrescue="*) ;;
+  *) KNOBS="${KNOBS:+$KNOBS }t715.paramrescue=1" ;;
+  esac
+fi
 
 # --- tools image (file, readelf, python3; shellcheck for the tests) -------
 if ! docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
@@ -135,7 +210,7 @@ INIT_SHA="$(sha256_of "$INIT_SRC")"
 # GPU modules, in load order (file names sort in that order).
 MODDIR="$(mktemp -d)"
 MODTREE="$(mktemp -d)"
-trap 'rm -rf "$MODDIR" "$MODTREE"' EXIT
+trap 'rm -rf "$MODDIR" "$MODTREE" "$PRDIR"' EXIT
 MODREL=""
 MODSHA=""
 if [[ -n "$MODULES_TAR" ]]; then
@@ -154,12 +229,12 @@ if [[ -n "$MODULES_TAR" ]]; then
 fi
 # The modules' tarball hash names the tree: /init refreshes a persistent
 # root's copy when it changes (same release string, other build).
-BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}"
+BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}${PRSHA:+, paramrescue: the first ${PARAMRESCUE_EXTENT} bytes of PARAM, sha256:${PRSHA:0:12}}$ALSO_NOTE"
 
 # shellcheck disable=SC2016  # expanded by the container's bash
 docker run --rm --platform linux/arm64 \
   -v "$DEB:/in/busybox.deb:ro" -v "$FSCK:/in/e2fsck.deb:ro" -v "$INIT_SRC:/in/init:ro" -v "$CPIO_PY:/in/cpio_newc.py:ro" \
-  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
+  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$PRDIR:/in/paramrescue:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
 cd /tmp
 dpkg-deb -x /in/busybox.deb deb
 dpkg-deb -x /in/e2fsck.deb fsckdeb
@@ -234,6 +309,13 @@ if os.path.isdir(tree):
             if os.path.islink(p):
                 continue
             items[os.path.join(rel, f)] = (0o100644, open(p, "rb").read(), 0, 0)
+# The loader the rescue puts back (boot/build-initramfs.sh --paramrescue).
+pr = "/in/paramrescue"
+for f in ("param.img.gz", "loader.sha256", "stock.sha256", "extent", "also.sha256"):
+    if os.path.exists(os.path.join(pr, f)):
+        items.setdefault("lib", (0o040755, b"", 0, 0))
+        items.setdefault("lib/t715-paramrescue", (0o040755, b"", 0, 0))
+        items["lib/t715-paramrescue/" + f] = (0o100644, open(os.path.join(pr, f), "rb").read(), 0, 0)
 for line in open(applets):
     path = line.strip()
     if not path or path in ("linuxrc", "sbin/init") or path in items:

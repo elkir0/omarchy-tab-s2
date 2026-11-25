@@ -3,7 +3,7 @@
 | Path | What |
 |---|---|
 | `initramfs/init` | the initramfs's `/init` (busybox sh, PID 1): image mode, persistent root, knobs, debug shell |
-| `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs), reproducibly, in Docker |
+| `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs; with `--paramrescue`, the loader the rescue puts back), reproducibly, in Docker |
 | `pack-test-recovery.sh` | packs kernel, DTB and initramfs into a RECOVERY image, or a BOOT image with `--boot` |
 | `samsung_bootimg.py` | Samsung boot image and DTBH reader/writer |
 | `cpio_newc.py`, `zimage_extract.py`, `seclog_decode.py` | cpio writer, zImage/ikconfig extractor, sboot `sec_log` decoder |
@@ -74,6 +74,7 @@ file can look stale. The initramfs logs a warning in that case.
 | `t715.persist=NAME` | (none) | persistent root `USERDATA/NAME` (wins over `rootfs.select`'s line 2) |
 | `t715.persist=0` | | image mode even if `rootfs.select` asks for a persistent root (rescue boot) |
 | `t715.quiet=1` | `0` | a quiet screen until the Plymouth splash: console loglevel 3 from the initramfs on (`CONFIG_CMDLINE`'s `loglevel=8` comes after anything sboot or a boot image header could add; sboot drops the header's command line anyway), the VT cleared and its cursor hidden |
+| `t715.paramrescue=1` | `0` | a tablet whose only system is started by a loader in PARAM: unless PARAM holds the stock image or the loader known to work (`/lib/t715-paramrescue`, from `--paramrescue`), write that loader back and restart (see "The loader's rescue" below) |
 | `t715.wdtguard=0` | `1` | boot even when the previous reset was the watchdog (default: restart to Android at once) |
 | `t715.crashlog=1` | `0` | **test images only**: after a watchdog reset, just before the guard's restart, save the previous boot's pstore records (its console, a panic dump) to `media/0/linux/t715-crash/` on USERDATA, without the kernel command line, init's environment and MAC addresses; USERDATA gets `e2fsck -p` and a read-write mount for that copy only. Without it the guard's own short boot overwrites the console of the boot that hung |
 | `t715.returnafter=SECS` | `0` | unattended boot: SECS seconds after the hand-over, restart to Android through sysrq `b` (PMU SWRESET) and forward the journal to the kernel log |
@@ -181,6 +182,81 @@ default for a tablet handed to an end user). Bake
 it back; telnetd then listens on 172.16.42.1:23 only, and the shell has
 no password. macOS has no built-in RNDIS driver. If no interface appears,
 rebuild with `--knobs "t715.usbfn=ecm"` (CDC-ECM is native on macOS).
+
+### The loader's rescue (`t715.paramrescue`)
+
+For a tablet that keeps no 32-bit system: S-Boot starts the arm64 kernel
+through a loader placed in PARAM ([bnuuyloader](https://github.com/meowybnuuy/bnuuyloader)),
+and boots BOOT only when that loader hands the boot back (the arm64 system
+did not come up) or when no loader runs at all. A loader that fails to fire
+is never reached again, and with nothing behind BOOT the tablet restarts in
+a loop that nothing can reach.
+
+With the knob on, `/init` looks at PARAM first, once the USB debug link is up:
+
+| The loader's part of PARAM holds | What happens |
+|---|---|
+| the loader known to work | nothing: the boot goes on |
+| the stock image (no loader) | nothing: the boot goes on |
+| anything else | the known loader is written over it, read back, and the board restarts: the arm64 system comes back by itself |
+
+The boot then goes on to the root image, and as there is none, to the
+failure path: the reason on screen, the debug link (and with
+`t715.telnet=1` its root shell) for `t715.failwait` seconds, then a restart.
+PARAM flagged read-only (as the system of every day leaves it, by a rule of
+its own) is made writable first; a disk that cannot be written is not forced.
+With the knob off, a file of the directory missing, an image that is not the
+one its sha256 announces, no single partition named PARAM, or a write that
+does not read back, nothing is written and the boot goes on the same way.
+
+`--paramrescue-also IMAGE` (more than once) names other PARAM images whose
+loaders work: the rescue leaves them alone too and never writes them, so
+the loader the owner put in PARAM is respected.
+
+**Only the loader's part of PARAM is compared and written.** The loader is
+the start of PARAM, the archive S-Boot reads its logo from; what follows is
+data of S-Boot's own, and S-Boot writes it whenever it boots a kernel itself
+(a fallback boot, included): on 2026-11-25 the first rescue took a good loader
+for none, twice, because of it. `--paramrescue-extent BYTES` keeps the rescue
+to the first BYTES; without it, the whole image is the loader.
+
+The files come from the build; the option turns the knob on by default:
+
+```bash
+bash boot/build-initramfs.sh --out out/initramfs-rescue \
+     --knobs "t715.usbfn=ecm t715.telnet=1 t715.failwait=120 t715.quiet=1" \
+     --paramrescue LOADER.param --paramrescue-extent LOADER_BYTES --paramrescue-stock SHA256_OF_THE_STOCK_PARAM \
+     [--paramrescue-also OTHER_LOADER.param ...]
+bash boot/tests/test_initramfs.sh       # builds its own images, never touches the tablet
+bash boot/pack-test-recovery.sh --initramfs out/initramfs-rescue/initramfs.cpio.gz \
+     --out out/rescue/recovery BUILD_DIR      # RECOVERY image
+bash boot/pack-test-recovery.sh --initramfs out/initramfs-rescue/initramfs.cpio.gz \
+     --boot --out out/rescue/boot BUILD_DIR   # the same for BOOT
+```
+
+Both sha256 are of the loader's part (`head -c LOADER_BYTES IMAGE | sha256sum`).
+
+Rules:
+
+- **Such an image is one tablet's own PARAM with a loader in it: never publish it.**
+  The stock PARAM's sha256 is required: without it the rescue would take the
+  stock image for a loader that did not run.
+- **The known loaders must follow the loaders in use.** BOOT is booted also
+  when a working loader hands the boot back, and the rescue then replaces a
+  loader it knows of neither way (a newer one, with a failure of the arm64
+  system behind it) by the one it writes back. Rebuild the image with each
+  new loader: the last proven one as `--paramrescue`, the others as
+  `--paramrescue-also`.
+- **BOOT first, while the loader works.** S-Boot never boots BOOT then, so a
+  broken image costs nothing. To see the rescue for real, make one boot that
+  the ledger will not count as up (`systemctl disable t715-kboot-mark.service`,
+  restart, `systemctl enable` it, restart): the loader hands the next two
+  boots to the rescue. RECOVERY after: it cannot be tried by keys while the
+  loader is in PARAM, the loader running in every S-Boot boot, a recovery
+  one included.
+- The system of every day's tools that name PARAM by the sha256 of the whole
+  partition find no name for it after a fallback boot, since S-Boot's data
+  has changed: they must look at the loader's part, as the rescue does.
 
 ### On-screen messages
 

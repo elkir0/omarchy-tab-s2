@@ -88,6 +88,11 @@
 #                        after anything sboot or the boot image could add),
 #                        the VT cleared and its cursor hidden; say () still
 #                        writes first-boot progress and errors to the VT
+#   t715.paramrescue=1    a tablet whose only system is started by a loader
+#                        in PARAM: PARAM holding neither the stock image nor
+#                        the loader known to work (/lib/t715-paramrescue),
+#                        that loader is written back and the board restarts
+#                        (see param_rescue); default 0
 #
 # Persistent root (a tablet that keeps no Android): instead of steps 3-4,
 # USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
@@ -164,11 +169,13 @@ SEED_MARGIN_KIB=524288  # free space a seed must leave on USERDATA (512 MiB)
 [ -z "$TEST" ] || SEED_MARGIN_KIB=1024
 TELNET=0            # 1: the root telnet shell on the USB network link
 FAILREBOOT=1        # 0: wait on screen after a failure instead of rebooting
+PARAMRESCUE=0       # 1: put the loader known to work back in PARAM when it is not there
 
 # --- paths
 RUNDIR=/run/t715
 LOGFILE=$RUNDIR/initramfs.log
 KMSG=/dev/kmsg
+PARAMRESCUE_DIR=/lib/t715-paramrescue   # the loader known to work and the two sha256 (param_rescue)
 UD_MNT=/userdata            # USERDATA, read-only (read-write for a persistent root)
 UD_FINAL=$RUNDIR/userdata   # where USERDATA lives after the switch_root
 LOWER=$RUNDIR/lower         # the image, read-only
@@ -385,6 +392,9 @@ parse_knobs() {
         t715.quiet=0 | t715.quiet=1)
             QUIET=${_pk#*=}
             ;;
+        t715.paramrescue=0 | t715.paramrescue=1)
+            PARAMRESCUE=${_pk#*=}
+            ;;
         t715.persist=*)
             _pk_v=${_pk#*=}
             if [ "$_pk_v" = 0 ] || persist_name_ok "$_pk_v"; then
@@ -416,7 +426,7 @@ read_knobs() {
         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
     fi
     parse_knobs "$_rk_cmdline" "cmdline"
-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE"
 }
 
 # ---------------------------------------------------------------------------
@@ -1588,6 +1598,118 @@ do_reboot() {
     done
 }
 
+# param_rescue: t715.paramrescue, for a tablet whose only system is started
+# by a loader in PARAM (bnuuyloader: it starts the arm64 kernel of a slot of
+# CACHE) and that keeps no other.  S-Boot boots this kernel (BOOT) when the
+# loader hands the boot back, because the arm64 system did not come up, and
+# at once when no loader runs at all: one that fails to fire is never
+# reached again, and nothing on the tablet could then be reached either.
+# So PARAM is looked at first.  $PARAMRESCUE_DIR holds a loader known to
+# work (param.img.gz, gzipped) with its sha256 (loader.sha256) and that of
+# the tablet's stock PARAM (stock.sha256), written by
+# boot/build-initramfs.sh --paramrescue, and the length of that part of
+# PARAM (extent; without the file, the whole image).  Only those first
+# bytes are compared and ever written: S-Boot keeps data of its own at the
+# end of PARAM and writes it whenever it boots a kernel itself (seen
+# 2026-11-25), so a loader followed by such data must still be the loader.
+# That part of PARAM holding either image is left alone, and so is one
+# holding any loader of also.sha256 (others that work, --paramrescue-also):
+# the one the owner put there is respected.  Holding anything else, it is a
+# loader that did not run: the known one is written over it and read back,
+# and the board restarts, which brings the arm64 system back by itself.  With the knob
+# off, a file of the directory missing, an image that is not the one its
+# sha256 announces, no single partition named PARAM, nothing more happens
+# here: the boot goes on to the root image, and so to the failure path and
+# its debug shell, as after a write that does not read back.  A loader
+# known here is one tablet's own PARAM: such an image is never published.
+# Host-test: the write is real (the test's loop disk) and exit 98 replaces
+# the restart.
+param_rescue() {
+    [ "$PARAMRESCUE" = 1 ] || return 0
+    if [ ! -s "$PARAMRESCUE_DIR/param.img.gz" ] || [ ! -s "$PARAMRESCUE_DIR/loader.sha256" ] ||
+        [ ! -s "$PARAMRESCUE_DIR/stock.sha256" ]; then
+        warn "t715.paramrescue: $PARAMRESCUE_DIR lacks a file, nothing done"
+        return 0
+    fi
+    _pr_known=$(cut -d' ' -f1 "$PARAMRESCUE_DIR/loader.sha256")
+    _pr_stock=$(cut -d' ' -f1 "$PARAMRESCUE_DIR/stock.sha256")
+    if [ "$(zcat "$PARAMRESCUE_DIR/param.img.gz" | sha256sum | cut -d' ' -f1)" != "$_pr_known" ]; then
+        warn "t715.paramrescue: param.img.gz is not the image loader.sha256 announces, nothing done"
+        return 0
+    fi
+    _pr_hits=$(list_partnames | while read -r _pr_d _pr_n; do
+        if [ "$_pr_n" = PARAM ]; then printf '%s ' "$_pr_d"; fi
+    done)
+    set -f
+    # shellcheck disable=SC2086  # count the words
+    set -- $_pr_hits
+    set +f
+    if [ "$#" -ne 1 ] || [ ! -b "/dev/$1" ]; then
+        warn "t715.paramrescue: no single partition named PARAM (${_pr_hits:-none}), nothing done"
+        return 0
+    fi
+    _pr_dev=/dev/$1
+    _pr_size=$(cat "$PARAMRESCUE_DIR/extent" 2>/dev/null)
+    [ -n "$_pr_size" ] || _pr_size=$(zcat "$PARAMRESCUE_DIR/param.img.gz" | wc -c)
+    case $_pr_size in
+    '' | *[!0-9]*)
+        warn "t715.paramrescue: the loader's length is not a number ('$_pr_size'), nothing done"
+        return 0
+        ;;
+    esac
+    _pr_sum=$(head -c "$_pr_size" "$_pr_dev" | sha256sum | cut -d' ' -f1)
+    if [ "$_pr_sum" = "$_pr_known" ]; then
+        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold the loader known to work, nothing to do"
+        return 0
+    fi
+    if [ "$_pr_sum" = "$_pr_stock" ]; then
+        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold the stock image, no loader: nothing to do"
+        return 0
+    fi
+    if [ -s "$PARAMRESCUE_DIR/also.sha256" ] && grep -qx "$_pr_sum" "$PARAMRESCUE_DIR/also.sha256"; then
+        log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) hold another loader known to work, nothing to do"
+        return 0
+    fi
+    say "Rescue: PARAM does not hold the loader known to work. Writing it back."
+    log "t715.paramrescue: the first $_pr_size bytes of PARAM ($_pr_dev) read back $_pr_sum: neither the loader known to work nor the stock image, writing the loader"
+    # Where it differs from the loader, for the record.
+    _pr_diff=$(zcat "$PARAMRESCUE_DIR/param.img.gz" | cmp -l - "$_pr_dev" 2>/dev/null | head -n 4096)
+    _pr_n=$(printf '%s\n' "$_pr_diff" | grep -c .)
+    _pr_at=$(printf '%s\n' "$_pr_diff" | head -n 1 | cut -d' ' -f1)
+    log "t715.paramrescue: at least $_pr_n byte(s) of PARAM differ from the loader, the first at byte ${_pr_at:-none} (what follows the loader is not compared)"
+    if [ -n "$_pr_at" ]; then
+        _pr_skip=$(( (_pr_at - 1) / 16 ))
+        log "  PARAM there:      $(dd if="$_pr_dev" bs=16 skip=$_pr_skip count=4 2>/dev/null | od -An -tx1 | tr -s ' \n' ' ')"
+        log "  the loader there: $(zcat "$PARAMRESCUE_DIR/param.img.gz" | dd bs=16 skip=$_pr_skip count=4 2>/dev/null | od -An -tx1 | tr -s ' \n' ' ')"
+    fi
+    # The system of every day keeps PARAM read-only by one of its own rules:
+    # a partition's flag is cleared here, a whole disk's is not.
+    if [ "$(cat "/sys/class/block/${_pr_dev#/dev/}/ro" 2>/dev/null)" = 1 ]; then
+        if run blockdev --setrw "$_pr_dev"; then
+            log "t715.paramrescue: PARAM was read-only, made writable"
+        else
+            err "t715.paramrescue: PARAM is read-only and could not be made writable"
+        fi
+    fi
+    if ! zcat "$PARAMRESCUE_DIR/param.img.gz" | dd of="$_pr_dev" bs=1M conv=fsync 2>/dev/null; then
+        err "t715.paramrescue: the write to $_pr_dev failed"
+    fi
+    sync
+    _pr_sum=$(head -c "$_pr_size" "$_pr_dev" | sha256sum | cut -d' ' -f1)
+    if [ "$_pr_sum" != "$_pr_known" ]; then
+        say "Rescue: PARAM could not be restored. Hold Power and Volume down to restart."
+        err "t715.paramrescue: PARAM reads back $_pr_sum after the write, not the loader known to work"
+        return 1
+    fi
+    say "Rescue: the loader known to work is back in PARAM. Restarting."
+    log "t715.paramrescue: PARAM reads back as the loader known to work: restarting"
+    [ -n "$TEST" ] || sleep 5
+    if [ -n "$TEST" ]; then
+        exit 98
+    fi
+    do_reboot
+}
+
 # save_crashlog: t715.crashlog, see the knob list at the top.  Called by
 # wdt_guard after a watchdog reset, just before its restart, whose own short
 # boot would otherwise overwrite the pstore console of the boot that hung
@@ -1705,6 +1827,10 @@ main() {
     # The debug link (DHCP with telnet off, telnetd with t715.telnet=1) is
     # up before the first seed: its progress takes minutes.
     net_up || warn "USB debug link not available, booting without it"
+    # The loader first: when it has to be put back in PARAM, the restart that
+    # follows needs nothing else.  The link is up, so the debug shell is there
+    # should the write fail.
+    param_rescue
     if prepare_root; then
         if [ "$SHELL_MODE" = 1 ]; then
             shell_wait
