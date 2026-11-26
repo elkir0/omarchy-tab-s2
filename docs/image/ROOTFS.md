@@ -1052,10 +1052,21 @@ their frequencies to the kernel (`T715_WG_BOOST_CPUS` turns it back on).
 The on-device tests are in `arm64/tests/sleep/ondevice/`; there the Wi-Fi
 test feeds no watchdog (`t715-watchdog-keeper` does), and the soak judges
 a sleep by the clock when the kernel's sleep line is missing. Status: in
-the 64-bit image build; the kernel side tested on the tablet (2026-11-26:
-four real sleeps with the CP off and the chip down, four clean wakes on
-the RTC alarm), the user space not yet. `arm64/tests/sleep/run.sh` runs
-the off-device suites.
+the 64-bit image build; tested on the tablet on 2026-11-26: four real
+sleeps with the CP off and the chip down, four clean wakes on the RTC
+alarm, then the whole chain on battery (60 s of dark screen, a real sleep
+of 165 s, a power-key wake, the CP and the Wi-Fi back in 5 s).
+`arm64/tests/sleep/run.sh` runs the off-device suites.
+
+Omarchy 4.5 locks the session before every suspend: its
+`omarchy-sleep-lock.service` (a user unit) locks, exits to release its
+delay inhibitor, and is restarted. Here logind stays in its sleep
+preparation for the seconds `t715-sleep prepare` takes, and each restart in
+that window failed ("already running"): five in ten seconds would leave the
+unit failed and later sleeps unlocked. The drop-in
+`overlay-omarchy/etc/systemd/user/omarchy-sleep-lock.service.d/t715-sleep.conf`
+makes the restart wait until logind's `PreparingForSleep` is false and
+lifts the start limit (tested: one restart, no failure).
 
 ## microSD card
 

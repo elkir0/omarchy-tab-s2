@@ -158,10 +158,14 @@ para=$(awk '/^## Sleep/ {s = 1; next} /^## / {s = 0} s' "$top/docs/image/ROOTFS.
        | awk '/^\*\*In 64 bits\.\*\*/ {p = 1} p && /^$/ {exit} p')
 [ -n "$para" ] || fail "(d) docs/image/ROOTFS.md's Sleep section has its paragraph In 64 bits"
 for w in 'arm64/rootfs/overlay/' 'configure-omarchy.sh' 'T715_WG_BOOST_CPUS' \
-         'the kernel side tested on the tablet' 'the user space not yet'; do
+         'tested on the tablet on 2026-11-26' 'the whole chain on battery'; do
     printf '%s\n' "$para" | tr '\n' ' ' | grep -qF -- "$w" \
         || fail "(d) the paragraph In 64 bits says: $w"
 done
+grep -qF 'omarchy-sleep-lock.service.d/t715-sleep.conf' "$top/docs/image/ROOTFS.md" \
+    || fail "(d) docs/image/ROOTFS.md explains the drop-in that keeps Omarchy's sleep lock alive"
+[ -f "$here/rootfs/overlay-omarchy/etc/systemd/user/omarchy-sleep-lock.service.d/t715-sleep.conf" ] \
+    || fail "(d) the overlay has the omarchy-sleep-lock drop-in"
 if grep -n 'not ported' "$here/docs/ROOTFS.md" | grep -Eq 'suspend|t715-wifi-guard'; then
     fail "(d) arm64/docs/ROOTFS.md no longer calls the sleep or the guard not ported"
 fi

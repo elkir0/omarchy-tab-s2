@@ -647,6 +647,17 @@ if grep -qx 'HandleLidSwitch=ignore' "$lid" 2>/dev/null && grep -qx 'HandleLidSw
 else
     fail "logind's lid drop-in $lid does not ignore the switch"
 fi
+# Omarchy locks before every suspend through omarchy-sleep-lock.service, a
+# monitor that exits once it has locked and is restarted; t715-sleep's
+# prepare step keeps logind preparing for seconds, so the drop-in makes the
+# restart wait for the sleep to end and lifts the start limit.
+di=/etc/systemd/user/omarchy-sleep-lock.service.d/t715-sleep.conf
+if grep -qx 'StartLimitIntervalSec=0' "$di" 2>/dev/null && grep -q '^ExecStartPre=.*PreparingForSleep' "$di" \
+   && grep -qx 'TimeoutStartSec=infinity' "$di"; then
+    pass "omarchy-sleep-lock waits for the sleep to end before it restarts, with no start limit ($di)"
+else
+    fail "the drop-in $di that keeps Omarchy's sleep lock alive through t715-sleep's prepare step is missing or changed"
+fi
 # status only reads (in a container the kernel has no system sleep).
 out="$("$SL" status 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | head -n1 | grep -qE '^sleep: (on|switched off)$'; then
