@@ -166,7 +166,7 @@ rm -rf "$CTX"
 mkdir -p "$CTX/firmware" "$CTX/ssh" "$CTX/repo-manifests" "$CTX/watchdog" "$CTX/shim"
 cp -f "$ROOTFS_DIR/Dockerfile" "$ROOTFS_DIR"/*.sh "$ROOTFS_DIR"/packages.* "$ROOTFS_DIR"/t715-*.lua \
       "$ROOTFS_DIR/omarchy-trusted.fpr" "$ROOTFS_DIR/omarchy-migrations.hold" "$CTX/"
-cp -R "$ROOTFS_DIR/overlay" "$ROOTFS_DIR/overlay-omarchy" "$CTX/"
+cp -R "$ROOTFS_DIR/overlay" "$ROOTFS_DIR/overlay-omarchy" "$ROOTFS_DIR/patches-omarchy-settings" "$CTX/"
 cp -f "$ROOTFS_DIR/watchdog/t715-watchdog-keeper.c" "$CTX/watchdog/"
 cp -f "$ROOTFS_DIR/shim/t715-dmabuf-check-shim.c" "$CTX/shim/"
 cp -f "$COMMON_DIR/alarm-tarball.sha256" "$CTX/tarball-pin"
