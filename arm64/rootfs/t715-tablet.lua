@@ -70,8 +70,12 @@ o.launch_on_start("bash -c 'omarchy-toggle-enabled lock-on-start || exit 0; "
 -- one notification offers omamobile's onboarding (phone.lua starts it the same
 -- way): name and email, a real PIN or password, the AI apps, voice input's
 -- language and the default coding agent (omamobile-shell 0.2.147-3.2, its patch
--- 0015). With a shell that has no onboarding, nothing happens.
-o.launch_on_start("bash -c 'command -v omamobile-onboarding >/dev/null || exit 0; exec omamobile-onboarding --nudge'")
+-- 0015). With a shell that has no onboarding, nothing happens. The nudge is a
+-- D-Bus call to org.freedesktop.Notifications, which Omarchy's shell owns only
+-- once its QML has loaded, a few seconds after this line runs: sent before
+-- that, it was lost (2.1.0, on the reference tablet). So it waits for the name
+-- (60 s at most).
+o.launch_on_start("bash -c 'command -v omamobile-onboarding >/dev/null || exit 0; for _ in $(seq 60); do busctl --user status org.freedesktop.Notifications >/dev/null 2>&1 && break; sleep 1; done; exec omamobile-onboarding --nudge'")
 
 -- The touch shell (omamobile-shell, touch layer P2) needs nothing else from
 -- Hyprland: its gestures are layer-shell strips (the bar's pull-down, the

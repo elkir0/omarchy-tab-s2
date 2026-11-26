@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.1.1, pre-release
+
+A fix for the first start of 2.1.0: the setup's notification could be lost.
+
+- **The first-run setup's notification.** At the first login, a notification ("Finish setting up
+  your phone ... Tap to start") opens the setup: your name, a real PIN or password, the AI apps,
+  your coding agent. It is a D-Bus call to the notification server, which Omarchy's shell owns
+  only once it has loaded, a few seconds after the call was made: on the reference tablet's clean
+  2.1.0 install the call came 2 s too early and the notification never showed. The login now
+  waits for the notification server (60 s at most) before it sends it.
+- **Already on 2.1.0 and never saw the setup?** Start it yourself: `omamobile-onboarding` in a
+  terminal (or reinstall 2.1.1, [the guide, section 8](docs/INSTALL-ARM64.md#8-from-200-the-reinstall)).
+  Until the setup sets your own PIN or password, the lock screen takes the placeholder `changeme`.
+- Nothing else changes: the kernel, the installer's code and the image's contents are 2.1.0's,
+  but for the versions it states.
+
+Tested on the reference tablet, with a notification server that takes its name 6 s late on a
+private session bus: the 2.1.0 line loses the notification, as at the clean install; the new line
+waits, and the notification arrives at 6.8 s. The release's checks of the image as for every
+release (the new line in it, the modules, the capabilities, no key or saved network, e2fsck). The
+image is 2.1.0's build with this one file changed, not a new build, so the build's smoke check did
+not run again; a fresh install of 2.1.1 was not tried.
+
 ## 2.1.0, pre-release
 
 The same day as 2.0.0 (2026-11-26): the two big gaps 2.0.0 left open in 64 bits — sleep and

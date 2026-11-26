@@ -261,7 +261,7 @@ Rules:
 
 ### The installer of the 64-bit system (`t715.golden`)
 
-Built with `--golden boot/golden` (which turns the knob on), this initramfs is the 2.1.0
+Built with `--golden boot/golden` (which turns the knob on), this initramfs is the 2.1.1
 release's installer (2.0.0's, plus the reinstall below), in BOOT and RECOVERY:
 [docs/INSTALL-ARM64.md](../docs/INSTALL-ARM64.md) is
 the user's guide, and its section 7 the short account. The code is the part of `initramfs/init`
@@ -284,7 +284,7 @@ The release builds the installer itself (`arm64/release/make-release.sh`), on th
 
 **The reinstall (since 2.1.0).** A tablet on 2.0.0 already has the loader in PARAM and an
 installed root, so there the installer only acts as the rescue. A file named `reinstall` in
-`linux/` of the internal storage asks the 2.1.0 installer for a reinstall, once the loader hands
+`linux/` of the internal storage asks the installer (since 2.1.0) for a reinstall, once the loader hands
 it a start (a kernel log line `KBOOT: try` that no `KBOOT: up` follows makes the loader give the
 next two starts to BOOT; RECOVERY with the keys does not help, the loader runs there too): the checks run
 first, as for a first install; then the installed root `omarchy-arm64` is renamed
