@@ -79,7 +79,10 @@ storage (for example your `~/.ssh/id_ed25519.pub`). Without it, SSH stays closed
 
 0. While Android still runs: Settings → About tablet → Software information, tap *Build number*
    seven times; then Settings → Developer options → **OEM unlocking** on. Without it the
-   bootloader refuses the installer ("Custom binary blocked").
+   bootloader may refuse the installer ("Custom binary blocked"). Some tablets do not show the
+   option at all; download mode then may show an RMM or KG state. Flash anyway: if the
+   installer's white text comes up, the bootloader accepted it. If it refuses, flash the stock
+   firmware back.
 1. Turn the tablet off. Hold **Volume down + Home + Power** until the warning screen, then
    **Volume up**: download mode.
 2. Connect the USB cable.
@@ -124,7 +127,8 @@ on the internal storage. Hold **Volume down + Power** to restart.
 | `... .sha256 is missing` or `The image file is damaged (bad checksum)` | the sidecar is missing, or the copy is incomplete | copy both files again, restart |
 | `The internal storage could not be read: is it encrypted?` | an encrypted Android storage | flash the stock firmware, decrypt or reset Android, start again |
 | `Not enough free space` | under about 13 GB free | free space from Android (flash the stock firmware back first), or start from a reset tablet |
-| `PARAM does not hold the stock image ... that this installer knows` | PARAM was changed by something else, or a firmware whose PARAM differs | flash the stock `T715XXU2CRH1` firmware with Odin, then the installer again. Nothing was written. Report it |
+| `PARAM does not hold the stock image ... that this installer knows`, after lines starting with `PARAM:` | PARAM was changed by something else, or a firmware whose PARAM differs; the `PARAM:` lines say which of its pictures differ from the stock ones, are missing or are not in it, and whether bytes after them are not zero | flash the stock `T715XXU2CRH1` firmware with Odin, all four slots (BL included), then the installer again. Nothing was written. If it says this again, post a photo of the screen in the XDA thread |
+| `PARAM holds the stock pictures, then N bytes S-Boot does not read` | PARAM holds the stock archive, and older bytes after it that a flash of the firmware left | nothing: the install goes on, the loader has zeros there, and `linux/PARAM-stock-backup.img` keeps PARAM as it was |
 | `Battery at N %` | under 30 % | plug the charger in: the install starts by itself at 30 % |
 | `Note: this chip's voltage fuses differ from the reference tablet's` | your chip's ASV fuse word is not the reference tablet's (`0x33010008`); the install goes on | report it with the install log: the CPU's voltage tables are the reference chip's ([ARM64.md](ARM64.md)) |
 | `Omarchy did not finish starting last time. The tablet restarts and tries again.` | the 64-bit system did not come up: the loader hands two starts back to the installer, then tries again | nothing, at first. If it never comes up, report it with the install log |
@@ -145,7 +149,9 @@ each step only once:
 
 1. **Checks, before any write**: S-Boot's version (`androidboot.bootloader` on its command line
    must be `T715XXU2CRH1`), PARAM's first 7340032 bytes (the archive of pictures S-Boot shows) must
-   have the sha256 of that firmware's stock image (`boot/golden/stock.sha256`), the battery, the
+   have the sha256 of that firmware's stock image (`boot/golden/stock.sha256`), or hold that
+   archive followed by bytes that are not zero, left by an earlier write (S-Boot reads only the
+   archive, and the loader has zeros there; since 2.1.2), the battery, the
    image's checksum, and the image itself (an aarch64 system carrying its kernel). The chip's
    voltage fuses are read and logged: the CPU tables are the reference tablet's (see
    [ARM64.md](ARM64.md)).

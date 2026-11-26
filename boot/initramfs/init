@@ -2040,6 +2040,130 @@ golden_param_sum() {
     head -c "$EXTENT" "$PARAM_DEV" 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
+# golden_members FILE: the members of the archive in FILE's first EXTENT
+# bytes, read as golden_forge reads them, one line each, "SHA256 SIZE NAME"
+# (the sha256 of the member's data; the name kept to letters, digits and
+# ._-, others shown as ?), then "end OFFSET": where the archive ends, its
+# first header block whose first byte is zero.  A size that is not octal, or
+# a member that runs past EXTENT, ends the list with "bad OFFSET" instead.
+golden_members() {
+    _gl_h=$RUNDIR/tar-head-list
+    _gl_off=0
+    while [ $((_gl_off + 512)) -le "$EXTENT" ]; do
+        if ! dd if="$1" of="$_gl_h" bs=512 skip=$((_gl_off / 512)) count=1 2>/dev/null; then
+            echo "bad $_gl_off"
+            return 0
+        fi
+        [ "$(head -c 1 "$_gl_h" | od -An -tu1 | tr -d ' ')" != 0 ] || break
+        _gl_name=$(head -c 100 "$_gl_h" | tr -d '\000' | tr -c 'A-Za-z0-9._-' '?')
+        _gl_size=$(dd if="$_gl_h" bs=1 skip=124 count=12 2>/dev/null | tr -d '\000 ')
+        case $_gl_size in
+        '' | *[!0-7]*)
+            echo "bad $_gl_off"
+            return 0
+            ;;
+        esac
+        _gl_size=$((0$_gl_size))
+        _gl_blocks=$(((_gl_size + 511) / 512))
+        if [ $((_gl_off + 512 + _gl_blocks * 512)) -gt "$EXTENT" ]; then
+            echo "bad $_gl_off"
+            return 0
+        fi
+        _gl_sum=$(dd if="$1" bs=512 skip=$((_gl_off / 512 + 1)) count="$_gl_blocks" 2>/dev/null |
+            head -c "$_gl_size" | sha256sum | cut -d' ' -f1)
+        echo "$_gl_sum $_gl_size ${_gl_name:-?}"
+        _gl_off=$((_gl_off + 512 + _gl_blocks * 512))
+    done
+    rm -f "$_gl_h"
+    echo "end $_gl_off"
+}
+
+# golden_archive FILE: what the archive in FILE's first EXTENT bytes is, for
+# a PARAM that is not, byte for byte, the stock image or the loader.
+# $RUNDIR/param-members gets golden_members' lines; GA_END is where the
+# archive ends, GA_SUM the sha256 of the first EXTENT bytes with those after
+# that end taken as zeros (the archive alone: S-Boot reads nothing else
+# there), GA_TAIL how many bytes after the end are not zero.  GA_END and
+# GA_SUM are empty when the archive cannot be read.  A flash of the stock
+# firmware writes its archive and may leave older bytes after it: the stock
+# archive with such bytes is still the stock image (GA_SUM is stock.sha256),
+# and the loader, forged from the members alone, has zeros there.
+golden_archive() {
+    GA_END=
+    GA_SUM=
+    GA_TAIL=
+    golden_members "$1" >"$RUNDIR/param-members"
+    GA_END=$(sed -n 's/^end //p' "$RUNDIR/param-members")
+    [ -n "$GA_END" ] || return 0
+    GA_SUM=$({
+        head -c "$GA_END" "$1"
+        head -c $((EXTENT - GA_END)) /dev/zero
+    } | sha256sum | cut -d' ' -f1)
+    GA_TAIL=$(dd if="$1" bs=512 skip=$((GA_END / 512)) count=$(((EXTENT - GA_END) / 512)) 2>/dev/null |
+        tr -d '\000' | wc -c | tr -d ' ')
+}
+
+# golden_param_report: after golden_archive "$PARAM_DEV", on screen and in
+# the log, how PARAM's archive differs from the stock one (stock.members):
+# the pictures that differ, are missing or are not in it, and the bytes
+# after its end, so that a photo of the screen says what this tablet's
+# PARAM holds.  Names and sizes of Samsung's pictures only: nothing of the
+# tablet's own (S-Boot keeps that after EXTENT, never read here).
+golden_param_report() {
+    while read -r _rp_sum _rp_size _rp_name; do
+        case $_rp_sum in
+        end | bad) ;;
+        *) log "golden: PARAM member $_rp_name, $_rp_size bytes, sha256 $_rp_sum" ;;
+        esac
+    done <"$RUNDIR/param-members"
+    _rp_bad=$(sed -n 's/^bad //p' "$RUNDIR/param-members")
+    if [ -n "$_rp_bad" ]; then
+        say "PARAM: its first $EXTENT bytes are not an archive of pictures that can be read (at byte $_rp_bad)."
+        return 0
+    fi
+    if [ -s "$GOLDEN_DIR/stock.members" ]; then
+        # "missing NAME SIZE", "differs NAME SIZE STOCK_SIZE", "extra NAME
+        # SIZE", "count N STOCK_N", in the stock archive's order, then this one's.
+        awk 'NR == FNR {
+                if ($1 != "end" && $1 != "bad") { s[$3] = $1; z[$3] = $2; o[++n] = $3 }
+                next
+             }
+             { st[$3] = $1; sz[$3] = $2; so[++m] = $3 }
+             END {
+                for (i = 1; i <= m; i++) {
+                    k = so[i]
+                    if (!(k in s)) print "missing " k " " sz[k]
+                    else if (s[k] != st[k]) print "differs " k " " z[k] " " sz[k]
+                }
+                for (i = 1; i <= n; i++) if (!(o[i] in st)) print "extra " o[i] " " z[o[i]]
+                if (n != m) print "count " n " " m
+             }' "$RUNDIR/param-members" "$GOLDEN_DIR/stock.members" >"$RUNDIR/param-diff"
+        _rp_n=0
+        while read -r _rp_what _rp_a _rp_b _rp_c; do
+            _rp_n=$((_rp_n + 1))
+            if [ "$_rp_n" -gt 8 ]; then
+                continue
+            fi
+            case $_rp_what in
+            missing) say "PARAM: $_rp_a is missing (stock: $_rp_b bytes)." ;;
+            differs) say "PARAM: $_rp_a is not the stock one ($_rp_b bytes, stock: $_rp_c)." ;;
+            extra) say "PARAM: $_rp_a ($_rp_b bytes) is not in the stock archive." ;;
+            count) say "PARAM: $_rp_a pictures, stock: $_rp_b." ;;
+            esac
+        done <"$RUNDIR/param-diff"
+        if [ "$_rp_n" -gt 8 ]; then
+            say "PARAM: and $((_rp_n - 8)) other differences."
+        elif [ "$_rp_n" = 0 ]; then
+            say "PARAM: the stock pictures, but the archive's headers or their order differ."
+        fi
+    else
+        say "PARAM: $(grep -c -v -E '^(end|bad) ' "$RUNDIR/param-members") pictures."
+    fi
+    if [ "${GA_TAIL:-0}" -gt 0 ]; then
+        say "PARAM: $GA_TAIL bytes after the archive (bytes $GA_END to $EXTENT) are not zero."
+    fi
+}
+
 # golden_write_param IMG: IMG (EXTENT bytes, checked by the caller) over
 # PARAM's first EXTENT bytes, read back against loader.sha256.
 golden_write_param() {
@@ -2061,8 +2185,12 @@ golden_write_param() {
 golden_forge_checked() {
     _gc_stock=$(head -c "$EXTENT" "$1" | sha256sum | cut -d' ' -f1)
     if [ "$_gc_stock" != "$(golden_val stock.sha256)" ]; then
-        err "golden: $1 is not the stock PARAM this installer knows ($_gc_stock)"
-        return 1
+        golden_archive "$1"
+        if [ -z "$GA_SUM" ] || [ "$GA_SUM" != "$(golden_val stock.sha256)" ]; then
+            err "golden: $1 is not the stock PARAM this installer knows ($_gc_stock)"
+            return 1
+        fi
+        log "golden: $1 holds the stock archive, and $GA_TAIL bytes after its end (byte $GA_END) that are not zero: the loader has zeros there"
     fi
     golden_forge "$1" "$RUNDIR/param-loader.img" || return 1
     _gc_sum=$(sha256sum "$RUNDIR/param-loader.img" | cut -d' ' -f1)
@@ -2694,6 +2822,13 @@ golden_main() {
         golden_install 1 || golden_save_log
         return 1
     fi
+    golden_archive "$PARAM_DEV"
+    if [ -n "$GA_SUM" ] && [ "$GA_SUM" = "$(golden_val stock.sha256)" ]; then
+        log "golden: PARAM holds the stock archive, and $GA_TAIL bytes after its end (byte $GA_END) that are not zero, left by an earlier write: the stock image all the same, installing"
+        say "PARAM holds the stock pictures, then $GA_TAIL bytes S-Boot does not read: the loader puts zeros there."
+        golden_install 1 || golden_save_log
+        return 1
+    fi
     log "golden: PARAM's first $EXTENT bytes are $_gm_sum: neither the stock image nor the loader"
     if [ -f "$_gm_root/$GOLDEN_MARK" ] && [ -f "$_gm_root/$GOLDEN_SAVED" ]; then
         say "Rescue: PARAM does not hold Omarchy's loader. Writing it back."
@@ -2706,7 +2841,8 @@ golden_main() {
         FAIL_REASON="Rescue: the loader could not be written back. Flash linux/PARAM-stock-backup.img to PARAM in download mode (see the install guide)."
         return 1
     fi
-    FAIL_REASON="PARAM does not hold the stock image of $(golden_val bootloader) that this installer knows. Nothing was written. Flash the stock $(golden_val bootloader) firmware with Odin, then this installer again."
+    golden_param_report
+    FAIL_REASON="PARAM does not hold the stock image of $(golden_val bootloader) that this installer knows. Nothing was written. Flash the stock $(golden_val bootloader) firmware with Odin (BL included), then this installer again. If it says this again, post a photo of this screen in the XDA thread."
     return 1
 }
 

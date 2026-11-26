@@ -64,7 +64,12 @@
 #     Scenarios: the fresh install, the resume (the root is there already:
 #     the copy is skipped), the loader's hand-back (exit 99 after
 #     t715.failwait), the rescue (PARAM holds neither image: the loader is
-#     forged again from the root's saved stock PARAM), the refusals (unknown
+#     forged again from the root's saved stock PARAM), a PARAM whose archive
+#     is the stock one with non-zero bytes left after its end (installed all
+#     the same, the loader's zeros over them; the same tolerance in the
+#     rescue's forge), a PARAM whose archive is not the stock one (the
+#     on-screen report of what differs against stock.members, then the
+#     refusal), the refusals (unknown
 #     PARAM, wrong bootloader, no or wrong sidecar, not an aarch64 image, a
 #     foreign root: exit 97, PARAM/CACHE/USERDATA byte-identical), the slots
 #     already in CACHE (the free one gets one generation above the other,
@@ -829,9 +834,10 @@ gwith_userdata() {
   umount "$W/gud"
   return "$rc"
 }
-# gplant_root KIND: hand-plant an installed root on USERDATA, as scenario 1's
-# seed leaves it (the marker, the kernel's slot); with KIND=golden, also the
-# .t715-golden marker and the saved stock PARAM (the rescue's).
+# gplant_root KIND [SAVED_PARAM]: hand-plant an installed root on USERDATA, as
+# scenario 1's seed leaves it (the marker, the kernel's slot); with KIND=golden,
+# also the .t715-golden marker and the saved stock PARAM (the rescue's),
+# SAVED_PARAM by default $GF/param-stock.img.
 gplant_root() {
   # shellcheck disable=SC2016  # expanded by the sh -c script
   gwith_userdata sh -c '
@@ -841,10 +847,10 @@ gplant_root() {
     cp "$2/kernel.slot" "$1/omarchy-arm64/usr/lib/t715-golden/kernel.slot"
     if [ "$3" = golden ]; then
       echo "Omarchy for the Galaxy Tab S2, 64 bits: installer 9.9.9-test" >"$1/omarchy-arm64/.t715-golden"
-      cp "$2/param-stock.img" "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img"
+      cp "${4:-$2/param-stock.img}" "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img"
       chmod 0600 "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img"
     fi
-  ' sh "$W/gud" "$GF" "$1"
+  ' sh "$W/gud" "$GF" "$1" "${2:-}"
 }
 # gslot_gen DEV SECTOR: the generation of the slot header there, read by the
 # init's own slot_gen (busybox sh, the same bytes the boots run), empty when
@@ -857,6 +863,13 @@ gcache_blocks() {
 }
 # gparam_loader_sum: the sha256 the fixtures' loader.sha256 names.
 gparam_loader_sum() { head -n 1 "$GF/golden/loader.sha256" | cut -d' ' -f1; }
+# gparam_stock_sum: the sha256 the fixtures' stock.sha256 names.
+gparam_stock_sum() { head -n 1 "$GF/golden/stock.sha256" | cut -d' ' -f1; }
+# garchive_end: where the stock archive ends (the fixtures' stock.end).
+garchive_end() { cat "$GF/stock.end"; }
+# gtail_len: the length of the non-zero run after the stock archive's end in
+# param-golden-tail.img (the fixtures' tail-run.bin).
+gtail_len() { stat -c %s "$GF/tail-run.bin"; }
 # gdisk_sums_noud: PARAM, SYSTEM and CACHE's content checksums only (the
 # scenarios whose USERDATA is expected to change).
 gdisk_sums_noud() {
@@ -1070,6 +1083,43 @@ EOF
     sh -c "[ \"\$(grep -c '^fnv-ok' '$W/gfnv.out')\" -eq \"\$(wc -l <'$GF/fnv-expected.txt')\" ] && ! grep -q 'fnv-BAD' '$W/gfnv.out'"
 }
 
+# scenario_golden_members_python: the init's golden_members and golden_archive
+# against Python (check-param.py's members): the lines but "end" must be
+# golden/stock.members byte for byte, the end line Python's members() gives,
+# and on the tail PARAM GA_SUM must be stock.sha256 with GA_TAIL the run's
+# length.  Needs no disk, only the golden initramfs' functions.
+scenario_golden_members_python() {
+  echo "--- scenario: golden, golden_members and golden_archive against Python (check-param.py's members)"
+  cat >"$W/gmem.sh" <<'EOF'
+log() { :; }; err() { echo "err: $*" >&2; return 0; }; warn() { :; }
+. /work/golden-fns.sh
+RUNDIR=/work/golden-run; mkdir -p "$RUNDIR"
+GOLDEN_DIR=/work/root-gfns/lib/t715-golden
+EXTENT=$(golden_val extent)
+golden_members /t/golden-fixtures/param-stock.img >/work/gmembers-stock.out
+golden_archive /t/golden-fixtures/param-golden-tail.img
+echo "ga-sum $GA_SUM"
+echo "ga-end $GA_END"
+echo "ga-tail $GA_TAIL"
+echo "stock-sum $(golden_val stock.sha256)"
+EOF
+  "$W/root-gfns/bin/busybox" sh "$W/gmem.sh" >"$W/gmem.out" 2>&1
+  sed 's/^/        | /' "$W/gmem.out"
+  local gend gtail
+  gend=$(garchive_end)
+  gtail=$(gtail_len)
+  check "golden_members' lines but end are stock.members, byte for byte" \
+    cmp -s <(grep -v '^end ' "$W/gmembers-stock.out") "$GF/golden/stock.members"
+  check "golden_members' end line is Python members()'s end ($gend)" \
+    grep -qx "end $gend" "$W/gmembers-stock.out"
+  check "golden_archive on the tail PARAM: GA_SUM is stock.sha256" \
+    grep -qx "ga-sum $(gparam_stock_sum)" "$W/gmem.out"
+  check "golden_archive on the tail PARAM: GA_END is the archive's end ($gend)" \
+    grep -qx "ga-end $gend" "$W/gmem.out"
+  check "golden_archive on the tail PARAM: GA_TAIL is the run's length ($gtail)" \
+    grep -qx "ga-tail $gtail" "$W/gmem.out"
+}
+
 scenario_golden_fresh() {
   echo "--- scenario: golden, fresh install (stock PARAM, image + sidecar, Android's CACHE)"
   greset_all
@@ -1185,7 +1235,7 @@ scenario_golden_rescue() {
 }
 
 scenario_golden_unknown_param() {
-  echo "--- scenario: golden, PARAM holds neither and nothing is installed: refused, exit 97"
+  echo "--- scenario: golden, PARAM holds neither and nothing is installed: the report, refused, exit 97"
   greset_all
   gset_param "$W/param-golden-changed.img"
   local before after
@@ -1193,13 +1243,130 @@ scenario_golden_unknown_param() {
   grun gunknown
   local rc=$GRC
   after=$(gdisk_sums)
+  # byte 4096 is inside download.jpg's data: its size comes from the
+  # fixtures' stock.members, not from this script's arithmetic
+  local dsize
+  dsize=$(awk '$3 == "download.jpg" { print $2 }' "$GF/golden/stock.members")
   check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
   check "logged: neither the stock image nor the loader" log_has gunknown "neither the stock image nor the loader"
-  check "said on screen: not the stock image this installer knows" \
-    log_has gunknown "t715-say: PARAM does not hold the stock image of T715XXU2CRH1 that this installer knows. Nothing was written."
+  check "said on screen: the changed member named" \
+    log_has gunknown "t715-say: PARAM: download.jpg is not the stock one ($dsize bytes, stock: $dsize)."
+  check "said on screen: the refusal text" \
+    log_has gunknown "t715-say: PARAM does not hold the stock image of T715XXU2CRH1 that this installer knows. Nothing was written. Flash the stock T715XXU2CRH1 firmware with Odin (BL included), then this installer again. If it says this again, post a photo of this screen in the XDA thread."
   check "waiting line said on screen" log_has gunknown "t715-say: waiting: hold Power and Volume down to restart"
   gcheck_nothing_written "$before" "$after"
   [[ $rc -eq 97 ]] || show_log gunknown
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_param_tail: PARAM's first EXTENT bytes are not the stock
+# image, but its archive is the stock one once the bytes after its end are
+# taken as zeros (an earlier write left a run of non-zero bytes there): the
+# installer installs exactly as for a stock PARAM, and the loader it writes
+# has zeros in place of those bytes.
+scenario_golden_param_tail() {
+  echo "--- scenario: golden, PARAM holds the stock archive with leftover bytes after its end: installed, exit 99"
+  greset_all
+  gset_param "$GF/param-golden-tail.img"
+  grun gtail
+  local rc=$GRC
+  local gend gtail
+  gend=$(garchive_end)
+  gtail=$(gtail_len)
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the stock archive with the leftover bytes, installing" \
+    log_has gtail "golden: PARAM holds the stock archive, and $gtail bytes after its end (byte $gend) that are not zero, left by an earlier write: the stock image all the same, installing"
+  check "said on screen: the leftover bytes, the loader puts zeros there" \
+    log_has gtail "t715-say: PARAM holds the stock pictures, then $gtail bytes S-Boot does not read: the loader puts zeros there."
+  check "logged: golden_forge_checked's tolerance for the copy of PARAM" \
+    log_has gtail "holds the stock archive, and $gtail bytes after its end (byte $gend) that are not zero: the loader has zeros there"
+  check "the loader forged as expected" log_has gtail "golden: the loader forged from the stock PARAM is the expected one"
+  check "PARAM holds the loader" log_has gtail "golden: PARAM holds the loader (sha256"
+  check "PARAM's first $GEXTENT bytes hash to loader.sha256" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "the loader has zeros where the leftover bytes were" \
+    cmp -s <(dd if="$(g_param_dev)" bs=1 skip=1048576 count="$gtail" status=none) <(head -c "$gtail" /dev/zero)
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$GF/param-golden-tail.img")
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "PARAM-stock-backup.img is the raw PARAM, leftover bytes included, with its sidecar" gwith_userdata sh -c '
+    cmp -s "$1/media/0/linux/PARAM-stock-backup.img" "$2/param-golden-tail.img"
+    [ "$(cat "$1/media/0/linux/PARAM-stock-backup.img.sha256")" = "$(sha256sum "$2/param-golden-tail.img" | cut -d" " -f1)  PARAM-stock-backup.img" ]
+  ' sh "$W/gud" "$GF"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "the root's saved PARAM is the raw PARAM too, mode 0600" gwith_userdata sh -c '
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$2/param-golden-tail.img"
+    [ "$(stat -c %a "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img")" = 600 ]
+  ' sh "$W/gud" "$GF"
+  [[ $rc -eq 99 ]] || show_log gtail
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_param_other: PARAM's archive is not the stock one (no
+# lpm.jpg, no warning.jpg, an extra custom.jpg) and nothing is installed:
+# the on-screen report says what differs, then the refusal; nothing written.
+scenario_golden_param_other() {
+  echo "--- scenario: golden, PARAM's archive is not the stock one (missing and extra pictures): the report, refused, exit 97"
+  greset_all
+  gset_param "$GF/param-golden-other.img"
+  local before after
+  before=$(gdisk_sums)
+  grun gother
+  local rc=$GRC
+  after=$(gdisk_sums)
+  local lpm warning csize csum n m
+  lpm=$(awk '$3 == "lpm.jpg" { print $2 }' "$GF/golden/stock.members")
+  warning=$(awk '$3 == "warning.jpg" { print $2 }' "$GF/golden/stock.members")
+  csize=$(stat -c %s "$GF/custom.jpg")
+  csum=$(sha256sum "$GF/custom.jpg" | cut -d' ' -f1)
+  n=$(grep -c . "$GF/param-other.members")
+  m=$(grep -c . "$GF/golden/stock.members")
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: neither the stock image nor the loader" log_has gother "neither the stock image nor the loader"
+  check "said on screen: lpm.jpg missing" log_has gother "t715-say: PARAM: lpm.jpg is missing (stock: $lpm bytes)."
+  check "said on screen: warning.jpg missing" log_has gother "t715-say: PARAM: warning.jpg is missing (stock: $warning bytes)."
+  check "said on screen: custom.jpg not in the stock archive" \
+    log_has gother "t715-say: PARAM: custom.jpg ($csize bytes) is not in the stock archive."
+  check "said on screen: the picture counts" log_has gother "t715-say: PARAM: $n pictures, stock: $m."
+  check "logged: PARAM member custom.jpg, its size and sha256" \
+    log_has gother "golden: PARAM member custom.jpg, $csize bytes, sha256 $csum"
+  check "exactly one log line for custom.jpg" \
+    sh -c "[ \"\$(grep -cF 'golden: PARAM member custom.jpg,' '$W/gother.log')\" -eq 1 ]"
+  check "said on screen: the refusal text" \
+    log_has gother "t715-say: PARAM does not hold the stock image of T715XXU2CRH1 that this installer knows. Nothing was written. Flash the stock T715XXU2CRH1 firmware with Odin (BL included), then this installer again. If it says this again, post a photo of this screen in the XDA thread."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gother
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_rescue_tail: as the rescue, but the root's saved stock PARAM
+# is one with leftover bytes after its archive's end: the tolerance of
+# golden_forge_checked applies to it too, the loader goes back into PARAM.
+scenario_golden_rescue_tail() {
+  echo "--- scenario: golden, rescue with a saved stock PARAM that has leftover bytes after its archive (PARAM changed)"
+  greset_all
+  gplant_root golden "$GF/param-golden-tail.img"
+  gset_param "$W/param-golden-changed.img"
+  grun gresctail
+  local rc=$GRC
+  local gend gtail
+  gend=$(garchive_end)
+  gtail=$(gtail_len)
+  check "restart after the loader is back (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: neither the stock image nor the loader" log_has gresctail "neither the stock image nor the loader"
+  check "said on screen: writing the loader back" log_has gresctail "t715-say: Rescue: PARAM does not hold Omarchy's loader. Writing it back."
+  check "logged: golden_forge_checked's tolerance for the saved PARAM" \
+    log_has gresctail "holds the stock archive, and $gtail bytes after its end (byte $gend) that are not zero: the loader has zeros there"
+  check "the loader was forged from the saved stock PARAM" log_has gresctail "golden: the loader forged from the stock PARAM is the expected one"
+  check "said on screen: back in PARAM, restarting" log_has gresctail "t715-say: Rescue: the loader is back in PARAM. Restarting."
+  check "PARAM's first $GEXTENT bytes are the loader now" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$W/param-golden-changed.img")
+  [[ $rc -eq 99 ]] || show_log gresctail
   detach_inner_loops
   ip link del usb0 2>/dev/null || true
 }
@@ -1971,6 +2138,7 @@ in_container() {
   # --- the installer of the 64-bit system (t715.golden): its own disk ---
   make_golden_fixtures
   scenario_golden_forge_python
+  scenario_golden_members_python
   if attach_disk "$W/disk-golden.img" 4; then
     ok "the golden synthetic disk on $OUTER, ${OUTER#/dev/}p4 named USERDATA"
   else
@@ -1981,6 +2149,9 @@ in_container() {
   scenario_golden_handback
   scenario_golden_rescue
   scenario_golden_unknown_param
+  scenario_golden_param_tail
+  scenario_golden_param_other
+  scenario_golden_rescue_tail
   scenario_golden_wrong_bootloader
   scenario_golden_no_sidecar
   scenario_golden_bad_sidecar
@@ -2140,19 +2311,22 @@ logo = b"\xff\xd8" + bytes(((i * 7 + 3) & 0xFF) for i in range(3000))
 
 # the stock PARAM: a ustar archive of the pictures S-Boot shows, zero-padded
 # to EXTENT, then S-Boot's own data (never touched by the installer)
-buf = io.BytesIO()
-with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
-    for name, data in [
-        ("adv-env.img", bytes(range(256)) * 4),
-        ("download.jpg", b"\xff\xd8\xff\xe0" + bytes((i * 13) & 0xFF for i in range(2048))),
-        ("logo.jpg", b"\xff\xd8" + bytes((i * 11 + 5) & 0xFF for i in range(4096))),
-        ("lpm.jpg", b"\xff\xd8" + bytes((i * 3 + 1) & 0xFF for i in range(1024))),
-        ("warning.jpg", b"\xff\xd8" + bytes((i * 5 + 2) & 0xFF for i in range(1536))),
-    ]:
-        ti = tarfile.TarInfo(name)
-        ti.size = len(data)
-        tf.addfile(ti, io.BytesIO(data))
-stock = buf.getvalue()
+pictures = [
+    ("adv-env.img", bytes(range(256)) * 4),
+    ("download.jpg", b"\xff\xd8\xff\xe0" + bytes((i * 13) & 0xFF for i in range(2048))),
+    ("logo.jpg", b"\xff\xd8" + bytes((i * 11 + 5) & 0xFF for i in range(4096))),
+    ("lpm.jpg", b"\xff\xd8" + bytes((i * 3 + 1) & 0xFF for i in range(1024))),
+    ("warning.jpg", b"\xff\xd8" + bytes((i * 5 + 2) & 0xFF for i in range(1536))),
+]
+def ustar(members):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+        for name, data in members:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    return buf.getvalue()
+stock = ustar(pictures)
 assert len(stock) <= EXTENT, len(stock)
 stock = stock + bytes(EXTENT - len(stock))
 m = b"S-Boot data after the loader's part, kept as it is. "
@@ -2160,6 +2334,37 @@ marker = (m * (DISK // len(m) + 1))[:DISK - EXTENT]
 assert len(marker) == DISK - EXTENT and marker.strip(b"\0")
 stock_full = stock + marker
 (out / "param-stock.img").write_bytes(stock_full)
+
+# the stock archive's members, as the build's --golden wants them (what
+# check-param.py --members prints), and where the archive ends: the tests
+# read both, instead of trusting this script's arithmetic
+stock_members, archive_end = cp.members(stock, EXTENT)
+(out / "golden" / "stock.members").write_text(
+    "".join(f"{digest} {size} {name}\n" for name, size, digest in stock_members))
+(out / "stock.end").write_text(f"{archive_end}\n")
+
+# a PARAM whose archive is the stock one, but with a run of non-zero bytes
+# after the archive's end (an earlier write left them there; S-Boot reads
+# the archive only)
+tail_run = b"leftover bytes of an older PARAM"
+assert b"\0" not in tail_run and archive_end <= 1048576 and 1048576 + len(tail_run) <= EXTENT
+tail = bytearray(stock_full)
+tail[1048576:1048576 + len(tail_run)] = tail_run
+(out / "param-golden-tail.img").write_bytes(bytes(tail))
+(out / "tail-run.bin").write_bytes(tail_run)
+
+# a PARAM whose archive is not the stock one: no lpm.jpg, no warning.jpg,
+# one extra custom.jpg
+custom = b"\xff\xd8" + bytes((i * 17 + 9) & 0xFF for i in range(400))
+other_pictures = [p for p in pictures if p[0] not in ("lpm.jpg", "warning.jpg")] + [("custom.jpg", custom)]
+other = ustar(other_pictures)
+assert len(other) <= EXTENT, len(other)
+other = other + bytes(EXTENT - len(other))
+(out / "param-golden-other.img").write_bytes(other + marker)
+(out / "custom.jpg").write_bytes(custom)
+other_members, _ = cp.members(other, EXTENT)
+(out / "param-other.members").write_text(
+    "".join(f"{digest} {size} {name}\n" for name, size, digest in other_members))
 
 (out / "golden" / "extent").write_text(f"{EXTENT}\n")
 (out / "golden" / "stock.sha256").write_text(
@@ -2230,7 +2435,7 @@ else
   echo "  FAIL  the build log lacks the golden note"; HFAIL=$((HFAIL + 1))
 fi
 for f in lib/t715-golden/logo.jpg lib/t715-golden/stock.sha256 lib/t715-golden/loader.sha256 \
-  lib/t715-golden/extent lib/t715-golden/bootloader lib/t715-golden/release; do
+  lib/t715-golden/stock.members lib/t715-golden/extent lib/t715-golden/bootloader lib/t715-golden/release; do
   if grep -q " $f\$" "$TMP/g/initramfs.manifest.txt"; then echo "  PASS  the archive has $f"
   else echo "  FAIL  the archive lacks $f"; HFAIL=$((HFAIL + 1)); fi
 done

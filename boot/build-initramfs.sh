@@ -43,6 +43,9 @@
 #                          /init puts in the tablet's own PARAM in place of
 #                          Samsung's; stock.sha256 and loader.sha256, those of
 #                          PARAM's first EXTENT bytes before and after;
+#                          stock.members, the stock archive's members
+#                          (sha256, size, name each), to say on screen how
+#                          a PARAM it does not know differs;
 #                          extent; bootloader, the one bootloader the loader
 #                          is made for; release, the installer's version.
 #                          No byte of Samsung's in it: this build is public.
@@ -190,7 +193,7 @@ GDIR="$(mktemp -d)"
 GOLDEN_NOTE=""
 if [[ -n "$GOLDEN" ]]; then
   [[ -d "$GOLDEN" ]] || die "--golden: $GOLDEN is not a directory"
-  for f in logo.jpg stock.sha256 loader.sha256 extent bootloader release; do
+  for f in logo.jpg stock.sha256 loader.sha256 stock.members extent bootloader release; do
     [[ -s "$GOLDEN/$f" ]] || die "--golden: $GOLDEN/$f is missing or empty"
     cp "$GOLDEN/$f" "$GDIR/$f"
   done
@@ -198,6 +201,9 @@ if [[ -n "$GOLDEN" ]]; then
     [[ "$(head -n 1 "$GDIR/$f" | cut -d' ' -f1)" =~ ^[0-9a-f]{64}$ ]] || die "--golden: $f is not a lower-case sha256"
   done
   [[ "$(head -n 1 "$GDIR/extent")" =~ ^[1-9][0-9]*$ ]] || die "--golden: extent is not a number of bytes"
+  if grep -q -v -E '^[0-9a-f]{64} [0-9]+ [A-Za-z0-9._-]+$' "$GDIR/stock.members"; then
+    die "--golden: stock.members has a line that is not \"SHA256 SIZE NAME\""
+  fi
   [[ "$(head -n 1 "$GDIR/bootloader")" =~ ^[A-Z0-9]+$ ]] || die "--golden: bootloader is not a firmware version"
   [[ "$(head -n 1 "$GDIR/release")" =~ ^[0-9A-Za-z.+-]+$ ]] || die "--golden: release is not a version"
   [[ "$(head -c 2 "$GDIR/logo.jpg" | od -An -tx1 | tr -d ' ')" == ffd8 ]] || die "--golden: logo.jpg is not a JPEG"
@@ -360,7 +366,7 @@ for f in ("param.img.gz", "loader.sha256", "stock.sha256", "extent", "also.sha25
         items["lib/t715-paramrescue/" + f] = (0o100644, open(os.path.join(pr, f), "rb").read(), 0, 0)
 # The installer of the 64-bit system (boot/build-initramfs.sh --golden).
 gd = "/in/golden"
-for f in ("logo.jpg", "stock.sha256", "loader.sha256", "extent", "bootloader", "release"):
+for f in ("logo.jpg", "stock.sha256", "loader.sha256", "stock.members", "extent", "bootloader", "release"):
     if os.path.exists(os.path.join(gd, f)):
         items.setdefault("lib", (0o040755, b"", 0, 0))
         items.setdefault("lib/t715-golden", (0o040755, b"", 0, 0))
