@@ -37,6 +37,15 @@
 #                          (t715.paramrescue, on by default with the option).
 #                          A tablet's own PARAM is never published: keep
 #                          such a build private.
+#   /lib/t715-golden/      only with --golden DIR: the installer of the 64-bit
+#                          system (t715.golden, on by default with the
+#                          option): logo.jpg, the loader's forged logo that
+#                          /init puts in the tablet's own PARAM in place of
+#                          Samsung's; stock.sha256 and loader.sha256, those of
+#                          PARAM's first EXTENT bytes before and after;
+#                          extent; bootloader, the one bootloader the loader
+#                          is made for; release, the installer's version.
+#                          No byte of Samsung's in it: this build is public.
 #   empty dirs             proc sys run tmp newroot userdata ...
 #
 # Usage: bash boot/build-initramfs.sh [--out DIR] [--knobs "t715.shell=1 ..."]
@@ -44,6 +53,7 @@
 #                                        [--paramrescue PARAM_IMG --paramrescue-stock SHA256
 #                                         [--paramrescue-extent BYTES]
 #                                         [--paramrescue-also PARAM_IMG ...]]
+#                                        [--golden DIR]
 #
 # Everything runs in Docker (native arm64 Debian trixie, pinned by digest):
 # hash-checked download, `file`/`readelf` checks, applet list, cpio
@@ -62,6 +72,7 @@ PARAMRESCUE=""
 PARAMRESCUE_STOCK=""
 PARAMRESCUE_EXTENT=""
 PARAMRESCUE_ALSO=()
+GOLDEN=""
 
 # Debian trixie image index (multi-arch), pinned; used as linux/arm64.
 BASE_IMAGE="debian@sha256:8c4733a92aacd0bcff3779eadc35a4a5147f36cb20a5fcb56504cbc740212259"
@@ -81,7 +92,7 @@ FSCK_URLS=(
   "http://snapshot.debian.org/archive/debian/20261020T000000Z/pool/main/e/e2fsprogs/e2fsck-static_1.47.2-3%2Bb12_armhf.deb"
 )
 
-usage() { sed -n '2,43p' "$0"; }
+usage() { sed -n '2,60p' "$0"; }
 die() { echo "error: $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
@@ -98,6 +109,8 @@ while [[ $# -gt 0 ]]; do
     --paramrescue-extent=*) PARAMRESCUE_EXTENT="${1#--paramrescue-extent=}"; shift ;;
     --paramrescue-also) [[ $# -ge 2 ]] || die "--paramrescue-also needs a value"; PARAMRESCUE_ALSO+=("$2"); shift 2 ;;
     --paramrescue-also=*) PARAMRESCUE_ALSO+=("${1#--paramrescue-also=}"); shift ;;
+    --golden) [[ $# -ge 2 ]] || die "--golden needs a value"; GOLDEN="$2"; shift 2 ;;
+    --golden=*) GOLDEN="${1#--golden=}"; shift ;;
     --knobs=*) KNOBS="${1#--knobs=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -167,6 +180,35 @@ if [[ -n "$PARAMRESCUE" ]]; then
   esac
 fi
 
+# --- the installer of the 64-bit system (t715.golden) ----------------------
+# --golden DIR: DIR holds logo.jpg (the loader's logo, as the loader's build
+# writes it next to its PARAM image), stock.sha256 and loader.sha256 (the
+# sha256 of PARAM's first EXTENT bytes as the firmware ships them, and once
+# logo.jpg replaces Samsung's: the installer writes nothing else), extent,
+# bootloader and release (one word each).  Checked here, packed as they are.
+GDIR="$(mktemp -d)"
+GOLDEN_NOTE=""
+if [[ -n "$GOLDEN" ]]; then
+  [[ -d "$GOLDEN" ]] || die "--golden: $GOLDEN is not a directory"
+  for f in logo.jpg stock.sha256 loader.sha256 extent bootloader release; do
+    [[ -s "$GOLDEN/$f" ]] || die "--golden: $GOLDEN/$f is missing or empty"
+    cp "$GOLDEN/$f" "$GDIR/$f"
+  done
+  for f in stock.sha256 loader.sha256; do
+    [[ "$(head -n 1 "$GDIR/$f" | cut -d' ' -f1)" =~ ^[0-9a-f]{64}$ ]] || die "--golden: $f is not a lower-case sha256"
+  done
+  [[ "$(head -n 1 "$GDIR/extent")" =~ ^[1-9][0-9]*$ ]] || die "--golden: extent is not a number of bytes"
+  [[ "$(head -n 1 "$GDIR/bootloader")" =~ ^[A-Z0-9]+$ ]] || die "--golden: bootloader is not a firmware version"
+  [[ "$(head -n 1 "$GDIR/release")" =~ ^[0-9A-Za-z.+-]+$ ]] || die "--golden: release is not a version"
+  [[ "$(head -c 2 "$GDIR/logo.jpg" | od -An -tx1 | tr -d ' ')" == ffd8 ]] || die "--golden: logo.jpg is not a JPEG"
+  [[ $(wc -c <"$GDIR/logo.jpg") -le 1048576 ]] || die "--golden: logo.jpg is over 1 MiB"
+  GOLDEN_NOTE=", golden: installer $(head -n 1 "$GDIR/release") for $(head -n 1 "$GDIR/bootloader"), loader sha256:$(head -c 12 "$GDIR/loader.sha256")"
+  case " $KNOBS " in
+  *" t715.golden="*) ;;
+  *) KNOBS="${KNOBS:+$KNOBS }t715.golden=1" ;;
+  esac
+fi
+
 # --- tools image (file, readelf, python3; shellcheck for the tests) -------
 if ! docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
   echo ">>> building Docker image $TOOLS_IMAGE"
@@ -210,7 +252,7 @@ INIT_SHA="$(sha256_of "$INIT_SRC")"
 # GPU modules, in load order (file names sort in that order).
 MODDIR="$(mktemp -d)"
 MODTREE="$(mktemp -d)"
-trap 'rm -rf "$MODDIR" "$MODTREE" "$PRDIR"' EXIT
+trap 'rm -rf "$MODDIR" "$MODTREE" "$PRDIR" "$GDIR"' EXIT
 MODREL=""
 MODSHA=""
 if [[ -n "$MODULES_TAR" ]]; then
@@ -229,12 +271,12 @@ if [[ -n "$MODULES_TAR" ]]; then
 fi
 # The modules' tarball hash names the tree: /init refreshes a persistent
 # root's copy when it changes (same release string, other build).
-BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}${PRSHA:+, paramrescue: the first ${PARAMRESCUE_EXTENT} bytes of PARAM, sha256:${PRSHA:0:12}}$ALSO_NOTE"
+BUILD_ID="init sha256:${INIT_SHA:0:12}, busybox-static $BB_VERSION armhf, e2fsck-static $FSCK_VERSION armhf${KNOBS:+, knobs: $KNOBS}${MODULES_TAR:+, modules: gpu-sched panfrost + lib/modules/$MODREL (sha256:${MODSHA:0:12})}${PRSHA:+, paramrescue: the first ${PARAMRESCUE_EXTENT} bytes of PARAM, sha256:${PRSHA:0:12}}$ALSO_NOTE$GOLDEN_NOTE"
 
 # shellcheck disable=SC2016  # expanded by the container's bash
 docker run --rm --platform linux/arm64 \
   -v "$DEB:/in/busybox.deb:ro" -v "$FSCK:/in/e2fsck.deb:ro" -v "$INIT_SRC:/in/init:ro" -v "$CPIO_PY:/in/cpio_newc.py:ro" \
-  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$PRDIR:/in/paramrescue:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
+  -v "$MODDIR:/in/modules:ro" -v "$MODTREE:/in/modtree:ro" -v "$PRDIR:/in/paramrescue:ro" -v "$GDIR:/in/golden:ro" -v "$OUT:/out" -e KNOBS="$KNOBS" -e BUILD_ID="$BUILD_ID" "$TOOLS_IMAGE" bash -euo pipefail -c '
 cd /tmp
 dpkg-deb -x /in/busybox.deb deb
 dpkg-deb -x /in/e2fsck.deb fsckdeb
@@ -316,6 +358,13 @@ for f in ("param.img.gz", "loader.sha256", "stock.sha256", "extent", "also.sha25
         items.setdefault("lib", (0o040755, b"", 0, 0))
         items.setdefault("lib/t715-paramrescue", (0o040755, b"", 0, 0))
         items["lib/t715-paramrescue/" + f] = (0o100644, open(os.path.join(pr, f), "rb").read(), 0, 0)
+# The installer of the 64-bit system (boot/build-initramfs.sh --golden).
+gd = "/in/golden"
+for f in ("logo.jpg", "stock.sha256", "loader.sha256", "extent", "bootloader", "release"):
+    if os.path.exists(os.path.join(gd, f)):
+        items.setdefault("lib", (0o040755, b"", 0, 0))
+        items.setdefault("lib/t715-golden", (0o040755, b"", 0, 0))
+        items["lib/t715-golden/" + f] = (0o100644, open(os.path.join(gd, f), "rb").read(), 0, 0)
 for line in open(applets):
     path = line.strip()
     if not path or path in ("linuxrc", "sbin/init") or path in items:

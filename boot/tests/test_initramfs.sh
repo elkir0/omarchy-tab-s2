@@ -55,6 +55,24 @@
 #     follows is kept, a loader of the list of those left alone
 #     (--paramrescue-also) is left alone, a malformed length is refused.
 #
+#     The installer of the 64-bit system (t715.golden=1, a build with --golden
+#     DIR): a second synthetic disk (PARAM 8 MiB, SYSTEM with the Wi-Fi NVRAM
+#     and the Bluetooth patch RAM, CACHE 200 MiB as Android leaves it: one
+#     file system spanning the partition, USERDATA with omarchy-arm64.img
+#     and its .sha256 sidecar in media/0/linux; the image is an ext4 root
+#     tree carrying usr/lib/t715-golden/kernel.slot, a generation-0 slot).
+#     Scenarios: the fresh install, the resume (the root is there already:
+#     the copy is skipped), the loader's hand-back (exit 99 after
+#     t715.failwait), the rescue (PARAM holds neither image: the loader is
+#     forged again from the root's saved stock PARAM), the refusals (unknown
+#     PARAM, wrong bootloader, no or wrong sidecar, not an aarch64 image, a
+#     foreign root: exit 97, PARAM/CACHE/USERDATA byte-identical), the slots
+#     already in CACHE (the free one gets one generation above the other,
+#     the file system and the other slot stay byte-identical), and the forge
+#     and fnv1a64 of the init against Python (boot/golden/check-param.py's
+#     forge).  All the golden fixtures are synthetic, generated on the host
+#     with python3.
+#
 # Usage: bash boot/tests/test_initramfs.sh
 # (internal: --in-container CPIO_GZ, run inside the test container)
 set -euo pipefail
@@ -86,8 +104,10 @@ node() { echo "$W/dev/${1#/dev/}"; }
 
 detach_inner_loops() {
   local dev
-  # The init attached media/0/linux/rootfs.img from its own namespace.
-  for dev in $(losetup -a 2>/dev/null | awk -F: '/media\/0\/linux\/rootfs[^\/]*\.img/ {print $1}'); do
+  # The init attached media/0/linux/rootfs.img or omarchy-arm64.img from its
+  # own namespace (losetup shows the backing file with or without its path,
+  # depending on whether that namespace is still alive).
+  for dev in $(losetup -a 2>/dev/null | awk -F: '/(media\/0\/linux\/)?(rootfs|omarchy-arm64)[^\/]*\.img/ {print $1}'); do
     losetup -d "$(node "$dev")" 2>/dev/null || true
   done
 }
@@ -282,15 +302,15 @@ disk_sums() {
   echo "userdata=$(dd if="$W/disk.img" bs=512 skip=12288 count=131072 status=none | sha256sum | cut -d' ' -f1)"
 }
 
-attach_disk() {  # [IMAGE]: the disk image to attach (the fixtures' by default)
-  local n
+attach_disk() {  # [IMAGE] [PART_WITH_USERDATA]: the disk image to attach (the fixtures' by default)
+  local n part=${2:-3}
   n=$(losetup -f)
   losetup -P "$(node "$n")" "${1:-$W/disk.img}"
   LOOPS+=("$n")
   OUTER=$n
   local i
   for ((i = 0; i < 20; i++)); do
-    grep -qx "PARTNAME=USERDATA" "/sys/class/block/${n#/dev/}p3/uevent" 2>/dev/null && return 0
+    grep -qx "PARTNAME=USERDATA" "/sys/class/block/${n#/dev/}p$part/uevent" 2>/dev/null && return 0
     sleep 0.5
   done
   return 1
@@ -727,6 +747,524 @@ PARTS
   detach_disk
 }
 
+# ===========================================================================
+# the installer of the 64-bit system (t715.golden): its fixtures, helpers
+# and scenarios.  Everything here is synthetic; the golden directory and the
+# PARAM images were generated on the host by python3 (boot/golden/check-param.py's
+# forge gives loader.sha256 and param-loader.img), and are mounted read-only
+# at $GF.
+# ===========================================================================
+GF=/t/golden-fixtures
+GOLDEN_CPIO=/t/initramfs-golden.cpio.gz
+GEXTENT=7340032                    # the fixtures' extent (the loader's part of PARAM)
+GSLOT_SECTORS=140                  # the fixtures' kernel.slot: 71680 bytes = 140 sectors
+GOLD_CMD="androidboot.bootloader=T715XXU2CRH1 t715.golden=1 t715.rootwait=30 t715.failwait=2"
+
+prepare_golden_boot() {  # NAME [KNOBS]: as prepare_boot, with the golden initramfs
+  local cpio=$CPIO
+  CPIO=$GOLDEN_CPIO
+  prepare_boot "$@"
+  CPIO=$cpio
+}
+
+# The golden disk's partitions, by number: PARAM SYSTEM CACHE USERDATA.
+g_param_dev()  { echo "$(node "$OUTER")p1"; }
+g_system_dev() { echo "$(node "$OUTER")p2"; }
+g_cache_dev()  { echo "$(node "$OUTER")p3"; }
+g_ud_dev()     { echo "$(node "$OUTER")p4"; }
+
+# gpart_sum START COUNT: one partition's content checksum, in sectors.
+gpart_sum() { dd if="$W/disk-golden.img" bs=512 skip="$1" count="$2" status=none | sha256sum | cut -d' ' -f1; }
+gdisk_sums() {
+  sync
+  echo "param=$(gpart_sum 2048 16384)"
+  echo "system=$(gpart_sum 18432 16384)"
+  echo "cache=$(gpart_sum 34816 409600)"
+  echo "userdata=$(gpart_sum 444416 131072)"
+}
+
+gwait_node() {  # DEV: wait for the devtmpfs node (never write where it is not there yet)
+  local d=$1 i
+  for ((i = 0; i < 20; i++)); do
+    [ -b "$d" ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+gset_param() {  # IMG: PARAM holds this 8 MiB image
+  local d
+  d=$(g_param_dev)
+  gwait_node "$d" || { ko "PARAM is not a block device here ($d)"; return 1; }
+  blockdev --setrw "$d" 2>/dev/null || true
+  dd if="$1" of="$d" bs=1M conv=notrunc,fsync status=none
+}
+# greset_all [USERDATA_IMG]: the golden disk's factory state (stock PARAM,
+# Android's CACHE, USERDATA holding the given image, by default the factory
+# one: the image and its sidecar in media/0/linux, no root).  The variant
+# images are built offline, so no read-write mount is needed to set up.
+greset_all() {
+  local d
+  for d in p1 p2 p3 p4; do blockdev --setrw "$(node "$OUTER")$d" 2>/dev/null || true; done
+  gset_param "$GF/param-stock.img" || return 1
+  dd if="$W/golden-system.img" of="$(g_system_dev)" bs=1M conv=notrunc status=none
+  dd if="$W/golden-cache.img" of="$(g_cache_dev)" bs=1M conv=notrunc status=none
+  dd if="${1:-$W/golden-userdata-factory.img}" of="$(g_ud_dev)" bs=1M conv=notrunc status=none
+}
+# gwith_userdata CMD...: run CMD with the golden disk's USERDATA on $W/gud.
+gwith_userdata() {
+  mkdir -p "$W/gud"
+  blockdev --setrw "$(g_ud_dev)" || return 1
+  mount "$(g_ud_dev)" "$W/gud" || return 1
+  local rc=0
+  "$@" || rc=$?
+  umount "$W/gud"
+  return "$rc"
+}
+# gplant_root KIND: hand-plant an installed root on USERDATA, as scenario 1's
+# seed leaves it (the marker, the kernel's slot); with KIND=golden, also the
+# .t715-golden marker and the saved stock PARAM (the rescue's).
+gplant_root() {
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  gwith_userdata sh -c '
+    set -e
+    mkdir -p "$1/omarchy-arm64/usr/lib/t715-golden" "$1/omarchy-arm64/var/lib/t715"
+    printf "persistent root omarchy-arm64, installed from omarchy-arm64.img\ninstaller 9.9.9-test, kernel t715-test\n" >"$1/omarchy-arm64/.t715-persist"
+    cp "$2/kernel.slot" "$1/omarchy-arm64/usr/lib/t715-golden/kernel.slot"
+    if [ "$3" = golden ]; then
+      echo "Omarchy for the Galaxy Tab S2, 64 bits: installer 9.9.9-test" >"$1/omarchy-arm64/.t715-golden"
+      cp "$2/param-stock.img" "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img"
+      chmod 0600 "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img"
+    fi
+  ' sh "$W/gud" "$GF" "$1"
+}
+# gslot_gen DEV SECTOR: the generation of the slot header there, read by the
+# init's own slot_gen (busybox sh, the same bytes the boots run), empty when
+# that header is not one of ours.
+gslot_gen() { "$W/root-gfns/bin/busybox" sh "$W/gslot.sh" "$1" "$2"; }
+# gcache_blocks: "BLOCKS LOG_BLOCK_SIZE" of CACHE's file system superblock.
+gcache_blocks() {
+  dd if="$(g_cache_dev)" of="$W/cache-sb" bs=1024 skip=1 count=1 status=none
+  echo "$(od -An -tu4 -j 4 -N 4 "$W/cache-sb" | tr -d ' ') $(od -An -tu4 -j 24 -N 4 "$W/cache-sb" | tr -d ' ')"
+}
+# gparam_loader_sum: the sha256 the fixtures' loader.sha256 names.
+gparam_loader_sum() { head -n 1 "$GF/golden/loader.sha256" | cut -d' ' -f1; }
+
+make_golden_fixtures() {
+  # SYSTEM: the Wi-Fi NVRAM (a macaddr line and another one) and the
+  # Bluetooth patch RAM.
+  mkdir -p "$W/gsystem/etc/wifi" "$W/gsystem/vendor/firmware"
+  printf 'macaddr=00:90:4c:00:00:01\nphycal=0\n' >"$W/gsystem/etc/wifi/nvram_net.txt"
+  printf 'BCM4358A3 synthetic patch RAM, from no tablet\n' >"$W/gsystem/vendor/firmware/bcm4358A3_V0086.0144.hcd"
+  mkfs.ext4 -q -F -d "$W/gsystem" "$W/golden-system.img" 8M
+
+  # CACHE as Android leaves it: one file system spanning the 200 MiB partition.
+  truncate -s 200M "$W/golden-cache.img"
+  mkfs.ext4 -q -F -b 4096 -L CACHE "$W/golden-cache.img"
+  # CACHE already shrunk, with slot B of generation 5 (scenario 9): a 64 MiB
+  # file system in front of the slots, written into the 200 MiB region.
+  truncate -s 64M "$W/golden-cache64.img"
+  mkfs.ext4 -q -F -b 4096 -L CACHE "$W/golden-cache64.img"
+  truncate -s 200M "$W/golden-cache9.img"
+  dd if="$W/golden-cache64.img" of="$W/golden-cache9.img" bs=1M conv=notrunc status=none
+  dd if="$GF/kernel.slot.gen5" of="$W/golden-cache9.img" bs=512 seek=262144 conv=notrunc status=none
+
+  # The root image's tree.  The checks of scenario 1 read all of it back from
+  # USERDATA after the seed.
+  local t="$W/gtree" long
+  mkdir -p "$t/usr/bin" "$t/usr/lib/systemd" "$t/usr/lib/firmware/brcm" \
+    "$t/usr/lib/t715-golden" "$t/mnt" "$t/etc" "$t/home/alarm" "$t/one" "$t/two"
+  long="$t/usr/share/doc/$(printf 'a%.0s' $(seq 80))"   # a path over 100 characters
+  mkdir -p "$long"
+  # an ELF whose e_machine (byte 18) is 0xb7: AArch64
+  { printf '\177ELF\002\001\001\000'; head -c 8 /dev/zero; printf '\002\000\267'; head -c 45 /dev/zero; } \
+    >"$t/usr/lib/systemd/systemd"
+  echo '#!/bin/sh' >"$t/usr/bin/setuid-helper"
+  chmod 4755 "$t/usr/bin/setuid-helper"                 # setuid root
+  ln -s ../lib/systemd/systemd "$t/usr/bin/init"
+  echo 'hard-linked data' >"$t/one/data.bin"
+  ln "$t/one/data.bin" "$t/two/data.bin"                 # one file, two top-level directories
+  echo doc >"$long/file.txt"
+  chown -R 1000:1000 "$t/home/alarm"
+  cp "$GF/kernel.slot" "$t/usr/lib/t715-golden/kernel.slot"
+  mkfs.ext4 -q -F -d "$t" "$W/omarchy-arm64.img" 8M
+  # the same tree with a 32-bit systemd (scenario 8: refused)
+  cp -a "$t" "$W/gtree-bad"
+  printf '\050' | dd of="$W/gtree-bad/usr/lib/systemd/systemd" bs=1 seek=18 conv=notrunc status=none
+  mkfs.ext4 -q -F -d "$W/gtree-bad" "$W/omarchy-arm64-bad.img" 8M
+
+  # USERDATA: the image and its sha256sum sidecar in media/0/linux.
+  mkdir -p "$W/gudata/media/0/linux"
+  cp "$W/omarchy-arm64.img" "$W/gudata/media/0/linux/omarchy-arm64.img"
+  (cd "$W/gudata/media/0/linux" && sha256sum omarchy-arm64.img >omarchy-arm64.img.sha256)
+  mkfs.ext4 -q -F -d "$W/gudata" "$W/golden-userdata.img" 64M
+  cp "$W/golden-userdata.img" "$W/golden-userdata-factory.img"
+  # the variants the refusal scenarios need, built offline (no read-write
+  # mount of USERDATA to set up): no sidecar, a wrong-hash sidecar, and the
+  # not-aarch64 image with its own sidecar
+  rm -rf "$W/gudata-noside" && cp -a "$W/gudata" "$W/gudata-noside"
+  rm -f "$W/gudata-noside/media/0/linux/omarchy-arm64.img.sha256"
+  mkfs.ext4 -q -F -d "$W/gudata-noside" "$W/golden-userdata-noside.img" 64M
+  rm -rf "$W/gudata-badside" && cp -a "$W/gudata" "$W/gudata-badside"
+  printf '%064d  omarchy-arm64.img\n' 0 >"$W/gudata-badside/media/0/linux/omarchy-arm64.img.sha256"
+  mkfs.ext4 -q -F -d "$W/gudata-badside" "$W/golden-userdata-badside.img" 64M
+  rm -rf "$W/gudata-badarch" && cp -a "$W/gudata" "$W/gudata-badarch"
+  cp "$W/omarchy-arm64-bad.img" "$W/gudata-badarch/media/0/linux/omarchy-arm64.img"
+  (cd "$W/gudata-badarch/media/0/linux" && sha256sum omarchy-arm64.img >omarchy-arm64.img.sha256)
+  mkfs.ext4 -q -F -d "$W/gudata-badarch" "$W/golden-userdata-badarch.img" 64M
+
+  # PARAM holding neither the stock image nor the loader (scenarios 4 and 5):
+  # the stock image with one byte changed inside the loader's part.
+  cp "$GF/param-stock.img" "$W/param-golden-changed.img"
+  printf '\x5a' | dd of="$W/param-golden-changed.img" bs=1 seek=4096 conv=notrunc status=none
+
+  # The golden disk (all the partition starts are 1 MiB-aligned).
+  truncate -s 295M "$W/disk-golden.img"
+  sfdisk -q "$W/disk-golden.img" <<'EOF'
+label: gpt
+start=2048, size=16384, name=PARAM
+start=18432, size=16384, name=SYSTEM
+start=34816, size=409600, name=CACHE
+start=444416, size=131072, name=USERDATA
+EOF
+  dd if="$GF/param-stock.img" of="$W/disk-golden.img" bs=1M seek=1 conv=notrunc status=none
+  dd if="$W/golden-system.img" of="$W/disk-golden.img" bs=1M seek=9 conv=notrunc status=none
+  dd if="$W/golden-cache.img" of="$W/disk-golden.img" bs=1M seek=17 conv=notrunc status=none
+  dd if="$W/golden-userdata.img" of="$W/disk-golden.img" bs=1M seek=217 conv=notrunc status=none
+
+  # The init's golden functions (fnv1a64, slot_gen, golden_forge), taken from
+  # the same bytes the boot scenarios run, sourced without the last line
+  # (main "$@"): $W/gslot.sh reads a slot's generation, $W/gfnv.sh forges.
+  rm -rf "$W/root-gfns"
+  mkdir -p "$W/root-gfns"
+  (cd "$W/root-gfns" && gzip -dc "$GOLDEN_CPIO" | cpio -idm --quiet --no-absolute-filenames)
+  sed -n '/^GOLDEN_DIR=/,$p' "$W/root-gfns/init" | sed '$d' >"$W/golden-fns.sh"
+  cat >"$W/gslot.sh" <<'EOF'
+. /work/golden-fns.sh
+RUNDIR=/work/golden-run
+mkdir -p "$RUNDIR"
+slot_gen "$1" "$2"
+EOF
+  # what scenario 1 expects the installed root's tree to look like
+  cat >"$W/gcheck-tree.sh" <<'EOF'
+set -e
+r=$1/omarchy-arm64
+[ -f "$r/.t715-persist" ] && [ -f "$r/.t715-golden" ]
+[ ! -e "$1/.omarchy-arm64.t715-seed" ]
+grep -qx 'persistent root omarchy-arm64, installed from omarchy-arm64.img' "$r/.t715-persist"
+[ "$(stat -c %u:%g "$r/home/alarm")" = 1000:1000 ]
+[ "$(stat -c %a "$r/usr/bin/setuid-helper")" = 4755 ]
+[ "$(readlink "$r/usr/bin/init")" = ../lib/systemd/systemd ]
+[ "$(stat -c %i "$r/one/data.bin")" = "$(stat -c %i "$r/two/data.bin")" ]
+[ "$(stat -c %h "$r/one/data.bin")" = 2 ]
+[ -f "$r/usr/share/doc/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/file.txt" ]
+grep -qx 'macaddr=<REDACTED>' "$r/usr/lib/firmware/brcm/samsung-gts28/nvram_net.txt"
+grep -qx 'phycal=0' "$r/usr/lib/firmware/brcm/samsung-gts28/nvram_net.txt"
+cmp -s "$r/usr/lib/firmware/brcm/BCM4358A3.hcd" /work/gsystem/vendor/firmware/bcm4358A3_V0086.0144.hcd
+EOF
+}
+
+# grun NAME [KNOB...]: prepare the golden initramfs as root-NAME and run it
+# with GOLD_CMD plus the extra knobs; the exit status lands in GRC.
+grun() {
+  local name=$1
+  shift
+  prepare_golden_boot "$name"
+  GRC=0
+  run_init "$name" "$GOLD_CMD${1:+ $*}" || GRC=$?
+}
+
+# scenario 11 first: it needs no disk, only the golden initramfs' functions.
+# gcheck_nothing_written BEFORE AFTER: the refusal wrote nothing.
+gcheck_nothing_written() {
+  if [ "$1" = "$2" ]; then
+    ok "nothing written (PARAM, SYSTEM, CACHE, USERDATA byte-identical)"
+  else
+    ko "nothing written (PARAM, SYSTEM, CACHE, USERDATA byte-identical)"
+    echo "        before: $1"
+    echo "        after:  $2"
+  fi
+}
+
+scenario_golden_forge_python() {
+  echo "--- scenario: golden, the forge and fnv1a64 against Python (check-param.py's forge)"
+  cat >"$W/gfnv.sh" <<'EOF'
+log() { :; }; err() { echo "err: $*" >&2; return 0; }; warn() { :; }
+. /work/golden-fns.sh
+RUNDIR=/work/golden-run; mkdir -p "$RUNDIR"
+GOLDEN_DIR=/work/root-gfns/lib/t715-golden
+EXTENT=$(golden_val extent)
+golden_forge /t/golden-fixtures/param-stock.img /work/forge-out.img || { echo "FORGE-FAILED"; exit 1; }
+head -c "$EXTENT" /t/golden-fixtures/param-loader.img >/work/loader-head.img
+echo "forge-sha $(sha256sum /work/forge-out.img | cut -d' ' -f1)"
+echo "loader-sha $(golden_val loader.sha256)"
+echo "python-sha $(sha256sum /work/loader-head.img | cut -d' ' -f1)"
+cmp -s /work/forge-out.img /work/loader-head.img && echo "forge-bytes same" || echo "forge-bytes DIFFER"
+while read -r n skip count low high; do
+  got=$(fnv1a64 "/t/golden-fixtures/$n" "$skip" "$count")
+  if [ "$got" = "$low $high" ]; then echo "fnv-ok $n $skip $count"; else echo "fnv-BAD $n $skip $count got=$got want=$low $high"; fi
+done </t/golden-fixtures/fnv-expected.txt
+EOF
+  "$W/root-gfns/bin/busybox" sh "$W/gfnv.sh" >"$W/gfnv.out" 2>&1
+  sed 's/^/        | /' "$W/gfnv.out"
+  local want
+  want=$(gparam_loader_sum)
+  check "golden_forge's output hashes to loader.sha256" grep -qx "forge-sha $want" "$W/gfnv.out"
+  check "Python's forge (param-loader.img) is loader.sha256 too" grep -qx "python-sha $want" "$W/gfnv.out"
+  check "golden_forge's bytes are Python's forge's bytes" grep -qx "forge-bytes same" "$W/gfnv.out"
+  check "fnv1a64 matches Python on every fixed input" \
+    sh -c "[ \"\$(grep -c '^fnv-ok' '$W/gfnv.out')\" -eq \"\$(wc -l <'$GF/fnv-expected.txt')\" ] && ! grep -q 'fnv-BAD' '$W/gfnv.out'"
+}
+
+scenario_golden_fresh() {
+  echo "--- scenario: golden, fresh install (stock PARAM, image + sidecar, Android's CACHE)"
+  greset_all
+  grun gfresh
+  local rc=$GRC
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the stock image, installing" log_has gfresh "golden: PARAM is the stock image: installing"
+  check "the image found in the internal storage" log_has gfresh "golden: the image is in the internal storage (media/0/linux/omarchy-arm64.img)"
+  check "image checksum verified" log_has gfresh "image checksum verified (omarchy-arm64.img.sha256)"
+  check "the image's tree copied" sh -c "grep -q 'entries copied in' '$W/gfresh.log'"
+  check "Wi-Fi NVRAM copied from SYSTEM" log_has gfresh "device files: Wi-Fi NVRAM copied from SYSTEM"
+  check "Bluetooth patch RAM copied from SYSTEM" log_has gfresh "device files: Bluetooth patch RAM copied from SYSTEM"
+  check "CACHE's file system replaced by a 64 MiB one" log_has gfresh "golden: CACHE's file system covers the slots: a new one of 64 MiB"
+  check "logged: slot A, generation 1" log_has gfresh "golden: the kernel's slot, generation 1, to sector 131072 of CACHE"
+  check "the slot reads back as written" log_has gfresh "golden: the kernel's slot reads back as written"
+  check "the stock PARAM saved" log_has gfresh "golden: the stock PARAM saved in media/0/linux/PARAM-stock-backup.img and the root's /var/lib/t715/PARAM-stock.img"
+  check "the loader forged as expected" log_has gfresh "golden: the loader forged from the stock PARAM is the expected one"
+  check "PARAM holds the loader" log_has gfresh "golden: PARAM holds the loader (sha256"
+  check "said on screen: installing" log_has gfresh "t715-say: Installing Omarchy, this takes about ten minutes"
+  check "said on screen: writing the loader" log_has gfresh "t715-say: Writing the loader..."
+  check "said on screen: installed, restarting" log_has gfresh "t715-say: Omarchy is installed. Restarting into it..."
+  check "reboot logged" log_has gfresh "rebooting (reboot -f)"
+  # the disk state
+  check "PARAM's first $GEXTENT bytes hash to loader.sha256" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$GF/param-stock.img")
+  check "CACHE's file system is now 16384 blocks of 4096 bytes" test "$(gcache_blocks)" = "16384 2"
+  check "slot A (sector 131072) is a valid header of generation 1" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 1
+  check "slot A's bytes after the header are the image's kernel.slot's" \
+    cmp -s <(dd if="$(g_cache_dev)" bs=512 skip=131072 count=$GSLOT_SECTORS status=none | tail -c +4097) <(tail -c +4097 "$GF/kernel.slot")
+  check "slot B (sector 262144) is not a valid header" test -z "$(gslot_gen "$(g_cache_dev)" 262144)"
+  check "the root's tree: owners, setuid, symlink, hard links, long path, NVRAM, markers" \
+    gwith_userdata sh "$W/gcheck-tree.sh" "$W/gud"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "PARAM-stock-backup.img is the whole stock PARAM, with its sidecar" gwith_userdata sh -c '
+    cmp -s "$1/media/0/linux/PARAM-stock-backup.img" "$2/param-stock.img"
+    [ "$(cat "$1/media/0/linux/PARAM-stock-backup.img.sha256")" = "$(sha256sum "$2/param-stock.img" | cut -d" " -f1)  PARAM-stock-backup.img" ]
+  ' sh "$W/gud" "$GF"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "the root's saved PARAM is the stock image, mode 0600" gwith_userdata sh -c '
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$2/param-stock.img"
+    [ "$(stat -c %a "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img")" = 600 ]
+  ' sh "$W/gud" "$GF"
+  check "the install log is next to the image" gwith_userdata test -s "$W/gud/media/0/linux/omarchy-arm64-install.log"
+  [[ $rc -eq 99 ]] || show_log gfresh
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_resume() {
+  echo "--- scenario: golden, resume (the root is there already, PARAM stock)"
+  greset_all
+  gplant_root persist
+  grun gresume
+  local rc=$GRC
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the root is there already" log_has gresume "golden: USERDATA/omarchy-arm64 is there already (an earlier start copied it)"
+  check "the copy was skipped" sh -c "! grep -q 'entries copied in' '$W/gresume.log'"
+  check "logged: slot A, generation 1" log_has gresume "golden: the kernel's slot, generation 1, to sector 131072 of CACHE"
+  check "PARAM holds the loader" log_has gresume "golden: PARAM holds the loader (sha256"
+  check "said on screen: installed, restarting" log_has gresume "t715-say: Omarchy is installed. Restarting into it..."
+  check "slot A is a valid header of generation 1" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 1
+  check "CACHE's file system is now 16384 blocks of 4096 bytes" test "$(gcache_blocks)" = "16384 2"
+  check "PARAM's first $GEXTENT bytes hash to loader.sha256" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "the .t715-golden marker was written" gwith_userdata test -f "$W/gud/omarchy-arm64/.t715-golden"
+  [[ $rc -eq 99 ]] || show_log gresume
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_handback() {
+  echo "--- scenario: golden, the loader handed the start back (loader in PARAM, root installed)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  grun ghand
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the loader handed this start back" log_has ghand "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "said on screen: did not finish starting last time" log_has ghand "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
+  check "rebooting-in-N said on screen" log_has ghand "t715-say: rebooting in 2 seconds"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log ghand
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_rescue() {
+  echo "--- scenario: golden, rescue (PARAM holds neither image, the root has the saved stock PARAM)"
+  greset_all
+  gplant_root golden
+  gset_param "$W/param-golden-changed.img"
+  grun gresc
+  local rc=$GRC
+  check "restart after the loader is back (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: neither the stock image nor the loader" log_has gresc "neither the stock image nor the loader"
+  check "said on screen: writing the loader back" log_has gresc "t715-say: Rescue: PARAM does not hold Omarchy's loader. Writing it back."
+  check "the loader was forged from the saved stock PARAM" log_has gresc "golden: the loader forged from the stock PARAM is the expected one"
+  check "said on screen: back in PARAM, restarting" log_has gresc "t715-say: Rescue: the loader is back in PARAM. Restarting."
+  check "PARAM's first $GEXTENT bytes are the loader now" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$W/param-golden-changed.img")
+  [[ $rc -eq 99 ]] || show_log gresc
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_unknown_param() {
+  echo "--- scenario: golden, PARAM holds neither and nothing is installed: refused, exit 97"
+  greset_all
+  gset_param "$W/param-golden-changed.img"
+  local before after
+  before=$(gdisk_sums)
+  grun gunknown
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: neither the stock image nor the loader" log_has gunknown "neither the stock image nor the loader"
+  check "said on screen: not the stock image this installer knows" \
+    log_has gunknown "t715-say: PARAM does not hold the stock image of T715XXU2CRH1 that this installer knows. Nothing was written."
+  check "waiting line said on screen" log_has gunknown "t715-say: waiting: hold Power and Volume down to restart"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gunknown
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_wrong_bootloader() {
+  echo "--- scenario: golden, wrong bootloader (T715XXU1ARB1) with a stock PARAM: refused, exit 97"
+  greset_all
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gwrongbl
+  local rc=0
+  run_init gwrongbl "androidboot.bootloader=T715XXU1ARB1 t715.golden=1 t715.rootwait=30 t715.failwait=2" || rc=$?
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: the bootloader is wrong" log_has gwrongbl "ERROR: golden: the bootloader is 'T715XXU1ARB1', the loader is made for T715XXU2CRH1"
+  check "said on screen: the bootloader is wrong" \
+    log_has gwrongbl "t715-say: This tablet's bootloader is T715XXU1ARB1; Omarchy needs T715XXU2CRH1. Nothing was written."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gwrongbl
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_no_sidecar() {
+  echo "--- scenario: golden, no .sha256 sidecar next to the image: refused, exit 97"
+  greset_all "$W/golden-userdata-noside.img"
+  local before after
+  before=$(gdisk_sums)
+  grun gnoside
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: no sidecar next to the image" log_has gnoside "ERROR: golden: no omarchy-arm64.img.sha256 next to the image"
+  check "said on screen: the sidecar is missing" \
+    log_has gnoside "t715-say: omarchy-arm64.img.sha256 is missing next to the image: copy it there too, then restart. Nothing was written."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gnoside
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_bad_sidecar() {
+  echo "--- scenario: golden, a sidecar with a wrong hash: refused, exit 97"
+  greset_all "$W/golden-userdata-badside.img"
+  local before after
+  before=$(gdisk_sums)
+  grun gbadside
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: checksum mismatch" log_has gbadside "ERROR: image checksum check failed: checksum mismatch"
+  check "said on screen: the image file is damaged" log_has gbadside "t715-say: The image file is damaged (bad checksum). Copy it to the tablet again."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gbadside
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_not_aarch64() {
+  echo "--- scenario: golden, the image is not aarch64 (e_machine 0x28): refused, exit 97"
+  greset_all "$W/golden-userdata-badarch.img"
+  local before after
+  before=$(gdisk_sums)
+  dd if="$W/disk-golden.img" of="$W/gbadarch-ud-before.bin" bs=1M skip=217 count=64 status=none
+  grun gbadarch
+  local rc=$GRC
+  after=$(gdisk_sums)
+  dd if="$W/disk-golden.img" of="$W/gbadarch-ud-after.bin" bs=1M skip=217 count=64 status=none
+  if [ "$before" != "$after" ]; then
+    echo "        first differing bytes of USERDATA (offset in MiB-blocks):"
+    cmp -l "$W/gbadarch-ud-before.bin" "$W/gbadarch-ud-after.bin" 2>/dev/null | head -5 | sed 's/^/        /' || true
+  fi
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: not an aarch64 system" log_has gbadarch "ERROR: golden: the image is not an aarch64 system"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gbadarch
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_slots_there() {
+  echo "--- scenario: golden, CACHE already shrunk with slot B of generation 5: slot A gets generation 6"
+  greset_all
+  gplant_root persist   # the seed is scenario 1's/2's concern; the slots are this one's
+  dd if="$W/golden-cache9.img" of="$(g_cache_dev)" bs=1M conv=notrunc status=none
+  local fs_before slotb_before
+  fs_before=$(gpart_sum 34816 131072)            # the first 64 MiB: the file system
+  slotb_before=$(gpart_sum $((34816 + 262144)) $GSLOT_SECTORS)
+  grun gslots
+  local rc=$GRC
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the slots held A none, B 5" log_has gslots "the slots held: A none, B 5"
+  check "logged: generation 6 to sector 131072" log_has gslots "golden: the kernel's slot, generation 6, to sector 131072 of CACHE"
+  check "slot A is a valid header of generation 6" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 6
+  check "the file system stayed byte-identical" test "$(gpart_sum 34816 131072)" = "$fs_before"
+  check "slot B stayed byte-identical" test "$(gpart_sum $((34816 + 262144)) $GSLOT_SECTORS)" = "$slotb_before"
+  [[ $rc -eq 99 ]] || show_log gslots
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_foreign_root() {
+  echo "--- scenario: golden, a foreign omarchy-arm64 (no marker): refused, exit 97"
+  greset_all
+  gwith_userdata mkdir -p "$W/gud/omarchy-arm64"
+  local before after
+  before=$(gdisk_sums)
+  grun gforeign
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: the folder was not made by this installer" \
+    log_has gforeign "ERROR: golden: USERDATA/omarchy-arm64 exists and was not made by this installer"
+  check "said on screen: a folder this installer did not make" \
+    log_has gforeign "t715-say: The internal storage already holds a folder omarchy-arm64 that this installer did not make. Nothing was written."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 97 ]] || show_log gforeign
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
 with_userdata() {
   mkdir -p "$W/ud"
   blockdev --setrw "$(node "$OUTER")p3" || return 1
@@ -1053,7 +1591,9 @@ in_container() {
   CPIO=$1
   trap container_cleanup EXIT
   mkdir -p "$W"
-  mount -t tmpfs -o size=512m,mode=0755 t715-test "$W"
+  # 1g: the golden disk's CACHE alone is 200 MiB, and the resets write it
+  # through the loop device (no holes left).
+  mount -t tmpfs -o size=1g,mode=0755 t715-test "$W"
   mkdir -p "$W/dev"
   mount -t devtmpfs devtmpfs "$W/dev"
   # A plain file named like a partition, left by a run that wrote before the
@@ -1134,6 +1674,28 @@ in_container() {
   scenario_nouserdata
   scenario_param_nopart
 
+  # --- the installer of the 64-bit system (t715.golden): its own disk ---
+  make_golden_fixtures
+  scenario_golden_forge_python
+  if attach_disk "$W/disk-golden.img" 4; then
+    ok "the golden synthetic disk on $OUTER, ${OUTER#/dev/}p4 named USERDATA"
+  else
+    ko "the golden synthetic disk attached"; return 1
+  fi
+  scenario_golden_fresh
+  scenario_golden_resume
+  scenario_golden_handback
+  scenario_golden_rescue
+  scenario_golden_unknown_param
+  scenario_golden_wrong_bootloader
+  scenario_golden_no_sidecar
+  scenario_golden_bad_sidecar
+  scenario_golden_not_aarch64
+  scenario_golden_slots_there
+  scenario_golden_foreign_root
+  detach_disk
+  detach_inner_loops
+
   sync
   dd if="$W/disk.img" of="$W/ud-check.img" bs=512 skip=12288 count=131072 status=none
   check "USERDATA fsck clean after the persistent boots (e2fsck -fn)" e2fsck -fn "$W/ud-check.img"
@@ -1156,7 +1718,14 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/t715-initramfs-test.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# Optional: when other jobs use the Docker machine's loop devices too,
+# T715_LOOP_LOCK names a directory they all take (mkdir) before attaching any:
+# the suite waits for it, and gives it back as soon as the run ends.
+LOCKDIR="${T715_LOOP_LOCK:-}"
+if [[ -n "$LOCKDIR" ]]; then
+  until mkdir "$LOCKDIR" 2>/dev/null; do sleep 20; done
+fi
+trap 'rm -rf "$TMP"; [[ -z "$LOCKDIR" ]] || rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 HFAIL=0
 
 echo "=== 1. reproducible build"
@@ -1240,6 +1809,131 @@ refused "--paramrescue-extent not a number" \
   bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-words" --paramrescue "$TMP/param-known.img" \
   --paramrescue-stock "$STOCK_SHA" --paramrescue-extent half
 
+echo "=== 1c. the golden installer's fixtures (synthetic) and its build (--golden)"
+# python3 builds them: a fake logo.jpg, a stock PARAM image whose first
+# EXTENT bytes are a ustar tar of the pictures (Python's tarfile) followed by
+# S-Boot's own marker data, the two sha256 (stock's, and loader's: what
+# boot/golden/check-param.py's forge returns with the fake logo), extent,
+# bootloader, release, the forged loader image, the kernel's slot of the root
+# image (with the FNV-1a 64 of the image, the tree and the header) and the
+# fixed inputs for the init's fnv1a64 with Python's answers.
+command -v python3 >/dev/null 2>&1 || { echo "  FAIL  python3 is needed to build the golden fixtures"; exit 1; }
+cat >"$TMP/gen_golden_fixtures.py" <<'PY'
+#!/usr/bin/env python3
+"""Build the synthetic fixtures of the golden installer's tests."""
+import hashlib, importlib.util, io, sys, tarfile
+from pathlib import Path
+
+out = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("check_param", sys.argv[2])
+cp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cp)
+
+EXTENT = 7340032                 # the loader's part of PARAM
+DISK = 8 * 1024 * 1024           # PARAM is 8 MiB
+
+(out / "golden").mkdir(parents=True, exist_ok=True)
+# logo.jpg: a fake JPEG of a few KiB, a size that is not a multiple of 512
+logo = b"\xff\xd8" + bytes(((i * 7 + 3) & 0xFF) for i in range(3000))
+(out / "golden" / "logo.jpg").write_bytes(logo)
+
+# the stock PARAM: a ustar archive of the pictures S-Boot shows, zero-padded
+# to EXTENT, then S-Boot's own data (never touched by the installer)
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+    for name, data in [
+        ("adv-env.img", bytes(range(256)) * 4),
+        ("download.jpg", b"\xff\xd8\xff\xe0" + bytes((i * 13) & 0xFF for i in range(2048))),
+        ("logo.jpg", b"\xff\xd8" + bytes((i * 11 + 5) & 0xFF for i in range(4096))),
+        ("lpm.jpg", b"\xff\xd8" + bytes((i * 3 + 1) & 0xFF for i in range(1024))),
+        ("warning.jpg", b"\xff\xd8" + bytes((i * 5 + 2) & 0xFF for i in range(1536))),
+    ]:
+        ti = tarfile.TarInfo(name)
+        ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+stock = buf.getvalue()
+assert len(stock) <= EXTENT, len(stock)
+stock = stock + bytes(EXTENT - len(stock))
+m = b"S-Boot data after the loader's part, kept as it is. "
+marker = (m * (DISK // len(m) + 1))[:DISK - EXTENT]
+assert len(marker) == DISK - EXTENT and marker.strip(b"\0")
+stock_full = stock + marker
+(out / "param-stock.img").write_bytes(stock_full)
+
+(out / "golden" / "extent").write_text(f"{EXTENT}\n")
+(out / "golden" / "stock.sha256").write_text(
+    hashlib.sha256(stock_full[:EXTENT]).hexdigest() + "  param-stock.img\n")
+forged = cp.forge(stock_full[:EXTENT], logo, EXTENT)
+(out / "golden" / "loader.sha256").write_text(
+    hashlib.sha256(forged).hexdigest() + "  param-loader.img\n")
+(out / "golden" / "bootloader").write_text("T715XXU2CRH1\n")
+(out / "golden" / "release").write_text("9.9.9-test\n")
+(out / "param-loader.img").write_bytes(forged + marker)
+
+# the kernel's slot carried by the root image
+def fnv1a64(b):
+    h = 0xCBF29CE484222325
+    for x in b:
+        h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+img = bytearray(65536)                       # a fake arm64 Image
+img[0x38:0x3C] = (0x644D5241).to_bytes(4, "little")
+dtb = bytearray(b"\xd0\x0d\xfe\xed" + bytes((i * 9 + 7) & 0xFF for i in range(2044)))
+
+def slot(gen):
+    le32 = lambda n: n.to_bytes(4, "little")
+    fi, fd = fnv1a64(img), fnv1a64(dtb)
+    hdr = bytearray(4096)
+    hdr[0:4] = le32(0x314B3754); hdr[4:8] = le32(1); hdr[8:12] = le32(gen); hdr[12:16] = le32(0)
+    hdr[16:20] = le32(len(img)); hdr[20:24] = le32(0x42000000)
+    hdr[24:28] = le32(len(dtb)); hdr[28:32] = le32(0x5F000000)
+    hdr[32:36] = le32(fi & 0xFFFFFFFF); hdr[36:40] = le32(fi >> 32)
+    hdr[40:44] = le32(fd & 0xFFFFFFFF); hdr[44:48] = le32(fd >> 32)
+    fh = fnv1a64(hdr[:0x30])
+    hdr[48:52] = le32(fh & 0xFFFFFFFF); hdr[52:56] = le32(fh >> 32)
+    pad = lambda b: b + bytes((-len(b)) % 512)
+    return bytes(hdr) + pad(bytes(img)) + pad(bytes(dtb))
+
+(out / "kernel.slot").write_bytes(slot(0))
+(out / "kernel.slot.gen5").write_bytes(slot(5))
+(out / "kernel-image.bin").write_bytes(img)
+(out / "kernel-dtb.bin").write_bytes(dtb)
+
+# fixed inputs for the init's fnv1a64, with Python's answers
+(out / "fnv-logo.jpg").write_bytes(logo)
+(out / "fnv-256.bin").write_bytes(bytes(range(256)))
+lines = []
+for name, data in [("fnv-logo.jpg", logo), ("fnv-256.bin", bytes(range(256))), ("kernel-image.bin", bytes(img))]:
+    for skip, count in [(0, len(data)), (100, 500), (7, 1)]:
+        if skip + count <= len(data):
+            h = fnv1a64(data[skip:skip + count])
+            lines.append(f"{name} {skip} {count} {h & 0xFFFFFFFF} {h >> 32}")
+(out / "fnv-expected.txt").write_text("\n".join(lines) + "\n")
+print("        golden fixtures in", out)
+PY
+python3 "$TMP/gen_golden_fixtures.py" "$TMP/golden-fixtures" "$ROOT/boot/golden/check-param.py" \
+  || { echo "  FAIL  the golden fixtures could not be generated"; exit 1; }
+for d in g g2; do
+  bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/$d" --golden "$TMP/golden-fixtures/golden" \
+    >"$TMP/build-$d.log" 2>&1 || { cat "$TMP/build-$d.log"; exit 1; }
+done
+if cmp -s "$TMP/g/initramfs.cpio.gz" "$TMP/g2/initramfs.cpio.gz"; then
+  echo "  PASS  two builds with --golden byte-identical"
+else
+  echo "  FAIL  two builds with --golden differ"; HFAIL=$((HFAIL + 1))
+fi
+if grep -q "golden: installer 9.9.9-test for T715XXU2CRH1" "$TMP/build-g.log"; then
+  echo "  PASS  the build log names the golden installer"
+else
+  echo "  FAIL  the build log lacks the golden note"; HFAIL=$((HFAIL + 1))
+fi
+for f in lib/t715-golden/logo.jpg lib/t715-golden/stock.sha256 lib/t715-golden/loader.sha256 \
+  lib/t715-golden/extent lib/t715-golden/bootloader lib/t715-golden/release; do
+  if grep -q " $f\$" "$TMP/g/initramfs.manifest.txt"; then echo "  PASS  the archive has $f"
+  else echo "  FAIL  the archive lacks $f"; HFAIL=$((HFAIL + 1)); fi
+done
+
 echo "=== 2. shellcheck"
 if docker run --rm --platform linux/arm64 \
     -v "$ROOT/boot/initramfs/init:/c/init:ro" \
@@ -1270,6 +1964,8 @@ if docker run --rm --privileged --platform linux/arm/v7 --network none \
     -v "$TMP/param-known.img:/t/param-known.img:ro" \
     -v "$TMP/param-stock.img:/t/param-stock.img:ro" \
     -v "$TMP/param-third.img:/t/param-third.img:ro" \
+    -v "$TMP/g/initramfs.cpio.gz:/t/initramfs-golden.cpio.gz:ro" \
+    -v "$TMP/golden-fixtures:/t/golden-fixtures:ro" \
     "$TEST_IMAGE" bash /t/test_initramfs.sh --in-container /t/initramfs.cpio.gz; then
   :
 else

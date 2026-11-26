@@ -93,6 +93,9 @@
 #                        the loader known to work (/lib/t715-paramrescue),
 #                        that loader is written back and the board restarts
 #                        (see param_rescue); default 0
+#   t715.golden=1        the installer of the 64-bit system, and its rescue
+#                        once it is installed (see "Golden" below; on by
+#                        default in a build with --golden); default 0
 #
 # Persistent root (a tablet that keeps no Android): instead of steps 3-4,
 # USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
@@ -170,6 +173,8 @@ SEED_MARGIN_KIB=524288  # free space a seed must leave on USERDATA (512 MiB)
 TELNET=0            # 1: the root telnet shell on the USB network link
 FAILREBOOT=1        # 0: wait on screen after a failure instead of rebooting
 PARAMRESCUE=0       # 1: put the loader known to work back in PARAM when it is not there
+GOLDEN=0            # 1: the installer of the 64-bit system (golden_main)
+SBOOT_VERSION=      # androidboot.bootloader: the bootloader's version, from S-Boot's own command line
 
 # --- paths
 RUNDIR=/run/t715
@@ -395,6 +400,13 @@ parse_knobs() {
         t715.paramrescue=0 | t715.paramrescue=1)
             PARAMRESCUE=${_pk#*=}
             ;;
+        t715.golden=0 | t715.golden=1)
+            GOLDEN=${_pk#*=}
+            ;;
+        androidboot.bootloader=*)
+            # S-Boot's own word: the firmware version, no identifier
+            SBOOT_VERSION=${_pk#*=}
+            ;;
         t715.persist=*)
             _pk_v=${_pk#*=}
             if [ "$_pk_v" = 0 ] || persist_name_ok "$_pk_v"; then
@@ -426,7 +438,7 @@ read_knobs() {
         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
     fi
     parse_knobs "$_rk_cmdline" "cmdline"
-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE golden=$GOLDEN"
 }
 
 # ---------------------------------------------------------------------------
@@ -1278,18 +1290,15 @@ seed_persist() {
 # file would invite copy/paste mistakes to pass.  No sidecar: no check
 # (older images never had one), the boot goes on as before.
 check_image_sum() {
-    _cs_img=$UD_MNT/$ROOTIMG
+    _cs_img=${1:-$UD_MNT/$ROOTIMG}
     _cs_sum=$_cs_img.sha256
     if [ ! -f "$_cs_sum" ]; then
-        log "no checksum file for $ROOTIMG, copying without a check"
+        log "no checksum file for ${_cs_img##*/}, copying without a check"
         return 0
     fi
     say "Checking the image..."
-    case $ROOTIMG in
-    */*) _cs_dir=$UD_MNT/${ROOTIMG%/*} ;;
-    *) _cs_dir=$UD_MNT ;;
-    esac
-    _cs_name=${ROOTIMG##*/}
+    _cs_dir=${_cs_img%/*}
+    _cs_name=${_cs_img##*/}
     # Strip before parsing, never writing anything back: every CR (an
     # editor's CR LF pair) and one leading UTF-8 byte order mark, so the
     # same sidecar written on Linux or on Windows reads the same.
@@ -1310,14 +1319,14 @@ check_image_sum() {
     case ${_cs_rest} in
     [[:space:]]$_cs_name | [[:space:]]*[[:space:]]$_cs_name | [[:space:]]*"$_cs_name") ;;
     *)
-        err "malformed checksum file $ROOTIMG.sha256 (expected: one line, the hash, the image's file name)"
+        err "malformed checksum file $_cs_name.sha256 (expected: one line, the hash, the image's file name)"
         _log_lines 3 "$(cat "$_cs_sum" 2>/dev/null)"
         say "The image file is damaged (bad checksum). Copy it to the tablet again."
         return 1
         ;;
     esac
     if [ "${#_cs_hash}" != 64 ] || [ "${_cs_nlines:-0}" != 1 ]; then
-        err "malformed checksum file $ROOTIMG.sha256 (expected: one line, the hash, the image's file name)"
+        err "malformed checksum file $_cs_name.sha256 (expected: one line, the hash, the image's file name)"
         say "The image file is damaged (bad checksum). Copy it to the tablet again."
         return 1
     fi
@@ -1330,7 +1339,7 @@ check_image_sum() {
     _cs_out=$(cd "$_cs_dir" && printf '%s\n' "$_cs_line" | sha256sum -c - 2>&1)
     _cs_rc=$?
     if [ "$_cs_rc" -eq 0 ]; then
-        log "image checksum verified ($ROOTIMG.sha256)"
+        log "image checksum verified ($_cs_name.sha256)"
         return 0
     fi
     err "image checksum check failed: checksum mismatch (exit $_cs_rc)"
@@ -1812,6 +1821,791 @@ load_modules() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Golden: the installer of the 64-bit system (t715.golden=1)
+#
+# This initramfs, in BOOT and RECOVERY, installs the 64-bit Omarchy
+# (omarchy-tab-s2's arm64/: an aarch64 root image that carries its kernel's
+# slot) and is its rescue afterwards.  S-Boot starts it whenever PARAM holds
+# no loader (a stock tablet: the first start after the flash), and whenever
+# the loader hands a boot back (the 64-bit system did not mark itself up).
+#
+# With PARAM as the firmware ships it, and omarchy-arm64.img with its
+# sidecar omarchy-arm64.img.sha256 in the folder "linux" of the internal
+# storage (USERDATA/media/0/linux) or of a microSD card (linux/ or its top):
+#   1. checks, before any write: S-Boot's version (the loader is made for
+#      one bootloader's addresses), PARAM's first EXTENT bytes are the stock
+#      image this installer knows, the battery, the image's checksum (the
+#      sidecar is required), the image (an aarch64 root carrying
+#      usr/lib/t715-golden/kernel.slot);
+#   2. the image's tree into USERDATA/omarchy-arm64 (the arm64 kernel's
+#      t715.persist), through USERDATA/.omarchy-arm64.t715-seed, by busybox
+#      tar: owners, modes, links and hard links.  tar carries no extended
+#      attribute: the image lists its file capabilities, which its own
+#      t715-golden-caps.service sets again at the first boot, and its only
+#      ACLs are set again by systemd-tmpfiles at every boot (arm64/release
+#      makes the list and checks there is nothing else).  Then the Wi-Fi NVRAM and the
+#      Bluetooth patch RAM from SYSTEM, and an SSH key when one lies next to
+#      the image (import_device_files), so that the first start has both;
+#   3. CACHE: when no slot of ours is there yet, Android's /cache, which
+#      spans the partition, becomes a 64 MiB file system in front of the two
+#      kernel slots (mke2fs); the kernel's slot is written to the slot not in
+#      use, one generation above the other, and read back;
+#   4. PARAM: the whole stock image saved (USERDATA/media/0/linux/
+#      PARAM-stock-backup.img, the owner's way back through download mode,
+#      and the root's /var/lib/t715/PARAM-stock.img, this rescue's), the
+#      loader forged from it (golden_forge: Samsung's logo.jpg replaced by
+#      the loader's, lib/t715-golden/logo.jpg), refused unless it is exactly
+#      the image loader.sha256 names, written over those first EXTENT bytes
+#      only (S-Boot keeps data of its own after them), read back;
+#   5. the root's .t715-golden marker, the log next to the image, restart:
+#      the loader starts the 64-bit kernel of the slot, which boots the root.
+# Each step that is done already is skipped, so an interrupted install
+# goes on where it stopped at the next start.  PARAM is the last write: until
+# then every start comes back here, the stock way.
+# With the loader in PARAM and the root installed, a start here is the
+# loader's hand-back: the reason goes on screen and the board restarts after
+# t715.failwait seconds, which gives the loader its next try.  With anything
+# else in PARAM (another loader) and the root's saved stock image, the loader
+# is forged again from it and written back (the rescue).  Every refusal
+# writes nothing and waits on screen.
+GOLDEN_DIR=/lib/t715-golden         # logo.jpg, stock.sha256, loader.sha256, extent, bootloader, release
+GOLDEN_NAME=omarchy-arm64           # the root's directory on USERDATA
+GOLDEN_IMG_NAME=omarchy-arm64.img   # the image, in a folder "linux"
+GOLDEN_MARK=.t715-golden            # in the root: installed by this installer
+GOLDEN_BACKUP=media/0/linux/PARAM-stock-backup.img
+GOLDEN_EFS=media/0/linux/EFS-backup.img     # read only: EFS is never written
+GOLDEN_LOG=media/0/linux/omarchy-arm64-install.log
+GOLDEN_SAVED=var/lib/t715/PARAM-stock.img   # in the root
+GOLDEN_MIN_BATTERY=30
+GOLDEN_IMG=                         # the image found (golden_find_image)
+GOLDEN_SD=                          # 1 once a microSD card is mounted on $SD_MNT
+SD_MNT=/sdcard
+PARAM_DEV=
+EXTENT=
+# The kernel's slots in CACHE, in sectors of the partition (the loader's
+# layout, elkir0/bnuuyloader t715/docs/PRODUCTION-LOADER.md): a file system
+# in the first 64 MiB, slot A at 64 MiB, slot B at 128 MiB, 64 MiB each.  A
+# slot: a 4 KiB header ("T7K1", version 1, generation, flags, the image's and
+# the device tree's sizes and addresses and FNV-1a 64, then the FNV-1a 64 of
+# those 0x30 bytes), the arm64 Image, the device tree.
+SLOT_MAGIC=827012948                # 0x314B3754, "T7K1"
+SLOT_A=131072
+SLOT_B=262144
+SLOT_SECTORS=131072
+CACHE_FS_KIB=65536
+
+# golden_val NAME: the first word of $GOLDEN_DIR/NAME.
+golden_val() {
+    sed -n '1{s/[[:space:]].*//;p;}' "$GOLDEN_DIR/$1" 2>/dev/null
+}
+
+# part_dev NAME: /dev/X of the one partition of the eMMC named NAME.
+part_dev() {
+    _pd_want=$1
+    _pd_hits=$(list_partnames | while read -r _pd_d _pd_n; do
+        if [ "$_pd_n" = "$_pd_want" ]; then
+            printf '%s ' "$_pd_d"
+        fi
+    done)
+    set -f
+    # shellcheck disable=SC2086  # count the words
+    set -- $_pd_hits
+    set +f
+    if [ "$#" -ne 1 ] || [ ! -b "/dev/$1" ]; then
+        return 1
+    fi
+    printf '/dev/%s\n' "$1"
+}
+
+# make_rw DEV: clear a partition's read-only flag (the 64-bit system keeps
+# PARAM read-only by a rule of its own).
+make_rw() {
+    if [ "$(cat "/sys/class/block/${1#/dev/}/ro" 2>/dev/null)" = 1 ]; then
+        run blockdev --setrw "$1" || return 1
+    fi
+}
+
+# fnv1a64 FILE SKIP COUNT: "LOW HIGH", the FNV-1a 64 of COUNT bytes of FILE
+# from byte SKIP, as two 32-bit words: the loader's hash.  busybox's 64-bit
+# arithmetic wraps as the C code does (checked against Python by the tests).
+fnv1a64() {
+    _fn_h=-3750763034362895579 # 0xcbf29ce484222325
+    for _fn_b in $(dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -tu1 -v); do
+        _fn_h=$(((_fn_h ^ _fn_b) * 1099511628211))
+    done
+    printf '%s %s\n' $((_fn_h & 0xFFFFFFFF)) $(((_fn_h >> 32) & 0xFFFFFFFF))
+}
+
+# le32 N: the four bytes of N, little-endian, as printf escapes.
+le32() {
+    printf '\\%03o\\%03o\\%03o\\%03o' $(($1 & 255)) $((($1 >> 8) & 255)) \
+        $((($1 >> 16) & 255)) $((($1 >> 24) & 255))
+}
+
+# slot_gen FILE_OR_DEV SECTOR: the generation the slot's header there gives,
+# nothing when that header is not one of ours (magic, version, its hash).
+slot_gen() {
+    _sg_f=$RUNDIR/slot-head
+    dd if="$1" of="$_sg_f" bs=512 skip="$2" count=1 2>/dev/null || return 0
+    set -f
+    # shellcheck disable=SC2046  # one word per 32-bit word
+    set -- $(od -An -tu4 -N 56 -v "$_sg_f")
+    set +f
+    [ "$#" -eq 14 ] || return 0
+    [ "$1" = "$SLOT_MAGIC" ] && [ "$2" = 1 ] || return 0
+    _sg_gen=$3
+    _sg_want="${13} ${14}"
+    [ "$(fnv1a64 "$_sg_f" 0 48)" = "$_sg_want" ] || return 0
+    printf '%s\n' "$_sg_gen"
+}
+
+# golden_forge STOCK OUT: OUT = the first EXTENT bytes of the stock PARAM
+# image STOCK with the loader's logo.jpg in place of Samsung's.  PARAM's
+# first EXTENT bytes are a tar archive (the pictures S-Boot shows); each
+# member before and after logo.jpg is copied as it is, logo.jpg's header gets
+# the new size and checksum, the archive is padded with zeros to EXTENT
+# (elkir0/bnuuyloader's build_calib.py replace_logo, the same bytes).  Only
+# golden_param's sha256 check says whether OUT is the loader.
+golden_forge() {
+    _gf_in=$1
+    _gf_out=$2
+    _gf_logo=$GOLDEN_DIR/logo.jpg
+    _gf_h=$RUNDIR/tar-head
+    _gf_len=$(stat -c %s "$_gf_logo" 2>/dev/null)
+    case $_gf_len in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    : >"$_gf_out" || return 1
+    _gf_off=0
+    _gf_done=
+    while [ $((_gf_off + 512)) -le "$EXTENT" ]; do
+        dd if="$_gf_in" of="$_gf_h" bs=512 skip=$((_gf_off / 512)) count=1 2>/dev/null || return 1
+        [ "$(head -c 1 "$_gf_h" | od -An -tu1 | tr -d ' ')" != 0 ] || break
+        _gf_name=$(head -c 100 "$_gf_h" | tr -d '\000')
+        _gf_size=$(dd if="$_gf_h" bs=1 skip=124 count=12 2>/dev/null | tr -d '\000 ')
+        case $_gf_size in
+        '' | *[!0-7]*)
+            err "golden: PARAM's archive has a member whose size is not octal ('$_gf_name')"
+            return 1
+            ;;
+        esac
+        _gf_size=$((0$_gf_size))
+        _gf_blocks=$(((_gf_size + 511) / 512))
+        if [ "$_gf_name" = logo.jpg ]; then
+            [ -z "$_gf_done" ] || return 1
+            {
+                head -c 124 "$_gf_h"
+                printf '%011o\000' "$_gf_len"
+                dd if="$_gf_h" bs=1 skip=136 count=12 2>/dev/null
+                printf '        '
+                dd if="$_gf_h" bs=1 skip=156 count=356 2>/dev/null
+            } >"$_gf_h.new" || return 1
+            _gf_sum=$(od -An -tu1 -v "$_gf_h.new" | awk '{ for (i = 1; i <= NF; i++) s += $i } END { print s }')
+            {
+                head -c 148 "$_gf_h.new"
+                printf '%06o\000 ' $((_gf_sum & 2097151))
+                tail -c 356 "$_gf_h.new"
+                cat "$_gf_logo"
+                head -c $(((512 - _gf_len % 512) % 512)) /dev/zero
+            } >>"$_gf_out" || return 1
+            _gf_done=1
+        else
+            dd if="$_gf_in" bs=512 skip=$((_gf_off / 512)) count=$((1 + _gf_blocks)) 2>/dev/null >>"$_gf_out" || return 1
+        fi
+        _gf_off=$((_gf_off + 512 + _gf_blocks * 512))
+    done
+    rm -f "$_gf_h" "$_gf_h.new"
+    if [ -z "$_gf_done" ]; then
+        err "golden: no logo.jpg in PARAM's archive"
+        return 1
+    fi
+    _gf_end=$(stat -c %s "$_gf_out")
+    if [ $((_gf_end + 1024)) -gt "$EXTENT" ]; then
+        err "golden: the forged archive ($_gf_end bytes) does not leave room before byte $EXTENT"
+        return 1
+    fi
+    truncate -s "$EXTENT" "$_gf_out"
+}
+
+# golden_param_sum: the sha256 of PARAM's first EXTENT bytes.
+golden_param_sum() {
+    head -c "$EXTENT" "$PARAM_DEV" 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+# golden_write_param IMG: IMG (EXTENT bytes, checked by the caller) over
+# PARAM's first EXTENT bytes, read back against loader.sha256.
+golden_write_param() {
+    make_rw "$PARAM_DEV" || return 1
+    if ! dd if="$1" of="$PARAM_DEV" bs=512 count=$((EXTENT / 512)) conv=notrunc,fsync 2>/dev/null; then
+        err "golden: the write to PARAM ($PARAM_DEV) failed"
+    fi
+    sync
+    _gw_sum=$(golden_param_sum)
+    if [ "$_gw_sum" != "$(golden_val loader.sha256)" ]; then
+        err "golden: PARAM reads back $_gw_sum after the write, not the loader"
+        return 1
+    fi
+    log "golden: PARAM holds the loader (sha256 ${_gw_sum%"${_gw_sum#????????????}"}...)"
+}
+
+# golden_forge_checked STOCK: the loader forged from STOCK into
+# $RUNDIR/param-loader.img, refused unless it is the one loader.sha256 names.
+golden_forge_checked() {
+    _gc_stock=$(head -c "$EXTENT" "$1" | sha256sum | cut -d' ' -f1)
+    if [ "$_gc_stock" != "$(golden_val stock.sha256)" ]; then
+        err "golden: $1 is not the stock PARAM this installer knows ($_gc_stock)"
+        return 1
+    fi
+    golden_forge "$1" "$RUNDIR/param-loader.img" || return 1
+    _gc_sum=$(sha256sum "$RUNDIR/param-loader.img" | cut -d' ' -f1)
+    if [ "$_gc_sum" != "$(golden_val loader.sha256)" ]; then
+        err "golden: the loader forged from the stock PARAM is $_gc_sum, not the one this installer was built for: nothing written"
+        return 1
+    fi
+    log "golden: the loader forged from the stock PARAM is the expected one"
+}
+
+# golden_battery: wait for GOLDEN_MIN_BATTERY % (an install takes about a
+# quarter of an hour of eMMC writes); no battery level, no wait.
+golden_battery() {
+    [ -z "$TEST" ] || return 0
+    _gb_f=
+    for _gb in /sys/class/power_supply/*/capacity; do
+        if [ -r "$_gb" ]; then
+            _gb_f=$_gb
+            break
+        fi
+    done
+    if [ -z "$_gb_f" ]; then
+        log "golden: no battery level in this kernel, not checked"
+        return 0
+    fi
+    while :; do
+        _gb_c=$(cat "$_gb_f" 2>/dev/null)
+        case $_gb_c in
+        '' | *[!0-9]*) return 0 ;;
+        esac
+        if [ "$_gb_c" -ge "$GOLDEN_MIN_BATTERY" ]; then
+            log "golden: battery at $_gb_c %"
+            return 0
+        fi
+        say "Battery at $_gb_c %. Plug the charger in: the install starts at $GOLDEN_MIN_BATTERY %."
+        sleep 60
+    done
+}
+
+# golden_asv: the chip's ASV fuse word (table version, fused groups), read
+# only and logged.  The 64-bit kernel's CPU voltage tables are the
+# reference tablet's chip's (ASV table 8, group 1, fuse word 0x33010008), as
+# in the 32-bit releases since 1.0.1: another word is said on screen, not
+# refused.  Never the CHIPID words that identify the chip.
+golden_asv() {
+    [ -z "$TEST" ] || return 0
+    _ga=$(devmem 0x1000400C 32 2>/dev/null)
+    case $_ga in
+    0x33010008 | 0X33010008)
+        log "golden: ASV fuse word $_ga, as the reference tablet's chip"
+        ;;
+    0x* | 0X*)
+        warn "golden: ASV fuse word $_ga, not the reference chip's 0x33010008"
+        say "Note: this chip's voltage fuses differ from the reference tablet's (see the install guide)."
+        ;;
+    *) log "golden: the ASV fuse word could not be read" ;;
+    esac
+}
+
+# golden_find_image: GOLDEN_IMG = the image in the folder linux of the
+# internal storage, else of a microSD card (linux/, or its top), mounted
+# read-only on $SD_MNT.
+golden_find_image() {
+    GOLDEN_IMG=
+    if [ -f "$UD_MNT/media/0/linux/$GOLDEN_IMG_NAME" ]; then
+        GOLDEN_IMG=$UD_MNT/media/0/linux/$GOLDEN_IMG_NAME
+        log "golden: the image is in the internal storage (media/0/linux/$GOLDEN_IMG_NAME)"
+        return 0
+    fi
+    [ -z "$TEST" ] || return 1
+    # the card is found by the kernel a moment after the eMMC
+    _gi_w=0
+    while [ ! -b /dev/mmcblk1 ] && [ "$_gi_w" -lt 10 ]; do
+        sleep 1
+        _gi_w=$((_gi_w + 1))
+    done
+    for _gi_sd in /dev/mmcblk1p1 /dev/mmcblk1; do
+        [ -b "$_gi_sd" ] || continue
+        mkdir -p "$SD_MNT"
+        if run mount -o ro,nosuid,nodev,noexec "$_gi_sd" "$SD_MNT"; then
+            GOLDEN_SD=1
+            for _gi_p in "$SD_MNT/linux/$GOLDEN_IMG_NAME" "$SD_MNT/$GOLDEN_IMG_NAME"; do
+                if [ -f "$_gi_p" ]; then
+                    GOLDEN_IMG=$_gi_p
+                    log "golden: the image is on the microSD card (${_gi_p#"$SD_MNT"/})"
+                    return 0
+                fi
+            done
+            run umount "$SD_MNT"
+            GOLDEN_SD=
+        fi
+    done
+    return 1
+}
+
+# golden_cleanup: undo the mounts of an earlier attempt (the debug shell can
+# ask for another one).
+golden_cleanup() {
+    seed_cleanup
+    if [ -n "$GOLDEN_SD" ] && is_mounted "$SD_MNT"; then
+        run umount "$SD_MNT"
+    fi
+    GOLDEN_SD=
+    if is_mounted "$UD_MNT"; then
+        sync
+        run umount "$UD_MNT"
+    fi
+}
+
+# golden_userdata_rw: USERDATA read-write (e2fsck -p first), as for a
+# persistent root.
+golden_userdata_rw() {
+    if is_mounted "$UD_MNT" && ! is_mounted_ro "$UD_MNT"; then
+        return 0
+    fi
+    if is_mounted "$UD_MNT"; then
+        run umount "$UD_MNT" || return 1
+    fi
+    run blockdev --setrw "$UD_DEV" || return 1
+    fsck_userdata || return 1
+    mkdir -p "$UD_MNT"
+    run mount -t ext4 -o rw,noatime,nosuid,nodev,errors=remount-ro "$UD_DEV" "$UD_MNT" || return 1
+    if is_mounted_ro "$UD_MNT"; then
+        err "USERDATA came up read-only"
+        return 1
+    fi
+    log "USERDATA mounted read-write"
+}
+
+# golden_mount_image: the image attached read-only and mounted on $LOWER;
+# it must be an aarch64 root carrying the kernel's slot.
+golden_mount_image() {
+    if ! LOOP_DEV=$(losetup -f 2>/dev/null) || [ -z "$LOOP_DEV" ]; then
+        LOOP_DEV=
+        return 1
+    fi
+    if ! run losetup -r "$LOOP_DEV" "$GOLDEN_IMG"; then
+        LOOP_DEV=
+        return 1
+    fi
+    mkdir -p "$LOWER"
+    if ! run mount -t ext4 -o ro,noload "$LOOP_DEV" "$LOWER"; then
+        seed_cleanup
+        return 1
+    fi
+    # e_machine of an ELF at byte 18: 0xb7 is AArch64
+    _gm_m=$(dd if="$LOWER/usr/lib/systemd/systemd" bs=1 skip=18 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+    if [ "$_gm_m" != 183 ]; then
+        err "golden: the image is not an aarch64 system"
+        seed_cleanup
+        return 1
+    fi
+    if [ ! -s "$LOWER/usr/lib/t715-golden/kernel.slot" ]; then
+        err "golden: the image carries no usr/lib/t715-golden/kernel.slot"
+        seed_cleanup
+        return 1
+    fi
+}
+
+# golden_seed: the image's tree into USERDATA/$GOLDEN_NAME (see the head of
+# this part).  The progress on screen as seed_persist shows it.
+golden_seed() {
+    _gs_root=$UD_MNT/$GOLDEN_NAME
+    _gs_tmp=$UD_MNT/.$GOLDEN_NAME.t715-seed
+    _gs_used=$(df -Pk "$LOWER" | awk 'NR == 2 { print $3 }')
+    _gs_free=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $4 }')
+    case $_gs_used$_gs_free in
+    '' | *[!0-9]*)
+        err "golden: could not read the image's use or USERDATA's free space"
+        return 1
+        ;;
+    esac
+    if [ -e "$_gs_tmp" ]; then
+        log "golden: removing an interrupted copy"
+        run rm -rf "$_gs_tmp" || return 1
+        _gs_free=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $4 }')
+    fi
+    if [ "$_gs_free" -lt $((_gs_used + SEED_MARGIN_KIB)) ]; then
+        err "golden: USERDATA has $((_gs_free / 1024)) MiB free, the install needs $(((_gs_used + SEED_MARGIN_KIB) / 1024)) MiB"
+        FAIL_REASON="Not enough free space in the internal storage: the install needs $(((_gs_used + SEED_MARGIN_KIB) / 1048576 + 1)) GB. Nothing was written. Free some space, then restart (hold Power and Volume down)."
+        return 1
+    fi
+    run mkdir -m 0755 "$_gs_tmp" || return 1
+    log "golden: copying $((_gs_used / 1024)) MiB from the image"
+    say "Installing Omarchy, this takes about ten minutes"
+    _gs_t0=$(date +%s)
+    (
+        _gs_b0=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $3 }')
+        case $_gs_b0 in
+        '' | *[!0-9]*) exit 0 ;;
+        esac
+        _gs_i=0
+        while :; do
+            if [ "$_gs_i" -gt 0 ]; then
+                sleep 1
+            fi
+            _gs_i=$((_gs_i + 1))
+            [ $((_gs_i % 10)) -eq 1 ] || continue
+            _gs_b=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $3 }')
+            case $_gs_b in
+            '' | *[!0-9]*) continue ;;
+            esac
+            _gs_d=$((_gs_b - _gs_b0))
+            [ "$_gs_d" -lt 0 ] && _gs_d=0
+            _gs_p=$((_gs_d * 100 / _gs_used))
+            [ "$_gs_p" -gt 99 ] && _gs_p=99
+            [ "$_gs_p" -lt 1 ] && _gs_p=1
+            say "Installing Omarchy: $_gs_p%"
+        done
+    ) &
+    _gs_prog=$!
+    _gs_rc=0
+    _gs_list=
+    for _gs_e in "$LOWER"/* "$LOWER"/.[!.]* "$LOWER"/..?*; do
+        [ -e "$_gs_e" ] || [ -L "$_gs_e" ] || continue
+        case ${_gs_e##*/} in
+        lost+found) ;;
+        *) _gs_list="$_gs_list ${_gs_e##*/}" ;;
+        esac
+    done
+    # One archive for the whole tree: hard links across top-level
+    # directories stay links.  The names have no blanks (checked by
+    # arm64/release), so the list splits on spaces.
+    set -f
+    # shellcheck disable=SC2086  # the list of top-level names
+    (cd "$LOWER" && tar -cf - $_gs_list) | (cd "$_gs_tmp" && tar -xpf -) || _gs_rc=1
+    set +f
+    kill "$_gs_prog" 2>/dev/null
+    wait "$_gs_prog" 2>/dev/null
+    # tar's own status reaches only the last command of the pipe: count the
+    # entries on both sides as well.
+    _gs_n1=$(cd "$LOWER" && find . -path ./lost+found -prune -o -print | wc -l)
+    _gs_n2=$(cd "$_gs_tmp" && find . | wc -l)
+    if [ "$_gs_rc" != 0 ] || [ "$_gs_n1" != "$_gs_n2" ]; then
+        err "golden: copying the image failed (exit $_gs_rc; $_gs_n1 entries in the image, $_gs_n2 copied)"
+        return 1
+    fi
+    # busybox tar leaves the symbolic links it makes to root: their owner
+    # back, as in the image (the user's own links in their home)
+    _gs_nl=0
+    while IFS= read -r _gs_l; do
+        _gs_o=$(stat -c '%u:%g' "$LOWER/$_gs_l" 2>/dev/null) || continue
+        chown -h "$_gs_o" "$_gs_tmp/$_gs_l" 2>/dev/null && _gs_nl=$((_gs_nl + 1))
+    done <<EOF_LINKS
+$(cd "$LOWER" && find . -path ./lost+found -prune -o -type l ! -user 0 -print -o -type l ! -group 0 -print)
+EOF_LINKS
+    log "golden: $_gs_n2 entries copied in $(($(date +%s) - _gs_t0))s, the owner of $_gs_nl symbolic link(s) set back"
+    _gs_nr=$NEWROOT
+    NEWROOT=$_gs_tmp
+    import_device_files
+    NEWROOT=$_gs_nr
+    {
+        printf 'persistent root %s, installed from %s\n' "$GOLDEN_NAME" "$GOLDEN_IMG_NAME"
+        printf 'installer %s, kernel %s\n' "$(golden_val release)" "$(uname -r)"
+    } >"$_gs_tmp/$PERSIST_MARK" || return 1
+    sync
+    run mv "$_gs_tmp" "$_gs_root" || return 1
+    sync
+}
+
+# golden_cache_fs DEV: no slot of ours in CACHE: when its file system
+# covers the slots (Android's /cache, the whole partition), a new one of 64
+# MiB takes its place.  The 64-bit system never mounts it.
+golden_cache_fs() {
+    # ext4 superblock at 1024: s_blocks_count_lo at 1028, s_log_block_size at
+    # 1048, s_magic at 1080
+    _gcf_sb=$RUNDIR/cache-sb
+    dd if="$1" of="$_gcf_sb" bs=1024 skip=1 count=1 2>/dev/null || return 1
+    _gcf_blocks=$(od -An -tu4 -j 4 -N 4 "$_gcf_sb" | tr -d ' ')
+    _gcf_log=$(od -An -tu4 -j 24 -N 4 "$_gcf_sb" | tr -d ' ')
+    _gcf_magic=$(od -An -tu2 -j 56 -N 2 "$_gcf_sb" | tr -d ' ')
+    if [ "$_gcf_magic" = 61267 ] && [ "${_gcf_log:-9}" -le 6 ] &&
+        [ $((_gcf_blocks * (1024 << _gcf_log))) -le $((CACHE_FS_KIB * 1024)) ]; then
+        log "golden: CACHE's file system ends before the slots, kept"
+        return 0
+    fi
+    log "golden: CACHE's file system covers the slots: a new one of $((CACHE_FS_KIB / 1024)) MiB"
+    make_rw "$1" || return 1
+    run mke2fs -b 4096 -L CACHE "$1" "$CACHE_FS_KIB" || return 1
+}
+
+# golden_slot SLOT_FILE: the kernel's slot (written with generation 0 by
+# arm64/release) into the CACHE slot not in use, one generation above the
+# one in use; the header's generation and hash are made here, the image's
+# and the device tree's hashes come with it.  Written, then read back whole.
+golden_slot() {
+    _gk_src=$1
+    _gk_dev=$(part_dev CACHE) || {
+        err "golden: no single partition named CACHE"
+        return 1
+    }
+    _gk_size=$(stat -c %s "$_gk_src")
+    if [ $((_gk_size % 512)) -ne 0 ] || [ "$_gk_size" -gt $((SLOT_SECTORS * 512)) ] ||
+        [ "$(slot_gen "$_gk_src" 0)" != 0 ]; then
+        err "golden: $_gk_src is not a slot of generation 0 that fits"
+        return 1
+    fi
+    if [ "$(blockdev --getsize64 "$_gk_dev")" -lt $(((SLOT_B + SLOT_SECTORS) * 512)) ]; then
+        err "golden: CACHE is too small for the two slots"
+        return 1
+    fi
+    _gk_a=$(slot_gen "$_gk_dev" "$SLOT_A")
+    _gk_b=$(slot_gen "$_gk_dev" "$SLOT_B")
+    if [ -z "$_gk_a$_gk_b" ]; then
+        golden_cache_fs "$_gk_dev" || return 1
+    fi
+    if [ -z "$_gk_a" ] && [ -z "$_gk_b" ]; then
+        _gk_at=$SLOT_A
+        _gk_gen=1
+    elif [ -z "$_gk_b" ] || { [ -n "$_gk_a" ] && [ "$_gk_a" -gt "$_gk_b" ]; }; then
+        _gk_at=$SLOT_B
+        _gk_gen=$((_gk_a + 1))
+    else
+        _gk_at=$SLOT_A
+        _gk_gen=$((_gk_b + 1))
+    fi
+    _gk_new=$RUNDIR/kernel.slot
+    {
+        head -c 8 "$_gk_src"
+        # shellcheck disable=SC2059  # the escapes are the bytes
+        printf "$(le32 "$_gk_gen")"
+        dd if="$_gk_src" bs=1 skip=12 count=36 2>/dev/null
+    } >"$_gk_new.h" || return 1
+    set -f
+    # shellcheck disable=SC2046  # two words
+    set -- $(fnv1a64 "$_gk_new.h" 0 48)
+    set +f
+    {
+        cat "$_gk_new.h"
+        # shellcheck disable=SC2059  # the escapes are the bytes
+        printf "$(le32 "$1")$(le32 "$2")"
+        dd if="$_gk_src" bs=1 skip=56 count=4040 2>/dev/null
+        dd if="$_gk_src" bs=4096 skip=1 2>/dev/null
+    } >"$_gk_new" || return 1
+    rm -f "$_gk_new.h"
+    if [ "$(slot_gen "$_gk_new" 0)" != "$_gk_gen" ] || [ "$(stat -c %s "$_gk_new")" != "$_gk_size" ]; then
+        err "golden: the slot made here does not check"
+        return 1
+    fi
+    _gk_sum=$(sha256sum "$_gk_new" | cut -d' ' -f1)
+    log "golden: the kernel's slot, generation $_gk_gen, to sector $_gk_at of CACHE (the slots held: A ${_gk_a:-none}, B ${_gk_b:-none})"
+    make_rw "$_gk_dev" || return 1
+    if ! dd if="$_gk_new" of="$_gk_dev" bs=512 seek="$_gk_at" conv=notrunc,fsync 2>/dev/null; then
+        err "golden: the write to CACHE failed"
+    fi
+    sync
+    _gk_back=$(dd if="$_gk_dev" bs=512 skip="$_gk_at" count=$((_gk_size / 512)) 2>/dev/null | sha256sum | cut -d' ' -f1)
+    rm -f "$_gk_new"
+    if [ "$_gk_back" != "$_gk_sum" ]; then
+        err "golden: the slot does not read back as written"
+        return 1
+    fi
+    log "golden: the kernel's slot reads back as written"
+}
+
+# golden_efs_backup: EFS (the IMEI, the one partition no tool can rebuild)
+# copied, read only, next to PARAM's copy, for the owner to keep on a
+# computer.  Never fatal: EFS is not written by anything here.
+golden_efs_backup() {
+    [ ! -e "$UD_MNT/$GOLDEN_EFS" ] || return 0
+    if ! _ge_dev=$(part_dev EFS); then
+        warn "golden: no single partition named EFS: no copy of it"
+        return 0
+    fi
+    if dd if="$_ge_dev" of="$UD_MNT/$GOLDEN_EFS.part" bs=1M 2>/dev/null &&
+        [ "$(sha256sum "$UD_MNT/$GOLDEN_EFS.part" | cut -d' ' -f1)" = "$(sha256sum "$_ge_dev" | cut -d' ' -f1)" ] &&
+        mv "$UD_MNT/$GOLDEN_EFS.part" "$UD_MNT/$GOLDEN_EFS"; then
+        chmod 0600 "$UD_MNT/$GOLDEN_EFS"
+        printf '%s  %s\n' "$(sha256sum "$UD_MNT/$GOLDEN_EFS" | cut -d' ' -f1)" "${GOLDEN_EFS##*/}" >"$UD_MNT/$GOLDEN_EFS.sha256"
+        sync
+        log "golden: EFS copied (read only) to $GOLDEN_EFS"
+    else
+        rm -f "$UD_MNT/$GOLDEN_EFS.part"
+        warn "golden: EFS could not be copied"
+    fi
+}
+
+# golden_param: save the stock PARAM (whole), forge the loader, write it.
+golden_param() {
+    _gp_copy=$RUNDIR/param-stock.img
+    dd if="$PARAM_DEV" of="$_gp_copy" bs=1M 2>/dev/null || return 1
+    _gp_sum=$(sha256sum "$_gp_copy" | cut -d' ' -f1)
+    golden_forge_checked "$_gp_copy" || return 1
+    for _gp_to in "$UD_MNT/$GOLDEN_BACKUP" "$UD_MNT/$GOLDEN_NAME/$GOLDEN_SAVED"; do
+        mkdir -p "${_gp_to%/*}" || return 1
+        cp "$_gp_copy" "$_gp_to.part" && sync && mv "$_gp_to.part" "$_gp_to" || return 1
+        if [ "$(sha256sum "$_gp_to" | cut -d' ' -f1)" != "$_gp_sum" ]; then
+            err "golden: the copy of the stock PARAM in ${_gp_to#"$UD_MNT"/} does not read back"
+            return 1
+        fi
+    done
+    chmod 0600 "$UD_MNT/$GOLDEN_NAME/$GOLDEN_SAVED" "$UD_MNT/$GOLDEN_BACKUP"
+    printf '%s  %s\n' "$_gp_sum" "${GOLDEN_BACKUP##*/}" >"$UD_MNT/$GOLDEN_BACKUP.sha256"
+    golden_efs_backup
+    sync
+    log "golden: the stock PARAM saved in ${GOLDEN_BACKUP} and the root's /$GOLDEN_SAVED"
+    golden_write_param "$RUNDIR/param-loader.img"
+}
+
+# golden_finish: the marker, the log next to the image, the restart.
+golden_finish() {
+    {
+        printf 'Omarchy for the Galaxy Tab S2, 64 bits: installer %s\n' "$(golden_val release)"
+        printf 'installed %s\n' "$(date -u '+%Y-%m-%d')"
+    } >"$UD_MNT/$GOLDEN_NAME/$GOLDEN_MARK" || return 1
+    cp "$LOGFILE" "$UD_MNT/$GOLDEN_LOG" 2>/dev/null
+    sync
+    golden_cleanup
+    say "Omarchy is installed. Restarting into it..."
+    log "golden: installed, restarting"
+    [ -n "$TEST" ] || sleep 5
+    do_reboot
+}
+
+# golden_save_log: the log next to the image, when USERDATA is writable.
+golden_save_log() {
+    if is_mounted "$UD_MNT" && ! is_mounted_ro "$UD_MNT" && mkdir -p "$UD_MNT/media/0/linux"; then
+        cp "$LOGFILE" "$UD_MNT/$GOLDEN_LOG" 2>/dev/null && sync
+    fi
+}
+
+# golden_install PARAM_TOO: everything but the checks of golden_main; with
+# PARAM_TOO = 1, the loader goes into PARAM last.
+golden_install() {
+    _gi_param=$1
+    _gi_root=$UD_MNT/$GOLDEN_NAME
+    FAIL_REASON="The install stopped (its log: linux/omarchy-arm64-install.log in the internal storage). PARAM was not changed: the next start tries again."
+    if [ "$_gi_param" = 1 ] && [ "$SBOOT_VERSION" != "$(golden_val bootloader)" ]; then
+        err "golden: the bootloader is '${SBOOT_VERSION:-unknown}', the loader is made for $(golden_val bootloader)"
+        FAIL_REASON="This tablet's bootloader is ${SBOOT_VERSION:-unknown}; Omarchy needs $(golden_val bootloader). Nothing was written. Flash the stock $(golden_val bootloader) firmware with Odin, then this installer again."
+        return 1
+    fi
+    golden_asv
+    if [ ! -f "$_gi_root/$PERSIST_MARK" ]; then
+        if [ -e "$_gi_root" ] || [ -L "$_gi_root" ]; then
+            err "golden: USERDATA/$GOLDEN_NAME exists and was not made by this installer"
+            FAIL_REASON="The internal storage already holds a folder $GOLDEN_NAME that this installer did not make. Nothing was written."
+            return 1
+        fi
+        if ! golden_find_image; then
+            err "golden: no $GOLDEN_IMG_NAME in the folder linux of the internal storage or of a microSD card"
+            FAIL_REASON="Omarchy's image was not found. Copy $GOLDEN_IMG_NAME and $GOLDEN_IMG_NAME.sha256 into a folder named linux on a microSD card, put the card in, then restart (hold Power and Volume down). Nothing was written."
+            return 1
+        fi
+        if [ ! -f "$GOLDEN_IMG.sha256" ]; then
+            err "golden: no $GOLDEN_IMG_NAME.sha256 next to the image"
+            FAIL_REASON="$GOLDEN_IMG_NAME.sha256 is missing next to the image: copy it there too, then restart. Nothing was written."
+            return 1
+        fi
+        golden_battery
+        if ! check_image_sum "$GOLDEN_IMG"; then
+            FAIL_REASON="The image file is damaged (bad checksum). Copy it again, then restart. Nothing was written."
+            return 1
+        fi
+        # The image checked while USERDATA is still read-only, so a refusal
+        # writes nothing; then detached, since an image attached from USERDATA
+        # would keep it from being remounted read-write, and attached again.
+        if ! golden_mount_image; then
+            FAIL_REASON="The image file could not be read as Omarchy's 64-bit image. Nothing was written."
+            return 1
+        fi
+        seed_cleanup
+        golden_userdata_rw || return 1
+        golden_mount_image || return 1
+        golden_seed || return 1
+        seed_cleanup
+    else
+        log "golden: USERDATA/$GOLDEN_NAME is there already (an earlier start copied it)"
+        golden_userdata_rw || return 1
+    fi
+    if ! golden_slot "$_gi_root/usr/lib/t715-golden/kernel.slot"; then
+        FAIL_REASON="The kernel could not be written to the CACHE partition. PARAM was not changed: the tablet comes back here."
+        return 1
+    fi
+    if [ "$_gi_param" = 1 ]; then
+        say "Writing the loader..."
+        if ! golden_param; then
+            FAIL_REASON="The loader could not be written. If the tablet no longer starts, flash linux/PARAM-stock-backup.img back to PARAM in download mode (see the install guide)."
+            return 1
+        fi
+    fi
+    golden_finish
+}
+
+# golden_main: what this start has to do (see the head of this part).
+# Returns only when it stops.
+golden_main() {
+    golden_cleanup
+    FAILREBOOT=0
+    EXTENT=$(golden_val extent)
+    case $EXTENT in
+    '' | *[!0-9]*)
+        err "golden: $GOLDEN_DIR is incomplete"
+        FAIL_REASON="This installer is incomplete. Nothing was written."
+        return 1
+        ;;
+    esac
+    for _gm_f in logo.jpg stock.sha256 loader.sha256 bootloader release; do
+        if [ ! -s "$GOLDEN_DIR/$_gm_f" ]; then
+            err "golden: $GOLDEN_DIR/$_gm_f is missing"
+            FAIL_REASON="This installer is incomplete. Nothing was written."
+            return 1
+        fi
+    done
+    say "Omarchy for the Galaxy Tab S2, 64 bits: installer $(golden_val release)"
+    log "golden: installer $(golden_val release), bootloader ${SBOOT_VERSION:-not given}"
+    if ! PARAM_DEV=$(part_dev PARAM); then
+        err "golden: no single partition named PARAM"
+        FAIL_REASON="The tablet's partitions look unusual (no PARAM). Nothing was written."
+        return 1
+    fi
+    _gm_sum=$(golden_param_sum)
+    find_userdata || return 1
+    mount_userdata || {
+        FAIL_REASON="The internal storage could not be read: is it encrypted? Omarchy needs it unencrypted (see the install guide). Nothing was written."
+        return 1
+    }
+    _gm_root=$UD_MNT/$GOLDEN_NAME
+    if [ "$_gm_sum" = "$(golden_val loader.sha256)" ]; then
+        if [ -f "$_gm_root/$GOLDEN_MARK" ]; then
+            log "golden: the loader is in PARAM and USERDATA/$GOLDEN_NAME is installed: the loader handed this start back"
+            FAILREBOOT=1
+            FAIL_REASON="Omarchy did not finish starting last time. The tablet restarts and tries again."
+            return 1
+        fi
+        log "golden: the loader is in PARAM, the system is not installed: installing it"
+        golden_install 0 || golden_save_log
+        return 1
+    fi
+    if [ "$_gm_sum" = "$(golden_val stock.sha256)" ]; then
+        log "golden: PARAM is the stock image: installing"
+        golden_install 1 || golden_save_log
+        return 1
+    fi
+    log "golden: PARAM's first $EXTENT bytes are $_gm_sum: neither the stock image nor the loader"
+    if [ -f "$_gm_root/$GOLDEN_MARK" ] && [ -f "$_gm_root/$GOLDEN_SAVED" ]; then
+        say "Rescue: PARAM does not hold Omarchy's loader. Writing it back."
+        if golden_forge_checked "$_gm_root/$GOLDEN_SAVED" && golden_write_param "$RUNDIR/param-loader.img"; then
+            golden_cleanup
+            say "Rescue: the loader is back in PARAM. Restarting."
+            [ -n "$TEST" ] || sleep 5
+            do_reboot
+        fi
+        FAIL_REASON="Rescue: the loader could not be written back. Flash linux/PARAM-stock-backup.img to PARAM in download mode (see the install guide)."
+        return 1
+    fi
+    FAIL_REASON="PARAM does not hold the stock image of $(golden_val bootloader) that this installer knows. Nothing was written. Flash the stock $(golden_val bootloader) firmware with Odin, then this installer again."
+    return 1
+}
+
 main() {
     mount_early
     # A failed redirection on "exec" would end the shell (= kernel panic
@@ -1831,6 +2625,13 @@ main() {
     # follows needs nothing else.  The link is up, so the debug shell is there
     # should the write fail.
     param_rescue
+    if [ "$GOLDEN" = 1 ]; then
+        # Returns only when it stops; the debug shell can ask for another try.
+        while :; do
+            golden_main
+            fail_wait || do_reboot
+        done
+    fi
     if prepare_root; then
         if [ "$SHELL_MODE" = 1 ]; then
             shell_wait

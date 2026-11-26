@@ -2,7 +2,8 @@
 
 | Path | What |
 |---|---|
-| `initramfs/init` | the initramfs's `/init` (busybox sh, PID 1): image mode, persistent root, knobs, debug shell |
+| `initramfs/init` | the initramfs's `/init` (busybox sh, PID 1): image mode, persistent root, knobs, debug shell; the installer of the 64-bit system and its rescue (`t715.golden`) |
+| `golden/` | what the installer writes into PARAM: the loader's logo (`logo.jpg`), the sha256 of PARAM's first `extent` bytes before (`stock.sha256`) and after (`loader.sha256`), the one `bootloader` it is made for, the `release`; `check-param.py` checks a PARAM dump against them on a computer |
 | `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs; with `--paramrescue`, the loader the rescue puts back), reproducibly, in Docker |
 | `pack-test-recovery.sh` | packs kernel, DTB and initramfs into a RECOVERY image, or a BOOT image with `--boot` |
 | `samsung_bootimg.py` | Samsung boot image and DTBH reader/writer |
@@ -257,6 +258,35 @@ Rules:
 - The system of every day's tools that name PARAM by the sha256 of the whole
   partition find no name for it after a fallback boot, since S-Boot's data
   has changed: they must look at the loader's part, as the rescue does.
+
+### The installer of the 64-bit system (`t715.golden`)
+
+Built with `--golden boot/golden` (which turns the knob on), this initramfs is the 2.0
+release's installer, in BOOT and RECOVERY: [docs/INSTALL-ARM64.md](../docs/INSTALL-ARM64.md) is
+the user's guide, and its section 7 the short account. The code is the part of `initramfs/init`
+headed "Golden"; in order:
+
+| Step | Function | What |
+|---|---|---|
+| state | `golden_main` | PARAM's first `extent` bytes: the stock image (`stock.sha256`) → install; the loader (`loader.sha256`) and the root marked `.t715-golden` → the loader handed this start back: say so, restart after `t715.failwait`; the loader without the root → install it (PARAM is left alone); anything else with the root's saved stock PARAM → forge and write the loader again (the rescue); anything else → refuse |
+| checks | `golden_install` | `androidboot.bootloader` from S-Boot's command line is `bootloader`; the image `omarchy-arm64.img` in `linux/` of the internal storage (`media/0/linux`) or of a microSD card, its sidecar `.sha256` (required); the battery (30 %); the image is aarch64 and carries `usr/lib/t715-golden/kernel.slot`; the chip's ASV fuse word is logged |
+| root | `golden_seed` | the image's tree into `USERDATA/.omarchy-arm64.t715-seed` with busybox `tar` (the arm64 image's `cp` cannot run on this 32-bit kernel; tar carries no extended attribute: the release lists the image's file capabilities, which the image's `t715-golden-caps.service` sets again at the first boot, and checks it holds no other but the ACLs systemd-tmpfiles sets), the entries counted on both sides, `import_device_files`, the `.t715-persist` marker, renamed `omarchy-arm64` |
+| kernel | `golden_slot`, `golden_cache_fs` | with no slot of ours in CACHE, a 64 MiB file system (`mke2fs`) in front of the slots; the slot written to the one not in use with the next generation (its header's generation and FNV-1a 64 made here, `slot_gen` reads them back), the whole slot read back |
+| loader | `golden_param`, `golden_forge`, `golden_write_param` | PARAM copied whole to `media/0/linux/PARAM-stock-backup.img` and the root's `var/lib/t715/PARAM-stock.img`, EFS (read only) to `media/0/linux/EFS-backup.img`; the loader forged from the copy (Samsung's `logo.jpg` replaced by `golden/logo.jpg`, the members after it moved, zeros to `extent`), refused unless its sha256 is `loader.sha256`; written over the first `extent` bytes only, read back |
+| end | `golden_finish` | the root's `.t715-golden`, the log to `media/0/linux/omarchy-arm64-install.log`, restart |
+
+Each step done already is skipped at the next start; PARAM is the last write. Every refusal
+writes nothing and waits on screen (`t715.failreboot` is 0 in this mode), except the loader's
+hand-back, which restarts. The host tests: the `golden` scenarios of `tests/test_initramfs.sh`.
+The release builds the installer itself (`arm64/release/make-release.sh`), on the 1.0.5 release's
+32-bit kernel, with `t715.failwait=30 t715.quiet=1`.
+
+`golden/logo.jpg` is the logo of the loader `kboot7-cas3` (elkir0/bnuuyloader: its `t715/loader`
+builds it, `t715/docs/SPLASH.md` tells that image; `check-param.py STOCK kboot7-cas3.param` says
+the same bytes): the loader's code and its boot screen, our bytes only (no metadata; its only runs in common with Samsung's partitions are the JPEG
+standard's Huffman tables and AArch64 no-op padding). `stock.sha256` is that of the archive part
+of `T715XXU2CRH1`'s PARAM, Samsung's pictures and two default settings, the same on every tablet
+of that firmware as far as known; a tablet whose PARAM differs is refused, not guessed at.
 
 ### On-screen messages
 
