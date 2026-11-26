@@ -26,10 +26,11 @@ tablet's bootloader. The two bricks are told together in [docs/ARM64.md](../docs
 | `rootfs/` | the image's build: `build.sh` (the one command), the Dockerfile and its steps, the overlays, the package lists, the pins of every package downloaded, the smoke checks |
 | `rootfs/pkg/` | the packages built for the tablet: `omamobile-omarchy`, `omamobile-shell`, `omamobile-settings`, `omamobile-remote`, `omamobile-voice`, `omaphone`, `omamessages`, `omatel-agent` (Omarchy Mobile, with the tablet's patches), `t715-modem` (the modem stack of this repository's `modem/`), `voxtype-bin` (dictation, rebuilt for the tablet's CPU), `hyprgraphics` |
 | `rootfs/initramfs/` | the initramfs built into the 64-bit kernel: it finds the root in USERDATA |
+| `rootfs/overlay/usr/local/sbin/t715-sleep`, `t715-wifi-guard` | the sleep of the 32-bit image: suspend to RAM a minute after the screen goes dark on battery, the CP and the Wi-Fi/Bluetooth chip powered down around it ([docs/image/ROOTFS.md](../docs/image/ROOTFS.md), "Sleep"); in the image build, the kernel side tested on the tablet, the user space not yet |
 | `tools/t715-arm64-health` | the health check of a running tablet: what passes, warns and fails |
 | `tools/t715-isa-audit` | finds the programs that may not run on the tablet's CPU (below) |
 | `tools/claude-code` | installs Anthropic's signed arm64 build of Claude Code, checked against Anthropic's release key |
-| `tests/` | the off-device suites of the two tools |
+| `tests/` | the off-device suites of the two tools and of the sleep |
 | `release/make-release.sh` | the release: the image with the kernel's modules and slot, checked; the installer (`../boot/`, `t715.golden`); the Odin package, the sums, a manifest |
 | `docs/ROADMAP.md` | Golden: what 2.0.0 holds, and what is left |
 | `docs/ROOTFS.md` | everything about the image: what it contains and why, the boot mark and the watchdog keeper, what the kernel must provide, the boot arguments, writing the image to the tablet, the risks |
@@ -98,6 +99,7 @@ Install > AI menu.
 bash arm64/tests/health/run.sh
 bash arm64/tests/isa-audit/run.sh
 bash arm64/tests/android/run.sh
+bash arm64/tests/sleep/run.sh
 ```
 
 The packages run their own tests (`check()`) whenever `build.sh` builds them, and the image is

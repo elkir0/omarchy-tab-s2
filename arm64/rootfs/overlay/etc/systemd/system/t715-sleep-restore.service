@@ -1,0 +1,14 @@
+# SM-T715: bring the radios back after a sleep -- start the modem's CP
+# again when its own choice wants it, and hand the Wi-Fi/Bluetooth chip to
+# t715-wifi-guard's recover (docs/image/ROOTFS.md, "Sleep").  Started
+# --no-block by t715-sleep itself: at the wake (the prepare unit's ExecStop)
+# and at a lit screen while markers say a sleep took the radios down.  No
+# Install section: nothing enables it, it is only ever pulled in that way.
+[Unit]
+Description=Bring the radios back after the tablet's sleep (SM-T715)
+Documentation=file:///usr/local/sbin/t715-sleep
+After=t715-sleep-prepare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t715-sleep restore

@@ -17,8 +17,10 @@
 #       the on-screen keyboard's gsettings, terminal layouts, session
 #       environment); the touch shell is not (omamobile-omarchy's patch series,
 #       the QML modules its plugins import, the user's profile or plugin links);
-#       PipeWire's BlueZ plugin is missing; the user's Hyprland config does not
-#       verify;
+#       PipeWire's BlueZ plugin is missing; the Wi-Fi guard or the sleep is not
+#       in place (t715-wifi-guard, t715-sleep, their units enabled, suspend and
+#       sleep not masked, logind's lid drop-in); the user's Hyprland config
+#       does not verify;
 #       the Android (Waydroid) integration is not in place: waydroid or
 #       python-pyclip not installed, a tool of overlay-omarchy missing or not
 #       parsing, the two user units not enabled for every user,
@@ -550,6 +552,107 @@ if sh -n /usr/local/sbin/t715-wifi-addr 2>/dev/null && command -v logger >/dev/n
     pass "t715-wifi-addr parses; logger and wpa_supplicant present"
 else
     fail "t715-wifi-addr does not parse, or no logger or wpa_supplicant"
+fi
+
+echo "== Wi-Fi guard (docs/image/ROOTFS.md) =="
+# The 32-bit image's checks (its tests/verify-rootfs.sh, "Wi-Fi guard"), in
+# the image's own container: the script, its mode, the enabled unit.
+WG=/usr/local/sbin/t715-wifi-guard
+wgu=/etc/systemd/system/t715-wifi-guard.service
+if [ "$(stat -c %a "$WG" 2>/dev/null)" = 755 ] && sh -n "$WG" 2>/dev/null; then
+    pass "$WG: mode 0755, parses"
+else
+    fail "$WG: missing, not mode 0755, or does not parse"
+fi
+[ "$(readlink /etc/systemd/system/multi-user.target.wants/t715-wifi-guard.service)" = "$wgu" ] \
+    && pass "t715-wifi-guard.service enabled (multi-user.target.wants)" \
+    || fail "t715-wifi-guard.service not enabled (multi-user.target.wants -> $(readlink /etc/systemd/system/multi-user.target.wants/t715-wifi-guard.service || echo missing))"
+if grep -qx 'Type=simple' "$wgu" && grep -qx 'ExecStart=/usr/local/sbin/t715-wifi-guard run' "$wgu" \
+   && grep -qx 'After=NetworkManager.service bluetooth.service' "$wgu" \
+   && grep -qx 'Restart=always' "$wgu" && grep -qx 'WantedBy=multi-user.target' "$wgu"; then
+    pass "t715-wifi-guard.service: simple, runs run, after NetworkManager and bluetooth, restarts whatever its exit"
+else
+    fail "t715-wifi-guard.service is not as the 32-bit image has it ($wgu)"
+fi
+if ! grep -v '^[[:space:]]*#' "$WG" | grep -Eq 'rfkill|nmcli|NetworkManager|ModemManager'; then
+    pass "t715-wifi-guard: writes only the two drivers' bind and unbind files, never rfkill or NetworkManager's"
+else
+    fail "t715-wifi-guard names rfkill, nmcli, NetworkManager or ModemManager outside a comment"
+fi
+# arm64: the A57 boost is off by default (the image leaves the cores and
+# their frequencies to the kernel).
+if grep -qxF "    aarch64|arm64) WG_BOOST_DEFAULT='' ;;" "$WG"; then
+    pass "t715-wifi-guard: the A57 boost off by default on aarch64"
+else
+    fail "t715-wifi-guard: no aarch64 default for the A57 boost"
+fi
+
+echo "== Sleep (docs/image/ROOTFS.md) =="
+# The 32-bit image's checks (its tests/verify-rootfs.sh, "Sleep"): the
+# script, its three units, their enabling, the targets, logind's lid drop-in.
+SL=/usr/local/sbin/t715-sleep
+sdir=/etc/systemd/system
+if [ "$(stat -c %a "$SL" 2>/dev/null)" = 755 ] && sh -n "$SL" 2>/dev/null; then
+    pass "$SL: mode 0755, parses"
+else
+    fail "$SL: missing, not mode 0755, or does not parse"
+fi
+[ "$(readlink "$sdir/multi-user.target.wants/t715-sleep.service")" = "$sdir/t715-sleep.service" ] \
+    && pass "t715-sleep.service enabled (multi-user.target.wants)" \
+    || fail "t715-sleep.service not enabled (multi-user.target.wants -> $(readlink "$sdir/multi-user.target.wants/t715-sleep.service" || echo missing))"
+[ "$(readlink "$sdir/sleep.target.wants/t715-sleep-prepare.service")" = "$sdir/t715-sleep-prepare.service" ] \
+    && pass "t715-sleep-prepare.service enabled (sleep.target.wants)" \
+    || fail "t715-sleep-prepare.service not wanted by sleep.target (-> $(readlink "$sdir/sleep.target.wants/t715-sleep-prepare.service" || echo missing))"
+u="$sdir/t715-sleep.service"
+if grep -qx 'Type=simple' "$u" && grep -qx 'ExecStart=/usr/local/sbin/t715-sleep run' "$u" \
+   && grep -qx 'After=t715-wifi-guard.service' "$u" && grep -qx 'Restart=on-failure' "$u" \
+   && grep -qx 'WantedBy=multi-user.target' "$u"; then
+    pass "t715-sleep.service: simple, runs run, after the Wi-Fi guard, restarts on failure"
+else
+    fail "t715-sleep.service is not as the 32-bit image has it"
+fi
+u="$sdir/t715-sleep-prepare.service"
+if grep -qx 'Before=sleep.target' "$u" && grep -qx 'StopWhenUnneeded=yes' "$u" \
+   && grep -qx 'Type=oneshot' "$u" && grep -qx 'RemainAfterExit=yes' "$u" \
+   && grep -qx 'ExecStart=/usr/local/sbin/t715-sleep prepare' "$u" \
+   && grep -qx 'ExecStop=/usr/local/sbin/t715-sleep resume' "$u" \
+   && grep -qx 'WantedBy=sleep.target' "$u"; then
+    pass "t715-sleep-prepare.service: before sleep.target, oneshot kept active, prepare then resume"
+else
+    fail "t715-sleep-prepare.service is not as the 32-bit image has it"
+fi
+u="$sdir/t715-sleep-restore.service"
+if grep -qx 'Type=oneshot' "$u" && grep -qx 'ExecStart=/usr/local/sbin/t715-sleep restore' "$u" \
+   && ! grep -q '^\[Install\]' "$u"; then
+    pass "t715-sleep-restore.service: oneshot, runs restore, no Install section"
+else
+    fail "t715-sleep-restore.service is not as the 32-bit image has it"
+fi
+if ! grep -v '^[[:space:]]*#' "$SL" | grep -Eq 'rfkill|t715-modem-power (on|off)|/etc/NetworkManager'; then
+    pass "t715-sleep: never writes rfkill, NetworkManager's settings or the modem's own switch"
+else
+    fail "t715-sleep names rfkill, t715-modem-power on/off or /etc/NetworkManager outside a comment"
+fi
+for target in suspend sleep; do
+    if [ "$(readlink "$sdir/$target.target" 2>/dev/null)" != /dev/null ]; then
+        pass "$target.target not masked (t715-sleep masks it at run time on a kernel without system sleep)"
+    else
+        fail "$target.target is masked: every suspend of t715-sleep would be refused"
+    fi
+done
+lid=/etc/systemd/logind.conf.d/90-t715-lid.conf
+if grep -qx 'HandleLidSwitch=ignore' "$lid" 2>/dev/null && grep -qx 'HandleLidSwitchExternalPower=ignore' "$lid" \
+   && grep -qx 'HandleLidSwitchDocked=ignore' "$lid"; then
+    pass "logind ignores the lid switch ($lid): the sleep is t715-sleep's"
+else
+    fail "logind's lid drop-in $lid does not ignore the switch"
+fi
+# status only reads (in a container the kernel has no system sleep).
+out="$("$SL" status 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | head -n1 | grep -qE '^sleep: (on|switched off)$'; then
+    pass "t715-sleep status runs: $(printf '%s\n' "$out" | sed -n '1p;3p' | tr '\n' ' ')"
+else
+    fail "t715-sleep status (exit $rc): $(printf '%s\n' "$out" | head -n1)"
 fi
 echo "== Hyprland config (the user's) =="
 # Required: a config error makes Hyprland draw its error bar, and Hyprland's

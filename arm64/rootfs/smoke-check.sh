@@ -87,6 +87,11 @@ for unit in sshd.service NetworkManager.service usb-rndis.service \
     fi
 done
 for target in suspend sleep hibernate hybrid-sleep suspend-then-hibernate; do
+    # The Omarchy image unmasks suspend and sleep for t715-sleep: its part of
+    # the check (smoke-check-omarchy, "Sleep") checks them.
+    case "$target" in
+        suspend|sleep) pacman -Q omarchy >/dev/null 2>&1 && continue ;;
+    esac
     [ "$(readlink "/etc/systemd/system/$target.target" 2>/dev/null)" = /dev/null ] \
         && pass "$target.target is masked" || fail "$target.target is not masked"
 done
@@ -359,6 +364,7 @@ kernel="$(pacman -Qq | grep -E '^linux' | grep -vx 'linux-api-headers' || true)"
 echo "== scripts and binaries load =="
 bad=""
 for f in /usr/local/sbin/usb-rndis-setup /usr/local/sbin/t715-wifi-addr /usr/local/sbin/t715-vendor-firmware \
+         /usr/local/sbin/t715-wifi-guard /usr/local/sbin/t715-sleep \
          /usr/lib/systemd/system-shutdown/t715-stuck-procs /usr/local/bin/t715-pstore-shutdown; do
     [ -f "$f" ] || { bad="$bad $f(missing)"; continue; }
     bash -n "$f" 2>/dev/null || bad="$bad $f"

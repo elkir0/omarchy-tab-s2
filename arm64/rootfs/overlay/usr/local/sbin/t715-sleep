@@ -1,0 +1,688 @@
+#!/bin/sh
+# t715-sleep: the tablet's own suspend to RAM -- sleep once the screen has
+# been dark long enough on battery, and bring the radios back on the wake.
+#
+# The kernel this goes with can put the whole tablet to RAM: /sys/power/
+# mem_sleep holds "s2idle [deep]", and systemctl suspend asks for deep.  A
+# deep suspend is still a harmless dry run -- the system resumes at once --
+# unless /sys/module/exynos5433_sleep/parameters/arm was written 1 just
+# before, and the kernel clears that switch after every attempt: nothing
+# else can arm a sleep by accident.  A kernel without the arm file, or
+# without [deep] in mem_sleep, has no system sleep at all -- run masks the
+# sleep targets until the next boot (so a suspend cannot freeze the system
+# with the radios up, the protection the image had before), says so once
+# and exits, and prepare and resume stay silent.
+#
+# What must be off before a real sleep: the modem's CP, or the shannon
+# driver refuses to suspend, and the Wi-Fi/Bluetooth chip, which cannot
+# keep its state through a sleep yet.  prepare (the ExecStart of
+# t715-sleep-prepare.service, Before=sleep.target) stops the CP through the
+# modem's own units -- exactly t715-modem-power's cp_off, never its on/off,
+# which are the user's persistent choice -- powers the chip down with
+# `t715-wifi-guard off`, and only then arms the kernel; whatever did not go
+# down leaves this suspend the dry run it started as.  On external power the
+# radios go down all the same but nothing is armed: a tablet on a charger
+# does not need to sleep, and a dry run with the Wi-Fi up would put
+# brcmfmac through a suspend it cannot keep.  The wake, the
+# same service's ExecStop (systemd runs it once the system is back), disarms
+# at once, says how long the sleep lasted, and starts
+# t715-sleep-restore.service -- unless it was the battery check: prepare
+# sets the PMIC's RTC alarm (/sys/class/rtc/rtc0/wakealarm) for a look at
+# the battery every CHECK_HOURS, and at that wake the radios stay off and
+# the still-dark screen is judged again within QUICK seconds, a battery at
+# or below LOW powering the tablet off rather than sleeping it again.  An
+# alarm already in the RTC belongs to whoever set it and is left alone.
+#
+# run, the policy loop (t715-sleep.service, after the Wi-Fi guard), polls
+# every POLL seconds.  A lit screen resets the dark count, drops the
+# battery-check marker and brings the radios back; a dark one counts up to
+# AFTER (QUICK after a battery-check wake), then sleeps unless a reason
+# holds -- external power, audio playing (ALSA, or Bluetooth audio through
+# BlueZ), a call, the hotspot, a remote login session (REMOTE=ignore drops
+# that one), a block-mode sleep inhibitor in logind, stay-awake, a package
+# transaction, a Wi-Fi recovery holding
+# the guard's lock, the CP between states -- or the battery is low, which
+# powers off.  Each reason is one fixed line, logged when it changes and
+# not again while it holds.  The wake sources are the kernel's: the Power
+# and Home keys, the cover, a cable plug and the RTC alarm; after a key
+# wake t715-keys lights the screen by itself, and a lit screen is what
+# brings the radios back.  The screen counts as dark only while a
+# /sys/class/drm/card*-DSI-1/dpms positively reads Off: a missing file
+# reads as lit, so a tablet whose panel state cannot be read never sleeps
+# blind.
+#
+# The switch: /var/lib/t715-sleep/mode holding "off" (t715-sleep off, root
+# only) disables sleeping -- run reads it at every poll, so a change takes
+# effect at once -- and anything else, or no file, means on.
+#
+# Every path and command comes from the environment, for the off-device
+# test (tests/test_t715_sleep.sh): T715_SLEEP_SYS, T715_SLEEP_PROC,
+# T715_SLEEP_RUN (the markers), T715_SLEEP_VAR (the switch),
+# T715_SLEEP_HOME, T715_SLEEP_PACMAN_LOCK, T715_SLEEP_GUARD,
+# T715_SLEEP_GUARD_LOCK, T715_SLEEP_MODEM, T715_SLEEP_SHANNONCTL,
+# T715_SLEEP_NMCLI, T715_SLEEP_SYSTEMCTL, T715_SLEEP_LOGINCTL,
+# T715_SLEEP_BUSCTL, T715_SLEEP_NOW (a command printing the epoch),
+# T715_SLEEP_SLEEP, T715_SLEEP_LOGGER, T715_SLEEP_RTC; and the numbers
+# T715_SLEEP_AFTER, T715_SLEEP_QUICK, T715_SLEEP_POLL,
+# T715_SLEEP_CHECK_HOURS (0 disables the alarm), T715_SLEEP_LOW,
+# T715_SLEEP_REMOTE (block or ignore) and T715_SLEEP_MAX_POLLS (tests only:
+# run returns after that many polls).
+#
+# Only these are ever written: the arm file, the RTC's wakealarm, the
+# markers under T715_SLEEP_RUN and the switch under T715_SLEEP_VAR -- never
+# rfkill, NetworkManager's settings or the modem's own files.  One log line
+# per decision, and never a BlueZ object path (it holds a device address),
+# a MAC or Bluetooth address, an SSID or a connection name (the fixed word
+# Hotspot appears only inside a comparison), a user name, or a raw command
+# output.
+#
+# Usage: t715-sleep run        the policy loop (t715-sleep.service)
+#        t715-sleep prepare    before the sleep (the prepare unit's ExecStart)
+#        t715-sleep resume     after the wake (its ExecStop)
+#        t715-sleep restore    the radios back (t715-sleep-restore.service)
+#        t715-sleep status     one short report
+#        t715-sleep on | off   the persistent switch, root only
+set -u
+
+SYS=${T715_SLEEP_SYS:-/sys}
+SYS=${SYS%/}
+PROC=${T715_SLEEP_PROC:-/proc}
+PROC=${PROC%/}
+RUN=${T715_SLEEP_RUN:-/run/t715-sleep}
+VAR=${T715_SLEEP_VAR:-/var/lib/t715-sleep}
+HOME_ROOT=${T715_SLEEP_HOME:-/home}
+HOME_ROOT=${HOME_ROOT%/}
+PACMAN_LOCK=${T715_SLEEP_PACMAN_LOCK:-/var/lib/pacman/db.lck}
+GUARD=${T715_SLEEP_GUARD:-/usr/local/sbin/t715-wifi-guard}
+GUARD_LOCK=${T715_SLEEP_GUARD_LOCK:-/run/t715-wifi-guard.lock}
+MODEM=${T715_SLEEP_MODEM:-t715-modem-power}
+SHANNONCTL=${T715_SLEEP_SHANNONCTL:-shannonctl}
+NMCLI=${T715_SLEEP_NMCLI:-nmcli}
+SYSTEMCTL=${T715_SLEEP_SYSTEMCTL:-systemctl}
+LOGINCTL=${T715_SLEEP_LOGINCTL:-loginctl}
+BUSCTL=${T715_SLEEP_BUSCTL:-busctl}
+NOW=${T715_SLEEP_NOW:-date +%s}
+SLEEP=${T715_SLEEP_SLEEP:-sleep}
+LOGGER=${T715_SLEEP_LOGGER:-logger -t t715-sleep}
+RTC=${T715_SLEEP_RTC:-rtc0}
+
+AFTER=${T715_SLEEP_AFTER:-60}
+QUICK=${T715_SLEEP_QUICK:-10}
+POLL=${T715_SLEEP_POLL:-5}
+CHECK_HOURS=${T715_SLEEP_CHECK_HOURS:-12}
+LOW=${T715_SLEEP_LOW:-5}
+REMOTE=${T715_SLEEP_REMOTE:-block}
+MAX_POLLS=${T715_SLEEP_MAX_POLLS:-}
+
+ARM=$SYS/module/exynos5433_sleep/parameters/arm
+MEM_SLEEP=$SYS/power/mem_sleep
+WAKEALARM=$SYS/class/rtc/$RTC/wakealarm
+PREPARE_UNIT=shannon-modem-prepare.service
+RESTORE_UNIT=t715-sleep-restore.service
+SUSPEND_WAIT=120 # seconds given for the resume marker to change
+
+usage() {
+    printf 'usage: t715-sleep run|prepare|resume|restore|status|on|off\n' >&2
+}
+
+# log TEXT: one line to the journal (the test's stub collects it).
+log() {
+    # shellcheck disable=SC2086
+    $LOGGER "$*"
+}
+
+# clock: the epoch now, as a number (0 when the clock command fails).
+clock() {
+    # shellcheck disable=SC2086
+    $NOW 2>/dev/null || printf '0'
+}
+
+# do_sleep SECONDS: the sleep command, from the environment.
+do_sleep() {
+    # shellcheck disable=SC2086
+    $SLEEP "$1" 2>/dev/null || true
+}
+
+# sleep_capable: this kernel has the 5433's system sleep -- the arm file,
+# and deep in mem_sleep.
+sleep_capable() {
+    [ -e "$ARM" ] || return 1
+    grep -q '\[deep\]' "$MEM_SLEEP" 2>/dev/null
+}
+
+# write_arm VALUE: the kernel's arm switch.  A refused write is logged: the
+# suspend would silently stay a dry run.
+write_arm() {
+    if ! printf '%s\n' "$1" > "$ARM" 2>/dev/null; then
+        log "cannot write $1 to ${ARM#"$SYS"/}"
+        return 1
+    fi
+    return 0
+}
+
+# read_marker / write_marker / drop_marker: the small files under RUN that
+# carry what prepare did across the sleep.
+read_marker() {
+    cat "$RUN/$1" 2>/dev/null || printf ''
+}
+
+write_marker() {
+    printf '%s\n' "$2" > "$RUN/$1" 2>/dev/null && return 0
+    log "cannot write the marker $1"
+    return 1
+}
+
+drop_marker() {
+    rm -f "$RUN/$1" 2>/dev/null
+}
+
+# screen_dark: only a dpms file positively reading Off counts; a missing
+# file reads as lit.
+screen_dark() {
+    for f in "$SYS"/class/drm/card*-DSI-1/dpms; do
+        [ -e "$f" ] || continue
+        [ "$(cat "$f" 2>/dev/null)" = Off ] && return 0
+    done
+    return 1
+}
+
+# external_power: any supply that is not the battery is online (the
+# charger, or a USB host).
+external_power() {
+    for d in "$SYS"/class/power_supply/*/; do
+        [ -d "$d" ] || continue
+        [ "$(cat "${d}type" 2>/dev/null)" = Battery ] && continue
+        [ "$(cat "${d}online" 2>/dev/null)" = 1 ] && return 0
+    done
+    return 1
+}
+
+# battery_percent: the battery supply's capacity, or nothing.
+battery_percent() {
+    for d in "$SYS"/class/power_supply/*/; do
+        [ -d "$d" ] || continue
+        [ "$(cat "${d}type" 2>/dev/null)" = Battery ] || continue
+        cat "${d}capacity" 2>/dev/null && return 0
+        return 1
+    done
+    return 1
+}
+
+# audio_playing: an ALSA stream is running.
+audio_playing() {
+    for f in "$PROC"/asound/card*/pcm*p/sub*/status; do
+        [ -e "$f" ] || continue
+        grep -q 'state: RUNNING' "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# bt_audio_playing: a BlueZ media transport is active.  The object paths
+# hold device addresses: they never leave this function, and nothing of
+# BlueZ is ever logged.  A busctl that fails answers no.
+bt_audio_playing() {
+    # shellcheck disable=SC2086
+    $BUSCTL --system --list tree org.bluez 2>/dev/null | grep '/fd[0-9][0-9]*$' | {
+        while IFS= read -r path; do
+            # shellcheck disable=SC2086
+            if [ "$($BUSCTL --system get-property org.bluez "$path" \
+                        org.bluez.MediaTransport1 State 2>/dev/null)" = 's "active"' ]; then
+                exit 0
+            fi
+        done
+        exit 1
+    }
+}
+
+# call_up: shannonctl reports a call, parsed as t715-modem-power's in_use
+# does.  A missing command or a failure answers no.
+call_up() {
+    # shellcheck disable=SC2086
+    $SHANNONCTL status 2>/dev/null |
+        python3 -I -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("calls") else 1)' \
+        2>/dev/null
+}
+
+# sleep_blocked: a block-mode sleep inhibitor held in logind (an app that
+# asked not to be slept under, systemd-inhibit --mode=block).  Delay locks
+# (NetworkManager, the lock screen) are logind's to wait for and hold
+# nothing.  This is the check systemctl's --check-inhibitors=yes makes, but
+# that one also refuses whenever another user has a session -- the tablet's
+# own user, seen from this root service -- so the suspend below never asks
+# systemctl for it.  The JSON is parsed as the shannonctl status is.  A busctl
+# that fails answers no.
+sleep_blocked() {
+    # shellcheck disable=SC2086
+    $BUSCTL --json=short call org.freedesktop.login1 /org/freedesktop/login1 \
+            org.freedesktop.login1.Manager ListInhibitors 2>/dev/null |
+        python3 -I -c 'import json, sys
+d = json.load(sys.stdin)["data"][0]
+sys.exit(0 if any("sleep" in i[0].split(":") and i[3].startswith("block") for i in d) else 1)' \
+        2>/dev/null
+}
+
+# hotspot_up: the hotspot connection, by its fixed name only.
+hotspot_up() {
+    # shellcheck disable=SC2086
+    $NMCLI -t -f NAME connection show --active 2>/dev/null | grep -qx Hotspot
+}
+
+# remote_session: an active remote login session (SSH and the like), which
+# a sleep would cut off.  Only the count is ever logged, never a user or
+# session name.  REMOTE=ignore drops the whole check.
+remote_session() {
+    [ "$REMOTE" = ignore ] && return 1
+    # shellcheck disable=SC2086
+    $LOGINCTL list-sessions --no-legend 2>/dev/null | {
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            # shellcheck disable=SC2086
+            set -- $line
+            sid=$1
+            # shellcheck disable=SC2086
+            [ "$($LOGINCTL show-session -p Remote --value "$sid" 2>/dev/null)" = yes ] \
+                || continue
+            # shellcheck disable=SC2086
+            case $($LOGINCTL show-session -p State --value "$sid" 2>/dev/null) in
+                active|online) exit 0 ;;
+            esac
+        done
+        exit 1
+    }
+}
+
+# stay_awake: any user's Omarchy stay-awake indicator is set.
+stay_awake() {
+    for f in "$HOME_ROOT"/*/.local/state/omarchy/indicators/stay-awake; do
+        [ -e "$f" ] && return 0
+    done
+    return 1
+}
+
+# guard_busy: a Wi-Fi recovery holds the guard's lock.  Without flock the
+# check cannot run and answers no.
+guard_busy() {
+    command -v flock >/dev/null 2>&1 || return 1
+    flock -n 9 9>"$GUARD_LOCK" 2>/dev/null && return 1
+    return 0
+}
+
+# modem_enabled: the modem starts at boot, the user's own choice, which a
+# sleep must not change.
+modem_enabled() {
+    # shellcheck disable=SC2086
+    [ "$($SYSTEMCTL is-enabled "$PREPARE_UNIT" 2>/dev/null)" = enabled ]
+}
+
+# cp_state: the modem command's "cp" (online, booting, crashed, offline,
+# stopping, waiting or off), or nothing when there is no modem.
+cp_state() {
+    # shellcheck disable=SC2086
+    $MODEM status --json 2>/dev/null |
+        sed -n 's/.*"cp": *"\([a-z][a-z]*\)".*/\1/p' | head -n 1
+}
+
+# restore_active: the restore unit is already bringing the radios back.  A
+# oneshot reads "activating" while its ExecStart runs, never "active".
+restore_active() {
+    # shellcheck disable=SC2086
+    case $($SYSTEMCTL is-active "$RESTORE_UNIT" 2>/dev/null) in
+        active|activating|reloading) return 0 ;;
+    esac
+    return 1
+}
+
+# why_not_sleep: the first reason that holds, as a fixed short string, or
+# nothing when the tablet may sleep.  The checks that only read a file come
+# first, those that start a program (busctl, loginctl, python3, nmcli, the
+# modem's script) after them: the first match wins, and on this tablet's
+# A53s each program costs a good part of a second.
+why_not_sleep() {
+    if external_power; then printf 'external power\n'; return 0; fi
+    if audio_playing; then printf 'audio playing\n'; return 0; fi
+    if stay_awake; then printf 'stay-awake\n'; return 0; fi
+    if [ -e "$PACMAN_LOCK" ]; then printf 'a package transaction\n'; return 0; fi
+    if guard_busy; then printf 'a Wi-Fi recovery\n'; return 0; fi
+    if bt_audio_playing; then printf 'Bluetooth audio playing\n'; return 0; fi
+    if remote_session; then printf 'a remote login session\n'; return 0; fi
+    if sleep_blocked; then printf 'a sleep inhibitor\n'; return 0; fi
+    case $(cp_state) in
+        booting|waiting|stopping) printf 'the CP between states\n'; return 0 ;;
+    esac
+    if call_up; then printf 'a call\n'; return 0; fi
+    if hotspot_up; then printf 'the hotspot\n'; return 0; fi
+    return 1
+}
+
+# start_restore: the restore unit, without waiting for it.
+start_restore() {
+    # shellcheck disable=SC2086
+    $SYSTEMCTL start --no-block "$RESTORE_UNIT" || \
+        log "cannot start $RESTORE_UNIT"
+}
+
+# run_policy: what t715-sleep.service runs.  Never returns but through the
+# poweroff or a test's MAX_POLLS.
+run_policy() {
+    if ! sleep_capable; then
+        # The protection the image had before this script: on a kernel that
+        # cannot sleep for real (an older BOOT, the rescue), a suspend would
+        # freeze the system with the radios up.  The sleep targets are
+        # masked until the next boot, so systemctl suspend refuses.
+        # shellcheck disable=SC2086
+        $SYSTEMCTL mask --runtime sleep.target suspend.target >/dev/null 2>&1 ||
+            log "cannot mask the sleep targets"
+        log "this kernel has no system sleep: suspend masked until the next boot"
+        exit 0
+    fi
+    log "run: sleeping after $AFTER s of dark screen ($QUICK s after a battery check), on battery"
+    dark=0
+    last_resumed=$(read_marker resumed)
+    said=''      # the reason last logged, nothing while none holds
+    off_said=0   # the switched-off line, once per stretch of it
+    polls=0
+    while :; do
+        polls=$((polls + 1))
+        resumed=$(read_marker resumed)
+        resumed_fresh=0
+        [ "$resumed" != "$last_resumed" ] && resumed_fresh=1
+        last_resumed=$resumed
+        if [ "$(cat "$VAR/mode" 2>/dev/null)" = off ]; then
+            dark=0
+            said=''
+            if [ "$off_said" != 1 ]; then
+                log "sleep is switched off"
+                off_said=1
+            fi
+        elif screen_dark; then
+            dark=$((dark + POLL))
+            [ "$resumed_fresh" = 1 ] && dark=0
+            need=$AFTER
+            [ -e "$RUN/check" ] && need=$QUICK
+            if [ "$dark" -ge "$need" ]; then
+                pct=$(battery_percent)
+                case $pct in
+                    ''|*[!0-9]*) pct=-1 ;;
+                esac
+                if [ "$pct" -ge 0 ] && [ "$pct" -le "$LOW" ] && ! external_power; then
+                    log "battery at $pct %: powering off"
+                    # shellcheck disable=SC2086
+                    $SYSTEMCTL poweroff
+                    exit 0
+                fi
+                reason=$(why_not_sleep)
+                if [ -n "$reason" ]; then
+                    if [ "$reason" != "$said" ]; then
+                        log "not sleeping: $reason"
+                        said=$reason
+                    fi
+                    # Judged again after another AFTER of dark screen, not
+                    # at every poll: the checks start programs.
+                    dark=0
+                else
+                    # A suspend logind refused is tried again after another
+                    # AFTER of dark screen, its lines said once while the
+                    # refusals go on.  The block inhibitors were checked
+                    # above (sleep_blocked); --check-inhibitors=no keeps
+                    # systemctl from refusing for the tablet user's own
+                    # session.
+                    refusal='suspend refused by logind'
+                    [ "$said" = "$refusal" ] ||
+                        log "screen off for $dark s on battery: suspending"
+                    # shellcheck disable=SC2086
+                    if $SYSTEMCTL suspend --check-inhibitors=no; then
+                        waited=0
+                        while [ "$waited" -lt "$SUSPEND_WAIT" ]; do
+                            [ "$(read_marker resumed)" != "$resumed" ] && break
+                            do_sleep 1
+                            waited=$((waited + 1))
+                        done
+                        said=''
+                    elif [ "$said" != "$refusal" ]; then
+                        log "$refusal"
+                        said=$refusal
+                    fi
+                    dark=0
+                fi
+            fi
+        else
+            # Lit: nothing is dark, and the radios come back.
+            dark=0
+            said=''
+            off_said=0
+            drop_marker check
+            if { [ -e "$RUN/cp" ] || [ -e "$RUN/wifi" ]; } && ! restore_active; then
+                start_restore
+                log "the screen lit: bringing the radios back"
+            fi
+        fi
+        if [ -n "$MAX_POLLS" ] && [ "$polls" -ge "$MAX_POLLS" ]; then
+            exit 0
+        fi
+        do_sleep "$POLL"
+    done
+}
+
+# do_prepare: before sleep.target.  Always exits 0: it never fails the
+# sleep transaction, it only decides whether this suspend is real.
+do_prepare() {
+    sleep_capable || return 0
+    mkdir -p "$RUN" 2>/dev/null
+    write_marker asleep-at "$(clock)"
+    write_arm 0
+    ready=1
+    # The CP, through the modem's own units, as its cp_off does.
+    if modem_enabled; then
+        state=$(cp_state)
+        if [ "$state" != off ]; then
+            write_marker cp ''
+            # shellcheck disable=SC2086
+            $SYSTEMCTL stop "$PREPARE_UNIT"
+            # shellcheck disable=SC2086
+            $SYSTEMCTL stop shannond.service shannon-loader.service
+            state=$(cp_state)
+            if [ "$state" = off ]; then
+                log "prepare: CP off"
+            else
+                log "prepare: the CP did not stop ($state)"
+                ready=0
+            fi
+        fi
+    fi
+    # The Wi-Fi/Bluetooth chip.
+    # shellcheck disable=SC2086
+    if $GUARD off; then
+        write_marker wifi ''
+    else
+        rc=$?
+        log "prepare: the Wi-Fi/Bluetooth chip did not power down (exit $rc)"
+        ready=0
+    fi
+    # The battery-check alarm, when the RTC is free.
+    if [ "$CHECK_HOURS" -gt 0 ] 2>/dev/null; then
+        alarm_now=$(cat "$WAKEALARM" 2>/dev/null)
+        case $alarm_now in
+            ''|0)
+                if printf '%s\n' "+$((CHECK_HOURS * 3600))" > "$WAKEALARM" 2>/dev/null; then
+                    alarm_now=$(cat "$WAKEALARM" 2>/dev/null)
+                    [ -n "$alarm_now" ] && write_marker alarm "$alarm_now"
+                else
+                    log "cannot write the RTC alarm"
+                fi
+                ;;
+        esac
+    fi
+    # On external power the radios go down all the same -- a dry run with
+    # the Wi-Fi up would put brcmfmac through a suspend it cannot keep --
+    # but the suspend is not armed: a tablet on a charger has no need to
+    # sleep, and the restore brings the radios back at once.
+    if [ "$ready" = 1 ] && external_power; then
+        log "prepare: on external power: this suspend stays a dry run"
+    elif [ "$ready" = 1 ]; then
+        write_arm 1
+        log "prepare: CP, Wi-Fi and Bluetooth off: this suspend sleeps"
+    else
+        log "prepare: this suspend stays a dry run"
+    fi
+    return 0
+}
+
+# do_resume: after the wake (the prepare unit's ExecStop).  Always exits 0.
+do_resume() {
+    sleep_capable || return 0
+    write_arm 0
+    now=$(clock)
+    asleep_at=$(read_marker asleep-at)
+    case $asleep_at in
+        ''|*[!0-9]*) asleep_at=$now ;;
+    esac
+    log "woke up after $((now - asleep_at)) s"
+    mkdir -p "$RUN" 2>/dev/null
+    write_marker resumed "$now"
+    check_wake=0
+    if [ -e "$RUN/alarm" ]; then
+        alarm=$(read_marker alarm)
+        case $alarm in
+            ''|*[!0-9]*) ;;
+            *) [ "$now" -ge $((alarm - 60)) ] && check_wake=1 ;;
+        esac
+        if [ "$check_wake" = 1 ]; then
+            write_marker check ''
+            log "woke up for the battery check: the radios stay off"
+        else
+            # Our alarm, still in the RTC and not fired: clear it, and only
+            # while the RTC still holds that same time.
+            [ "$(cat "$WAKEALARM" 2>/dev/null)" = "$alarm" ] && \
+                printf '%s\n' 0 > "$WAKEALARM" 2>/dev/null
+        fi
+        drop_marker alarm
+    fi
+    if [ "$check_wake" != 1 ]; then
+        start_restore
+    fi
+    return 0
+}
+
+# do_restore: the radios back, what t715-sleep-restore.service runs.  The
+# CP is only started (--no-block), so it boots while the chip comes back:
+# bringing the Wi-Fi up first changed nothing for the chip's starts (one try
+# in two failed either way, 32 wakes on 2026-11-10) and only delayed the CP
+# by up to a minute.
+do_restore() {
+    if [ -e "$RUN/cp" ]; then
+        if modem_enabled; then
+            # shellcheck disable=SC2086
+            $SYSTEMCTL start --no-block "$PREPARE_UNIT"
+            log "restore: CP starting"
+        fi
+        drop_marker cp
+    fi
+    if [ -e "$RUN/wifi" ]; then
+        guard_rc=0
+        # shellcheck disable=SC2086
+        $GUARD check >/dev/null || guard_rc=$?
+        if [ "$guard_rc" = 0 ]; then
+            log "restore: the Wi-Fi is already up"
+        else
+            guard_rc=0
+            # shellcheck disable=SC2086
+            $GUARD recover || guard_rc=$?
+            if [ "$guard_rc" = 0 ]; then
+                log "restore: the Wi-Fi came back"
+            else
+                log "restore: the Wi-Fi did not come back (exit $guard_rc)"
+            fi
+        fi
+        drop_marker wifi
+    fi
+    drop_marker check
+    return 0
+}
+
+# do_status: one short report.
+do_status() {
+    if [ "$(cat "$VAR/mode" 2>/dev/null)" = off ]; then
+        printf 'sleep: switched off\n'
+    else
+        printf 'sleep: on\n'
+    fi
+    printf 'a sleep after %s s of dark screen (%s s after a battery check)\n' \
+        "$AFTER" "$QUICK"
+    if sleep_capable; then
+        printf 'kernel: can suspend to RAM (deep)\n'
+    else
+        printf 'kernel: no system sleep on this kernel\n'
+    fi
+    marks=''
+    [ -e "$RUN/cp" ] && marks="$marks the CP is off for the sleep,"
+    [ -e "$RUN/wifi" ] && marks="$marks the Wi-Fi/Bluetooth chip is off for the sleep,"
+    [ -e "$RUN/check" ] && marks="$marks a battery check is pending,"
+    [ -e "$RUN/alarm" ] && marks="$marks a battery-check alarm is set,"
+    if [ -n "$marks" ]; then
+        printf 'markers:%s\n' "${marks%,}"
+    else
+        printf 'markers: none\n'
+    fi
+    now=$(clock)
+    resumed=$(read_marker resumed)
+    case $resumed in
+        ''|*[!0-9]*) printf 'last wake: none\n' ;;
+        *)
+            asleep_at=$(read_marker asleep-at)
+            case $asleep_at in
+                ''|*[!0-9]*)
+                    printf 'last wake: %s s ago\n' "$((now - resumed))" ;;
+                *)
+                    printf 'last wake: %s s ago, after %s s asleep\n' \
+                        "$((now - resumed))" "$((resumed - asleep_at))" ;;
+            esac
+            ;;
+    esac
+    return 0
+}
+
+# do_switch on|off: the persistent switch, root only.
+do_switch() {
+    if [ "$(id -u 2>/dev/null)" != 0 ]; then
+        printf 't715-sleep %s: root only\n' "$1" >&2
+        exit 1
+    fi
+    mkdir -p "$VAR" 2>/dev/null
+    if ! printf '%s\n' "$1" > "$VAR/mode" 2>/dev/null; then
+        printf 't715-sleep %s: cannot write %s\n' "$1" "$VAR/mode" >&2
+        exit 1
+    fi
+    printf 'sleep switched %s\n' "$1"
+    return 0
+}
+
+case ${1:-} in
+    run)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        run_policy
+        ;;
+    prepare)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        do_prepare
+        ;;
+    resume)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        do_resume
+        ;;
+    restore)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        do_restore
+        ;;
+    status)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        do_status
+        ;;
+    on|off)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        do_switch "$1"
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac

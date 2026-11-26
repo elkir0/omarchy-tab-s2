@@ -1038,6 +1038,25 @@ by the kernel series' DSI changes: 5 wakes in 6 failed on the first test
 kernel and 3 in 6 on the next, then none in 28 (the failure came in runs,
 so the count alone does not prove the fix).
 
+**In 64 bits.** The 64-bit image build carries the same sleep:
+`t715-sleep`, its three units and `t715-wifi-guard` with its unit are in
+`arm64/rootfs/overlay/`, and `arm64/rootfs/configure-omarchy.sh` enables
+them as `configure-system.sh` does here and unmasks `suspend.target` and
+`sleep.target`, which the 64-bit base image masks. `t715-sleep` and the
+four units are this image's byte for byte: the 64-bit kernel has the same
+arm switch and the same dry-run default, its PMIC RTC is `rtc0` too, and
+the panel's DPMS file and the Wi-Fi interface (`wlp1s0` there) are found
+by what they are, not by name. One thing differs: the Wi-Fi guard's A57
+boost is off by default on arm64, where the image leaves the cores and
+their frequencies to the kernel (`T715_WG_BOOST_CPUS` turns it back on).
+The on-device tests are in `arm64/tests/sleep/ondevice/`; there the Wi-Fi
+test feeds no watchdog (`t715-watchdog-keeper` does), and the soak judges
+a sleep by the clock when the kernel's sleep line is missing. Status: in
+the 64-bit image build; the kernel side tested on the tablet (2026-11-26:
+four real sleeps with the CP off and the chip down, four clean wakes on
+the RTC alarm), the user space not yet. `arm64/tests/sleep/run.sh` runs
+the off-device suites.
+
 ## microSD card
 
 The kernel drives the microSD slot (`15560000.mmc`, a separate kernel

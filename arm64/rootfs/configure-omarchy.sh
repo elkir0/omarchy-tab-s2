@@ -11,11 +11,8 @@
 #     CPU and GPU frequencies or take cores offline: the kernel's business
 #     under the owner's rules (CPUFREQ.md), and the arm64 kernel has none of
 #     it yet; power-profiles-daemon is not installed either;
-#   t715-sleep, t715-sleep-prepare, t715-sleep-restore   suspend to RAM has no
-#     arm64 kernel support yet, and the watchdog runs: sleep targets stay masked;
-#   t715-wifi-guard, 60-t715-wifi-aspm.rules, modprobe.d/t715-brcmfmac.conf
-#     written for the arm32 kernel's brcmfmac and regulators: to be ported
-#     with Wi-Fi itself;
+#   60-t715-wifi-aspm.rules, modprobe.d/t715-brcmfmac.conf   written for the
+#     arm32 kernel's brcmfmac and regulators;
 #   omatel-agent.service stays (omamobile-shell depends on the agent).
 set -euo pipefail
 
@@ -148,6 +145,25 @@ if pacman -Q t715-modem >/dev/null 2>&1; then
 else
     record "modem" "not installed" "no t715-modem"
 fi
+# The Wi-Fi guard and the sleep (docs/image/ROOTFS.md, "Battery saver" and
+# "Sleep", with its paragraph "In 64 bits"; the files are overlay/'s, as on
+# the 32-bit image). t715-wifi-guard watches for the BCM4358's failed Wi-Fi
+# starts and power-cycles the whole Wi-Fi/Bluetooth chip; its `off` is what
+# the sleep powers the chip down with. t715-sleep suspends the tablet to RAM
+# once its screen has been dark for a minute on battery; its prepare unit
+# powers the CP and the chip down and arms the kernel's sleep before each
+# suspend, and brings them back after it. The base image masks
+# suspend.target and sleep.target (configure-base.sh): this image unmasks
+# them, as the 32-bit image keeps them, and t715-sleep masks them itself,
+# until the next boot, on a kernel without the system sleep. The
+# hibernation targets stay masked.
+[ -x /usr/local/sbin/t715-wifi-guard ] || die "no /usr/local/sbin/t715-wifi-guard"
+systemctl enable t715-wifi-guard.service
+[ -x /usr/local/sbin/t715-sleep ] || die "no /usr/local/sbin/t715-sleep"
+systemctl enable t715-sleep.service t715-sleep-prepare.service
+systemctl unmask suspend.target sleep.target
+record "sleep" ok "t715-wifi-guard and t715-sleep enabled, t715-sleep-prepare wanted by sleep.target; suspend.target and sleep.target unmasked, hibernation masked"
+
 # omatel-agent (rings for calls, keeps SMS): omamobile-shell's dependency; it
 # runs for every desktop user, with nothing to talk to until there is a modem.
 [ -f /usr/lib/systemd/user/omatel-agent.service ] && systemctl --global enable omatel-agent.service

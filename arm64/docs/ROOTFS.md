@@ -238,7 +238,8 @@ What differs:
 | `alarm` = ALARM's default user, default password | `alarm` renamed to a placeholder user with a placeholder password; root locked | no owner account details in this build |
 | Debian's Chromium in a root of its own (`t715-chromium`) | ALARM's own `chromium` | it exists for aarch64 |
 | the watchdog: the kernel feeds it; `wdt_guard` in the initramfs | the kernel never feeds it; two units in the image feed it and mark the boot | the design decided on 2026-11-24 |
-| `t715-power-profile`, `t715-power-guard`, A57 hot-unplug, suspend, `t715-wifi-guard`, Waydroid | not ported | section 4 |
+| `t715-power-profile`, `t715-power-guard`, A57 hot-unplug, Waydroid | not ported | section 4 |
+| suspend (`t715-sleep`), `t715-wifi-guard` | ported on 2026-11-26, the guard's A57 boost off by default; the kernel side tested, the user space not yet | below, and `docs/image/ROOTFS.md`, "Sleep" |
 
 **The overlay.** Of the owner's 66 files under `image/rootfs/overlay/`:
 **61 are in these images byte for byte**, 2 are changed, 26 are not ported.
@@ -272,18 +273,23 @@ What differs:
   `t715-kboot-mark.service`, `t715-kboot-mark`,
   `t715-watchdog-keeper.service`, `t715-vendor-firmware.service`,
   `t715-vendor-firmware`.
-* **Not ported** (26):
+* **Ported later** (2026-11-26, the sleep; the counts above are the first
+  port's): in `overlay/`, `t715-sleep` and its three units and
+  `t715-wifi-guard.service` byte for byte, and `t715-wifi-guard` changed
+  (its A57 boost off by default on aarch64: the cores and their frequencies
+  are the kernel's). `configure-omarchy.sh` enables them and unmasks
+  `suspend.target` and `sleep.target` in the Omarchy image; the base image
+  keeps them masked. Off-device tests: `arm64/tests/sleep/`.
+* **Not ported** (26, at the first port):
   `t715-power-profile` (service, path, script), `t715-power-guard` (service,
   timer), `60-t715-big-cores.rules`: they scale CPU and GPU frequencies and
   take cores offline, which the arm64 port leaves to the kernel side under
   the owner's rules (`CPUFREQ.md`); `power-profiles-daemon` is left out of
   the packages for the same reason;
-  `t715-sleep`, `t715-sleep-prepare`, `t715-sleep-restore`: no suspend on
-  the arm64 kernel yet, and a watchdog runs (the sleep targets are masked in
-  both images);
-  `t715-wifi-guard` (service and script), `60-t715-wifi-aspm.rules`,
-  `modprobe.d/t715-brcmfmac.conf`: written for the arm32 kernel's `brcmfmac`
-  patch and regulators, to come back with Wi-Fi itself;
+  `t715-sleep`, `t715-sleep-prepare`, `t715-sleep-restore`,
+  `t715-wifi-guard` (service and script): ported later (above);
+  `60-t715-wifi-aspm.rules`, `modprobe.d/t715-brcmfmac.conf`: written for
+  the arm32 kernel's `brcmfmac` patch and regulators;
   `t715-android*`, `waydroid` wrapper, `launchd.py`: Waydroid needs binder
   in the arm64 kernel and is not installed;
   `sddm.conf.d/autologin.conf` and `usr/share/t715-omarchy/locale.env`: the
@@ -979,8 +985,8 @@ tests in the container; `t715-modem` is built, its loader's suite run in `check(
 keeper is read from the 6.12 source.
 
 **Open.** No image is released yet, and no installer exists (`../../docs/ARM64.md`). Suspend to RAM
-on arm64. The mark's budget (section 5) is not measured. A fresh root's first boot has no Wi-Fi: the
-NVRAM is copied from SYSTEM after brcmfmac probed, and brcmfmac cannot be reloaded. The ramoops
+on arm64: its user space is in the image build, not yet tested on the tablet. The mark's budget
+(section 5) is not measured. A fresh root's first boot has no Wi-Fi: the NVRAM is copied from SYSTEM after brcmfmac probed, and brcmfmac cannot be reloaded. The ramoops
 records survive warm resets and nothing archives them (systemd-pstore is off). `t715-reboot-to` is
 untested. Whether arm64 needs the dmabuf-check shim is unknown. The modem with a SIM (registration,
 data, SMS, calls) is untested.

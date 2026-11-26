@@ -1,0 +1,24 @@
+# SM-T715: the work around every suspend -- ExecStart (prepare) stops the
+# modem's CP and the Wi-Fi/Bluetooth chip and arms the kernel's sleep, or
+# leaves the suspend the dry run it started as; ExecStop (resume) runs once
+# systemd brings the system back: it disarms, times the sleep and starts
+# t715-sleep-restore.service (docs/image/ROOTFS.md, "Sleep").  That is
+# systemd's own pattern for work around a sleep: Before=sleep.target with
+# RemainAfterExit, so the unit is active while the tablet sleeps and its
+# ExecStop is the wake.  Nothing here fails the sleep transaction: it always
+# exits 0.
+[Unit]
+Description=Prepare the tablet's suspend to RAM and resume after the wake (SM-T715)
+Documentation=file:///usr/local/sbin/t715-sleep
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/t715-sleep prepare
+ExecStop=/usr/local/sbin/t715-sleep resume
+TimeoutSec=120
+
+[Install]
+WantedBy=sleep.target

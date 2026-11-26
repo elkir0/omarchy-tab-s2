@@ -1,0 +1,1027 @@
+#!/bin/sh
+# t715-wifi-guard: bring the SM-T715's Wi-Fi back by itself when the
+# BCM4358's Wi-Fi half fails to start, at boot or later.
+#
+# The BCM4358 is one chip for Wi-Fi (PCIe, brcmfmac) and Bluetooth (a UART,
+# hci_uart_bcm).  Its Wi-Fi start fails about one boot in four -- brcmfmac
+# logs a probe error and the desktop shows no radio -- even from a chip that
+# was fully powered off, and a failed start recovers at the next power cycle
+# of the *whole* chip about four times in five.  Power-cycling the Wi-Fi
+# alone, Bluetooth left up, recovers far less often: the chip's shared part
+# stays powered while Bluetooth is on.  With the kernel this goes with,
+# unbinding the PCIe host (exynos-pcie) cuts the Wi-Fi enable line and
+# binding it powers the Wi-Fi up and probes it; unbinding hci_uart_bcm cuts
+# the Bluetooth enable.  Unbinding Bluetooth also kills a running Wi-Fi,
+# which is fine here: the Wi-Fi is the one being restarted.  A rebind needs
+# nothing else from this script: the udev rules give the chip back its
+# addresses and ASPM setting (t715-bt-addr@, t715-wifi-addr, the ASPM rule).
+#
+# In 64 bits (arm64/rootfs/overlay/, the 64-bit image): the 32-bit image's
+# script with one change, the A57 boost below, off by default on arm64,
+# where the image leaves the cores and their frequencies to the kernel.
+# The drivers, the PCIe host, the Bluetooth device and the kernel's
+# wifi_power_cycle are the same on the 64-bit kernel; the Wi-Fi interface
+# (wlp1s0 there) and the panel's DRM card are found by what they are, never
+# by name.  The 64-bit image has no ASPM rule: a rebind leaves the link as
+# the kernel sets it, as every boot there does.
+#
+# A recovery's try is the host unbind, the Bluetooth unbind when it is
+# bound, OFF_SECS off, the host bind and the judgment; Bluetooth is
+# bound back once, at the end of the recovery and never inside a try.
+# Its patch download runs about 6 s after its bind (115200 baud), and an
+# unbind of hci_uart_bcm while it runs blocks about 20 s -- the driver's
+# setup times out command by command before the unbind returns -- so a
+# bind inside a try whose start fails 2 s later hands the next try's
+# unbind that bill (measured 2026-11-11: a cycle that ends mid-download
+# leaves the next bind 26 s away, against 7 s).  Bound after the Wi-Fi's
+# judgment instead, the Wi-Fi stays up through the later bind and
+# download (8 of 8 good starts did), and the order costs the start rate
+# nothing.
+#
+# A start failed when the kernel log holds one of brcmfmac's failure
+# signatures (a probe failure, an MMIO read, a halted firmware, a mailbox
+# reading all ones, a ring past its depth, or the second timeout on a query
+# command), or when no 802.11 interface came within 20 s.  A try judges
+# its start every second, as it runs: the second a signature appears the
+# start failed, and an interface alone is not a good start either -- a
+# halt can come a few seconds after it appears -- it must hold, up and
+# clear, five seconds.  Only the lines logged since the last good judgment
+# count: those after the line stamped with the state's wm, or after the
+# snapshot taken before a try's bind.
+# The kernel log is a ring buffer, about 1500 lines on the tablet, and it
+# turns over within hours: whole-log counts fall as the old lines leave,
+# far enough for a new failure to sit below the counts an old judgment
+# saved and pass for none.  The saved counts are only the fallback for a
+# judgment with no wm to mark where it stopped.  Only the two drivers'
+# bind and unbind files are ever written -- plus, for the length of a
+# recovery and never elsewhere, the A57 cores' online files and their
+# cpufreq governor (see the boost below): never the modem, rfkill or
+# NetworkManager's settings.
+#
+# Usage: t715-wifi-guard check             0 when the Wi-Fi is up, else 1
+#                                           with one line on stdout saying why
+#        t715-wifi-guard recover [TRIES]    power-cycle the whole chip, up to
+#                                           TRIES times (10), each try the
+#                                           host unbind, the Bluetooth unbind
+#                                           when it is bound, the off wait,
+#                                           the host bind and the judgment --
+#                                           Bluetooth bound back once, at the
+#                                           end: 0 when a start came
+#                                           good, 1 when none did, 2 when
+#                                           the host unbind got stuck, 3 when
+#                                           the kernel cannot power-cycle the
+#                                           Wi-Fi (see below)
+#        t715-wifi-guard off                power the whole chip down, Wi-Fi
+#                                           and Bluetooth, and leave it down
+#                                           for the system's sleep: 0 when it
+#                                           is down, 1 when a recovery holds
+#                                           the lock (the chip is left as it
+#                                           is) or Bluetooth stayed bound, 2
+#                                           when the host unbind got stuck, 3
+#                                           when the kernel cannot power-cycle
+#                                           the Wi-Fi
+#        t715-wifi-guard run                what the unit runs: at boot wait
+#                                           up to 60 s for the host to bind
+#                                           and the Wi-Fi to settle, check,
+#                                           recover if it failed; then follow
+#                                           the kernel log and, 10 s after a
+#                                           new failure signature, check again
+#                                           and recover if needed -- but check
+#                                           once more under the recovery lock,
+#                                           for another recovery may have
+#                                           brought the Wi-Fi up while this
+#                                           one waited for it: then nothing
+#                                           is cycled and it does not count.
+#                                           A signature logged at or before
+#                                           the last good check (by its kernel
+#                                           timestamp) was judged by that
+#                                           check: it is skipped, with one log
+#                                           line for all that check judged.
+#                                           At most 3 recoveries in any 30
+#                                           minutes: past that it logs once
+#                                           and stops recovering until the
+#                                           next boot.
+#
+# The system-sleep hook calls `off` before every suspend: a chip that is
+# powered down for a sleep needs no watching, and `recover` after the resume
+# is how it comes back.  `off` leaves a marker in /run (OFF_MARK) to say the
+# chip is down on purpose: while it is there the watch judges nothing -- no
+# wait, no check, no recovery -- and `recover`'s cycles remove it before
+# their first bind, so a failed recovery leaves no marker either.  /run is
+# empty at boot, so no marker survives a reboot.
+#
+# The kernel must cut the Wi-Fi's power and power the PCIe PHY down when its
+# host is unbound, which pci_exynos says with its read-only parameter
+# wifi_power_cycle (Y from the kernel of 2026-11-09 on).  With an older
+# kernel (the rescue in RECOVERY, say) a rebind resets nothing, and after a
+# failed start every bind hangs for minutes: the script then recovers
+# nothing and says so once.
+#
+# A recovery boosts the CPU for its own length.  t715-keys takes the A57
+# cores (cpu4 to cpu7) offline when the screen goes dark, so a recovery
+# with the screen dark -- after a dark wake, say -- starts the chip in
+# the state that measured 26 good starts of 45 (and 13 of its failures
+# in the firmware's boot, 1 to 2 s after the bind); the same starts with
+# the cores online and every cpufreq policy on performance measured 41
+# of 45, and six suspend restores held that way all came up on the
+# first try.  So a recovery brings those cores online and writes
+# performance to their governor before its first try, and puts them
+# back as t715-keys keeps them once it ends, on every exit; `off`,
+# `check` and the watch never boost.  On arm64 (uname -m aarch64) the
+# boost is off unless T715_WG_BOOST_CPUS names the cores: t715-keys takes
+# no core offline there and nothing in the 64-bit image writes a governor,
+# so a recovery runs on the cores and frequencies the kernel keeps.
+#
+# Every path and command comes from the environment, for the off-device
+# test (arm64/tests/sleep/test_t715_wifi_guard.sh):
+#   T715_WG_SYS        /sys, the sysfs root
+#   T715_WG_KLOG       dmesg, a command that prints the kernel log
+#   T715_WG_KFOLLOW    dmesg -W, a command that follows it (new lines only)
+#   T715_WG_SLEEP      sleep
+#   T715_WG_LOGGER     logger -t t715-wifi-guard
+#   T715_WG_LOCK       /run/t715-wifi-guard.lock, the flock of a recovery
+#   T715_WG_STATE      /run/t715-wifi-guard.state, the signature counts at
+#                      the last good bind: check judges the lines logged
+#                      after that judgment's wm -- the kernel log is a ring
+#                      buffer, about 1500 lines on the tablet, that turns
+#                      over within hours, and the whole-log counts fall as
+#                      the old lines leave, far enough to hide a new
+#                      failure -- and since boot while there is no such
+#                      file (the state lives in /run, so a new boot starts
+#                      with none); it also holds wm, the kernel timestamp
+#                      of the last log line that judgment saw (the watch
+#                      skips up to it); the counts alone are the fallback
+#                      when there is no wm
+#   T715_WG_TRACE      when set, every sysfs write is also appended there as
+#                      "<path relative to the root> <value>", so a test can
+#                      check the order of the writes
+#   T715_WG_UNBIND_MAX 60, seconds given to the host unbind before giving up
+#   T715_WG_GOOD_SECS  5, seconds a start must hold, interface up and no new
+#                      failure signature, before a try judges it good: a halt
+#                      can come a few seconds after the interface appears
+#   T715_WG_OFF_SECS   2, seconds the chip stays off
+#   T715_WG_OFF_LOCK   30, seconds `off` waits for the recovery lock before
+#                      giving up on powering the chip down
+#   T715_WG_OFF_MARK   /run/t715-wifi-guard.off, the marker that says the
+#                      chip is powered down for a sleep; the watch judges
+#                      nothing while it is there
+#   T715_WG_BOOST_CPUS "4 5 6 7", the A57 cores a recovery brings online on
+#                      performance for its own length; none on arm64 (the
+#                      boost off), and empty is the boost off anywhere
+#   T715_WG_ARCH       uname -m, the architecture that picks the boost's
+#                      default: aarch64 (or arm64) none, anything else the
+#                      A57 cores
+#   T715_WG_SAVER      /run/t715-power/saver, the power saver's flag: the
+#                      boost puts the cores back offline after a recovery
+#                      when it exists or the screen is dark
+#
+# One log line per decision and per try, and never a raw kernel log line, a
+# MAC or Bluetooth address, an SSID, a network name or the kernel command
+# line: only which signature was seen.  `check` prints its one-line reason
+# on stdout; the rest talk through the logger only.  `run` and `recover`
+# serialize their recoveries on the lock; `check` only reads, and the
+# service's re-check under that lock answers 4 -- "the Wi-Fi came up
+# meanwhile" -- which run keeps to itself.  A refused write is logged and
+# the rest still runs.  Exits 0, 1 or 2 unless the usage is wrong (2 as
+# well).
+set -u
+
+SYS=${T715_WG_SYS:-/sys}
+SYS=${SYS%/}
+KLOG=${T715_WG_KLOG:-dmesg}
+KFOLLOW=${T715_WG_KFOLLOW:-dmesg -W}
+SLEEP=${T715_WG_SLEEP:-sleep}
+LOGGER=${T715_WG_LOGGER:-logger -t t715-wifi-guard}
+LOCK=${T715_WG_LOCK:-/run/t715-wifi-guard.lock}
+STATE=${T715_WG_STATE:-/run/t715-wifi-guard.state}
+TRACE=${T715_WG_TRACE:-}
+UNBIND_MAX=${T715_WG_UNBIND_MAX:-60}
+OFF_SECS=${T715_WG_OFF_SECS:-2}
+OFF_LOCK_SECS=${T715_WG_OFF_LOCK:-30}
+OFF_MARK=${T715_WG_OFF_MARK:-/run/t715-wifi-guard.off}
+# The boost's default by the architecture: the A57 cores on the 32-bit
+# system, none on arm64 (see the boost in the header).
+case ${T715_WG_ARCH:-$(uname -m 2>/dev/null)} in
+    aarch64|arm64) WG_BOOST_DEFAULT='' ;;
+    *) WG_BOOST_DEFAULT='4 5 6 7' ;;
+esac
+# `-`, not `:-`: an empty T715_WG_BOOST_CPUS is the boost turned off, not
+# the default list back again.
+BOOST_CPUS=${T715_WG_BOOST_CPUS-$WG_BOOST_DEFAULT}
+SAVER=${T715_WG_SAVER:-/run/t715-power/saver}
+GOOD_SECS=${T715_WG_GOOD_SECS:-5}
+IFACE_SECS=20    # how long the interface has to come after the bind
+SETTLE_SECS=60   # at boot, how long the first start has to settle
+DEBOUNCE_SECS=10 # after a signature in the log, before checking again
+MAX_REC=3        # recoveries allowed...
+WINDOW_SECS=1800 # ...in any 30 minutes
+TRIES_DEFAULT=10 # a try recovers about one failed start in two (2026-11-09);
+                 # a failed try costs about 8 s, judged as it runs
+
+PCIE_DRV=$SYS/bus/platform/drivers/exynos-pcie
+PCIE_HOST=15700000.pcie
+BT_DRV=$SYS/bus/serial/drivers/hci_uart_bcm
+BRCMF_DRV=$SYS/bus/pci/drivers/brcmfmac
+PCI_DEV=0000:01:00.0
+CAP=$SYS/module/pci_exynos/parameters/wifi_power_cycle
+
+# The failure signatures, as substrings of the kernel log; the query
+# timeout counts as one only from its second occurrence (it shows up once
+# on a start that still succeeds).
+SIG_PROBE='brcmf_pcie_probe: failed'
+SIG_MMIO='MMIO read failed'
+SIG_HALT='Firmware has halted'
+SIG_MBOX='mailbox status reads all ones'
+SIG_DEPTH='past its depth'
+SIG_QUERY='Timeout on response for query command'
+
+# A kernel log line from dmesg (and dmesg -W) starts with its timestamp:
+# "[", padding spaces, the seconds, "." and six digits, "]", as in
+# "[ 1200.100000] ...".  This matches that start and keeps the timestamp,
+# SECONDS.MICROS, without the padding (a sed basic regex).
+TS_RE='^\[ *\([0-9][0-9]*\.[0-9]\{6\}\)]'
+
+usage() {
+    printf 'usage: t715-wifi-guard check\n' >&2
+    printf '       t715-wifi-guard recover [TRIES]\n' >&2
+    printf '       t715-wifi-guard off\n' >&2
+    printf '       t715-wifi-guard run\n' >&2
+}
+
+# log TEXT: one line to the journal (the test's stub collects it).
+log() {
+    # shellcheck disable=SC2086
+    $LOGGER "$*"
+}
+
+# do_sleep SECONDS: the sleep command, from the environment.
+do_sleep() {
+    # shellcheck disable=SC2086
+    $SLEEP "$1"
+}
+
+# klog_text: what the kernel log holds right now.
+klog_text() {
+    # shellcheck disable=SC2086
+    $KLOG 2>/dev/null || true
+}
+
+# write_sysfs VALUE PATH: one of the two drivers' bind or unbind files.  A
+# refused write is logged (without a raw kernel line) and the rest runs;
+# with T715_WG_TRACE set the write is also appended to the trace, as
+# "<path relative to the root> <value>", in the order it was made.
+write_sysfs() {
+    if ! printf '%s\n' "$1" > "$2" 2>/dev/null; then
+        log "cannot write $1 to ${2#"$SYS"/}"
+        return 1
+    fi
+    if [ -n "$TRACE" ]; then
+        printf '%s %s\n' "${2#"$SYS"/}" "$1" >> "$TRACE" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# save_state DIGEST / read_state: the signature counts at the last good
+# bind, in /run, so a later check judges the log since then -- and the wm
+# of that judgment, so the watch skips the lines it already judged.
+save_state() {
+    if ! printf '%s\n' "$1" > "$STATE" 2>/dev/null; then
+        log "cannot write the state file $STATE"
+    fi
+}
+
+read_state() {
+    cat "$STATE" 2>/dev/null || true
+}
+
+# sig_count TEXT SIG: how often SIG is in TEXT.
+sig_count() {
+    printf '%s\n' "$1" | grep -cF -- "$2" || true
+}
+
+# line_ts LINE: the kernel timestamp LINE starts with, as SECONDS.MICROS,
+# or nothing when it starts with none in exactly that form.  sed runs in
+# the C locale, where no byte of the rest of the line can stop the match.
+line_ts() {
+    printf '%s\n' "$1" | LC_ALL=C sed -n "1s/$TS_RE.*/\\1/p"
+}
+
+# ts_valid TS: TS has the form line_ts prints (digits, "." and six
+# digits), as a wm read back from the state file must.
+ts_valid() {
+    case $1 in
+        *[!0-9.]*|*.*.*) return 1 ;;
+        [0-9]*.[0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+    esac
+    return 1
+}
+
+# ts_le A B: 0 when the timestamp A is at or before B.  test(1) only: the
+# seconds first, then the six-digit micros when the seconds are equal --
+# $(( )) would read a leading zero as octal, and 089000 is an error there.
+ts_le() {
+    wg_as=${1%.*}; wg_au=${1#*.}
+    wg_bs=${2%.*}; wg_bu=${2#*.}
+    [ "$wg_as" -lt "$wg_bs" ] 2>/dev/null && return 0
+    [ "$wg_as" -eq "$wg_bs" ] 2>/dev/null && [ "$wg_au" -le "$wg_bu" ] 2>/dev/null
+}
+
+# klog_wm TEXT: the timestamp of the last line of TEXT that has one, or
+# nothing when none has: how far in the kernel log a judgment of TEXT saw.
+klog_wm() {
+    printf '%s\n' "$1" | LC_ALL=C sed -n "s/$TS_RE.*/\\1/p" | tail -n 1
+}
+
+# klog_since TEXT WM: the lines of TEXT after the LAST line stamped WM --
+# what a judgment reads once the last good one stopped at WM.  Matching by
+# line, not by time: the lines without a timestamp that follow are in, and
+# two CPUs logging out of order changes nothing.  When no line is stamped
+# WM that line has left the ring buffer, and every line still in it was
+# logged after it: all of TEXT.  Callers pass only a WM that ts_valid
+# took.
+klog_since() {
+    wg_pat="^\[ *$(printf '%s\n' "$2" | sed 's/\./\\./g')]"
+    wg_ln=$(printf '%s\n' "$1" | LC_ALL=C grep -n "$wg_pat" 2>/dev/null | tail -n 1 | cut -d: -f1)
+    if [ -n "$wg_ln" ]; then
+        printf '%s\n' "$1" | LC_ALL=C sed -n "$((wg_ln + 1)),\$p"
+    else
+        # No line stamped WM: it has left the ring buffer, and every line
+        # still in it was logged after it.
+        printf '%s\n' "$1"
+    fi
+}
+
+# sig_digest TEXT: the signature counts of TEXT, one name=N per line; the
+# query timeout counts only from its second occurrence.  Then wm=, TEXT's
+# klog_wm, when a line of TEXT has a timestamp: a saved digest also says
+# how far in the kernel log the judgment it records saw.
+sig_digest() {
+    wg_text=$1
+    printf 'probe_failed=%s\n' "$(sig_count "$wg_text" "$SIG_PROBE")"
+    printf 'mmio_read=%s\n' "$(sig_count "$wg_text" "$SIG_MMIO")"
+    printf 'fw_halted=%s\n' "$(sig_count "$wg_text" "$SIG_HALT")"
+    printf 'mailbox_ones=%s\n' "$(sig_count "$wg_text" "$SIG_MBOX")"
+    printf 'ring_depth=%s\n' "$(sig_count "$wg_text" "$SIG_DEPTH")"
+    wg_n=$(sig_count "$wg_text" "$SIG_QUERY")
+    [ "$wg_n" -ge 2 ] 2>/dev/null || wg_n=0
+    printf 'query_timeout=%s\n' "$wg_n"
+    wg_dwm=$(klog_wm "$wg_text")
+    if [ -n "$wg_dwm" ]; then
+        printf 'wm=%s\n' "$wg_dwm"
+    fi
+}
+
+# sig_field DIGEST NAME: that field's value, 0 when the digest has none.
+sig_field() {
+    printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1
+}
+
+# sig_new BASE CURR: the names whose count grew from BASE to CURR -- the
+# signatures that appeared in between -- space separated on one line.  An
+# empty BASE (no state yet) makes every signature new: that is "since
+# boot"; the saved state is "since the last good bind".
+sig_new() {
+    wg_out=""
+    for wg_name in probe_failed mmio_read fw_halted mailbox_ones ring_depth query_timeout; do
+        wg_c=$(sig_field "$2" "$wg_name"); : "${wg_c:=0}"
+        wg_b=$(sig_field "$1" "$wg_name"); : "${wg_b:=0}"
+        if [ "$wg_c" -gt "$wg_b" ] 2>/dev/null; then
+            wg_out="$wg_out$wg_name "
+        fi
+    done
+    printf '%s\n' "${wg_out% }"
+}
+
+# sig_names TEXT: the names of the failure signatures in TEXT, space
+# separated on one line, in sig_new's order -- what
+# sig_new "" "$(sig_digest TEXT)" says, without the digest's round trip.
+# A recovery's judgment asks it every second, and on the tablet that
+# round trip (twelve sed pipelines) was most of each second's processes.
+sig_names() {
+    wg_out=""
+    [ "$(sig_count "$1" "$SIG_PROBE")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}probe_failed "
+    [ "$(sig_count "$1" "$SIG_MMIO")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}mmio_read "
+    [ "$(sig_count "$1" "$SIG_HALT")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}fw_halted "
+    [ "$(sig_count "$1" "$SIG_MBOX")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}mailbox_ones "
+    [ "$(sig_count "$1" "$SIG_DEPTH")" -gt 0 ] 2>/dev/null && wg_out="${wg_out}ring_depth "
+    [ "$(sig_count "$1" "$SIG_QUERY")" -ge 2 ] 2>/dev/null && wg_out="${wg_out}query_timeout "
+    printf '%s\n' "${wg_out% }"
+}
+
+# line_signature LINE: the name of the failure signature in LINE, or
+# nothing.  Only the name ever leaves this: never the line itself.
+line_signature() {
+    case $1 in
+        *"$SIG_PROBE"*) printf 'probe_failed\n' ;;
+        *"$SIG_MMIO"*) printf 'mmio_read\n' ;;
+        *"$SIG_HALT"*) printf 'fw_halted\n' ;;
+        *"$SIG_MBOX"*) printf 'mailbox_ones\n' ;;
+        *"$SIG_DEPTH"*) printf 'ring_depth\n' ;;
+        *"$SIG_QUERY"*) printf 'query_timeout\n' ;;
+        *) printf '\n' ;;
+    esac
+}
+
+# host_bound / bt_dev / wifi_iface_present / wifi_up: the state of the two
+# drivers and of the Wi-Fi, as sysfs shows it.
+host_bound() {
+    [ -e "$PCIE_DRV/$PCIE_HOST" ]
+}
+
+# bt_dev: the name of the serial device hci_uart_bcm holds (serial0-0), or
+# nothing when Bluetooth is not bound.
+bt_dev() {
+    for wg_d in "$BT_DRV"/serial*-*; do
+        [ -e "$wg_d" ] || continue
+        printf '%s\n' "${wg_d##*/}"
+        return 0
+    done
+    return 1
+}
+
+wifi_iface_present() {
+    for wg_p in "$SYS"/class/net/*/phy80211; do
+        [ -e "$wg_p" ] || continue
+        return 0
+    done
+    return 1
+}
+
+wifi_up() {
+    wifi_iface_present || return 1
+    [ -e "$BRCMF_DRV/$PCI_DEV" ]
+}
+
+# log_has_signature: any failure signature in the whole kernel log.
+log_has_signature() {
+    [ -n "$(sig_new "" "$(sig_digest "$(klog_text)")")" ]
+}
+
+# run_check: the Wi-Fi's state.  Sets wg_reason (why it is down, one line)
+# and wg_digest (the log's signature counts now, and its wm); returns 0
+# when it is up.  A failure signature is one in the lines logged since the
+# last good judgment -- those after the line stamped with its wm, which
+# the state carries: whole-log counts fall as the ring buffer turns over
+# (about 1500 lines on the tablet), and a new failure could sit below
+# them.  The saved counts, not the wm, say it when there is no valid wm
+# (an older version's state, a log without timestamps).
+run_check() {
+    wg_ktext=$(klog_text)
+    wg_digest=$(sig_digest "$wg_ktext")
+    wg_state=$(read_state)
+    wg_swm=$(sig_field "$wg_state" wm)
+    if ts_valid "$wg_swm"; then
+        wg_reason=$(sig_new "" "$(sig_digest "$(klog_since "$wg_ktext" "$wg_swm")")")
+    else
+        wg_reason=$(sig_new "$wg_state" "$wg_digest")
+    fi
+    if [ -n "$wg_reason" ]; then
+        wg_reason="wifi down: failure signature in the kernel log since the last bind ($wg_reason)"
+        return 1
+    fi
+    if ! wifi_iface_present; then
+        wg_reason='wifi down: no 802.11 interface'
+        return 1
+    fi
+    if [ ! -e "$BRCMF_DRV/$PCI_DEV" ]; then
+        wg_reason='wifi down: the brcmfmac PCI device is not bound'
+        return 1
+    fi
+    return 0
+}
+
+# unbind_host: the PCIe host's unbind in the background, given UNBIND_MAX
+# seconds: the kernel can hang in it.  The child marks its end in a file
+# (a finished but unreaped child still answers kill -0, so the file, not
+# the pid, says it returned).  0 done, 1 still running after the limit.
+unbind_host() {
+    wg_marker=$STATE.unbind
+    rm -f "$wg_marker"
+    ( write_sysfs "$PCIE_HOST" "$PCIE_DRV/unbind"
+      : > "$wg_marker" 2>/dev/null ) &
+    wg_pid=$!
+    wg_uwaited=0
+    while [ ! -e "$wg_marker" ] && [ "$wg_uwaited" -lt "$UNBIND_MAX" ]; do
+        do_sleep 1
+        wg_uwaited=$((wg_uwaited + 1))
+    done
+    if [ -e "$wg_marker" ]; then
+        wait "$wg_pid" 2>/dev/null
+        return 0
+    fi
+    # No wait after the kill: the child may sit in an uninterruptible
+    # unbind, and it is not coming back either way.
+    kill "$wg_pid" 2>/dev/null
+    return 1
+}
+
+# kernel_can_cycle: the PCIe host cuts the Wi-Fi's power and powers the PHY
+# down on unbind (see the header).
+kernel_can_cycle() {
+    [ "$(cat "$CAP" 2>/dev/null)" = Y ]
+}
+
+# mark_off [BTDEV] / off_marked / off_bt: the marker that says the chip is
+# powered down for a sleep.  `off` writes it, with the name of the
+# Bluetooth device it unbound (serial0-0) when it unbound one: `recover`
+# binds that device back, once at its end, since bt_dev finds only a
+# bound one.  A marker
+# that exists already keeps its name when there is none to write (a second
+# off finds Bluetooth unbound by the first).  `recover`'s cycles remove it
+# before their first bind, so a failed recovery leaves no marker either;
+# while it is there the watch judges nothing.  /run starts empty at boot,
+# so a new boot starts with no marker.
+mark_off() {
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1" > "$OFF_MARK" 2>/dev/null ||
+            log "cannot write the off marker $OFF_MARK"
+    elif [ ! -e "$OFF_MARK" ]; then
+        : > "$OFF_MARK" 2>/dev/null || log "cannot write the off marker $OFF_MARK"
+    fi
+}
+
+# off_bt: the Bluetooth device the marker names, when it is a serial
+# device name and nothing else.
+off_bt() {
+    wg_ob=$(sed -n '1p' "$OFF_MARK" 2>/dev/null)
+    case $wg_ob in
+        serial[0-9]*-[0-9]*) case $wg_ob in *[!a-z0-9-]*) ;; *) printf '%s\n' "$wg_ob" ;; esac ;;
+    esac
+}
+
+off_marked() {
+    [ -e "$OFF_MARK" ]
+}
+
+# boost_on / boost_off: the A57 cores online and on performance for the
+# length of a recovery.  t715-keys owns those cores and takes them
+# offline when the screen goes dark, so a recovery with the screen dark
+# starts the chip in the worst state measured -- good starts whole-chip
+# cycles alternated cycle by cycle on the same tablet (2026-11-11):
+#   L: screen off, cpu4-7 offline, A53 on schedutil      26 of 45
+#   H: cpu4-7 online, every cpufreq policy on performance 41 of 45
+#   Q: cpu4-7 online, schedutil (A57 at 0.8-1.1 GHz)      11 of 15
+#   P: cpu4-7 offline, only the A53 policy on performance  8 of 15
+# The failures H removes come in the firmware's boot, 1 to 2 s after
+# the bind: 1 of 45 against 13 of 45 in L.  Six suspend restores with
+# the cores held as in H all came up on the first try, 6.3 to 6.6 s
+# after the wake; six without took 8 to 82 s, with four failed tries.
+# The boost writes only what a recovery's own length needs and puts it
+# back as t715-keys keeps it; it never touches the exit code.
+#
+# wg_boost_oned: the cores this boost brought online (space separated),
+# to take back offline at its end.  wg_boost_gov: the cpufreq file the
+# governor was written to and wg_boost_govv its saved value -- the
+# policy is per cluster, so one write covers the cluster.  wg_boost_did:
+# the boost wrote something, so its end says its line too.
+wg_boost_oned=""
+wg_boost_gov=""
+wg_boost_govv=""
+wg_boost_did=0
+
+boost_on() {
+    wg_boost_oned=""
+    wg_boost_gov=""
+    wg_boost_govv=""
+    wg_boost_did=0
+    [ -n "$BOOST_CPUS" ] || return 0
+    for wg_c in $BOOST_CPUS; do
+        wg_f=$SYS/devices/system/cpu/cpu$wg_c/online
+        if [ -e "$wg_f" ] && [ "$(cat "$wg_f" 2>/dev/null)" = 0 ]; then
+            write_sysfs 1 "$wg_f" || true
+            wg_boost_oned="$wg_boost_oned$wg_c "
+        fi
+    done
+    for wg_c in $BOOST_CPUS; do
+        wg_g=$SYS/devices/system/cpu/cpu$wg_c/cpufreq/scaling_governor
+        if [ -e "$wg_g" ]; then
+            wg_boost_gov=$wg_g
+            wg_boost_govv=$(cat "$wg_g" 2>/dev/null)
+            write_sysfs performance "$wg_g" || true
+            break
+        fi
+    done
+    [ -n "$wg_boost_oned$wg_boost_gov" ] || return 0
+    wg_boost_did=1
+    log 'boost: the A57 cores online on performance for the recovery'
+}
+
+# The screen is lit unless a card0-DSI-1 dpms file reads Off -- that is
+# t715-sleep's rule, and a missing file reads as lit.
+boost_screen_lit() {
+    for wg_d in "$SYS"/class/drm/card*-DSI-1/dpms; do
+        [ -e "$wg_d" ] || continue
+        [ "$(cat "$wg_d" 2>/dev/null)" = Off ] && return 1
+        return 0
+    done
+    return 0
+}
+
+boost_off() {
+    # The governor back first, so the cores leave performance before
+    # they go offline.
+    if [ -n "$wg_boost_gov" ] && [ -e "$wg_boost_gov" ]; then
+        write_sysfs "$wg_boost_govv" "$wg_boost_gov" || true
+    fi
+    # t715-keys wants the cores online with the screen lit and the
+    # saver off: leave them so.  Any other state, and they go back
+    # offline as it keeps them.
+    if boost_screen_lit && [ ! -e "$SAVER" ]; then
+        wg_boost_oned=""
+    fi
+    for wg_c in $wg_boost_oned; do
+        write_sysfs 0 "$SYS/devices/system/cpu/cpu$wg_c/online" || true
+    done
+    [ "$wg_boost_did" -eq 1 ] || return 0
+    log 'boost: the A57 cores back as t715-keys keeps them'
+}
+
+# recover_cycles TRIES: the whole-chip power cycles, one per try, each
+# stopping at the first good start.  0 one came good (the state file then
+# holds that start's counts), 1 none did, 2 the host unbind got stuck, 3 the
+# kernel cannot power-cycle the Wi-Fi.
+recover_cycles() {
+    wg_tries=$1
+    wg_try=0
+    if ! kernel_can_cycle; then
+        log "this kernel cannot power-cycle the Wi-Fi (no pci_exynos.wifi_power_cycle): not recovering"
+        return 3
+    fi
+    # The chip is no longer down for a sleep: the cycles that follow are
+    # meant to bring it back, so the marker must not survive them -- a
+    # failed recovery leaves none either.
+    # Bluetooth comes back once, at the end of the recovery and never
+    # inside a try: bt_dev finds only a bound device, so it is found
+    # before the first try (falling back to the name the marker keeps
+    # when `off` unbound it) and kept for the whole recovery -- after the
+    # first try it is unbound and bt_dev would find nothing.
+    wg_bt=$(bt_dev)
+    wg_btoff=$(off_bt)
+    wg_btbind=${wg_bt:-$wg_btoff}
+    wg_btund=0
+    rm -f "$OFF_MARK" 2>/dev/null || true
+    log "recover: up to $wg_tries whole-chip power cycles"
+    while [ "$wg_try" -lt "$wg_tries" ]; do
+        wg_try=$((wg_try + 1))
+        if host_bound; then
+            if ! unbind_host; then
+                log "recovery try $wg_try of $wg_tries: the host unbind did not return within $UNBIND_MAX s: giving up"
+                # A stuck Wi-Fi must not cost the Bluetooth too: when a
+                # try of this recovery unbound it, or it is unbound now
+                # (`off` unbound it before the recovery, the marker
+                # naming it), bind it back before leaving.  A stuck first
+                # try of a recovery that found it bound never touched it.
+                if [ -n "$wg_btbind" ] && { [ "$wg_btund" -eq 1 ] || [ -z "$(bt_dev)" ]; }; then
+                    write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+                fi
+                return 2
+            fi
+        fi
+        # Only the first try finds Bluetooth bound (and a recovery after
+        # `off`, whose chip is down, finds none); unbinding it here --
+        # before its patch download starts, never during one -- keeps
+        # every try's cost the same few seconds.
+        if [ -n "$wg_bt" ]; then
+            write_sysfs "$wg_bt" "$BT_DRV/unbind" || true
+            wg_bt=""
+            wg_btund=1
+        fi
+        do_sleep "$OFF_SECS"
+        # The snapshot before the bind: the wm of its last timestamped
+        # line marks where the try's judgment starts.  It is judged by
+        # line, the lines after that wm, so the ring buffer turning over
+        # under it (about 1500 lines on the tablet) cannot make a failure
+        # after the bind fall below counts that hold lines gone from the
+        # log; with no wm in the snapshot, the counts carry the judgment
+        # as before.
+        wg_pretext=$(klog_text)
+        wg_pre=$(sig_digest "$wg_pretext")
+        wg_prewm=$(klog_wm "$wg_pretext")
+        write_sysfs "$PCIE_HOST" "$PCIE_DRV/bind" || true
+        # The judgment runs every second from the bind, ending the try as
+        # soon as its outcome is known: a failure signature in the lines
+        # after the pre-bind wm fails the start at once, while a start must
+        # hold -- interface up, no signature -- GOOD_SECS seconds before it
+        # is good, for a halt can come a few seconds after the interface
+        # appears; the interface has until IFACE_SECS to come.
+        # The whole log's counts are taken only where they are needed --
+        # the judgment with no wm, and the state a good start saves: on
+        # the tablet each second's reading spawns some fifty processes,
+        # and the whole-log counts were a quarter of them, every second.
+        wg_waited=0
+        wg_held=0
+        while :; do
+            do_sleep 1
+            wg_waited=$((wg_waited + 1))
+            wg_curtext=$(klog_text)
+            if ts_valid "$wg_prewm"; then
+                wg_newsig=$(sig_names "$(klog_since "$wg_curtext" "$wg_prewm")")
+            else
+                wg_cur=$(sig_digest "$wg_curtext")
+                wg_newsig=$(sig_new "$wg_pre" "$wg_cur")
+            fi
+            if [ -n "$wg_newsig" ]; then
+                log "recovery try $wg_try of $wg_tries: failed: failure signature after the bind ($wg_newsig), after $wg_waited s"
+                continue 2
+            fi
+            if wifi_up; then
+                wg_held=$((wg_held + 1))
+                if [ "$wg_held" -ge "$GOOD_SECS" ]; then
+                    log "recovery try $wg_try of $wg_tries: the Wi-Fi came up after $wg_waited s"
+                    # Bluetooth back at last: the Wi-Fi is up and judged,
+                    # and its patch download now runs unwatched.
+                    if [ -n "$wg_btbind" ]; then
+                        write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+                    fi
+                    save_state "$(sig_digest "$wg_curtext")"
+                    return 0
+                fi
+            else
+                wg_held=0
+            fi
+            [ "$wg_waited" -ge "$IFACE_SECS" ] && break
+        done
+        log "recovery try $wg_try of $wg_tries: failed: no interface within $IFACE_SECS s"
+    done
+    # No start came good; Bluetooth comes back anyway -- it never caused
+    # the failure and the chip is no longer being cycled.
+    if [ -n "$wg_btbind" ]; then
+        write_sysfs "$wg_btbind" "$BT_DRV/bind" || true
+    fi
+    log "recover: $wg_tries tries, none brought the Wi-Fi up"
+    return 1
+}
+
+# off_now: the chip powered down, Wi-Fi and Bluetooth, and left down -- the
+# state a suspend wants.  Idempotent: a chip already down is only marked.
+# 0 down, 1 Bluetooth stayed bound to its driver, 2 the host unbind got
+# stuck.
+off_now() {
+    wg_bt=$(bt_dev)
+    if ! host_bound && [ -z "$wg_bt" ]; then
+        mark_off
+        log "off: already powered down"
+        return 0
+    fi
+    wg_rc=0
+    if host_bound; then
+        if ! unbind_host; then
+            log "off: the host unbind did not return within $UNBIND_MAX s: giving up"
+            return 2
+        fi
+    fi
+    if [ -n "$wg_bt" ]; then
+        # A refused write is logged and the rest still runs: the marker and
+        # the log line say the chip is down only when it is.
+        if ! write_sysfs "$wg_bt" "$BT_DRV/unbind" && [ -n "$(bt_dev)" ]; then
+            log "off: Bluetooth stayed bound to its driver"
+            wg_rc=1
+        fi
+    fi
+    mark_off "$wg_bt"
+    [ "$wg_rc" -eq 0 ] && log "off: the Wi-Fi and Bluetooth chip is powered down"
+    return "$wg_rc"
+}
+
+# off_cmd: what the sleep hook calls before a suspend.  The kernel gate
+# first, as a recovery's: an unbind on a kernel that cannot power-cycle
+# makes every later bind hang.  Then the recovery lock, waited for at most
+# OFF_LOCK_SECS: a recovery in flight has the chip half-cycled and may be
+# bringing the Wi-Fi up, so the chip is left as it is rather than pulled
+# from under it.  With no flock it runs unlocked, with a log line.  0 the
+# chip is down, 1 a recovery holds the lock or Bluetooth stayed bound, 2
+# the host unbind got stuck, 3 the kernel cannot power-cycle.
+off_cmd() {
+    if ! kernel_can_cycle; then
+        log "this kernel cannot power-cycle the Wi-Fi (no pci_exynos.wifi_power_cycle): not powering down"
+        return 3
+    fi
+    if command -v flock >/dev/null 2>&1; then
+        (
+            if ! flock -w "$OFF_LOCK_SECS" 9; then
+                log "off: a recovery holds the lock: the chip is left as it is"
+                exit 1
+            fi
+            off_now
+        ) 9>"$LOCK"
+    else
+        log "no flock: powering down without the lock"
+        off_now
+    fi
+}
+
+# locked TRIES [recheck]: one recovery under the lock, so that only one
+# instance of this script power-cycles the chip at a time -- the service's
+# run and a recovery typed by hand serialize on it.  The recovery's exit
+# code is passed through.  With recheck (what recover_maybe passes, never
+# the recover subcommand: an explicit ask always cycles) the check runs
+# again once the lock is held, before any cycle -- another recovery may
+# have brought the Wi-Fi up while this one waited for the lock, and a
+# cycle would then only break a start that came good: 4 comes back in that
+# case, the good start's counts saved and nothing cycled.  With no flock
+# (a test without util-linux) it runs unlocked, with a log line, the
+# re-check kept.  The cycles run under the boost: on once the lock and
+# any re-check are past, off on every exit, so both the service's
+# recoveries and a typed `recover` get it.  The boost never touches the
+# exit code it passes through.  A recovery stopped halfway (TERM or INT,
+# a service stop) undoes the boost before it goes, rather than leave the
+# A57 cores on performance until t715-keys next acts.
+locked() {
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x 9
+            if [ "${2:-}" = recheck ] && run_check; then
+                save_state "$wg_digest"
+                exit 4
+            fi
+            boost_on
+            trap 'boost_off; exit 143' TERM INT
+            recover_cycles "$1"
+            wg_rc=$?
+            trap - TERM INT
+            boost_off
+            exit "$wg_rc"
+        ) 9>"$LOCK"
+    else
+        log "no flock: recovering without the lock"
+        if [ "${2:-}" = recheck ] && run_check; then
+            save_state "$wg_digest"
+            return 4
+        fi
+        boost_on
+        trap 'boost_off; exit 143' TERM INT
+        recover_cycles "$1"
+        wg_rc=$?
+        trap - TERM INT
+        boost_off
+        return "$wg_rc"
+    fi
+}
+
+# recover_maybe: one rate-limited recovery, what run does whenever its
+# check failed.  The timestamps of this boot's recoveries sit in RECS;
+# past MAX_REC in any WINDOW_SECS the decision is logged once and no more
+# recoveries happen until the next boot (the process keeps watching).  A
+# start that came good while another recovery held the lock is not one of
+# them: nothing was cycled, so RECS does not grow either.
+RECS=""
+GAVEUP=0
+
+recover_maybe() {
+    if [ "$GAVEUP" -eq 1 ]; then
+        return 0
+    fi
+    wg_now=$(date +%s 2>/dev/null || printf '0')
+    wg_keep=""
+    # shellcheck disable=SC2086
+    for wg_ts in $RECS; do
+        [ $((wg_now - wg_ts)) -lt "$WINDOW_SECS" ] && wg_keep="$wg_keep$wg_ts "
+    done
+    RECS=$wg_keep
+    wg_n=0
+    # shellcheck disable=SC2086
+    for wg_ts in $RECS; do
+        wg_n=$((wg_n + 1))
+    done
+    if [ "$wg_n" -ge "$MAX_REC" ]; then
+        GAVEUP=1
+        log "$MAX_REC recoveries in $((WINDOW_SECS / 60)) minutes: not recovering any more until the next boot"
+        return 0
+    fi
+    locked "$TRIES_DEFAULT" recheck
+    wg_rc=$?
+    if [ "$wg_rc" -eq 4 ]; then
+        # The lock was held by another recovery and that one brought the
+        # Wi-Fi up: cycle nothing, count nothing.
+        log "recover: the Wi-Fi came up meanwhile (another recovery held the lock): nothing to do"
+        return 0
+    fi
+    if [ "$wg_rc" -eq 0 ]; then
+        log "recovered: the Wi-Fi is up"
+    elif [ "$wg_rc" -eq 3 ]; then
+        GAVEUP=1
+        return 0
+    else
+        log "recovery failed (exit $wg_rc): the Wi-Fi is still down"
+    fi
+    RECS="$RECS$wg_now "
+    return 0
+}
+
+# watch_loop: the follow mode.  A signature in a new kernel line starts a
+# DEBOUNCE_SECS wait, then the check and, when it failed, a recovery --
+# unless the last good judgment already saw that line (see the skip).  The
+# query timeout needs two lines before it counts as a signature here too.
+# Raw kernel lines never leave this loop: only the signature's name does.
+watch_loop() {
+    wg_qcount=0
+    wg_wm_said=""
+    wg_off_said=0
+    while IFS= read -r wg_line; do
+        wg_hit=$(line_signature "$wg_line")
+        [ -n "$wg_hit" ] || continue
+        # The sleep skip: the chip is powered down on purpose (the marker
+        # `off` left), so nothing its power-down logs is a failure to judge
+        # -- no wait, no check, no query-timeout count.  One fixed line per
+        # marker, the first time only; the flag resets once the marker is
+        # gone, so a later sleep says it again.
+        if off_marked; then
+            if [ "$wg_off_said" -eq 0 ]; then
+                log "watch: the chip is off for a sleep: not judging"
+                wg_off_said=1
+            fi
+            continue
+        fi
+        wg_off_said=0
+        # The skip: a line logged at or before the wm of the last good
+        # judgment was in the log that judgment read, so it is judged
+        # already -- the backlog a recovery leaves in the pipe, say.  No
+        # wait, no check, no query-timeout count; one fixed log line per
+        # wm, the first time, and nothing of the line in it.  A line
+        # without a timestamp, or a state without a valid wm (none yet, an
+        # older version's, a log without timestamps), skips nothing.
+        wg_lts=$(line_ts "$wg_line")
+        if [ -n "$wg_lts" ]; then
+            wg_wm=$(sig_field "$(read_state)" wm)
+            if ts_valid "$wg_wm" && ts_le "$wg_lts" "$wg_wm"; then
+                if [ "$wg_wm" != "$wg_wm_said" ]; then
+                    log "watch: skipping failure signatures logged before the last good check (already judged)"
+                    wg_wm_said=$wg_wm
+                fi
+                continue
+            fi
+        fi
+        if [ "$wg_hit" = query_timeout ]; then
+            wg_qcount=$((wg_qcount + 1))
+            [ "$wg_qcount" -ge 2 ] || continue
+        fi
+        log "watch: failure signature ($wg_hit) in the kernel log"
+        do_sleep "$DEBOUNCE_SECS"
+        if run_check; then
+            log "watch check: the Wi-Fi is up"
+            save_state "$wg_digest"
+        else
+            log "watch check: $wg_reason"
+            recover_maybe
+        fi
+    done
+}
+
+# run_guard: what the unit runs.
+run_guard() {
+    log "run: waiting for the Wi-Fi to settle at boot (up to $SETTLE_SECS s)"
+    wg_waited=0
+    while [ "$wg_waited" -lt "$SETTLE_SECS" ]; do
+        if host_bound; then
+            if wifi_iface_present; then break; fi
+            if log_has_signature; then break; fi
+        fi
+        do_sleep 2
+        wg_waited=$((wg_waited + 2))
+    done
+    if run_check; then
+        log "boot check: the Wi-Fi is up"
+        save_state "$wg_digest"
+    else
+        log "boot check: $wg_reason"
+        recover_maybe
+    fi
+    log "watch: following the kernel log for Wi-Fi failures"
+    # shellcheck disable=SC2086
+    $KFOLLOW | watch_loop
+}
+
+case ${1:-} in
+    check)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        if run_check; then
+            exit 0
+        fi
+        printf '%s\n' "$wg_reason"
+        exit 1
+        ;;
+    recover)
+        [ $# -le 2 ] || { usage; exit 2; }
+        wg_tries=${2:-$TRIES_DEFAULT}
+        case $wg_tries in
+            *[!0-9]*|'') usage; exit 2 ;;
+        esac
+        [ "$wg_tries" -ge 1 ] || { usage; exit 2; }
+        locked "$wg_tries"
+        exit $?
+        ;;
+    off)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        off_cmd
+        exit $?
+        ;;
+    run)
+        [ $# -eq 1 ] || { usage; exit 2; }
+        run_guard
+        exit 0
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
