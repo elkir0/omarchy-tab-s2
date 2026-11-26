@@ -79,24 +79,27 @@ bootloader and about arm64 Linux on it](https://github.com/elkir0/bnuuyloader/bl
 - **The starting point and the first way back**: the 32-bit system itself, and its tools
   (`device/tssh`, `device/write-part.sh`), which reach the tablet over the USB cable and write
   BOOT and RECOVERY.
-- **The kernel sources**: the 64-bit kernel is this repository's kernel with the fork's nine
+- **The kernel sources**: the 64-bit kernel is this repository's kernel with the fork's ten
   patches.
 
 ## 4. What the 64-bit system does, and does not do
 
-On 2026-11-25, on the reference tablet.
+On 2026-11-26, on the reference tablet.
 
 **Works**: Omarchy 4.5 on arm64 as a daily system, user space in about 13 s, a soak of three
 hours with eight busy cores; a boot screen drawn by the bootloader itself; display, touch, GPU,
 Wi-Fi, Bluetooth, sound, sensors, battery and the microSD card as far as the health check sees;
-the LTE modem's processor online. **AI**: dictation and Omarchy Mobile's voice bar, in the
-user's language (Voxtype rebuilt for the tablet's ARMv8.0 CPU); a first-run onboarding that
+the LTE modem's processor online; **suspend to RAM** — a minute after the screen goes dark on
+battery, the modem's processor and the Wi-Fi/Bluetooth chip powered down around the sleep, wake
+on the Power and Home keys, the cover, a cable or the RTC alarm; **Android apps** through Waydroid
+(LineageOS 20, 64-bit and 32-bit apps, an Android tile in quick settings). **AI**: dictation and
+Omarchy Mobile's voice bar, in the user's language (Voxtype rebuilt for the tablet's ARMv8.0
+CPU); a first-run onboarding that
 offers Claude Desktop, ChatGPT Desktop and a default coding agent; Claude Desktop, ChatGPT
 Desktop, Claude Code, mise, Ollama, OpenCode and Grok start on the tablet.
 
-**Not yet**, where the 32-bit release has it: **suspend to RAM**, **Android apps** (the 32-bit
-Waydroid image cannot run there), **the A57 cores above 1.2 GHz** and their hot-unplug, **the
-modem with a SIM** (registration, mobile data, SMS, calls), the camera's user space. The 64-bit
+**Not yet**, where the 32-bit release has it: **the A57 cores above 1.2 GHz**, **the modem with
+a SIM** (registration, mobile data, SMS, calls), the camera's user space. The 64-bit
 port's roadmaps: toward the
 turnkey release, [arm64/docs/ROADMAP.md](../arm64/docs/ROADMAP.md); the boot side's,
 [ROADMAP.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/ROADMAP.md) in the fork.

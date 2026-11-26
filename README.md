@@ -7,7 +7,7 @@ of its Exynos 5433, on mainline Linux 6.12, with **AI built in**: Claude Code on
 in the search bar, Claude Desktop and ChatGPT Desktop, dictation in your own language that never
 leaves the tablet, and local models with Ollama.
 
-**2.0.0 "Golden".** Download, flash once, and the tablet installs itself: [the guide](docs/INSTALL-ARM64.md).
+**2.1.0.** Download, flash once, and the tablet installs itself: [the guide](docs/INSTALL-ARM64.md).
 It is the daily system of the reference tablet, a Galaxy Tab S2 8.0 LTE (SM-T715), since
 2026-11-25.
 
@@ -63,6 +63,7 @@ On the reference tablet, in 64 bits, since 2026-11-25.
 | Boot | the loader in PARAM starts the 64-bit kernel at every power-on, behind a boot screen drawn by the bootloader; user space in about 13 s; a failed attempt hands the next boots to the rescue, then tries again |
 | CPU | eight cores in AArch64: A53 from 400 MHz to 1.2 GHz, A57 from 800 MHz to 1.2 GHz, schedutil, thermal trips from the board's tables |
 | Desktop | Hyprland 0.57 and the Omarchy shell on the 2048x1536 panel, GPU through Panfrost (Mali-T760); the touch shell: drawer, home, recents, quick settings, back gesture, on-screen keyboard; rotation |
+| Android apps | Waydroid (LineageOS 20, Android 13) beside the Linux apps, 64-bit and 32-bit apps, from an Android tile in quick settings; opt-in: `sudo t715-android-setup all` downloads the Android image (about 1.1 GB) |
 | AI | Claude Code, Claude Desktop, ChatGPT Desktop, mise, Ollama, OpenCode and Grok start on the tablet; dictation and the voice bar in your language; Ask Claude Code from the search bar; the first-run setup |
 | Keys | Power, Home, the cover, and the Back and Recent touch keys |
 | Wi-Fi, Bluetooth | Wi-Fi (WPA2) and Bluetooth up at every boot |
@@ -70,13 +71,13 @@ On the reference tablet, in 64 bits, since 2026-11-25.
 | Sound | the WM1814 codec through PipeWire; the microphone feeds dictation |
 | Sensors, storage | accelerometer, gyroscope and magnetometer; the microSD card |
 | Battery | the fuel gauge, charging over USB |
+| Sleep | suspend to RAM a minute after the screen goes dark on battery, the modem's processor and the Wi-Fi/Bluetooth chip powered down around it; wakes on Power, Home, the cover, a cable or the RTC alarm |
 | Security | ufw on; a PIN or password from the first-run setup, and the screen lock |
 | Way back | the loader hands back to the bootloader when it has nothing sound to start; the installer, which stays in BOOT and RECOVERY as the rescue, says so and lets the loader try again, and puts the loader back into PARAM from the saved stock copy if it was lost |
 
-**Not yet in 64 bits**, where the 32-bit release had them: suspend to RAM, Android apps
-(Waydroid), the cameras' user space, the A57 cores above 1.2 GHz, and the modem with a SIM
-(registration, data, SMS, calls) tested end to end. [The roadmap](arm64/docs/ROADMAP.md) has the
-order.
+**Not yet in 64 bits**, where the 32-bit release had them: the cameras' user space, the A57
+cores above 1.2 GHz, and the modem with a SIM (registration, data, SMS, calls) tested end to
+end. [The roadmap](arm64/docs/ROADMAP.md) has the order.
 
 One tablet was tested: SM-T715, bootloader `T715XXU2CRH1`, hardware revision 9. Other Tab S2
 models are not covered.
@@ -88,8 +89,11 @@ models are not covered.
 
 | Route | For | How |
 |---|---|---|
-| **Download, flash, it installs** | anyone with the tablet | **2.0.0**: copy `omarchy-arm64.img` to a microSD card, flash the installer once with Odin or Heimdall, and the tablet installs itself, then starts Omarchy's first-run setup. [The guide](docs/INSTALL-ARM64.md) |
+| **Download, flash, it installs** | anyone with the tablet | **2.1.0**: copy `omarchy-arm64.img` to a microSD card, flash the installer once with Odin or Heimdall, and the tablet installs itself, then starts Omarchy's first-run setup. [The guide](docs/INSTALL-ARM64.md) |
 | **The long route** | power users | every step by hand from a computer, each with its way back: [GO-ARM64.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md) |
+
+Already on 2.0.0? [Reinstall from it](docs/INSTALL-ARM64.md#8-from-200-the-reinstall): the old
+system is kept aside as `omarchy-arm64.previous`, not deleted.
 
 The loader cannot ship as a file: PARAM is Samsung's firmware and holds one tablet's own data. So
 the installer builds it on the tablet, from that tablet's own PARAM, and checks the result against

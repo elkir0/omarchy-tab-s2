@@ -1,7 +1,7 @@
 # Installing Omarchy in 64 bits on the Samsung Galaxy Tab S2
 
 This guide takes a Samsung Galaxy Tab S2 8.0 LTE (SM-T715) from stock Android to Omarchy 4.5 in
-64 bits, with the 2.0.0 release: you copy one image to a microSD card, flash one package with
+64 bits, with the 2.1.0 release: you copy one image to a microSD card, flash one package with
 Odin, and the tablet installs itself. No command to type on the tablet, nothing to build.
 
 It is an unofficial port, not affiliated with Omarchy, Omarchy Mobile or Samsung. How it works,
@@ -40,13 +40,13 @@ for whoever wants to know: [section 7](#7-what-the-installer-does) here, then
 
 ## 2. Download and check
 
-From the [2.0.0 release](https://github.com/elkir0/omarchy-tab-s2/releases):
+From the [2.1.0 release](https://github.com/elkir0/omarchy-tab-s2/releases):
 
 | File | What it is |
 |---|---|
 | `omarchy-arm64.img.xz` | the 64-bit Omarchy system, compressed (unpacked: `omarchy-arm64.img`) |
 | `omarchy-arm64.img.sha256` | the image's checksum: the installer refuses an image without it |
-| `omarchy-tab-s2-2.0.0-AP.tar.md5` | the installer, for Odin's AP slot (it holds `boot.img` and `recovery.img`) |
+| `omarchy-tab-s2-2.1.0-AP.tar.md5` | the installer, for Odin's AP slot (it holds `boot.img` and `recovery.img`) |
 | `boot.img`, `recovery.img` | the same installer, for Heimdall |
 | `SHA256SUMS` | the checksum of every file |
 
@@ -83,7 +83,7 @@ storage (for example your `~/.ssh/id_ed25519.pub`). Without it, SSH stays closed
 1. Turn the tablet off. Hold **Volume down + Home + Power** until the warning screen, then
    **Volume up**: download mode.
 2. Connect the USB cable.
-3. **Odin**: put `omarchy-tab-s2-2.0.0-AP.tar.md5` in the **AP** slot and press *Start*.
+3. **Odin**: put `omarchy-tab-s2-2.1.0-AP.tar.md5` in the **AP** slot and press *Start*.
    **Heimdall**: `heimdall flash --BOOT boot.img --RECOVERY recovery.img`.
 4. When Odin says PASS, or Heimdall has finished, the tablet restarts by itself into the
    installer. If it stays in download mode, hold **Volume down + Power** until the screen goes
@@ -94,7 +94,7 @@ storage (for example your `~/.ssh/id_ed25519.pub`). Without it, SSH stays closed
 
 The screen shows, in white text on black:
 
-1. `Omarchy for the Galaxy Tab S2, 64 bits: installer 2.0.0`;
+1. `Omarchy for the Galaxy Tab S2, 64 bits: installer 2.1.0`;
 2. `Checking the image...` (about two minutes);
 3. `Installing Omarchy: N%` (about four minutes);
 4. `Writing the loader...`, then `Omarchy is installed. Restarting into it...`.
@@ -173,3 +173,58 @@ The release is built from this repository: the image with `arm64/rootfs/build.sh
 `arm64/release/make-release.sh` (the kernel from [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader)'s
 `t715/build-arm64.sh`). Power users who want to do it by hand, step by step: the long route,
 [GO-ARM64.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md).
+
+## 8. From 2.0.0: the reinstall
+
+A tablet on 2.0.0 already has the loader in PARAM and an installed system, so the 2.0.0 installer
+there only acts as the rescue. The 2.1.0 installer adds a reinstall, asked by a file named
+`reinstall` in the `linux` folder of the internal storage:
+
+1. Copy the 2.1.0 `omarchy-arm64.img` and `omarchy-arm64.img.sha256` into `linux/` on a microSD
+   card or the internal storage (section 3).
+2. Create the file `linux/reinstall` in the internal storage. From the running system:
+   `sudo touch /run/t715/userdata/media/0/linux/reinstall`.
+3. Flash the 2.1.0 installer with Odin or Heimdall (BOOT and RECOVERY), as for a first install
+   (section 4). The tablet then restarts into your 2.0.0 system as before: the loader starts it,
+   and the installer waits in BOOT.
+4. Hand the next start to the installer, from the running system:
+   `echo '<3>KBOOT: try' | sudo tee /dev/kmsg >/dev/null && sudo systemctl reboot`.
+   That line tells the loader that this start did not finish, so it gives the next start to the
+   installer. Starting in RECOVERY with the keys does not reach the installer: the loader runs
+   there too and starts the 64-bit system.
+
+The installer then checks the image, renames the installed system `omarchy-arm64.previous` (kept,
+never deleted: your files can be copied from
+`/run/t715/userdata/omarchy-arm64.previous/home/...` later), deletes the `reinstall` file and
+installs the new system. The loader stays in PARAM, and the rescue's saved stock PARAM is carried
+over. A second reinstall refuses while `omarchy-arm64.previous` exists, and says how to delete it.
+The internal storage needs room for the new system next to the one kept, about 6 GB (the image can
+stay on the microSD card): the installer checks it first and writes nothing when it is short. If
+the install stops before the new system is in place, the kept one is put back and the tablet
+restarts into it.
+The new system starts with the first-run setup again: your settings and files are not carried over
+(the old system is kept aside). Right after the reinstall the installer shows up once more, says
+that Omarchy did not finish starting last time, and restarts by itself after 30 seconds: the loader
+still counts the start you handed over. The start after that is the new system.
+
+## 9. Android apps
+
+Opt-in, as in the 32-bit release: the image ships Waydroid dormant. `sudo t715-android-setup all`
+downloads Waydroid 1.6.3's `waydroid_arm64` images on the tablet — LineageOS 20 (Android 13), the
+VANILLA system and the MAINLINE vendor, about 1.1 GB — and sets everything up. Android draws on
+the GPU through Panfrost (OpenGL ES 3.1), and both 64-bit (arm64-v8a) and 32-bit (armeabi-v7a)
+apps install. An Android tile in the quick settings starts and stops the session. Google Play
+(`--gapps`) exists as in 1.0.5 but was not tested in 64 bits.
+
+## 10. Sleep and the lock screen
+
+The tablet suspends to RAM a minute after the screen goes dark, on battery only — never on
+external power, or while a remote (ssh) login is open, audio plays, a call or the hotspot runs.
+Before the sleep the modem's processor and the Wi-Fi/Bluetooth chip are powered down; after the
+wake they come back (the Wi-Fi in about 5 s). Wake sources: the Power and Home keys, the cover,
+plugging a cable, the RTC alarm. While it sleeps there is no Wi-Fi, no Bluetooth, no call and no
+SMS (the modem's processor is off).
+
+Omarchy locks the session before every sleep, and the lock asks for the password or PIN set in the
+first-run setup. Until you set one, it is the image's placeholder `changeme`, which has letters:
+on the lock screen, switch the number pad to letters. Set a real PIN or password in the setup.

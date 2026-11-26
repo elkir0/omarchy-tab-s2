@@ -1,5 +1,80 @@
 # Changelog
 
+## 2.1.0, pre-release
+
+The same day as 2.0.0 (2026-11-26): the two big gaps 2.0.0 left open in 64 bits — sleep and
+Android apps — are closed, and the installer can reinstall from 2.0.0.
+
+- **Sleep (suspend to RAM) in 64 bits.** The kernel now has CPU hot-unplug and suspend to RAM
+  without PSCI, in the boot loader's fork elkir0/bnuuyloader as patch 0010: the secondary cores
+  go down through the secure monitor's shutdown call, the SoC sleeps through the monitor's sleep
+  call, and the wake-up comes back in 32-bit mode, where an AArch32 stub switches the boot CPU to
+  64 bits again before Linux resumes. The policy is the 32-bit release 1.0.5's, ported unchanged
+  (`t715-sleep`): the tablet sleeps a minute after the screen goes dark, on battery only — never
+  on external power, or while a remote (ssh) login is open, audio plays, a call or the hotspot
+  runs; before the sleep the modem's processor and the Wi-Fi/Bluetooth chip are powered down,
+  and after the wake they come back (the Wi-Fi in about 5 s). Wake sources: the Power and Home
+  keys, the cover, plugging a cable, the RTC alarm. Omarchy 4.5 locks the session before every
+  sleep, and the lock asks for the password or PIN set in the first-run setup: until you set one,
+  it is the image's placeholder `changeme`, which has letters — on the lock screen, switch the
+  number pad to letters. Set a real PIN or password in the setup. Omarchy's lock service
+  (`omarchy-sleep-lock`) needed a drop-in: without it, its restarts during the sleep preparation
+  could stop it for good, and later sleeps would no longer lock.
+- **Android apps (Waydroid) in 64 bits.** Waydroid 1.6.3 with LineageOS 20 (Android 13), the
+  `waydroid_arm64` images (VANILLA system and MAINLINE vendor), downloaded on the tablet when
+  you ask, with `sudo t715-android-setup all` (about 1.1 GB to download); the image ships
+  Waydroid dormant, as 1.0.5 did. Android draws on the GPU through Panfrost (Mali-T760 MC6,
+  OpenGL ES 3.1, Mesa 26.0.8); 1.0.5's Mesa workaround is not needed, that bug was in the 32-bit
+  vendor image only. Both 64-bit (arm64-v8a) and 32-bit (armeabi-v7a) apps install — 1.0.5 took
+  32-bit apps only; the kernel now has 32-bit user-space support (COMPAT), which the arm64
+  Android image needs. An Android tile in the quick settings starts and stops the session.
+- **Reinstall from 2.0.0** (new in the installer,
+  [docs/INSTALL-ARM64.md](docs/INSTALL-ARM64.md), "From 2.0.0: the reinstall"). A tablet on 2.0.0
+  already has the loader in PARAM and an installed system, so the 2.0.0 installer there only
+  acts as the rescue; the 2.1.0 installer adds a reinstall, asked by a file named `reinstall` in
+  the internal storage's `linux` folder: it checks the image, renames the installed system
+  `omarchy-arm64.previous` (kept, never deleted; your files can be copied from
+  `/run/t715/userdata/omarchy-arm64.previous/home/...` later), deletes the `reinstall` file and
+  installs the new system. The loader stays in PARAM, and the rescue's saved stock PARAM is
+  carried over. A second reinstall refuses while `omarchy-arm64.previous` exists, and says how
+  to delete it. The new system starts with the first-run setup again: your settings and files
+  are not carried over (the old system is kept aside). The installer is reached through the
+  loader's hand-back: from the running system,
+  `echo '<3>KBOOT: try' | sudo tee /dev/kmsg >/dev/null && sudo systemctl reboot` (the loader runs
+  in RECOVERY too, so the keys do not reach it).
+- **Kernel and image.** Linux 6.12.114, release `6.12.114-00106-gd30e37ad41ab`: the 1.0.5 patch
+  series plus the fork's ten arm64 patches (0010 is new: hot-unplug and suspend to RAM).
+  Configuration: `CONFIG_ARM64_EXYNOS5433_SUSPEND` and `CONFIG_COMPAT` added. The daily boot
+  arguments add `exynos5433_sleep=dryrun`: a suspend only sleeps for real when `t715-sleep` arms
+  it, once the radios are down. `hyprgraphics` is no longer rebuilt: Arch Linux ARM's 0.7.0 has
+  the lost-wakeup fix upstream (hyprwm/hyprgraphics#53) that the image rebuilt 0.6.0 for;
+  Hyprland 0.57.2 comes from Arch Linux ARM as before. The release files are named as 2.0.0's,
+  with 2.1.0: `omarchy-tab-s2-2.1.0-AP.tar.md5`, `boot.img`, `recovery.img`,
+  `omarchy-arm64.img.xz`, `omarchy-arm64.img.sha256`, `SHA256SUMS`, `MANIFEST.txt`.
+
+Tested on the reference tablet, 2026-11-26. **Sleep**: five real sleeps, five clean wakes —
+four on the RTC alarm (30 s each), and one through the whole chain on battery (60 s of dark
+screen, a real sleep of 165 s, a power-key wake, the modem and the Wi-Fi back). **Android**, with
+the on-device smoke test: booted in about 60 s, a cold app launch in 1.0 s and a warm one in
+174 ms, no crash and no GPU fault, about 1.3 GB of RAM used by Android. A stock install of the
+release's image took 7 min 13 s from the restart into the installer to the 64-bit desktop,
+and the health check said 21 PASS, 2 WARN (no Wi-Fi network saved yet, a pstore record), 0 FAIL. The reinstall, over that 2.1.0 install (the same procedure as from 2.0.0; not tried from an
+actual 2.0.0 system): the installer reached through the loader's hand-back in 24 s, 167,600
+entries copied in 241 s, the first system kept as `omarchy-arm64.previous`, the copy of the stock
+PARAM carried over, the kernel's slot written as generation 2; the new system up 7 min 54 s after
+the installer started (its one extra 30-second start included); the health check again 21 PASS,
+2 WARN, 0 FAIL.
+
+Not tested: Google Play (`--gapps`, it exists as in 1.0.5), the standby drain in 64 bits, and an
+install from a tablet still on Android by someone other than the reference tablet's owner.
+
+Known issues:
+- **Still not in 64 bits**: the cameras' user space, the A57 cores above 1.2 GHz, and calls, SMS
+  and mobile data with a SIM tested end to end.
+- **While the tablet sleeps** there is no Wi-Fi, no Bluetooth, no call, no SMS and no
+  notification (the modem's processor is off), and the Wi-Fi cannot wake it; the power drawn
+  asleep is not measured in 64 bits yet.
+
 ## 2.0.0 "Golden", pre-release
 
 The 64-bit system's first release, and the project's main line from now on: Omarchy 4.5 on arm64,
