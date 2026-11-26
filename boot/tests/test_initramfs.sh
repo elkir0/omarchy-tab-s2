@@ -68,7 +68,16 @@
 #     PARAM, wrong bootloader, no or wrong sidecar, not an aarch64 image, a
 #     foreign root: exit 97, PARAM/CACHE/USERDATA byte-identical), the slots
 #     already in CACHE (the free one gets one generation above the other,
-#     the file system and the other slot stay byte-identical), and the forge
+#     the file system and the other slot stay byte-identical), the reinstall
+#     asked by linux/reinstall over an installed root with the loader in
+#     PARAM (the happy path: the old root kept as omarchy-arm64.previous,
+#     the request file gone, the saved stock PARAM carried over to the new
+#     root, PARAM left alone, the free slot one generation above the other;
+#     refused while omarchy-arm64.previous exists, with no image, a bad sum
+#     or not enough free space: exit 97, nothing written; a copy that fails
+#     puts the kept root back and restarts; an interrupted one, the old root
+#     at omarchy-arm64.previous and no request file, goes on as a plain
+#     install and carries the saved stock PARAM over), and the forge
 #     and fnv1a64 of the init against Python (boot/golden/check-param.py's
 #     forge).  All the golden fixtures are synthetic, generated on the host
 #     with python3.
@@ -848,6 +857,30 @@ gcache_blocks() {
 }
 # gparam_loader_sum: the sha256 the fixtures' loader.sha256 names.
 gparam_loader_sum() { head -n 1 "$GF/golden/loader.sha256" | cut -d' ' -f1; }
+# gdisk_sums_noud: PARAM, SYSTEM and CACHE's content checksums only (the
+# scenarios whose USERDATA is expected to change).
+gdisk_sums_noud() {
+  sync
+  echo "param=$(gpart_sum 2048 16384)"
+  echo "system=$(gpart_sum 18432 16384)"
+  echo "cache=$(gpart_sum 34816 409600)"
+}
+# gplant_reinstall: the request file linux/reinstall on the golden disk's
+# USERDATA.
+gplant_reinstall() { gwith_userdata touch "$W/gud/media/0/linux/reinstall"; }
+# gfill_userdata: eat the golden disk's USERDATA's free space until under
+# 1 MiB is left (the reinstall's space refusal, whatever the image's use).
+gfill_userdata() { gwith_userdata sh "$W/gfill.sh" "$W/gud"; }
+# gmarker_ok ROOT: the planted root's marker files are as gplant_root left
+# them (used for the roots the reinstall keeps or puts back).
+gmarker_ok() {  # ROOT (a path inside $W/gud)
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  gwith_userdata sh -c '
+    [ -f "$1/.t715-golden" ] &&
+    [ "$(cat "$1/.t715-golden")" = "Omarchy for the Galaxy Tab S2, 64 bits: installer 9.9.9-test" ] &&
+    [ -f "$1/.t715-persist" ]
+  ' sh "$W/gud/$1"
+}
 
 make_golden_fixtures() {
   # SYSTEM: the Wi-Fi NVRAM (a macaddr line and another one) and the
@@ -911,6 +944,15 @@ make_golden_fixtures() {
   cp "$W/omarchy-arm64-bad.img" "$W/gudata-badarch/media/0/linux/omarchy-arm64.img"
   (cd "$W/gudata-badarch/media/0/linux" && sha256sum omarchy-arm64.img >omarchy-arm64.img.sha256)
   mkfs.ext4 -q -F -d "$W/gudata-badarch" "$W/golden-userdata-badarch.img" 64M
+  # the same tree with a top-level name holding a blank (the rollback
+  # scenario): the seed's archive list splits on blanks, so the copy fails
+  cp -a "$t" "$W/gtree-blank"
+  echo 'a name the seed cannot copy' >"$W/gtree-blank/a b"
+  mkfs.ext4 -q -F -d "$W/gtree-blank" "$W/omarchy-arm64-blank.img" 8M
+  rm -rf "$W/gudata-blank" && cp -a "$W/gudata" "$W/gudata-blank"
+  cp "$W/omarchy-arm64-blank.img" "$W/gudata-blank/media/0/linux/omarchy-arm64.img"
+  (cd "$W/gudata-blank/media/0/linux" && sha256sum omarchy-arm64.img >omarchy-arm64.img.sha256)
+  mkfs.ext4 -q -F -d "$W/gudata-blank" "$W/golden-userdata-blank.img" 64M
 
   # PARAM holding neither the stock image nor the loader (scenarios 4 and 5):
   # the stock image with one byte changed inside the loader's part.
@@ -960,6 +1002,19 @@ grep -qx 'persistent root omarchy-arm64, installed from omarchy-arm64.img' "$r/.
 grep -qx 'macaddr=<REDACTED>' "$r/usr/lib/firmware/brcm/samsung-gts28/nvram_net.txt"
 grep -qx 'phycal=0' "$r/usr/lib/firmware/brcm/samsung-gts28/nvram_net.txt"
 cmp -s "$r/usr/lib/firmware/brcm/BCM4358A3.hcd" /work/gsystem/vendor/firmware/bcm4358A3_V0086.0144.hcd
+EOF
+  # what the space-refusal scenario runs inside gwith_userdata: eat
+  # USERDATA's free blocks until under 1 MiB is left (below the image's
+  # use + the test's 1 MiB margin, whatever that use is)
+  cat >"$W/gfill.sh" <<'EOF'
+set -e
+free=$(df -Pk "$1" | awk 'NR == 2 {print $4}')
+want=$((free - 512))
+if [ "$want" -gt 0 ]; then
+  dd if=/dev/zero of="$1/t715-fill" bs=1024 count="$want" status=none
+  sync
+fi
+[ "$(df -Pk "$1" | awk 'NR == 2 {print $4}')" -lt 1024 ]
 EOF
 }
 
@@ -1099,6 +1154,7 @@ scenario_golden_handback() {
   after=$(gdisk_sums)
   check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
   check "logged: the loader handed this start back" log_has ghand "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "no reinstall asked (no request file)" sh -c "! grep -q 'asks for a reinstall' '$W/ghand.log'"
   check "said on screen: did not finish starting last time" log_has ghand "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
   check "rebooting-in-N said on screen" log_has ghand "t715-say: rebooting in 2 seconds"
   gcheck_nothing_written "$before" "$after"
@@ -1262,6 +1318,244 @@ scenario_golden_foreign_root() {
   gcheck_nothing_written "$before" "$after"
   [[ $rc -eq 97 ]] || show_log gforeign
   detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# --- the reinstall (linux/reinstall over an installed root, loader in
+# --- PARAM): the happy path, the refusals, the rollback, the interrupted one.
+
+# scenario_golden_reinstall: the happy path.  CACHE holds slot B of
+# generation 5, as the old install left it: the reinstall's slot A gets
+# generation 6, PARAM is left alone, the old root is kept as
+# omarchy-arm64.previous, the request file goes, and the new root carries
+# the saved stock PARAM over.
+scenario_golden_reinstall() {
+  echo "--- scenario: golden, the reinstall (loader in PARAM, root installed, linux/reinstall)"
+  greset_all
+  dd if="$W/golden-cache9.img" of="$(g_cache_dev)" bs=1M conv=notrunc status=none
+  gplant_root golden
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  local param_before fs_before slotb_before
+  param_before=$(gpart_sum 2048 16384)
+  fs_before=$(gpart_sum 34816 131072)
+  slotb_before=$(gpart_sum $((34816 + 262144)) $GSLOT_SECTORS)
+  grun greinst
+  local rc=$GRC
+  detach_inner_loops
+  check "restart after the reinstall (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the reinstall is asked" log_has greinst "media/0/linux/reinstall asks for a reinstall"
+  check "said on screen: a reinstall is asked" log_has greinst "t715-say: A reinstall is asked (linux/reinstall)."
+  check "logged: the root set aside, the request file removed" \
+    log_has greinst "golden: USERDATA/omarchy-arm64 set aside as omarchy-arm64.previous, media/0/linux/reinstall removed"
+  check "said on screen: kept as omarchy-arm64.previous" \
+    log_has greinst "t715-say: The installed system is kept as omarchy-arm64.previous. Installing the new one..."
+  check "logged: the saved stock PARAM carried over" \
+    log_has greinst "golden: the saved stock PARAM carried over from omarchy-arm64.previous"
+  check "logged: the slots held A none, B 5" log_has greinst "the slots held: A none, B 5"
+  check "logged: generation 6 to sector 131072" log_has greinst "golden: the kernel's slot, generation 6, to sector 131072 of CACHE"
+  check "said on screen: installed, restarting" log_has greinst "t715-say: Omarchy is installed. Restarting into it..."
+  check "reboot logged" log_has greinst "rebooting (reboot -f)"
+  check "PARAM byte-identical to before (the loader left as it is)" test "$(gpart_sum 2048 16384)" = "$param_before"
+  check "PARAM still holds the loader" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "slot A (sector 131072) is a valid header of generation 6" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 6
+  check "slot B (sector 262144) still generation 5" test "$(gslot_gen "$(g_cache_dev)" 262144)" = 5
+  check "CACHE's file system stayed byte-identical" test "$(gpart_sum 34816 131072)" = "$fs_before"
+  check "slot B stayed byte-identical" test "$(gpart_sum $((34816 + 262144)) $GSLOT_SECTORS)" = "$slotb_before"
+  check "the old root is kept as omarchy-arm64.previous, its marker unchanged" gmarker_ok omarchy-arm64.previous
+  check "the new root holds the image's tree and the markers" gwith_userdata sh "$W/gcheck-tree.sh" "$W/gud"
+  check "linux/reinstall is gone" gwith_userdata test ! -e "$W/gud/media/0/linux/reinstall"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "the new root's saved stock PARAM is byte-identical to the old one's, mode 600" gwith_userdata sh -c '
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$1/omarchy-arm64.previous/var/lib/t715/PARAM-stock.img" &&
+    [ "$(stat -c %a "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img")" = 600 ]
+  ' sh "$W/gud"
+  check "the install log is next to the image" gwith_userdata test -s "$W/gud/media/0/linux/omarchy-arm64-install.log"
+  [[ $rc -eq 99 ]] || show_log greinst
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_reinstall_previous: a reinstall asked while
+# omarchy-arm64.previous is still there: refused, nothing written.
+scenario_golden_reinstall_previous() {
+  echo "--- scenario: golden, reinstall refused: omarchy-arm64.previous is there already"
+  greset_all
+  gplant_root golden
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  gwith_userdata sh -c 'mkdir -p "$1/omarchy-arm64.previous" && echo kept >"$1/omarchy-arm64.previous/marker"' sh "$W/gud"
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  grun greinst-prev
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: omarchy-arm64.previous is there already" \
+    log_has greinst-prev "ERROR: golden: USERDATA/omarchy-arm64.previous is there already"
+  check "the on-screen reason names omarchy-arm64.previous" \
+    log_has greinst-prev "t715-say: A reinstall is asked, but the system an earlier reinstall set aside, omarchy-arm64.previous, is still there."
+  gcheck_nothing_written "$before" "$after"
+  detach_inner_loops
+  check "the root is as before" gmarker_ok omarchy-arm64
+  check "the request file stays" gwith_userdata test -f "$W/gud/media/0/linux/reinstall"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "omarchy-arm64.previous is as before" \
+    gwith_userdata sh -c '[ "$(cat "$1/omarchy-arm64.previous/marker")" = kept ]' sh "$W/gud"
+  [[ $rc -eq 97 ]] || show_log greinst-prev
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_reinstall_noimg: a reinstall asked with no image in
+# linux/: refused, nothing written, the request file stays.
+scenario_golden_reinstall_noimg() {
+  echo "--- scenario: golden, reinstall refused: no image found"
+  greset_all
+  gwith_userdata rm -f "$W/gud/media/0/linux/omarchy-arm64.img" "$W/gud/media/0/linux/omarchy-arm64.img.sha256"
+  gplant_root golden
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  grun greinst-noimg
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: no image in linux/" \
+    log_has greinst-noimg "ERROR: golden: no omarchy-arm64.img in the folder linux of the internal storage or of a microSD card"
+  check "said on screen: the image was not found" \
+    log_has greinst-noimg "t715-say: A reinstall is asked, but Omarchy's image was not found."
+  gcheck_nothing_written "$before" "$after"
+  detach_inner_loops
+  check "the root is untouched" gmarker_ok omarchy-arm64
+  check "the request file stays" gwith_userdata test -f "$W/gud/media/0/linux/reinstall"
+  [[ $rc -eq 97 ]] || show_log greinst-noimg
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_reinstall_badsum: a reinstall asked with a sidecar whose
+# hash is wrong: refused, nothing written, the request file stays.
+scenario_golden_reinstall_badsum() {
+  echo "--- scenario: golden, reinstall refused: the image's sum is bad"
+  greset_all "$W/golden-userdata-badside.img"
+  gplant_root golden
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  grun greinst-badsum
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: checksum mismatch" log_has greinst-badsum "ERROR: image checksum check failed: checksum mismatch"
+  check "said on screen: the image file is damaged" \
+    log_has greinst-badsum "t715-say: The image file is damaged (bad checksum). Copy it again, then restart. Nothing was written."
+  gcheck_nothing_written "$before" "$after"
+  detach_inner_loops
+  check "the root is untouched" gmarker_ok omarchy-arm64
+  check "the request file stays" gwith_userdata test -f "$W/gud/media/0/linux/reinstall"
+  [[ $rc -eq 97 ]] || show_log greinst-badsum
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_reinstall_space: a reinstall asked with USERDATA nearly
+# full (under 1 MiB free, below the image's use + the test's 1 MiB
+# margin): refused before anything is set aside, nothing written.
+scenario_golden_reinstall_space() {
+  echo "--- scenario: golden, reinstall refused for space (USERDATA nearly full)"
+  greset_all
+  gplant_root golden
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  if ! gfill_userdata; then ko "USERDATA filled"; return; fi
+  local before after
+  before=$(gdisk_sums)
+  grun greinst-space
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "waited on screen (exit 97, got $rc)" test "$rc" -eq 97
+  check "logged: the free space against the image's use" \
+    log_has greinst-space "MiB next to the system it keeps"
+  check "the on-screen reason names the GB needed" \
+    sh -c "grep -qE 't715-say: A reinstall needs [0-9]+ GB free in the internal storage, next to the installed system it keeps' '$W/greinst-space.log'"
+  gcheck_nothing_written "$before" "$after"
+  detach_inner_loops
+  check "the root stays" gmarker_ok omarchy-arm64
+  check "the request file stays" gwith_userdata test -f "$W/gud/media/0/linux/reinstall"
+  [[ $rc -eq 97 ]] || show_log greinst-space
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_reinstall_rollback: the image's tree cannot be copied
+# (a top-level name holding a blank, which the seed's archive list splits
+# on): after the rename the install fails, the kept root goes back as
+# omarchy-arm64, and the run ends in the reboot path.
+scenario_golden_reinstall_rollback() {
+  echo "--- scenario: golden, the reinstall stops in the copy: omarchy-arm64.previous goes back, restart"
+  greset_all "$W/golden-userdata-blank.img"
+  gplant_root golden
+  gplant_reinstall
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums_noud)
+  grun greinst-roll
+  local rc=$GRC
+  after=$(gdisk_sums_noud)
+  detach_inner_loops
+  check "restart after the rollback (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the root set aside, the request file removed" \
+    log_has greinst-roll "golden: USERDATA/omarchy-arm64 set aside as omarchy-arm64.previous, media/0/linux/reinstall removed"
+  check "logged: the copy failed" log_has greinst-roll "ERROR: golden: copying the image failed"
+  check "logged: omarchy-arm64.previous put back as omarchy-arm64" \
+    log_has greinst-roll "golden: the reinstall stopped before the new root was in place: omarchy-arm64.previous put back as omarchy-arm64"
+  check "said on screen: the installed system was put back" \
+    log_has greinst-roll "t715-say: The reinstall stopped (its log: linux/omarchy-arm64-install.log in the internal storage). The installed system was put back as it was; the tablet restarts into it."
+  check "rebooting-in-N said on screen" log_has greinst-roll "t715-say: rebooting in 2 seconds"
+  check "PARAM, SYSTEM, CACHE byte-identical" test "$before" = "$after"
+  check "the kept root is back as omarchy-arm64, its marker unchanged" gmarker_ok omarchy-arm64
+  check "omarchy-arm64.previous is gone" gwith_userdata test ! -e "$W/gud/omarchy-arm64.previous"
+  check "linux/reinstall is gone (removed before the install)" gwith_userdata test ! -e "$W/gud/media/0/linux/reinstall"
+  [[ $rc -eq 99 ]] || show_log greinst-roll
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_interrupted: an interrupted reinstall's next start (the
+# old root already at omarchy-arm64.previous, no omarchy-arm64, no request
+# file, the loader in PARAM): a plain "loader in PARAM, not installed"
+# install, carrying the saved stock PARAM over from .previous.
+scenario_golden_interrupted() {
+  echo "--- scenario: golden, an interrupted reinstall (old root at omarchy-arm64.previous, no request file)"
+  greset_all
+  gplant_root golden
+  gwith_userdata mv "$W/gud/omarchy-arm64" "$W/gud/omarchy-arm64.previous"
+  gset_param "$GF/param-loader.img"
+  local param_before
+  param_before=$(gpart_sum 2048 16384)
+  grun greinst-int
+  local rc=$GRC
+  detach_inner_loops
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the loader in PARAM, the system not installed" \
+    log_has greinst-int "golden: the loader is in PARAM, the system is not installed: installing it"
+  check "no reinstall asked (no request file)" sh -c "! grep -q 'asks for a reinstall' '$W/greinst-int.log'"
+  check "logged: the saved stock PARAM carried over from omarchy-arm64.previous" \
+    log_has greinst-int "golden: the saved stock PARAM carried over from omarchy-arm64.previous"
+  check "logged: slot A, generation 1" log_has greinst-int "golden: the kernel's slot, generation 1, to sector 131072 of CACHE"
+  check "said on screen: installed, restarting" log_has greinst-int "t715-say: Omarchy is installed. Restarting into it..."
+  check "PARAM byte-identical to before (the loader left as it is)" test "$(gpart_sum 2048 16384)" = "$param_before"
+  check "PARAM still holds the loader" \
+    test "$(gparam_loader_sum)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "slot A is a valid header of generation 1" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 1
+  check "the new root holds the image's tree and the markers" gwith_userdata sh "$W/gcheck-tree.sh" "$W/gud"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "the new root's saved stock PARAM is the one from omarchy-arm64.previous, mode 600" gwith_userdata sh -c '
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$1/omarchy-arm64.previous/var/lib/t715/PARAM-stock.img" &&
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$2/param-stock.img" &&
+    [ "$(stat -c %a "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img")" = 600 ]
+  ' sh "$W/gud" "$GF"
+  check "omarchy-arm64.previous is still there, untouched" gmarker_ok omarchy-arm64.previous
+  [[ $rc -eq 99 ]] || show_log greinst-int
   ip link del usb0 2>/dev/null || true
 }
 
@@ -1693,6 +1987,13 @@ in_container() {
   scenario_golden_not_aarch64
   scenario_golden_slots_there
   scenario_golden_foreign_root
+  scenario_golden_reinstall
+  scenario_golden_reinstall_previous
+  scenario_golden_reinstall_noimg
+  scenario_golden_reinstall_badsum
+  scenario_golden_reinstall_space
+  scenario_golden_reinstall_rollback
+  scenario_golden_interrupted
   detach_disk
   detach_inner_loops
 

@@ -1865,7 +1865,12 @@ load_modules() {
 # then every start comes back here, the stock way.
 # With the loader in PARAM and the root installed, a start here is the
 # loader's hand-back: the reason goes on screen and the board restarts after
-# t715.failwait seconds, which gives the loader its next try.  With anything
+# t715.failwait seconds, which gives the loader its next try -- unless a file
+# linux/reinstall in the internal storage asks for a reinstall (an upgrade
+# from an earlier release, reached through the loader's hand-back): then, once the image is
+# found and checked, the installed root is renamed omarchy-arm64.previous
+# (kept, never deleted here), the request file goes, and the root is installed
+# again as above, with the loader left in PARAM.  With anything
 # else in PARAM (another loader) and the root's saved stock image, the loader
 # is forged again from it and written back (the rescue).  Every refusal
 # writes nothing and waits on screen.
@@ -1877,6 +1882,8 @@ GOLDEN_BACKUP=media/0/linux/PARAM-stock-backup.img
 GOLDEN_EFS=media/0/linux/EFS-backup.img     # read only: EFS is never written
 GOLDEN_LOG=media/0/linux/omarchy-arm64-install.log
 GOLDEN_SAVED=var/lib/t715/PARAM-stock.img   # in the root
+GOLDEN_REINSTALL=media/0/linux/reinstall   # asks a reinstall over an installed system
+GOLDEN_PREVIOUS=omarchy-arm64.previous     # where that reinstall sets the installed system aside
 GOLDEN_MIN_BATTERY=30
 GOLDEN_IMG=                         # the image found (golden_find_image)
 GOLDEN_SD=                          # 1 once a microSD card is mounted on $SD_MNT
@@ -2155,6 +2162,7 @@ golden_find_image() {
 # ask for another one).
 golden_cleanup() {
     seed_cleanup
+    GOLDEN_CHECKED=
     if [ -n "$GOLDEN_SD" ] && is_mounted "$SD_MNT"; then
         run umount "$SD_MNT"
     fi
@@ -2495,29 +2503,32 @@ golden_install() {
             FAIL_REASON="The internal storage already holds a folder $GOLDEN_NAME that this installer did not make. Nothing was written."
             return 1
         fi
-        if ! golden_find_image; then
-            err "golden: no $GOLDEN_IMG_NAME in the folder linux of the internal storage or of a microSD card"
-            FAIL_REASON="Omarchy's image was not found. Copy $GOLDEN_IMG_NAME and $GOLDEN_IMG_NAME.sha256 into a folder named linux on a microSD card, put the card in, then restart (hold Power and Volume down). Nothing was written."
-            return 1
+        # golden_reinstall has found and checked the image already.
+        if [ -z "$GOLDEN_CHECKED" ]; then
+            if ! golden_find_image; then
+                err "golden: no $GOLDEN_IMG_NAME in the folder linux of the internal storage or of a microSD card"
+                FAIL_REASON="Omarchy's image was not found. Copy $GOLDEN_IMG_NAME and $GOLDEN_IMG_NAME.sha256 into a folder named linux on a microSD card, put the card in, then restart (hold Power and Volume down). Nothing was written."
+                return 1
+            fi
+            if [ ! -f "$GOLDEN_IMG.sha256" ]; then
+                err "golden: no $GOLDEN_IMG_NAME.sha256 next to the image"
+                FAIL_REASON="$GOLDEN_IMG_NAME.sha256 is missing next to the image: copy it there too, then restart. Nothing was written."
+                return 1
+            fi
+            golden_battery
+            if ! check_image_sum "$GOLDEN_IMG"; then
+                FAIL_REASON="The image file is damaged (bad checksum). Copy it again, then restart. Nothing was written."
+                return 1
+            fi
+            # The image checked while USERDATA is still read-only, so a refusal
+            # writes nothing; then detached, since an image attached from USERDATA
+            # would keep it from being remounted read-write, and attached again.
+            if ! golden_mount_image; then
+                FAIL_REASON="The image file could not be read as Omarchy's 64-bit image. Nothing was written."
+                return 1
+            fi
+            seed_cleanup
         fi
-        if [ ! -f "$GOLDEN_IMG.sha256" ]; then
-            err "golden: no $GOLDEN_IMG_NAME.sha256 next to the image"
-            FAIL_REASON="$GOLDEN_IMG_NAME.sha256 is missing next to the image: copy it there too, then restart. Nothing was written."
-            return 1
-        fi
-        golden_battery
-        if ! check_image_sum "$GOLDEN_IMG"; then
-            FAIL_REASON="The image file is damaged (bad checksum). Copy it again, then restart. Nothing was written."
-            return 1
-        fi
-        # The image checked while USERDATA is still read-only, so a refusal
-        # writes nothing; then detached, since an image attached from USERDATA
-        # would keep it from being remounted read-write, and attached again.
-        if ! golden_mount_image; then
-            FAIL_REASON="The image file could not be read as Omarchy's 64-bit image. Nothing was written."
-            return 1
-        fi
-        seed_cleanup
         golden_userdata_rw || return 1
         golden_mount_image || return 1
         golden_seed || return 1
@@ -2530,6 +2541,17 @@ golden_install() {
         FAIL_REASON="The kernel could not be written to the CACHE partition. PARAM was not changed: the tablet comes back here."
         return 1
     fi
+    if [ "$_gi_param" = 0 ] && [ ! -f "$_gi_root/$GOLDEN_SAVED" ] &&
+        [ -f "$UD_MNT/$GOLDEN_PREVIOUS/$GOLDEN_SAVED" ]; then
+        # a reinstall: the rescue's copy of the stock PARAM comes along
+        if mkdir -p "${_gi_root}/${GOLDEN_SAVED%/*}" &&
+            cp "$UD_MNT/$GOLDEN_PREVIOUS/$GOLDEN_SAVED" "$_gi_root/$GOLDEN_SAVED" &&
+            chmod 600 "$_gi_root/$GOLDEN_SAVED"; then
+            log "golden: the saved stock PARAM carried over from $GOLDEN_PREVIOUS"
+        else
+            err "golden: the saved stock PARAM could not be carried over from $GOLDEN_PREVIOUS"
+        fi
+    fi
     if [ "$_gi_param" = 1 ]; then
         say "Writing the loader..."
         if ! golden_param; then
@@ -2538,6 +2560,84 @@ golden_install() {
         fi
     fi
     golden_finish
+}
+
+# golden_reinstall: the loader is in PARAM, the root is installed and
+# linux/reinstall asks for a reinstall.  Everything is checked first, so that
+# a refusal writes nothing; then the installed root is set aside as
+# GOLDEN_PREVIOUS, the request file goes (from here on an interrupted install
+# goes on as a plain one at the next start), and golden_install puts the new
+# root in place, with the loader left as it is.
+golden_reinstall() {
+    _gr_root=$UD_MNT/$GOLDEN_NAME
+    _gr_prev=$UD_MNT/$GOLDEN_PREVIOUS
+    say "A reinstall is asked (linux/reinstall)."
+    log "golden: the loader is in PARAM, USERDATA/$GOLDEN_NAME is installed and $GOLDEN_REINSTALL asks for a reinstall"
+    if [ -e "$_gr_prev" ] || [ -L "$_gr_prev" ]; then
+        err "golden: USERDATA/$GOLDEN_PREVIOUS is there already"
+        FAIL_REASON="A reinstall is asked, but the system an earlier reinstall set aside, $GOLDEN_PREVIOUS, is still there. Delete it from Omarchy (sudo rm -rf /run/t715/userdata/$GOLDEN_PREVIOUS), or delete linux/reinstall. Nothing was written."
+        return 1
+    fi
+    if ! golden_find_image; then
+        err "golden: no $GOLDEN_IMG_NAME in the folder linux of the internal storage or of a microSD card"
+        FAIL_REASON="A reinstall is asked, but Omarchy's image was not found. Copy $GOLDEN_IMG_NAME and $GOLDEN_IMG_NAME.sha256 into a folder named linux on a microSD card, put the card in, then restart. Nothing was written."
+        return 1
+    fi
+    if [ ! -f "$GOLDEN_IMG.sha256" ]; then
+        err "golden: no $GOLDEN_IMG_NAME.sha256 next to the image"
+        FAIL_REASON="$GOLDEN_IMG_NAME.sha256 is missing next to the image: copy it there too, then restart. Nothing was written."
+        return 1
+    fi
+    golden_battery
+    if ! check_image_sum "$GOLDEN_IMG"; then
+        FAIL_REASON="The image file is damaged (bad checksum). Copy it again, then restart. Nothing was written."
+        return 1
+    fi
+    if ! golden_mount_image; then
+        FAIL_REASON="The image file could not be read as Omarchy's 64-bit image. Nothing was written."
+        return 1
+    fi
+    # The new root goes next to the one kept: the space is checked now, before
+    # anything is set aside (golden_seed checks it again, too late for that).
+    _gr_used=$(df -Pk "$LOWER" | awk 'NR == 2 { print $3 }')
+    _gr_free=$(df -Pk "$UD_MNT" | awk 'NR == 2 { print $4 }')
+    case $_gr_used$_gr_free in
+    '' | *[!0-9]*)
+        err "golden: could not read the image's use or USERDATA's free space"
+        FAIL_REASON="The free space of the internal storage could not be read. Nothing was written."
+        return 1
+        ;;
+    esac
+    if [ "$_gr_free" -lt $((_gr_used + SEED_MARGIN_KIB)) ]; then
+        err "golden: USERDATA has $((_gr_free / 1024)) MiB free, the reinstall needs $(((_gr_used + SEED_MARGIN_KIB) / 1024)) MiB next to the system it keeps"
+        FAIL_REASON="A reinstall needs $(((_gr_used + SEED_MARGIN_KIB) / 1048576 + 1)) GB free in the internal storage, next to the installed system it keeps. Nothing was written. Free some space (or put the image on a microSD card), or delete linux/reinstall, then restart."
+        return 1
+    fi
+    seed_cleanup
+    golden_userdata_rw || return 1
+    if ! run mv "$_gr_root" "$_gr_prev"; then
+        err "golden: USERDATA/$GOLDEN_NAME could not be renamed $GOLDEN_PREVIOUS"
+        FAIL_REASON="The installed system could not be set aside. It was left as it is; the tablet restarts into it."
+        FAILREBOOT=1
+        return 1
+    fi
+    rm -f "$UD_MNT/$GOLDEN_REINSTALL"
+    sync
+    log "golden: USERDATA/$GOLDEN_NAME set aside as $GOLDEN_PREVIOUS, $GOLDEN_REINSTALL removed"
+    say "The installed system is kept as $GOLDEN_PREVIOUS. Installing the new one..."
+    GOLDEN_CHECKED=1
+    golden_install 0 && return 0
+    # Stopped before the new root was in place (a failed copy): the system kept
+    # aside goes back, so that the tablet still starts.  Once the new root is
+    # there, the next start goes on with it instead (golden_install's steps).
+    if [ ! -e "$_gr_root" ] && [ ! -L "$_gr_root" ] && [ -d "$_gr_prev" ] &&
+        run mv "$_gr_prev" "$_gr_root"; then
+        sync
+        log "golden: the reinstall stopped before the new root was in place: $GOLDEN_PREVIOUS put back as $GOLDEN_NAME"
+        FAIL_REASON="The reinstall stopped (its log: linux/omarchy-arm64-install.log in the internal storage). The installed system was put back as it was; the tablet restarts into it."
+        FAILREBOOT=1
+    fi
+    return 1
 }
 
 # golden_main: what this start has to do (see the head of this part).
@@ -2576,6 +2676,10 @@ golden_main() {
     _gm_root=$UD_MNT/$GOLDEN_NAME
     if [ "$_gm_sum" = "$(golden_val loader.sha256)" ]; then
         if [ -f "$_gm_root/$GOLDEN_MARK" ]; then
+            if [ -f "$UD_MNT/$GOLDEN_REINSTALL" ]; then
+                golden_reinstall || golden_save_log
+                return 1
+            fi
             log "golden: the loader is in PARAM and USERDATA/$GOLDEN_NAME is installed: the loader handed this start back"
             FAILREBOOT=1
             FAIL_REASON="Omarchy did not finish starting last time. The tablet restarts and tries again."
