@@ -1,50 +1,40 @@
 # The 64-bit port: arm64 Omarchy on the Galaxy Tab S2
 
 The tablet's SoC, the Exynos 5433, is a 64-bit one that Samsung's signed bootloader starts in
-32 bits. This repository is the 32-bit Omarchy: the release, and its sources. A 64-bit Omarchy
-exists for the same tablet. Since 2026-11-25 it is the daily system of the reference tablet,
-with its eight cores, in place of the 32-bit one.
+32 bits. Since 2.0.0 this repository's main line is the 64-bit Omarchy, with its eight cores; the
+32-bit Omarchy (1.0.x) is [legacy](LEGACY-ARM32.md). The 64-bit system is the daily system of the
+reference tablet since 2026-11-25.
 
-It comes as a second brick, in a second repository, and **on 2026-11-25 there is nothing of it
-to download and flash**. This page says where it stands, for two kinds of readers.
+It comes as two bricks, in two repositories. This page says where each part is, for two kinds of
+readers.
 
 | Brick | Where | What it holds |
 |---|---|---|
-| **The boot** | [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), a fork of [bnuuyloader](https://github.com/meowybnuuy/bnuuyloader): its first pre-release is [0.9.0](https://github.com/elkir0/bnuuyloader/releases/tag/t715-0.9.0) | what makes the tablet start a 64-bit kernel: a loader placed in PARAM through the boot logo vulnerability CVE-2026-21155; the kernel patches for 64 bits; the rescue; what was found about this tablet's bootloader |
-| **The system** | this repository, [arm64/](../arm64/README.md) (since 2026-11-25; it was in the fork's `t715/rootfs/` before); its releases will be made here | Omarchy 4.5 for 64 bits: the build, the packages patched for the tablet, the AI integrations, the tools and the tests |
+| **The boot** | [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader), a fork of [bnuuyloader](https://github.com/meowybnuuy/bnuuyloader) | what makes the tablet start a 64-bit kernel: a loader placed in PARAM through the boot logo vulnerability CVE-2026-21155; the kernel patches for 64 bits; what was found about this tablet's bootloader |
+| **The system** | this repository: [arm64/](../arm64/README.md), the installer in [boot/](../boot/README.md), and the releases | Omarchy 4.5 for 64 bits: the build, the packages patched for the tablet, the AI integrations, the tools and the tests; the installer, which is also the rescue |
 
 ## 1. For whoever wants arm64 and nothing else
 
-**Not open on 2026-11-25.** No 64-bit image is released, and there is no installer. What is
-released is the 32-bit Omarchy of this repository: [the install guide](INSTALL.md) takes a stock
-tablet there with Odin or Heimdall, and nothing of it has to be undone to go to 64 bits
-afterwards.
+**Open since 2.0.0**: [the install guide](INSTALL-ARM64.md).
 
-What the short route will be, once it opens:
-
-| Step | What you will do |
+| Step | What you do |
 |---|---|
-| 1 | Download two files from a release of this repository: the 64-bit Omarchy image and the installer image. Check the checksums |
-| 2 | Flash the installer to BOOT and RECOVERY in download mode, with Odin or Heimdall, as the 32-bit guide does; put the image on the tablet |
-| 3 | Start the tablet. The installer does the rest by itself and restarts into Omarchy |
-
-What it still needs:
-
-- **the image, released as a file to download**;
-- **the installer**: an image for BOOT and RECOVERY that does the whole install on the tablet by
-  itself.
+| 1 | Download the image and the installer from [the release](https://github.com/elkir0/omarchy-tab-s2/releases); check the checksums |
+| 2 | Copy the image and its checksum file into a folder `linux` on a microSD card (or the internal storage) |
+| 3 | Flash the installer to BOOT and RECOVERY in download mode, with Odin or Heimdall. The tablet installs itself and starts Omarchy's first-run setup |
 
 Why there has to be an installer, and why the loader cannot be shipped as a file: it lives in
 PARAM, and a PARAM image is Samsung's firmware holding the data of one tablet. The forged boot
 logo must be built from each tablet's **own** PARAM. So the installer reads the tablet's PARAM,
-builds the loader there and writes it: the one exception, decided by the owner on 2026-11-24, to
-this repository's rule "never write PARAM".
+builds the loader there, checks it against the one sha256 it was made for, and writes it: the
+one exception, decided by the owner on 2026-11-24, to this repository's rule "never write PARAM".
+What it does, step by step: [INSTALL-ARM64.md](INSTALL-ARM64.md), section 7.
 
-## 2. For power users: the long route, today's
+## 2. For power users: the long route
 
-It works: it is what the reference tablet runs. It takes the tablet running the 32-bit Omarchy
-(1.0.5), a computer with Docker, the USB cable, and the readiness to recover a tablet from
-download mode.
+Every step by hand, from a computer: it is how the reference tablet got there first. It takes the
+tablet running the 32-bit Omarchy (1.0.5), a computer with Docker, the USB cable, and the
+readiness to recover a tablet from download mode.
 
 The whole route, in order, with a way back at every step, is in the fork:
 [Passing a Galaxy Tab S2 to arm64 Omarchy: the two routes](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md).

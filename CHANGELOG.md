@@ -1,26 +1,57 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 "Golden", pre-release
 
-- **The 64-bit system is the project's main line.** The README presents Omarchy 4.5 on arm64,
-  Golden in progress: what works, the AI layer, the two install routes, a new demo GIF and
-  screenshots taken on the reference tablet (`assets/arm64/`). Golden's roadmap:
+The 64-bit system's first release, and the project's main line from now on: Omarchy 4.5 on arm64,
+all eight cores, the AI layer, installed from a stock tablet by an installer that runs on the
+tablet itself. The 32-bit releases (1.0.x) are legacy.
+
+- **The installer** (`t715.golden`, [docs/INSTALL-ARM64.md](docs/INSTALL-ARM64.md)). The release's
+  `boot.img` and `recovery.img`, flashed once with Odin or Heimdall, install the 64-bit system
+  from `omarchy-arm64.img` on a microSD card or the internal storage: checks first (the bootloader
+  `T715XXU2CRH1`, PARAM as that firmware ships it, the battery, the image's checksum), then the
+  system's tree, the tablet's own Wi-Fi and Bluetooth files, the kernel into a slot of CACHE, and
+  last the loader, forged in PARAM from the tablet's own stock image; PARAM and EFS are saved
+  next to the image first. Each step resumes after an interruption; every refusal writes
+  nothing. Afterwards the same images are the system's rescue: the loader's hand-backs, and a
+  PARAM that lost its loader ([boot/README.md](boot/README.md), "The installer of the 64-bit
+  system"; host tests in `boot/tests/test_initramfs.sh`).
+- **Tested on the reference tablet, 2026-11-26**, put back in a stock state for it (PARAM's
+  archive as `T715XXU2CRH1` ships it, CACHE as Android left it, no root): the release's image, with
+  the installer's code (built with a root shell on the USB cable for the test), installed in seven
+  minutes from the restart into the installer to the 64-bit desktop (the copy: 167079 entries in
+  246 s), with the image on the internal storage and, in another run, on an exFAT microSD card; the first start ran with Wi-Fi (the tablet's NVRAM imported), Bluetooth, the modem's
+  processor online and the first-run setup's notification; the health check said 21 PASS, 2 WARN
+  (no Wi-Fi network saved yet, a pstore record), 0 FAIL. The loader's hand-back (two starts of the
+  installer, then the 64-bit system again) and the rescue (another loader in PARAM, forged back
+  from the saved stock PARAM) worked on the tablet. A copy by the installer's busybox tar was
+  compared with the image entry by entry: the same. Not tested: an install from a tablet still on
+  Android, Odin and Heimdall themselves (the test wrote BOOT from Linux).
+- **The release itself** ([arm64/release/make-release.sh](arm64/release/make-release.sh)): the
+  image with the kernel's modules and its slot, checked (no SSH host key, no machine-id, no key,
+  no saved network; its file capabilities listed and set again at the first boot, since the
+  installer's copy cannot carry them; this kernel, built without `CONFIG_EXT4_FS_SECURITY`,
+  keeps none on ext4, so newuidmap and newgidmap get the setuid bit instead), the installer on the 1.0.5 release's 32-bit kernel, the
+  Odin package, checksums and a manifest.
+- **The 64-bit system is the project's main line.** The README presents Omarchy 4.5 on arm64:
+  what works, the AI layer, the two install routes, a new demo GIF and screenshots taken on the
+  reference tablet (`assets/arm64/`). Golden's roadmap:
   [arm64/docs/ROADMAP.md](arm64/docs/ROADMAP.md). The 32-bit release (1.0.x) is legacy, no
   longer developed, kept downloadable and documented: [docs/LEGACY-ARM32.md](docs/LEGACY-ARM32.md).
 - **The loader's rescue (`t715.paramrescue`).** For a tablet whose only system is started by a
   loader in PARAM, as the 64-bit port needs: an initramfs built with
   `boot/build-initramfs.sh --paramrescue` looks at PARAM at each boot and, when the loader it
   finds there is not one known to work, writes the one that is and restarts. Off by default;
-  the release's images do not have it ([boot/README.md](boot/README.md), "The loader's rescue").
+  the release's installer has its own rescue, which needs no tablet's PARAM inside it
+  ([boot/README.md](boot/README.md), "The loader's rescue").
 - **The 64-bit Omarchy image, here.** [arm64/](arm64/README.md): the sources of the Omarchy 4.5
   image for arm64 that the reference tablet runs, moved from the fork elkir0/bnuuyloader and
   brought to its state of 2026-11-25: omarchy-mobile's head with the modem's interface, Voxtype
   rebuilt for the tablet's ARMv8.0 CPU, the voice bar in the user's language, a first-run
-  onboarding with the AI apps, the CPU audit (`arm64/tools/t715-isa-audit`). Not released.
-- **The 64-bit port, a page.** [docs/ARM64.md](docs/ARM64.md): where it stands, for whoever
-  wants it without reading more (nothing to download yet) and for power users. The 64-bit
-  port itself is not released; its boot brick has a first pre-release, bnuuyloader's 0.9.0
-  (the sources).
+  onboarding with the AI apps, the CPU audit (`arm64/tools/t715-isa-audit`).
+- **The 64-bit port, a page.** [docs/ARM64.md](docs/ARM64.md): the two bricks and the two routes,
+  for whoever wants it without reading more and for power users. The boot brick's sources are
+  the fork elkir0/bnuuyloader (its pre-release 0.9.0).
 
 ## 1.0.5, pre-release
 

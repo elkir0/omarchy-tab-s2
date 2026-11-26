@@ -7,9 +7,9 @@ of its Exynos 5433, on mainline Linux 6.12, with **AI built in**: Claude Code on
 in the search bar, Claude Desktop and ChatGPT Desktop, dictation in your own language that never
 leaves the tablet, and local models with Ollama.
 
-**Golden, in progress.** It is the daily system of the reference tablet, a Galaxy Tab S2 8.0 LTE
-(SM-T715), since 2026-11-25. The turnkey install (download, flash, it boots) is being finished;
-today the install is for power users. [Where it stands](#install).
+**2.0.0 "Golden".** Download, flash once, and the tablet installs itself: [the guide](docs/INSTALL-ARM64.md).
+It is the daily system of the reference tablet, a Galaxy Tab S2 8.0 LTE (SM-T715), since
+2026-11-25.
 
 An unofficial port: not affiliated with Omarchy, Omarchy Mobile or Samsung.
 
@@ -59,6 +59,7 @@ On the reference tablet, in 64 bits, since 2026-11-25.
 
 | Area | State |
 |---|---|
+| Install | one flash from a stock tablet: the installer copies the system, writes the kernel, saves PARAM and EFS, and builds the loader from the tablet's own PARAM; seven minutes on the reference tablet ([the guide](docs/INSTALL-ARM64.md)) |
 | Boot | the loader in PARAM starts the 64-bit kernel at every power-on, behind a boot screen drawn by the bootloader; user space in about 13 s; a failed attempt hands the next boots to the rescue, then tries again |
 | CPU | eight cores in AArch64: A53 from 400 MHz to 1.2 GHz, A57 from 800 MHz to 1.2 GHz, schedutil, thermal trips from the board's tables |
 | Desktop | Hyprland 0.57 and the Omarchy shell on the 2048x1536 panel, GPU through Panfrost (Mali-T760); the touch shell: drawer, home, recents, quick settings, back gesture, on-screen keyboard; rotation |
@@ -70,7 +71,7 @@ On the reference tablet, in 64 bits, since 2026-11-25.
 | Sensors, storage | accelerometer, gyroscope and magnetometer; the microSD card |
 | Battery | the fuel gauge, charging over USB |
 | Security | ufw on; a PIN or password from the first-run setup, and the screen lock |
-| Way back | the loader hands back to the bootloader when it has nothing sound to start; the rescue in BOOT and RECOVERY puts a known loader back into PARAM by itself |
+| Way back | the loader hands back to the bootloader when it has nothing sound to start; the installer, which stays in BOOT and RECOVERY as the rescue, says so and lets the loader try again, and puts the loader back into PARAM from the saved stock copy if it was lost |
 
 **Not yet in 64 bits**, where the 32-bit release had them: suspend to RAM, Android apps
 (Waydroid), the cameras' user space, the A57 cores above 1.2 GHz, and the modem with a SIM
@@ -85,18 +86,20 @@ models are not covered.
 
 ## Install
 
-| Route | For | State |
+| Route | For | How |
 |---|---|---|
-| **Download, flash, it boots** | anyone with the tablet | **coming**: the installer, which builds the loader on the tablet from the tablet's own PARAM, is being written; a release of this repository will then bring the image and the installer |
-| **The long route** | power users, today | it works: from the 32-bit release, with a computer, the USB cable and Docker; every step keeps a way back. [The guide, in order](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md) |
+| **Download, flash, it installs** | anyone with the tablet | **2.0.0**: copy `omarchy-arm64.img` to a microSD card, flash the installer once with Odin or Heimdall, and the tablet installs itself, then starts Omarchy's first-run setup. [The guide](docs/INSTALL-ARM64.md) |
+| **The long route** | power users | every step by hand from a computer, each with its way back: [GO-ARM64.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md) |
 
-[docs/ARM64.md](docs/ARM64.md) tells both routes and why the loader cannot ship as a file: PARAM
-is Samsung's firmware and holds one tablet's own data, so the loader is built on each tablet from
-its own PARAM.
+The loader cannot ship as a file: PARAM is Samsung's firmware and holds one tablet's own data. So
+the installer builds it on the tablet, from that tablet's own PARAM, and checks the result against
+the one sha256 it was built for before writing it ([docs/INSTALL-ARM64.md](docs/INSTALL-ARM64.md),
+section 7; [docs/ARM64.md](docs/ARM64.md)).
 
-> **Read this first.** Either route blows the Knox warranty bit for good, and the 64-bit port
-> writes PARAM, CACHE, BOOT and RECOVERY. **Never write** BOOTLOADER, EFS, m9kefs1-3 or RADIO:
-> EFS holds your IMEI, and the modem's boot code programs eFuses. Back up EFS first. This comes
+> **Read this first.** Installing blows the Knox warranty bit for good, replaces Android, and
+> writes PARAM, CACHE, BOOT and RECOVERY. It needs the firmware `T715XXU2CRH1`: the installer
+> checks it and writes nothing on another. It never writes BOOTLOADER, EFS, m9kefs1-3 or RADIO;
+> it saves PARAM and EFS (your IMEI) to the image's folder before it writes PARAM. This comes
 > with no warranty: you can lose your data and your tablet.
 
 ## Two bricks, two repositories
