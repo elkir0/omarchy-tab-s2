@@ -219,8 +219,11 @@ Opt-in, as in the 32-bit release: the image ships Waydroid dormant. `sudo t715-a
 downloads Waydroid 1.6.3's `waydroid_arm64` images on the tablet — LineageOS 20 (Android 13), the
 VANILLA system and the MAINLINE vendor, about 1.1 GB — and sets everything up. Android draws on
 the GPU through Panfrost (OpenGL ES 3.1), and both 64-bit (arm64-v8a) and 32-bit (armeabi-v7a)
-apps install. An Android tile in the quick settings starts and stops the session. Google Play
-(`--gapps`) exists as in 1.0.5 but was not tested in 64 bits.
+apps install. An Android tile in the quick settings starts and stops the session.
+With Google Play: `sudo t715-android-setup all --gapps`, on a tablet where Android was not set up
+yet (the GAPPS system, about 1.3 GB). Once Android has started, `sudo t715-android-setup google-id`
+prints the device's ID: register it at https://www.google.com/android/uncertified, then sign in
+to the Play Store. On the reference tablet the Play Store works (2026-11-26).
 
 ## 10. Sleep and the lock screen
 
