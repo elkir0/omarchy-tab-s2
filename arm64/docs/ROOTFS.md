@@ -50,7 +50,7 @@ SM-T715 part of the 4.0.6 build kept. What changed, file by file:
 | `Hyprland --verify-config` | the user's `hyprland.lua` directly | through a two-line wrapper (`hl.timer` stubbed, `HYPRLAND_INSTANCE_SIGNATURE` set): 4.5's `startup-cursor.lua` makes Hyprland 0.57 segfault in that mode (Lenovomarchy's finding, M4) |
 | Build orphans | | marked explicit by `finalize.sh` (`omarchy update` removes orphans: Lenovomarchy lost its Wi-Fi firmware that way) |
 | `IgnorePkg` | `hypr* aquamarine xdg-desktop-portal-hyprland omarchy omarchy-settings` | the same, and `omarchy-speedtest omarchy-keyring omamobile-omarchy omamobile-shell omamobile-settings omamobile-remote wlrctl omatel-agent` |
-| Unchanged | | Mesa from Arch Linux ARM (panfrost), `hyprgraphics` 0.6.0-2.1 (still needed: the lost-wakeup fix is not upstream), `omatel-agent` 0.2.4-1.1, the dmabuf-check shim, `overlay/` and `overlay-omarchy/` (one file added, `t715-omarchy-migrations-hold`), the named ALARM mirrors first, no kernel, no module, no firmware package |
+| Unchanged | | Mesa from Arch Linux ARM (panfrost), `hyprgraphics` from Arch Linux ARM (0.7.0 since 2.1.0, which has the lost-wakeup fix upstream; the 0.6.0-2.1 rebuild was for the earlier builds), `omatel-agent` 0.2.4-1.1, the dmabuf-check shim, `overlay/` and `overlay-omarchy/` (one file added, `t715-omarchy-migrations-hold`), the named ALARM mirrors first, no kernel, no module, no firmware package |
 
 **The bring-up knobs (new, `overlay/`):**
 
@@ -133,7 +133,7 @@ All under `../rootfs/`. Sizes and SHA-256 are in
 | `out/<image>.sha256` | `shasum -a 256 -c` format |
 | `out/<image>.MANIFEST` | image figures, versions, package counts, every build record, the smoke check's output |
 | `out/package-audit.tsv` | which of the owner's package names exist for aarch64 (`list`, `name`, `status`, `repository`, `version`, `detail`) |
-| `out/repo/aarch64/` | the local pacman repository `[t715-omarchy]`: Omarchy's 11 pinned packages, Omarchy Mobile's 3, the 4 built here, `t715-omarchy.db`, `MANIFEST-omarchy.tsv`, `MANIFEST-omamobile.tsv`, `MANIFEST-built.tsv` |
+| `out/repo/aarch64/` | the local pacman repository `[t715-omarchy]`: Omarchy's 11 pinned packages, Omarchy Mobile's 3, the 3 built here, `t715-omarchy.db`, `MANIFEST-omarchy.tsv`, `MANIFEST-omamobile.tsv`, `MANIFEST-built.tsv` |
 | `out/initramfs/root/` | the initramfs as a directory, for the kernel's `CONFIG_INITRAMFS_SOURCE` |
 | `out/initramfs/initramfs-aarch64.cpio.gz` | the same as one archive (for an external initrd or a later slot format), with a manifest and `SHA256SUMS` |
 | `build.sh` | the one command (section 2) |
@@ -143,7 +143,7 @@ All under `../rootfs/`. Sizes and SHA-256 are in
 | `overlay/`, `overlay-omarchy/` | the tablet's files: both images / the Omarchy image |
 | `watchdog/t715-watchdog-keeper.c` | the keeper (static aarch64, compiled at build) |
 | `shim/`, `t715-*.lua`, `t715-wallpapers.sh` | copied unchanged from the owner |
-| `pkg/` | four PKGBUILDs: `hyprgraphics` and `omatel-agent` the owner's; `omamobile-omarchy` and `omamobile-shell` Lenovomarchy's 0.1.48/0.2.133 with the SM-T715's patches (section 0) |
+| `pkg/` | three PKGBUILDs: `omatel-agent` the owner's; `omamobile-omarchy` and `omamobile-shell` Lenovomarchy's 0.1.48/0.2.133 with the SM-T715's patches (section 0) |
 | `initramfs/` | `init`, `build-initramfs.sh`, `cpio_newc.py` (the owner's cpio writer) |
 | `tests/test-initramfs.sh` | the init's tests in Docker |
 | `on-device-README.md` | shipped in the images as `/usr/share/doc/t715-arm64/README.md` |
@@ -163,7 +163,7 @@ bash build.sh
 It downloads the official Arch Linux ARM aarch64 tarball (checked: ALARM's
 md5, then a SHA-256 pinned in `lib/alarm-tarball.sha256`), imports it, builds
 a development image, verifies and imports Omarchy's pinned aarch64 packages,
-builds the four packages of `pkg/` with makepkg, runs the package audit,
+builds the packages of `pkg/` with makepkg, runs the package audit,
 builds the two images, runs each image's smoke check **in the image's own
 container**, exports each tree into an ext4 image (`mkfs.ext4 -d` in a Debian
 helper container: the tree is never extracted on macOS), writes the
@@ -518,7 +518,7 @@ uwsm, SDDM, `xdg-desktop-portal-hyprland`, Mesa.
 
 | Package | For aarch64 |
 |---|---|
-| `hyprgraphics` 0.6.0-2.1 | **rebuilt** (`aarch64`). The lost-wakeup fix (`CAsyncResourceGatherer::await()`, hyprwm/hyprgraphics#53) is a race in code that is the same on aarch64; the PKGBUILD already had `aarch64` in `arch=()`: copied unchanged |
+| `hyprgraphics` 0.6.0-2.1 | **rebuilt** (`aarch64`) for the builds before 2.1.0; since 2.1.0 the image takes Arch Linux ARM's 0.7.0, which has the lost-wakeup fix (`CAsyncResourceGatherer::await()`, hyprwm/hyprgraphics#53) upstream, so the rebuild is gone. The PKGBUILD already had `aarch64` in `arch=()`: copied unchanged |
 | `omamobile-omarchy` 0.1.32-1.2 | **rebuilt** (`any`): in no repository. The PKGBUILD needed two changes (below) |
 | `omamobile-shell` 0.2.94-6 | **rebuilt** (`any`): in no repository; the same two changes |
 | `omatel-agent` 0.2.4-1.1 | **rebuilt** (`aarch64`, Rust, 5 minutes natively): `omamobile-shell` depends on it. Copied unchanged. Without a modem it has nothing to talk to |

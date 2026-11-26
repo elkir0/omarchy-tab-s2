@@ -24,7 +24,7 @@ tablet's bootloader. The two bricks are told together in [docs/ARM64.md](../docs
 | Path | What |
 |---|---|
 | `rootfs/` | the image's build: `build.sh` (the one command), the Dockerfile and its steps, the overlays, the package lists, the pins of every package downloaded, the smoke checks |
-| `rootfs/pkg/` | the packages built for the tablet: `omamobile-omarchy`, `omamobile-shell`, `omamobile-settings`, `omamobile-remote`, `omamobile-voice`, `omaphone`, `omamessages`, `omatel-agent` (Omarchy Mobile, with the tablet's patches), `t715-modem` (the modem stack of this repository's `modem/`), `voxtype-bin` (dictation, rebuilt for the tablet's CPU), `hyprgraphics` |
+| `rootfs/pkg/` | the packages built for the tablet: `omamobile-omarchy`, `omamobile-shell`, `omamobile-settings`, `omamobile-remote`, `omamobile-voice`, `omaphone`, `omamessages`, `omatel-agent` (Omarchy Mobile, with the tablet's patches), `t715-modem` (the modem stack of this repository's `modem/`), `voxtype-bin` (dictation, rebuilt for the tablet's CPU) |
 | `rootfs/initramfs/` | the initramfs built into the 64-bit kernel: it finds the root in USERDATA |
 | `rootfs/overlay/usr/local/sbin/t715-sleep`, `t715-wifi-guard` | the sleep of the 32-bit image: suspend to RAM a minute after the screen goes dark on battery, the CP and the Wi-Fi/Bluetooth chip powered down around it ([docs/image/ROOTFS.md](../docs/image/ROOTFS.md), "Sleep"); in the image build, the kernel side tested on the tablet, the user space not yet |
 | `tools/t715-arm64-health` | the health check of a running tablet: what passes, warns and fails |

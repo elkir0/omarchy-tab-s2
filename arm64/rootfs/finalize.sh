@@ -32,7 +32,7 @@ fi
 awk -v stanza='# Omarchy (omarchy, omarchy-settings, omarchy-speedtest, omarchy-keyring, ...),
 # Omarchy Mobile'"'"'s omamobile-settings, omamobile-remote and wlrctl, and the
 # packages built for this tablet (omamobile-omarchy, omamobile-shell,
-# omatel-agent, hyprgraphics) came from the local repository [t715-omarchy] of
+# omatel-agent) came from the local repository [t715-omarchy] of
 # the image build, holding Omarchy'"'"'s and Omarchy Mobile'"'"'s own aarch64
 # packages exactly as published (verified against their keys and pins). It is
 # not shipped in this image. To use it again, copy that directory to /repo and
@@ -62,9 +62,9 @@ if [ "$(grep -c '^#\[t715-omarchy\]$' /etc/pacman.conf)" -gt 1 ]; then
         /etc/pacman.conf > /etc/pacman.conf.dedup && cat /etc/pacman.conf.dedup > /etc/pacman.conf && rm -f /etc/pacman.conf.dedup
 fi
 if [ "$STAGE" = omarchy ]; then
-    # Hyprland as tested with the dmabuf shim and the rebuilt hyprgraphics: an
+    # Hyprland as tested with the dmabuf shim and hyprgraphics 0.7: an
     # upgrade waits for a new image. Its family goes with it, for the sonames.
-    sed -i 's/^#IgnorePkg .*/# t715: Hyprland and its family stay as tested with the shim and the rebuilt\n# hyprgraphics; Omarchy stays at the pinned 4.5.0-3 (the touch patches are\n# checked against it); the touch layer and Omarchy Mobile'"'"'s packages are this\n# image'"'"'s own builds or verified copies, which no repository here carries\nIgnorePkg   = hypr* aquamarine xdg-desktop-portal-hyprland omarchy omarchy-settings omarchy-speedtest omarchy-keyring omamobile-omarchy omamobile-shell omamobile-settings omamobile-remote omamobile-voice wlrctl omatel-agent voxtype-bin/' /etc/pacman.conf
+    sed -i 's/^#IgnorePkg .*/# t715: Hyprland and its family stay as tested with the shim and\n# hyprgraphics 0.7; Omarchy stays at the pinned 4.5.0-3 (the touch patches are\n# checked against it); the touch layer and Omarchy Mobile'"'"'s packages are this\n# image'"'"'s own builds or verified copies, which no repository here carries\nIgnorePkg   = hypr* aquamarine xdg-desktop-portal-hyprland omarchy omarchy-settings omarchy-speedtest omarchy-keyring omamobile-omarchy omamobile-shell omamobile-settings omamobile-remote omamobile-voice wlrctl omatel-agent voxtype-bin/' /etc/pacman.conf
 fi
 if [ "$STAGE" = omarchy ] && ! grep -q '^\[omarchy\]$' /etc/pacman.conf; then
     # Omarchy's aarch64 channel, active, after Arch Linux ARM's repositories: what only

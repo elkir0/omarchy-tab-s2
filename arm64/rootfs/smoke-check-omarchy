@@ -74,7 +74,9 @@ else
     fail "ModemManager.service installed and not masked"
 fi
 id -nG "$U" | tr ' ' '\n' | grep -qx radio && pass "$U is in radio (shannonctl)" || fail "$U is not in radio"
-expect_version hyprgraphics '0\.6\.0-2\.1'
+# hyprgraphics from Arch Linux ARM: 0.7 has the lost-wakeup fix (hyprwm/hyprgraphics#53) that
+# the image rebuilt 0.6.0 for until 2.0.0
+expect_version hyprgraphics '0\.7\.[0-9]+-[0-9.]+'
 if pacman -Q mako >/dev/null 2>&1; then
     fail "mako is installed: it takes org.freedesktop.Notifications from Omarchy 4.5's shell"
 else
