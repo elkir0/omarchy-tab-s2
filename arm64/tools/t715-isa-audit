@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """t715-isa-audit: can these AArch64 ELF files run on an ARMv8.0-A CPU?
 
-The SM-T715 (Exynos 7420: Cortex-A53 + Cortex-A57) implements ARMv8.0-A with
+The SM-T715 (Exynos 5433: Cortex-A53 + Cortex-A57) implements ARMv8.0-A with
 the optional features fp, asimd, aes, pmull, sha1, sha2 and crc32, nothing
 newer. Code built for a later CPU dies there with SIGILL. This tool scans the
 executable code of AArch64 ELF files (executables, shared objects, relocatable

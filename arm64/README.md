@@ -14,7 +14,7 @@ tablet's bootloader. The two bricks are told together in [docs/ARM64.md](../docs
 
 | You want | Read |
 |---|---|
-| a 64-bit tablet, without reading more: download, flash, it boots | [docs/ARM64.md](../docs/ARM64.md), section 1. **Not open yet**: no image is released and there is no installer |
+| a 64-bit tablet, without reading more: download, flash, it installs | [the install guide](../docs/INSTALL-ARM64.md), with the release 2.0.0 |
 | to do it yourself today, or to understand it | the whole route, in order, in the fork: [GO-ARM64.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md); this directory is its step 4 (the image) and 6 (the root) |
 | to build the image, change it, or check what is in it | this page, then [docs/ROOTFS.md](docs/ROOTFS.md) |
 
@@ -29,7 +29,8 @@ tablet's bootloader. The two bricks are told together in [docs/ARM64.md](../docs
 | `tools/t715-isa-audit` | finds the programs that may not run on the tablet's CPU (below) |
 | `tools/claude-code` | installs Anthropic's signed arm64 build of Claude Code, checked against Anthropic's release key |
 | `tests/` | the off-device suites of the two tools |
-| `docs/ROADMAP.md` | Golden: what is done, and what is left before the turnkey release |
+| `release/make-release.sh` | the release: the image with the kernel's modules and slot, checked; the installer (`../boot/`, `t715.golden`); the Odin package, the sums, a manifest |
+| `docs/ROADMAP.md` | Golden: what 2.0.0 holds, and what is left |
 | `docs/ROOTFS.md` | everything about the image: what it contains and why, the boot mark and the watchdog keeper, what the kernel must provide, the boot arguments, writing the image to the tablet, the risks |
 
 ## Building the image
@@ -53,8 +54,27 @@ documented placeholder `changeme`, which the first-run onboarding asks to replac
 
 The kernel is not built here: it is this repository's kernel with the fork's patches
 ([t715/kernel/](https://github.com/elkir0/bnuuyloader/tree/main/t715/kernel)). The image carries
-no firmware of Samsung's: the Wi-Fi NVRAM and the Bluetooth patch are taken at the first boot from
-the tablet's own SYSTEM partition.
+no firmware of Samsung's: the Wi-Fi NVRAM and the Bluetooth patch are taken from the tablet's own
+SYSTEM partition, by the installer or at the first boot.
+
+## Making a release
+
+```bash
+bash arm64/rootfs/build.sh --target omarchy            # no --ssh-pubkey: a release has no key
+bash arm64/release/make-release.sh --version 2.0.0 \
+     --image arm64/rootfs/out/rootfs-aarch64-omarchy45.img --kernel-dir KERNEL_OUT --out out/release
+```
+
+`KERNEL_OUT` holds the arm64 kernel's `Image`, `modules.tar.xz` and `gts28ltexx-daily.dtb` (the
+fork's `t715/build-arm64.sh`, with the daily boot arguments). The script copies the image, adds the
+modules and the kernel's slot (`usr/lib/t715-golden/`), lists the file capabilities that the
+installer's copy cannot carry (`t715-golden-caps.service` sets them again at the first boot),
+checks what a public image must not hold (SSH host keys, a machine-id, keys, saved networks), builds the installer on the
+1.0.5 release's 32-bit kernel and packs it for Odin, then writes `SHA256SUMS` and `MANIFEST.txt`.
+A test build adds `--installer-knobs "t715.telnet=1 t715.usbfn=ecm"` (a root shell over the USB
+cable, and its MANIFEST says so); `--image-from DIR` then makes the release around the very image
+that test installed. What the installer does: [boot/README.md](../boot/README.md), "The installer
+of the 64-bit system".
 
 ## The tablet's CPU, and the AI apps
 
