@@ -15,7 +15,7 @@
 #       a library of Hyprland, quickshell, sddm or squeekboard; the dmabuf-check
 #       shim is not wired; the touch layer is not in place (t715-keys --check,
 #       the on-screen keyboard's gsettings, terminal layouts, session
-#       environment); the touch shell is not (omamobile-omarchy's patch series,
+#       environment, the keyboard layout picker's patch); the touch shell is not (omamobile-omarchy's patch series,
 #       the QML modules its plugins import, the user's profile or plugin links);
 #       PipeWire's BlueZ plugin is missing; the Wi-Fi guard or the sleep is not
 #       in place (t715-wifi-guard, t715-sleep, their units enabled, suspend and
@@ -322,6 +322,16 @@ if [ -x "$gen" ]; then
     fi
 else
     warn "no $gen: session environment not checked"
+fi
+
+# Omarchy's keyboard layout picker saves without fcitx5, which stays off here
+# (patches-omarchy-settings/0001, applied by configure-omarchy.sh).
+ts=/usr/share/omarchy/default/input-methods/typing_setup.py
+if grep -q '^def fcitx_running' "$ts" && grep -q '^  fcitx = fcitx_running()' "$ts" \
+   && python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$ts" 2>/dev/null; then
+    pass "keyboard layout picker: saves without fcitx5 (patches-omarchy-settings/0001)"
+else
+    fail "keyboard layout picker: $ts lacks patches-omarchy-settings/0001 (it fails while fcitx5 is off)"
 fi
 
 echo "== touch layer P2: the touch shell (docs/image/ROOTFS.md) =="

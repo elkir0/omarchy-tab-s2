@@ -1,0 +1,58 @@
+# SM-T715: Omarchy's keyboard layout picker without fcitx5.
+#
+# Setup > Keyboard (omarchy-setup-keyboard, typing_setup.py save_keyboard)
+# writes ~/.config/omarchy/keyboard-layouts, reloads Hyprland, checks the new
+# layout, then keeps fcitx5's input group in step with it. Before anything it
+# asks fcitx5 for that group (fcitx5-remote -q). The image keeps fcitx5 off
+# (omarchy-fcitx5.service.d/10-t715-osk.conf: the on-screen keyboard holds the
+# compositor's one input-method slot), so the question failed and the picker
+# saved nothing, with a notification "Command '['fcitx5-remote', '-q']'
+# returned non-zero exit status 1" (the owner's tablet, 2026-11-26).
+#
+# With no fcitx5 of this user running there is no group to keep in step: the
+# picker now saves the layout file, reloads and checks as before, and stops
+# there. With fcitx5 running (touch ~/.config/t715-omarchy/fcitx5) it does
+# what Omarchy does. A layout picked while fcitx5 was off is not in fcitx5's
+# group until the next pick with fcitx5 on.
+#
+# Against omarchy-settings 4.5.0-3 (the image's pin), applied once at build
+# time by configure-omarchy.sh: Omarchy Mobile's applier (omamobile-omarchy)
+# patches only the omarchy package's files, and omarchy-settings is held by
+# IgnorePkg, so nothing overwrites the file.
+--- i/default/input-methods/typing_setup.py
++++ w/default/input-methods/typing_setup.py
+@@ -173,12 +173,24 @@
+   return layouts, variants
+ 
+ 
++def fcitx_running():
++  # As configure.py's configure() tells: this user's fcitx5 daemon.
++  return subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "fcitx5"],
++                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
++
++
+ def save_keyboard(selected):
+   layouts, variants = keyboard_values(selected)
+   config_home = Path(os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"))
+   path = config_home / "omarchy/keyboard-layouts"
+   original = setup.read(path) if path.exists() else None
+-  group, old_layout, before = setup.live_group()
++  # SM-T715 (omarchy-tab-s2): fcitx5 can be off (the image keeps it off, as the
++  # on-screen keyboard holds the input-method slot). With no fcitx5 running
++  # there is no input group to keep in step with the layout: the layout file is
++  # all there is to save, where asking fcitx5 for its group failed the whole
++  # selection.
++  fcitx = fcitx_running()
++  group, old_layout, before = setup.live_group() if fcitx else (None, "", [])
+   group_changed = False
+   previous_errors = setup.run(["hyprctl", "configerrors"])
+   try:
+@@ -191,6 +203,8 @@
+                 for layout, variant in zip(layouts.split(","), variants.split(","))]
+     if keyboard_selection() != expected:
+       raise RuntimeError("Your personal keyboard layout override takes precedence over this selection")
++    if not fcitx:
++      return
+     first_layout = layouts.split(",")[0]
+     first_variant = variants.split(",")[0]
+     group_layout = first_layout + ("-" + first_variant if first_variant else "")

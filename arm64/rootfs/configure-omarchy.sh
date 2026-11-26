@@ -1,9 +1,9 @@
 #!/bin/bash
 # configure-omarchy.sh — step 12 of the Dockerfile, the Omarchy image: what
 # the base image's configure-base.sh did for a system that boots, done again
-# for the desktop: the touch layer's overlay, SDDM autologin, Omarchy's
-# system setup leaves, units, the firewall, Omarchy's user setup and the
-# per-user tablet settings.
+# for the desktop: the touch layer's overlay, the patches to omarchy-settings,
+# SDDM autologin, Omarchy's system setup leaves, units, the firewall, Omarchy's
+# user setup and the per-user tablet settings.
 #
 # Adapted from omarchy-tab-s2/image/rootfs/configure-system.sh
 # (read-only): its second half, after "display". Left out of it, and why:
@@ -39,6 +39,24 @@ log "overlay-omarchy"
     install -D -m "$(stat -c %a "/t715/overlay-omarchy/$f")" "/t715/overlay-omarchy/$f" "/$f"
 done
 record "overlay-omarchy" ok "$(find /t715/overlay-omarchy -type f | wc -l) files"
+
+# --- omarchy-settings patches -----------------------------------------------
+# Omarchy Mobile's applier (omamobile-omarchy) patches only the omarchy
+# package's files. omarchy-settings's are patched here, once: the package is
+# held by IgnorePkg (finalize.sh), so no upgrade overwrites them. Each patch
+# says why in its header; one that does not apply exactly stops the build.
+log "omarchy-settings patches"
+v="$(pacman -Q omarchy-settings 2>/dev/null)"
+[ "$v" = "omarchy-settings 4.5.0-3" ] || die "omarchy-settings is '${v:-not installed}', not 4.5.0-3: check patches-omarchy-settings/ against it"
+n=0
+for p in /t715/patches-omarchy-settings/*.patch; do
+    patch --forward --fuzz=0 --no-backup-if-mismatch -p1 -d /usr/share/omarchy -i "$p" >/dev/null \
+        || die "$(basename "$p") does not apply to $v"
+    n=$((n + 1))
+done
+python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' \
+    /usr/share/omarchy/default/input-methods/typing_setup.py || die "the patched typing_setup.py does not parse"
+record "omarchy-settings patches" ok "$n applied to $v"
 
 # The image's language, time zone and first keyboard layout (the on-screen
 # keyboard's), for omarchy-user-setup.sh.

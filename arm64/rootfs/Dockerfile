@@ -162,13 +162,15 @@ RUN --mount=type=bind,from=t715repo,target=/repo \
     bash -c 'bash /t715/repo-on.sh && bash /t715/install-mobile.sh'
 
 # ---------------------------------------------------------------------------
-# 12. Tablet and Omarchy configuration: overlay-omarchy/, the accounts'
+# 12. Tablet and Omarchy configuration: overlay-omarchy/, the patches to
+#     omarchy-settings (patches-omarchy-settings/), the accounts'
 #     groups, AQ_DRM_DEVICES, Omarchy's system setup leaves, units, SDDM
 #     autologin, Omarchy's user setup and the per-user tablet settings, the
 #     migration hold list. ssh/ again: the user's home is made anew from
 #     Omarchy's /etc/skel here, and gets the key again.
 # ---------------------------------------------------------------------------
 RUN --mount=type=bind,source=overlay-omarchy,target=/t715/overlay-omarchy \
+    --mount=type=bind,source=patches-omarchy-settings,target=/t715/patches-omarchy-settings \
     --mount=type=bind,source=user.env,target=/t715/user.env \
     --mount=type=bind,source=ssh,target=/t715/ssh \
     --mount=type=bind,source=omarchy-migrations.hold,target=/t715/omarchy-migrations.hold \

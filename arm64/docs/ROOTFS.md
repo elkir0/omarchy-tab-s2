@@ -96,6 +96,17 @@ eight checks more for it (43 in all).
 | `t715-lock-blank-through-keys.patch` | **ported**: `9002-t715-lock-blank-through-keys.patch`, the lock's `blankProcess` in 4.5's `shell/plugins/lock/Service.qml` after the series (0003, 0009, 0013, 0023 touch the file). 4.5 family only |
 | upstream's 0020, 0021, 0022 (kept by the 0.1.32 build) | **not in the series**: Lenovomarchy's 4.5 trim drops them (0020 is inert without `omamobile-update`, 0021 is the phone's suspend path, 0022 the fingerprint reader's); 0014 and 0029 too (emergency call, double tap) |
 
+`omarchy-settings` (`patches-omarchy-settings/`): `omamobile-omarchy`'s applier patches only the
+`omarchy` package's files, so `configure-omarchy.sh` applies these once, at build time, with
+`patch --fuzz=0` (a patch that does not apply stops the build); `omarchy-settings` is held by
+`IgnorePkg`, so no upgrade overwrites them, and the smoke check looks for each one.
+`0001-keyboard-layouts-without-fcitx5`: Omarchy's keyboard layout picker (Setup > Keyboard) asked
+fcitx5 for its input group before saving anything; fcitx5 stays off here (the on-screen keyboard
+holds the input-method slot), so it failed with `fcitx5-remote -q` and saved nothing (found
+2026-11-26). With no fcitx5 running it now saves the layout, reloads and checks as before, and
+stops there. `tests/test_keyboard_picker.py` runs it against the pinned package's file with
+stand-in commands.
+
 `omamobile-shell` (the 0.2.94 build's patches):
 
 | The 0.2.94 build's | Now (0.2.133) |
@@ -141,11 +152,13 @@ All under `../rootfs/`. Sizes and SHA-256 are in
 | `lib/` | `common.sh` (Docker helpers), `dev.Dockerfile`, `alarm-tarball.sha256` (the pinned base) |
 | `Dockerfile`, `*.sh`, `packages.*`, `omarchy-pins`, `omarchy-trusted.fpr`, `omamobile-pins`, `omamobile-trusted.fpr`, `omarchy-migrations.hold` | the image build's steps, adapted from the owner's (section 3) and from Lenovomarchy's (section 0) |
 | `overlay/`, `overlay-omarchy/` | the tablet's files: both images / the Omarchy image |
+| `patches-omarchy-settings/` | patches to `omarchy-settings`'s files, applied by `configure-omarchy.sh` (section 0) |
 | `watchdog/t715-watchdog-keeper.c` | the keeper (static aarch64, compiled at build) |
 | `shim/`, `t715-*.lua`, `t715-wallpapers.sh` | copied unchanged from the owner |
 | `pkg/` | three PKGBUILDs: `omatel-agent` the owner's; `omamobile-omarchy` and `omamobile-shell` Lenovomarchy's 0.1.48/0.2.133 with the SM-T715's patches (section 0) |
 | `initramfs/` | `init`, `build-initramfs.sh`, `cpio_newc.py` (the owner's cpio writer) |
 | `tests/test-initramfs.sh` | the init's tests in Docker |
+| `tests/test_keyboard_picker.py` | the keyboard layout picker's patch against the pinned `omarchy-settings` (on the host) |
 | `on-device-README.md` | shipped in the images as `/usr/share/doc/t715-arm64/README.md` |
 
 The Wi-Fi NVRAM and the Bluetooth patch RAM are **not** in these images

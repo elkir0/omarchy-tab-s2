@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Keyboard layouts.** Omarchy's keyboard layout picker (Setup > Keyboard) failed on the tablet
+  with "Command '['fcitx5-remote', '-q']' returned non-zero exit status 1" and saved nothing: it
+  asks fcitx5 first, and the image keeps fcitx5 off for the on-screen keyboard. It now saves the
+  layout without fcitx5 (a patch to `omarchy-settings`, applied when the image is built). On 2.1.1
+  or earlier, set the layout by hand, here French:
+  `printf 'XKBLAYOUT=fr\nXKBVARIANT=\n' > ~/.config/omarchy/keyboard-layouts && hyprctl reload`.
+
 ## 2.1.1, pre-release
 
 A fix for the first start of 2.1.0: the setup's notification could be lost.
