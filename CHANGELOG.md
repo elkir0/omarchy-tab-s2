@@ -1,13 +1,42 @@
 # Changelog
 
-## Unreleased
+## 2.1.2, pre-release
 
+The installer's PARAM check: a tablet flashed with the stock firmware could be refused there, with
+nothing to say why. And Omarchy's keyboard layout picker, which saved nothing on the tablet.
+
+- **Older bytes after the stock pictures.** Before it writes the loader, the installer checks that
+  PARAM holds the stock `T715XXU2CRH1` image. That check covered PARAM's first 7340032 bytes,
+  taken on the reference tablet, where the archive of pictures ends at byte 1070592 and zeros
+  follow. A flash of the firmware writes the archive and may leave older bytes after it, which
+  S-Boot does not read. A PARAM whose archive is the stock one, byte for byte, followed by such
+  bytes is now installed as a stock one: the loader has zeros there, and
+  `linux/PARAM-stock-backup.img` keeps PARAM as it was. A PARAM whose archive differs is refused
+  as before.
+- **What the installer says when it refuses PARAM.** A refusal writes nothing, not even its log.
+  Lines on screen, `PARAM: ...`, now come before the refusal: which of PARAM's pictures differ
+  from the stock ones, are missing or are not in the stock archive, and whether bytes after the
+  archive are not zero. A photo of that screen in the XDA thread says what the tablet's PARAM
+  holds.
 - **Keyboard layouts.** Omarchy's keyboard layout picker (Setup > Keyboard) failed on the tablet
   with "Command '['fcitx5-remote', '-q']' returned non-zero exit status 1" and saved nothing: it
   asks fcitx5 first, and the image keeps fcitx5 off for the on-screen keyboard. It now saves the
   layout without fcitx5 (a patch to `omarchy-settings`, applied when the image is built). On 2.1.1
   or earlier, set the layout by hand, here French:
   `printf 'XKBLAYOUT=fr\nXKBVARIANT=\n' > ~/.config/omarchy/keyboard-layouts && hyprctl reload`.
+- **The guide:** the new lines on screen; OEM unlocking, which some tablets do not show (if the
+  installer's white text comes up, the bootloader accepted it).
+
+Tested: the installer's test suite, 403 checks, with new scenarios (a stock archive followed by
+older bytes installed, the loader with zeros there and the backup as PARAM was; an archive with
+missing and extra pictures refused with its report; the rescue from a saved PARAM with such
+bytes; the installer's reading of the archive against Python's); with the tolerance made too
+loose on purpose, 26 checks fail. The reading of the reference tablet's own PARAM (a copy, on a
+computer, in busybox) gives the 29 pictures of the stock list. The image is a full rebuild of
+this tree (`arm64/rootfs/build.sh --target omarchy`), whose smoke check passed; the keyboard
+picker's tests run the patched and the pristine `save_keyboard` of the pinned package against
+stand-in commands. Not tried: the new installer on a tablet whose PARAM is refused (none at
+hand), and a fresh install of 2.1.2.
 
 ## 2.1.1, pre-release
 
