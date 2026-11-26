@@ -1,5 +1,16 @@
 # Android apps (Waydroid) — SM-T715
 
+## In 64 bits
+
+The 64-bit image (`arm64/rootfs/`) ships the same integration as 1.0.5: Waydroid dormant
+(the `waydroid` package of ALARM's aarch64 `[extra]`), `python-pyclip`, the tools
+(`t715-android`, `t715-android-setup`, the `waydroid` wrapper, the launcher daemon, the two
+user units), and the "Android" quick settings tile. What differs from 32 bits: `waydroid init`
+picks the 64-bit `waydroid_arm64` images on an aarch64 host, `arm64-v8a` apps now install
+(64-bit-only Android builds run), and there is no Mesa workaround — the bug of section 7 is
+32-bit only, so `t715-android-setup mesa-fix` is a no-op on aarch64 (one line, exit 0) and
+`all` skips it. Status: **in the 64-bit image build, not yet tested on the tablet**.
+
 Status: **in 1.0.5 (opt-in)**; working on the reference tablet on 2026-11-21,
 Google Play and WhatsApp included. The 1.0.5 release kernel includes the
 `t715-waydroid` series (section 2). The root image ships Waydroid dormant and

@@ -3,7 +3,8 @@
 This directory is the **system brick** of the 64-bit port: the sources of the Omarchy 4.5 image
 for arm64 that the reference tablet (SM-T715) runs daily since 2026-11-25. Omarchy 4.5 on Arch
 Linux ARM aarch64, with Omarchy Mobile's touch layer, the tablet's own parts (modem, keys, cover,
-rotation, microSD, power) and the AI integrations Omarchy and Omarchy Mobile offer.
+rotation, microSD, power, Android apps through Waydroid — dormant until `sudo t715-android-setup all`)
+and the AI integrations Omarchy and Omarchy Mobile offer.
 
 The other brick, **the boot**, is in the fork
 [elkir0/bnuuyloader](https://github.com/elkir0/bnuuyloader): the loader that starts a 64-bit kernel
@@ -96,6 +97,7 @@ Install > AI menu.
 ```bash
 bash arm64/tests/health/run.sh
 bash arm64/tests/isa-audit/run.sh
+bash arm64/tests/android/run.sh
 ```
 
 The packages run their own tests (`check()`) whenever `build.sh` builds them, and the image is

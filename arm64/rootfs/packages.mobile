@@ -3,18 +3,19 @@
 # One per line, "name  # why"; every line is mandatory.
 # Built here from pkg/ by tools/build-pkg:
 omamobile-omarchy        # Omarchy Mobile's touch patches to Omarchy 4.5 and their applier (pkg/omamobile-omarchy 0.1.51, arch = any)
-omamobile-shell          # the touch shell: bar, quick settings, launcher, recents, home, back swipe, voice bar (pkg/omamobile-shell 0.2.147-2.1, arch = any)
+omamobile-shell          # the touch shell: bar, quick settings, launcher, recents, home, back swipe, voice bar (pkg/omamobile-shell 0.2.147-3.2, arch = any)
 omatel-agent             # phone and messages service over the ModemManager API (pkg/omatel-agent, Rust): talks to shannond's ModemManager facade
 t715-modem               # the SS333 modem stack (pkg/t715-modem: the loader built for aarch64, shannond and its ModemManager facade, units, udev, NV provisioning from EFS read-only)
 omaphone                 # Omarchy Mobile's Phone app (pkg/omaphone 0.2.3: the armv7h recipe, no Speaker button), over omatel-agent and shannond's facade
 omamessages              # Omarchy Mobile's Messages app (pkg/omamessages 0.2.2), over omatel-agent
 omamobile-settings       # Omarchy Mobile's Settings app (About, Display): pkg/omamobile-settings 0.1.4, upstream's recipe from omarchy-mobile 899184543d60
 omamobile-remote         # drives the session over ssh: screenshots, taps, keys, apps (enables nothing by itself): pkg/omamobile-remote 0.1.3, the same
+python-pyclip            # Waydroid's shared clipboard over Wayland via wl-clipboard, not packaged by ALARM on aarch64 either (pkg/python-pyclip, arch = any)
 # Omarchy Mobile's own packages, verified against its signed repository (tools/fetch-omamobile, omamobile-pins):
 wlrctl                   # the virtual pointer and keyboard omamobile-remote uses
 # Left out for aarch64 (out/package-audit.tsv; arm64/docs/ROOTFS.md):
-#   not needed: python-pyclip (ALARM's aarch64 has it), t715-chromium (ALARM's
-#     aarch64 has Chromium: Omarchy's own list installs it);
+#   not needed: t715-chromium (ALARM's aarch64 has Chromium: Omarchy's own list
+#     installs it);
 #   not yet, their kernel driver is not on arm64: libcamera, libcamera-ipa,
 #     omacam, t715-camera (the cameras), t715-gps;
 #   armv7h-specific: t715-claude-code (Claude Code has an arm64 build of its own),

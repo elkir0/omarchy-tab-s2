@@ -71,11 +71,15 @@
 #        voice-input language, the default coding agent). The image starts
 #        the nudge itself (omamobile-onboarding --nudge at login; hypr/
 #        phone.lua, which does it on the phone, is not installed from here)
+#   0016 tablet-android-tile  the Android tile over t715-android (the
+#        0.2.94 series' 0013, ported): on while the Waydroid session runs,
+#        "Asleep" while the container is frozen; a tap starts or stops the
+#        session, a long press opens Android Settings; dimmed when Waydroid
+#        is not installed
 # Not carried forward from the SM-T715's 0.2.94 series, for the arm64 image
 # (the commands they drive are not in it): 0010 tablet-location-tile (no
-# t715-gps) and 0013 tablet-android-tile (no Waydroid on the arm64 kernel
-# yet). Upstream did what the 0.2.94 series' 0009 worked around (Escape by
-# name): 0008 keeps upstream's fix as its fallback.
+# t715-gps). Upstream did what the 0.2.94 series' 0009 worked around (Escape
+# by name): 0008 keeps upstream's fix as its fallback.
 #
 # The profiles: profile/shell.json is tablet-shell.json (only the plugins
 # shipped here, the call card and the voice bar among them, the drawer at 6
@@ -125,7 +129,7 @@
 
 pkgname=omamobile-shell
 pkgver=0.2.147
-pkgrel=3.1
+pkgrel=3.2
 pkgdesc="Omamobile's touch shell for Omarchy: status bar, quick settings, launcher, recents, home, back swipe, voice bar (SM-T715 tablet build)"
 arch=(any)
 url="https://github.com/derekross/omamobile"
@@ -181,6 +185,7 @@ _patches=(
   0013-tablet-call-card.patch
   0014-tablet-voice-language.patch
   0015-tablet-onboarding.patch
+  0016-tablet-android-tile.patch
 )
 source=(
   "${_tarball}::${url}/archive/${_commit}.tar.gz"
@@ -210,6 +215,7 @@ sha256sums=(
   'SKIP'
   'SKIP'
   'SKIP'
+  'd9391624a524e1af2b57ac3306954ce6e8e57563fa156d5a80b3d364fc5fce3e'
 )
 
 # What this build keeps of upstream's install script's output.

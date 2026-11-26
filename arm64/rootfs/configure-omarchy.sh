@@ -16,8 +16,6 @@
 #   t715-wifi-guard, 60-t715-wifi-aspm.rules, modprobe.d/t715-brcmfmac.conf
 #     written for the arm32 kernel's brcmfmac and regulators: to be ported
 #     with Wi-Fi itself;
-#   the Waydroid files (t715-android, t715-android-setup, ...)   Waydroid needs
-#     binder and ashmem in the arm64 kernel, and is not installed;
 #   omatel-agent.service stays (omamobile-shell depends on the agent).
 set -euo pipefail
 
@@ -92,6 +90,16 @@ systemctl set-default graphical.target >/dev/null
 systemctl --global enable t715-keys.service t715-squeekboard.service t715-idle.service \
     t715-update-check.timer t715-animations.path t715-animations.service t715-sdcard.service
 record "units" ok "sshd, sddm, usb-rndis; for every session: t715-keys, t715-squeekboard, t715-idle, t715-sdcard, t715-animations, t715-update-check.timer; graphical.target"
+
+# Android (Waydroid) session: does nothing on a system without Waydroid because of its ConditionPathExists= checks.
+[ -x /usr/local/bin/t715-android ] || die "no /usr/local/bin/t715-android"
+[ -x /usr/local/sbin/t715-android-setup ] || die "no /usr/local/sbin/t715-android-setup"
+[ -x /usr/local/bin/waydroid ] || die "no /usr/local/bin/waydroid"
+[ -f /usr/local/lib/t715-android/launchd.py ] || die "no /usr/local/lib/t715-android/launchd.py"
+systemctl --global enable t715-android.service
+systemctl --global enable t715-android-launchd.service
+# Keep waydroid-container.service disabled until the user runs `sudo t715-android-setup all`.
+systemctl disable waydroid-container.service || true
 
 # Omarchy 4.5's migration hold list, for an in-place Omarchy upgrade later
 # (t715-omarchy-migrations-hold, overlay-omarchy): a fresh image marks every

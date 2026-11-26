@@ -1,0 +1,657 @@
+#!/bin/bash
+# t715-android: the Android (Waydroid) session switch in the Omarchy session.
+#
+# Waydroid runs Android apps beside Linux apps in multi-window mode: each
+# Android app is a Wayland window whose Hyprland class is
+# `waydroid.<package>`.  Its container freezes by itself when no Android
+# window is shown, so leaving the session up costs little at idle, while
+# stopping it tears the session down cleanly.  The quick settings tile
+# reads `t715-android state` and switches the session or opens Android
+# Settings through this command.
+#
+# Launcher visibility (`apps`):
+# Waydroid writes one `waydroid.<package>.desktop` file per launchable
+# Android app in `${XDG_DATA_HOME:-~/.local/share}/applications/` and adds
+# `NoDisplay=true` to its built-in system apps, which left the Linux
+# launcher without a file manager or a browser while leaving Google
+# telephony/messaging apps visible on a tablet with no telephony or
+# in-Android cameras.  Waydroid preserves an existing `NoDisplay` key when
+# rewriting those files, so `apps` sets `NoDisplay=false` for the useful
+# built-in apps (SHOW) and `NoDisplay=true` for camera/telephony apps
+# (HIDE), overridable via `/etc/t715-android/apps-show` and
+# `/etc/t715-android/apps-hide`.
+#
+# An off marker in the user's state directory
+# ($T715_ANDROID_STATE_DIR/off, default ~/.local/state/t715-android/off)
+# keeps t715-android.service from starting automatically at the next
+# login (ConditionPathExists=!%h/.local/state/t715-android/off): `stop`
+# creates the marker and `start` removes it.
+#
+#   state     the session as key=value lines, in this order: installed,
+#             session, container, apps.  The quick settings tile parses
+#             them: the keys and their order are an interface.  Starts
+#             no Python or `waydroid` process (only `busctl`, `hyprctl`,
+#             `jq` and `timeout`), because `waydroid status` takes
+#             ~2.4 s to start on the tablet against the quick settings
+#             probe's 3 s timeout.
+#   start     remove the off marker, silently apply launcher visibility,
+#             start t715-android.service, poll the user session bus
+#             (`id.waydro.Session`) once a second (at most
+#             T715_ANDROID_WAIT seconds, default 30) until the session is
+#             running, and silently apply launcher visibility once more;
+#             exit 0 when already running without starting anything; on
+#             timeout or when Waydroid is not installed, report on stderr,
+#             notify, and exit 1.
+#   stop      create the off marker and stop t715-android.service; exit
+#             0 also when the session was not running.
+#   toggle    stop when the session is running, start otherwise.
+#   settings  start the session first when stopped (stopping on
+#             failure), then launch com.android.settings.
+#   apps      [apply|list]  apply the SHOW/HIDE visibility lists to
+#             Android's `.desktop` files (default: `apply`), or list
+#             installed Android desktop files (`shown|hidden<TAB>pkg<TAB>Name`,
+#             sorted by Name).
+#
+# One log line per start/stop transition (logger -t t715-android).
+# Everything is quoted; nothing is ever eval'd.
+#
+# Usage: t715-android state|start|stop|toggle|settings|apps [apply|list]|--help
+# No argument or an unknown one: the usage on stderr, exit 2.
+#
+# Test hooks (image/tests/test_t715_android.sh): T715_ANDROID_CFG
+# (/var/lib/waydroid/waydroid.cfg) for Waydroid's initialisation file,
+# T715_ANDROID_DEV (/dev) for the binder device ($T715_ANDROID_DEV/binder),
+# T715_ANDROID_CGROUP (/sys/fs/cgroup/lxc.payload.waydroid) for the
+# container's cgroup directory ($T715_ANDROID_CGROUP/cgroup.events),
+# T715_ANDROID_STATE_DIR (${XDG_STATE_HOME:-$HOME/.local/state}/t715-android)
+# for the off marker and notification id, T715_ANDROID_ETC
+# (/etc/t715-android) for `apps-show` and `apps-hide` override files,
+# XDG_DATA_HOME (${HOME}/.local/share) for `applications/`,
+# T715_ANDROID_WAIT (30) for the start wait window,
+# T715_ANDROID_WAYDROID_WRAPPER (/usr/local/bin/waydroid) for the fast-path
+# launcher wrapper used by `settings`, and every external command through PATH.
+set -u
+
+CFG=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+DEV=${T715_ANDROID_DEV:-/dev}
+CGROUP=${T715_ANDROID_CGROUP:-/sys/fs/cgroup/lxc.payload.waydroid}
+STATE_DIR=${T715_ANDROID_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/t715-android}
+ETC_DIR=${T715_ANDROID_ETC:-/etc/t715-android}
+APPS_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+OFF_MARKER=$STATE_DIR/off
+WAIT=${T715_ANDROID_WAIT:-30}
+case $WAIT in '' | *[!0-9]*) WAIT=30 ;; esac
+WAYDROID_WRAPPER=${T715_ANDROID_WAYDROID_WRAPPER:-/usr/local/bin/waydroid}
+UNIT=t715-android.service
+GLYPH_ANDROID=󰀲
+
+# Built-in Android apps to show or hide in the Linux launcher.
+# Overridable by $ETC_DIR/apps-show and $ETC_DIR/apps-hide (one package
+# per line, '#' comments).
+APPS_SHOW_DEFAULT=(
+    com.android.documentsui           # Files
+    org.lineageos.jelly               # Browser
+    com.android.gallery3d             # Gallery
+    com.android.settings              # Settings
+    com.android.calculator2           # Calculator
+    com.android.deskclock             # Clock
+    com.android.contacts              # Contacts
+    org.lineageos.etar                # Calendar
+    org.lineageos.eleven              # Music
+    org.lineageos.recorder            # Recorder
+)
+
+APPS_HIDE_DEFAULT=(
+    org.lineageos.aperture            # Camera
+    com.android.camera2               # Camera
+    com.google.android.dialer         # Phone
+    com.google.android.apps.messaging # Messages
+    com.android.dialer                # Phone
+    com.android.messaging             # Messages
+)
+
+usage() {
+    printf 'usage: t715-android state\n' >&2
+    printf '       t715-android start\n' >&2
+    printf '       t715-android stop\n' >&2
+    printf '       t715-android toggle\n' >&2
+    printf '       t715-android settings\n' >&2
+    printf '       t715-android apps [apply|list]\n' >&2
+}
+
+# log TEXT: to the journal, or to stderr where there is no logger (the
+# test's stub collects what the script has to say).
+log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t t715-android "$*"
+    else
+        printf 't715-android: %s\n' "$*" >&2
+    fi
+}
+
+# notify_android ARGS...: replace the previous Android notification when
+# omarchy-notification-send is available, keeping its id in STATE_DIR.
+notify_android() {
+    command -v omarchy-notification-send >/dev/null 2>&1 || return 0
+    _na_id=$(cat "$STATE_DIR/notify-id" 2>/dev/null) || _na_id=
+    case $_na_id in '' | *[!0-9]*) _na_id=0 ;; esac
+    _na_out=$(omarchy-notification-send -p -r "$_na_id" "$@") || return 0
+    case $_na_out in
+    '' | *[!0-9]*) ;;
+    *) mkdir -p "$STATE_DIR" && printf '%s\n' "$_na_out" >"$STATE_DIR/notify-id" 2>/dev/null ;;
+    esac
+    return 0
+}
+
+# is_installed: waydroid in PATH, waydroid.cfg present, binder device present.
+is_installed() {
+    command -v waydroid >/dev/null 2>&1 &&
+        [ -f "$CFG" ] &&
+        [ -e "$DEV/binder" ]
+}
+
+# session_running: true when id.waydro.Session is owned on the user
+# session bus (bounded with timeout 2 when available).
+session_running() {
+    command -v busctl >/dev/null 2>&1 || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 busctl --user status id.waydro.Session >/dev/null 2>&1
+    else
+        busctl --user status id.waydro.Session >/dev/null 2>&1
+    fi
+}
+
+# parse_status: set S_SESSION (running|stopped) and S_CONTAINER
+# (running|frozen|stopped) from the user D-Bus name and cgroup.events;
+# any failure or stopped session leaves both stopped.
+parse_status() {
+    S_SESSION=stopped
+    S_CONTAINER=stopped
+    session_running || return 0
+    S_SESSION=running
+    [ -d "$CGROUP" ] && [ -r "$CGROUP/cgroup.events" ] || return 0
+    _ps_pop=0
+    _ps_frz=0
+    while read -r _ps_key _ps_val _ || [ -n "$_ps_key" ]; do
+        case $_ps_key in
+        populated) _ps_pop=$_ps_val ;;
+        frozen) _ps_frz=$_ps_val ;;
+        esac
+    done < "$CGROUP/cgroup.events"
+    if [ "$_ps_pop" = 1 ]; then
+        if [ "$_ps_frz" = 1 ]; then
+            S_CONTAINER=frozen
+        else
+            S_CONTAINER=running
+        fi
+    fi
+    return 0
+}
+
+# count_apps: number of Hyprland clients whose class starts with
+# "waydroid."; empty when the session is stopped or either tool fails.
+count_apps() {
+    S_APPS=''
+    [ "$S_SESSION" = running ] || return 0
+    command -v hyprctl >/dev/null 2>&1 || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    _ca_json=$(hyprctl clients -j 2>/dev/null) || return 0
+    _ca_n=$(printf '%s\n' "$_ca_json" | jq -r '
+        if type == "array" then
+            [.[] | select(type == "object" and ((.class // "") | type == "string") and ((.class // "") | startswith("waydroid.")))] | length
+        else
+            empty
+        end
+    ' 2>/dev/null) || return 0
+    case $_ca_n in
+    '' | *[!0-9]*) S_APPS='' ;;
+    *) S_APPS=$_ca_n ;;
+    esac
+    return 0
+}
+
+compute_state() {
+    S_INSTALLED=no
+    S_SESSION=stopped
+    S_CONTAINER=stopped
+    S_APPS=''
+    is_installed || return 0
+    S_INSTALLED=yes
+    parse_status
+    count_apps
+    return 0
+}
+
+cmd_state() {
+    compute_state
+    printf 'installed=%s\nsession=%s\ncontainer=%s\napps=%s\n' \
+        "$S_INSTALLED" "$S_SESSION" "$S_CONTAINER" "$S_APPS"
+}
+
+# parse_pkg_file FILE: print non-empty package names from FILE, stripping
+# '#' comments and surrounding whitespace.
+parse_pkg_file() {
+    awk '{
+        sub(/#.*/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        if ($0 != "") print $0
+    }' "$1"
+}
+
+# load_app_lists: load SHOW and HIDE lists from override files in ETC_DIR
+# when present, otherwise from the built-in defaults.
+load_app_lists() {
+    local _nl _p
+    _nl=$'\n'
+    APPS_SHOW_LIST=$_nl
+    APPS_HIDE_LIST=$_nl
+    APPS_SHOW_OVERRIDDEN=0
+    APPS_HIDE_OVERRIDDEN=0
+
+    if [ -f "$ETC_DIR/apps-show" ]; then
+        APPS_SHOW_OVERRIDDEN=1
+        while IFS= read -r _p; do
+            [ -n "$_p" ] && APPS_SHOW_LIST="${APPS_SHOW_LIST}${_p}${_nl}"
+        done < <(parse_pkg_file "$ETC_DIR/apps-show")
+    else
+        for _p in "${APPS_SHOW_DEFAULT[@]}"; do
+            APPS_SHOW_LIST="${APPS_SHOW_LIST}${_p}${_nl}"
+        done
+    fi
+
+    if [ -f "$ETC_DIR/apps-hide" ]; then
+        APPS_HIDE_OVERRIDDEN=1
+        while IFS= read -r _p; do
+            [ -n "$_p" ] && APPS_HIDE_LIST="${APPS_HIDE_LIST}${_p}${_nl}"
+        done < <(parse_pkg_file "$ETC_DIR/apps-hide")
+    else
+        for _p in "${APPS_HIDE_DEFAULT[@]}"; do
+            APPS_HIDE_LIST="${APPS_HIDE_LIST}${_p}${_nl}"
+        done
+    fi
+}
+
+# list_has LIST ITEM: true when ITEM is an exact line in newline-wrapped LIST.
+list_has() {
+    local _nl=$'\n'
+    case "$1" in
+    *"${_nl}${2}${_nl}"*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# target_nodisplay PKG: print desired NoDisplay value (false|true) for PKG,
+# or return 1 when PKG is not in either list.
+target_nodisplay() {
+    local _pkg=$1 _in_show=0 _in_hide=0
+    list_has "$APPS_SHOW_LIST" "$_pkg" && _in_show=1
+    list_has "$APPS_HIDE_LIST" "$_pkg" && _in_hide=1
+    if [ "$_in_show" -eq 1 ] && [ "$_in_hide" -eq 0 ]; then
+        printf 'false\n'
+        return 0
+    elif [ "$_in_hide" -eq 1 ] && [ "$_in_show" -eq 0 ]; then
+        printf 'true\n'
+        return 0
+    elif [ "$_in_show" -eq 1 ] && [ "$_in_hide" -eq 1 ]; then
+        if [ "$APPS_SHOW_OVERRIDDEN" -eq 1 ] && [ "$APPS_HIDE_OVERRIDDEN" -eq 0 ]; then
+            printf 'false\n'
+        else
+            printf 'true\n'
+        fi
+        return 0
+    fi
+    return 1
+}
+
+# inspect_desktop_entry FILE WANT: print two lines: status (no_entry|same|change)
+# and the Name= value from [Desktop Entry] only.
+inspect_desktop_entry() {
+    awk -v want="$2" '
+    BEGIN { in_entry = 0; have_entry = 0; nd_count = 0; nd_exact = 0; have_name = 0; name = "" }
+    /^\[.*\]$/ {
+        if ($0 == "[Desktop Entry]") {
+            in_entry = 1
+            have_entry = 1
+        } else {
+            in_entry = 0
+        }
+        next
+    }
+    in_entry && !have_name && /^Name[[:space:]]*=/ {
+        val = $0
+        sub(/^Name[[:space:]]*=[[:space:]]*/, "", val)
+        sub(/\r$/, "", val)
+        name = val
+        have_name = 1
+    }
+    in_entry && /^NoDisplay[[:space:]]*=/ {
+        nd_count++
+        if ($0 == ("NoDisplay=" want)) nd_exact = 1
+    }
+    END {
+        if (!have_entry) status = "no_entry"
+        else if (nd_count == 1 && nd_exact == 1) status = "same"
+        else status = "change"
+        printf "%s\n%s\n", status, name
+    }
+    ' "$1"
+}
+
+# rewrite_desktop_entry FILE WANT: emit FILE with NoDisplay=WANT inside
+# [Desktop Entry] only, preserving all other keys and groups.
+rewrite_desktop_entry() {
+    awk -v want="$2" '
+    {
+        lines[NR] = $0
+        if ($0 ~ /^\[.*\]$/) {
+            if ($0 == "[Desktop Entry]") {
+                in_entry = 1
+                entry_line = NR
+            } else {
+                in_entry = 0
+            }
+        } else if (in_entry && $0 ~ /^NoDisplay[[:space:]]*=/) {
+            if (!nd_line) {
+                nd_line = NR
+            } else {
+                drop[NR] = 1
+            }
+        }
+    }
+    END {
+        target = "NoDisplay=" want
+        if (!entry_line) {
+            for (i = 1; i <= NR; i++) print lines[i]
+            exit 0
+        }
+        if (nd_line) {
+            lines[nd_line] = target
+            for (i = 1; i <= NR; i++) {
+                if (!drop[i]) print lines[i]
+            }
+        } else {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == entry_line) print target
+            }
+        }
+    }
+    ' "$1"
+}
+
+# apply_apps [QUIET]: apply SHOW/HIDE lists to waydroid.*.desktop files in
+# APPS_DIR.  When QUIET=1, suppress output and never fail the caller.
+apply_apps() {
+    local _quiet=${1:-0}
+    local _f _base _pkg _want _status _name _tmp _verb _found=0 _changed=0
+
+    if [ ! -d "$APPS_DIR" ]; then
+        [ "$_quiet" -eq 1 ] || printf 'no Android desktop files yet\n'
+        return 0
+    fi
+
+    for _f in "$APPS_DIR"/waydroid.*.desktop; do
+        [ -f "$_f" ] || continue
+        _found=1
+        break
+    done
+
+    if [ "$_found" -eq 0 ]; then
+        [ "$_quiet" -eq 1 ] || printf 'no Android desktop files yet\n'
+        return 0
+    fi
+
+    load_app_lists
+
+    for _f in "$APPS_DIR"/waydroid.*.desktop; do
+        [ -f "$_f" ] || continue
+        _base=${_f##*/}
+        _pkg=${_base#waydroid.}
+        _pkg=${_pkg%.desktop}
+        [ -n "$_pkg" ] || continue
+
+        _want=$(target_nodisplay "$_pkg") || continue
+
+        _status=""
+        _name=""
+        {
+            IFS= read -r _status || true
+            IFS= read -r _name || true
+        } < <(inspect_desktop_entry "$_f" "$_want")
+
+        [ "$_status" = "change" ] || continue
+
+        if ! _tmp=$(mktemp "$APPS_DIR/.t715-android.XXXXXX"); then
+            [ "$_quiet" -eq 1 ] || printf 't715-android: failed to create temporary file in %s\n' "$APPS_DIR" >&2
+            return 1
+        fi
+        if ! cp -p "$_f" "$_tmp" 2>/dev/null; then
+            chmod 0644 "$_tmp" 2>/dev/null || true
+        fi
+        if ! rewrite_desktop_entry "$_f" "$_want" >"$_tmp"; then
+            rm -f "$_tmp"
+            [ "$_quiet" -eq 1 ] || printf 't715-android: failed to rewrite %s\n' "$_f" >&2
+            return 1
+        fi
+        if cmp -s "$_tmp" "$_f"; then
+            rm -f "$_tmp"
+            continue
+        fi
+        if ! mv -f "$_tmp" "$_f"; then
+            rm -f "$_tmp"
+            [ "$_quiet" -eq 1 ] || printf 't715-android: failed to update %s\n' "$_f" >&2
+            return 1
+        fi
+
+        _changed=$((_changed + 1))
+        if [ "$_quiet" -eq 0 ]; then
+            if [ "$_want" = "false" ]; then
+                _verb="shown"
+            else
+                _verb="hidden"
+            fi
+            [ -n "$_name" ] || _name=$_pkg
+            printf '%s %s (%s)\n' "$_verb" "$_name" "$_pkg"
+        fi
+    done
+
+    if [ "$_changed" -eq 0 ] && [ "$_quiet" -eq 0 ]; then
+        printf 'nothing to change\n'
+    fi
+    return 0
+}
+
+apply_apps_quiet() {
+    apply_apps 1 >/dev/null 2>&1 || true
+}
+
+cmd_apps_apply() {
+    apply_apps 0
+}
+
+cmd_apps_list() {
+    local _f _base _pkg _tab _found=0
+
+    [ -d "$APPS_DIR" ] || return 0
+
+    for _f in "$APPS_DIR"/waydroid.*.desktop; do
+        [ -f "$_f" ] || continue
+        _found=1
+        break
+    done
+    [ "$_found" -eq 1 ] || return 0
+
+    _tab=$(printf '\t')
+    for _f in "$APPS_DIR"/waydroid.*.desktop; do
+        [ -f "$_f" ] || continue
+        _base=${_f##*/}
+        _pkg=${_base#waydroid.}
+        _pkg=${_pkg%.desktop}
+        [ -n "$_pkg" ] || continue
+        awk -v pkg="$_pkg" '
+        BEGIN { in_entry = 0; have_name = 0; name = ""; state = "shown" }
+        /^\[.*\]$/ {
+            in_entry = ($0 == "[Desktop Entry]")
+            next
+        }
+        in_entry && !have_name && /^Name[[:space:]]*=/ {
+            val = $0
+            sub(/^Name[[:space:]]*=[[:space:]]*/, "", val)
+            sub(/\r$/, "", val)
+            name = val
+            have_name = 1
+        }
+        in_entry && /^NoDisplay[[:space:]]*=/ {
+            val = $0
+            sub(/^NoDisplay[[:space:]]*=[[:space:]]*/, "", val)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+            if (tolower(val) == "true") state = "hidden"
+            else state = "shown"
+        }
+        END {
+            if (name == "") name = pkg
+            printf "%s\t%s\t%s\n", state, pkg, name
+        }
+        ' "$_f"
+    done | LC_ALL=C sort -t "$_tab" -k3,3 -k2,2
+}
+
+# start_unit: clear the off marker, silently apply launcher visibility,
+# start the user unit, poll until the session is running (up to WAIT
+# seconds), and silently apply launcher visibility once more.
+start_unit() {
+    rm -f "$OFF_MARKER"
+    apply_apps_quiet
+    if ! systemctl --user start "$UNIT"; then
+        printf 't715-android: failed to start %s\n' "$UNIT" >&2
+        notify_android -u normal -g "$GLYPH_ANDROID" "Android did not start" \
+            "Could not start $UNIT."
+        log "start failed: systemctl --user start $UNIT failed"
+        return 1
+    fi
+    _st_left=$WAIT
+    while :; do
+        parse_status
+        if [ "$S_SESSION" = running ]; then
+            apply_apps_quiet
+            log "Android session started"
+            return 0
+        fi
+        [ "$_st_left" -gt 0 ] || break
+        sleep 1
+        _st_left=$((_st_left - 1))
+    done
+    printf 't715-android: Android session did not start within %s s\n' "$WAIT" >&2
+    notify_android -u normal -g "$GLYPH_ANDROID" "Android did not start" \
+        "Waydroid did not come up within ${WAIT} s."
+    log "start timed out after ${WAIT} s"
+    return 1
+}
+
+# do_start: `start` -- start the session when installed and stopped.
+do_start() {
+    if ! is_installed; then
+        printf 't715-android: Waydroid is not installed or not initialised\n' >&2
+        notify_android -u normal -g "$GLYPH_ANDROID" "Android unavailable" \
+            "Waydroid is not installed or not initialised on this system."
+        return 1
+    fi
+    parse_status
+    if [ "$S_SESSION" = running ]; then
+        rm -f "$OFF_MARKER"
+        apply_apps_quiet
+        return 0
+    fi
+    start_unit
+}
+
+# do_stop: `stop` -- write the off marker and stop the user unit.
+do_stop() {
+    mkdir -p "$STATE_DIR" || {
+        printf 't715-android: cannot create %s\n' "$STATE_DIR" >&2
+        return 1
+    }
+    : >"$OFF_MARKER" || {
+        printf 't715-android: cannot write %s\n' "$OFF_MARKER" >&2
+        return 1
+    }
+    systemctl --user stop "$UNIT" || true
+    log "Android session stopped"
+    return 0
+}
+
+# do_toggle: `toggle` -- stop when running, start otherwise.
+do_toggle() {
+    if ! is_installed; then
+        do_start
+        return $?
+    fi
+    parse_status
+    if [ "$S_SESSION" = running ]; then
+        do_stop
+    else
+        start_unit
+    fi
+}
+
+# do_settings: `settings` -- start when stopped, then open Android Settings
+# through the fast-path launcher wrapper when available.
+do_settings() {
+    do_start || return 1
+    _ds_wd=$(command -v waydroid 2>/dev/null || true)
+    if [ "$_ds_wd" = "/usr/bin/waydroid" ] && [ -x "$WAYDROID_WRAPPER" ]; then
+        "$WAYDROID_WRAPPER" app launch com.android.settings
+    else
+        waydroid app launch com.android.settings
+    fi
+}
+
+if [ $# -lt 1 ]; then
+    usage >&2
+    exit 2
+fi
+
+case ${1:-} in
+state)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    cmd_state
+    ;;
+start)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    do_start
+    ;;
+stop)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    do_stop
+    ;;
+toggle)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    do_toggle
+    ;;
+settings)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    do_settings
+    ;;
+apps)
+    case $# in
+    1) cmd_apps_apply ;;
+    2)
+        case $2 in
+        apply) cmd_apps_apply ;;
+        list) cmd_apps_list ;;
+        *) usage >&2; exit 2 ;;
+        esac
+        ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    ;;
+--help | -h)
+    [ $# -eq 1 ] || { usage >&2; exit 2; }
+    usage 2>&1
+    exit 0
+    ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

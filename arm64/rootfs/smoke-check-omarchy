@@ -18,7 +18,12 @@
 #       environment); the touch shell is not (omamobile-omarchy's patch series,
 #       the QML modules its plugins import, the user's profile or plugin links);
 #       PipeWire's BlueZ plugin is missing; the user's Hyprland config does not
-#       verify.
+#       verify;
+#       the Android (Waydroid) integration is not in place: waydroid or
+#       python-pyclip not installed, a tool of overlay-omarchy missing or not
+#       parsing, the two user units not enabled for every user,
+#       waydroid-container.service enabled, an Android image or config in
+#       /var/lib/waydroid, or the Android tile missing from the touch shell.
 # WARN: other session binaries, QML modules the Omarchy shell may miss, the
 #       two vendor files.
 
@@ -42,7 +47,7 @@ expect_version omarchy '4\.5\.0-3'
 expect_version omarchy-speedtest '0\.2\.2-1'
 expect_version yay '13\.0\.1-1'
 expect_version omamobile-omarchy '0\.1\.51-1\.1'
-expect_version omamobile-shell '0\.2\.147-3\.1'
+expect_version omamobile-shell '0\.2\.147-3\.2'
 expect_version omamobile-voice '0\.1\.1-1\.1'
 expect_version voxtype-bin '1\.3\.1-1\.1'
 expect_version mise-bin '2026\.11\.14-1'
@@ -437,6 +442,77 @@ if grep -qE '^IgnorePkg +=.* voxtype-bin( |$)' /etc/pacman.conf; then
     pass "IgnorePkg holds voxtype-bin"
 else
     fail "IgnorePkg does not hold voxtype-bin: an upgrade from Omarchy's channel would bring back the SIGILL build"
+fi
+
+echo "== Android (Waydroid; docs/image/ANDROID.md of the owner's repository) =="
+# waydroid comes from ALARM's aarch64 [extra], python-pyclip from pkg/python-pyclip.
+if pacman -Q waydroid >/dev/null 2>&1; then
+    pass "waydroid installed ($(pacman -Q waydroid | cut -d' ' -f2))"
+else
+    fail "waydroid is not installed (packages.extra)"
+fi
+if [ -x /usr/bin/waydroid ]; then
+    pass "/usr/bin/waydroid present"
+else
+    fail "/usr/bin/waydroid missing"
+fi
+if pacman -Q python-pyclip >/dev/null 2>&1; then
+    pyclip_init="$(pacman -Ql python-pyclip 2>/dev/null | awk '$2 ~ /site-packages\/pyclip\/__init__\.py$/ { print $2; exit }')"
+    if [ -n "$pyclip_init" ] && [ -f "/$pyclip_init" ]; then
+        pass "python-pyclip installed, its module at /$pyclip_init"
+    else
+        fail "python-pyclip installed but its module is missing"
+    fi
+else
+    fail "python-pyclip is not installed (packages.mobile, pkg/python-pyclip)"
+fi
+for f in /usr/local/bin/t715-android /usr/local/bin/waydroid /usr/local/sbin/t715-android-setup; do
+    if [ -x "$f" ]; then
+        pass "$f present, mode $(stat -c %a "$f")"
+    else
+        fail "$f missing or not executable (overlay-omarchy)"
+    fi
+done
+if bash -n /usr/local/sbin/t715-android-setup 2>/dev/null; then
+    pass "t715-android-setup parses (bash -n)"
+else
+    fail "t715-android-setup does not parse"
+fi
+if python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' /usr/local/lib/t715-android/launchd.py 2>/dev/null; then
+    pass "launchd.py parses (ast)"
+else
+    fail "launchd.py does not parse"
+fi
+for u in t715-android t715-android-launchd; do
+    t="/etc/systemd/user/graphical-session.target.wants/$u.service"
+    if [ "$(readlink "$t" 2>/dev/null)" = "/etc/systemd/user/$u.service" ]; then
+        pass "$u.service enabled for every user (graphical-session.target.wants)"
+    else
+        fail "$u.service not enabled for every user ($t)"
+    fi
+done
+if [ "$(systemctl is-enabled waydroid-container.service 2>/dev/null)" = enabled ]; then
+    fail "waydroid-container.service is enabled (it must stay disabled until t715-android-setup all)"
+else
+    pass "waydroid-container.service not enabled"
+fi
+wd_imgs=""
+if [ -e /var/lib/waydroid ]; then
+    wd_imgs="$(find /var/lib/waydroid -maxdepth 2 \( -name '*.img' -o -name waydroid.cfg \) -print 2>/dev/null | tr '\n' ' ')"
+fi
+if [ -z "$wd_imgs" ]; then
+    pass "no Android image or config in /var/lib/waydroid"
+else
+    fail "Android image or config in /var/lib/waydroid: $wd_imgs"
+fi
+qs=/usr/share/omamobile/shell/plugins/omamobile.quicksettings
+if grep -q '"android": android' "$qs/QuickSettings.qml" 2>/dev/null \
+        && grep -q 'id: android' "$qs/QuickSettings.qml" 2>/dev/null \
+        && grep -q 'have t715-android' "$qs/tile-state.sh" 2>/dev/null \
+        && grep -q 't715-android start' "$qs/tile-action.sh" 2>/dev/null; then
+    pass "the Android quick-settings tile is in the touch shell (0016)"
+else
+    fail "the Android tile is missing from the touch shell (0016-tablet-android-tile.patch)"
 fi
 
 echo "== Bluetooth (docs/image/ROOTFS.md) =="

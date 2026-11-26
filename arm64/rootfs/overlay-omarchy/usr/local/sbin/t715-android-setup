@@ -1,0 +1,1373 @@
+#!/bin/bash
+# t715-android-setup: root-side installer and configurator of Waydroid on
+# the SM-T715.
+#
+# Installs Waydroid without risking a partial system upgrade, initialises
+# its Android images, applies the verified Mesa workaround when the vendor
+# image ships the crashing build, points it at the Mali-T760 GPU render node
+# and compatible OpenGL ES / windowing properties, opens the ufw firewall for
+# the waydroid0 bridge, enables waydroid-container.service, and exposes
+# Android's shared storage to the session user once Android has booted.
+#
+# Why the pacman method:
+# The tablet's Arch Linux ARM package database is deliberately kept at a
+# known-good snapshot.  Refreshing it in place (`pacman -Sy` followed by an
+# install) produces a partial upgrade, and `pacman -Syu` would overwrite
+# patched system packages.  `packages` instead copies the local database
+# (`/var/lib/pacman/local`) into a temporary `--dbpath`, refreshes only that
+# temporary database (`pacman -Sy --dbpath D`), downloads `waydroid` and its
+# dependencies into a temporary `--cachedir` (`pacman -Sw --noconfirm
+# --dbpath D --cachedir C waydroid`), and installs the downloaded archives
+# with `pacman -U --noconfirm --needed`.  `/var/lib/pacman/sync` is never
+# touched, and both temporary directories are removed on exit and on error.
+#
+# DRM render nodes and Waydroid properties:
+# The SM-T715 exposes two DRM render nodes, one for the display driver
+# (`exynos-drm`) and one for the GPU (`panfrost`), whose numbering is not
+# fixed across boots.  `configure` inspects
+# `/sys/class/drm/renderD<N>/device/driver` to locate `panfrost`, writes
+# `drm_device = /dev/dri/renderD<N>` under `[waydroid]`, sets Mali-T760's
+# OpenGL ES 3.1 property (`ro.opengles.version = 196609`),
+# `persist.waydroid.multi_windows = false`, `ro.lmk.use_minfree_levels = false`,
+# and `ro.config.low_ram = true` (opt-out via `T715_ANDROID_LOW_RAM=0`) under
+# `[properties]` (plus `ro.sf.lcd_density` when `T715_ANDROID_DENSITY` is set),
+# preserving every other section, key and key case, and runs `waydroid upgrade
+# --offline` only when the configuration changed.  It also installs
+# `system/etc/init/t715-charger.rc` into Waydroid's overlay, so that Android
+# still boots when the tablet was started with a cable in (see
+# `install_charger_rc`).  Multi-window stays off on
+# purpose:
+# `waydroid app launch` still gives each app its own Wayland window (class
+# `waydroid.<package>`), full size and without Android's caption bar, and
+# the shell puts each on its own screen; with multi-window on, Android opens
+# small freeform tasks, a task covered by another loses its window, and
+# surfaceflinger crashed under the resizes needed to fill the screen.
+#
+# Shared storage (`share`) and why POSIX ACLs:
+# Waydroid stores Android's `/sdcard` under
+# `<home>/.local/share/waydroid/data/media/0`, owned by Android uids and
+# gid 1023 (`media_rw`) with POSIX ACLs.  `share` grants the session user
+# (by numeric uid) traverse access down to `media/0` and recursive + default
+# `rwX` ACLs on `Download`, `Pictures`, `Documents`, `DCIM`, `Movies` and
+# `Music` (keeping `g:1023:rwX` and `m::rwx` in the default ACL), then
+# creates `<home>/Android` -> `media/0`.  Using POSIX ACLs means the
+# storage stays owned by Android, nothing is bind-mounted, and Android's
+# own permissions are kept so files created on either side are readable,
+# writable and deletable on the other.  `all` does NOT call `share`
+# because Android has not booted once yet at that point (`media/0` only
+# exists after Android's first boot).
+#
+# Mesa 26.0.8 workaround (`mesa-fix`):
+# Waydroid's 32-bit ARM (armv7h) vendor image
+# (`/var/lib/waydroid/images/vendor.img`) ships `lib/libgallium_dri.so` from
+# Mesa 26.0.8, which crashes Android's surfaceflinger (use-after-free in
+# `_mesa_hash_table_u64`, a 32-bit-only bug: sizeof(void*) != 8).  `mesa-fix`
+# mounts `vendor.img` read-only, verifies the exact sha256 of the known bad
+# library and the 4 bytes at offset `0xd4f86a` (the `bl ralloc_set_destructor`
+# call in `_mesa_hash_table_u64_create`), replaces them with `nop.w`
+# (`af f3 00 80`), verifies the resulting sha256, and installs the patched
+# library into `/var/lib/waydroid/overlay/vendor/lib/libgallium_dri.so`
+# (mode 644, root).  On any other vendor build it refuses to patch and removes
+# our previously patched overlay file if present so it cannot shadow a newer
+# Mesa library.  On aarch64 (64-bit `waydroid_arm64` images, `arm64-v8a` apps)
+# there is nothing to patch: `mesa-fix` says so in one line, removes any
+# overlay file it would own, and exits 0, so `all` skips it without failing.
+#
+# Google Services Framework Android ID (`google-id`):
+# With the Google-apps image (`init --gapps`), Google refuses sign-in until
+# the owner registers the container's GSF Android ID at
+# `https://www.google.com/android/uncertified`.  `google-id` checks that
+# `waydroid-container.service` is active, queries `gservices.db` inside the
+# container via `timeout 30 waydroid shell`, prints the numeric ID alone on
+# stdout (with registration instructions on stderr), and never stores or
+# logs it.
+#
+# Trimming the Google-apps image (`trim`):
+# The Google-apps image (`init --gapps`) is heavy for 2.7 GB of RAM.  `trim`
+# checks that `waydroid-container.service` is active, disables five heavy or
+# unused Google packages for user 0 (overridable via `/etc/t715-android/trim`,
+# one package per line with `#` comments), and caps cached background
+# processes (`settings put global activity_manager_constants
+# max_cached_processes=6`).  On the reference tablet this raised available
+# memory from 576 to 873 MB, lowered zram swap in use from 932 to 671 MB, and
+# brought memory pressure back to 0.  `trim --undo` re-enables the installed
+# packages and deletes `activity_manager_constants`.  `all` does NOT call
+# `trim` because Android must have booted once first.
+#
+# Ahead-of-time compilation (`optimize`):
+# Apps updated or installed from the Play Store stay at dexopt status `verify`
+# (interpreted/JIT), and Android's idle background optimisation never runs
+# because Waydroid freezes the idle container.  `optimize` queries `dumpsys
+# package dexopt` inside the running container and compiles every package whose
+# dexopt status is not `speed`, `speed-profile`, or `everything` (or only the
+# packages passed as arguments) with `cmd package compile -m speed -f PKG`
+# (bounded by `timeout 900`).  On the reference tablet (2026-11-21) compiling
+# took 3-15 s for small system apps, ~2 min each for the Play Store and a large
+# user app, and 7 min for Google Play services; Settings cold start dropped
+# from 3.4 s to 1.7-2.7 s and Files from 3.2 s to 1.6-1.9 s.  This can take
+# 10-20 minutes after many installs.  `all` does NOT call `optimize` because
+# Android must have booted and apps must be installed first.
+#
+# Usage:
+#   t715-android-setup packages        install waydroid safely if absent
+#   t715-android-setup init [--gapps]  initialise Waydroid images (requires
+#                                      /dev/binder; -s GAPPS with --gapps)
+#   t715-android-setup mesa-fix        apply or clean up the verified Mesa
+#                                      libgallium_dri.so overlay workaround
+#                                      (32-bit vendor image only; on aarch64
+#                                      it prints one line and exits 0)
+#   t715-android-setup configure       set panfrost DRM node and properties
+#                                      in waydroid.cfg; apply offline upgrade
+#                                      when changed
+#   t715-android-setup firewall        allow waydroid0 DNS/DHCP/routing in
+#                                      ufw when ufw is installed and active
+#   t715-android-setup enable          enable and start
+#                                      waydroid-container.service
+#   t715-android-setup share [USER]    grant USER (default: alarm) read/write
+#                                      ACL access to Android shared storage
+#                                      and link ~/Android (after first boot)
+#   t715-android-setup google-id       print the Google Services Framework
+#                                      Android ID (GAPPS image, after boot)
+#   t715-android-setup trim [--undo]   disable heavy/unused GAPPS packages and
+#                                      cap cached processes (after boot; --undo
+#                                      reverses)
+#   t715-android-setup optimize [PKG...]
+#                                      AOT-compile packages not yet compiled
+#                                      (or only the given packages; after boot)
+#   t715-android-setup all [--gapps]   run packages, init, mesa-fix,
+#                                      configure, firewall, enable in order
+#                                      (does not run share, google-id, trim or
+#                                      optimize)
+#   t715-android-setup status          print key=value status lines
+#   t715-android-setup --help          print usage on stdout and exit 0
+#
+# Every subcommand except `status` and `--help` requires root (`id -u` == 0).
+#
+# Exit codes:
+#   0  success (or --help)
+#   1  runtime failure (not root, command failure, missing cfg or panfrost)
+#   2  usage error (missing/unknown subcommand or invalid arguments)
+#   3  running kernel lacks Android binder ($T715_ANDROID_DEV/binder missing)
+#
+# Test hooks (environment variables; all external commands resolve via PATH):
+#   T715_ANDROID_CFG             /var/lib/waydroid/waydroid.cfg
+#   T715_ANDROID_VENDOR_IMG      /var/lib/waydroid/images/vendor.img
+#   T715_ANDROID_OVERLAY         /var/lib/waydroid/overlay
+#   T715_ANDROID_SYSFS           /sys
+#   T715_ANDROID_DEV             /dev
+#   T715_ANDROID_TMP             /var/tmp (parent for temporary dirs)
+#   T715_ANDROID_ETC             /etc/t715-android (override dir for trim)
+#   T715_ANDROID_ASSUME_ROOT     set to 1 to skip the root check
+#   T715_ANDROID_PACMAN_LOCAL    /var/lib/pacman/local
+#   T715_ANDROID_DENSITY         optional; when non-empty, sets ro.sf.lcd_density
+#   T715_ANDROID_LOW_RAM         set to 0 to leave ro.config.low_ram untouched
+#   T715_ANDROID_SIZE            Android's fixed display size, WxH in logical
+#                                pixels (default 744x1000); 0 leaves it alone
+#   T715_ANDROID_USER            default user for share (default: alarm)
+#   T715_ANDROID_MESA_BAD_SHA    override known bad libgallium_dri.so sha256
+#   T715_ANDROID_MESA_FIXED_SHA  override expected patched sha256
+#   T715_ANDROID_MESA_OFFSET     override patch file offset (hex or decimal)
+#   T715_ANDROID_ARCH            override the host architecture (`uname -m`)
+set -u
+
+# Host architecture: Waydroid's images and apps follow it.  aarch64 (or
+# arm64) runs the 64-bit `waydroid_arm64` images and arm64-v8a apps; armv7l
+# and armv8l (32-bit userland) run the 32-bit `waydroid_arm` images and
+# armeabi-v7a apps.  Only the Mesa workaround depends on it.
+HOST_ARCH=${T715_ANDROID_ARCH:-$(uname -m)}
+case "$HOST_ARCH" in
+    aarch64|arm64) HOST_64=1 ;;
+    *) HOST_64=0 ;;
+esac
+
+CFG_FILE=${T715_ANDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+VENDOR_IMG=${T715_ANDROID_VENDOR_IMG:-/var/lib/waydroid/images/vendor.img}
+OVERLAY_DIR=${T715_ANDROID_OVERLAY:-/var/lib/waydroid/overlay}
+OVERLAY_DIR=${OVERLAY_DIR%/}
+SYSFS=${T715_ANDROID_SYSFS:-/sys}
+SYSFS=${SYSFS%/}
+DEV_DIR=${T715_ANDROID_DEV:-/dev}
+DEV_DIR=${DEV_DIR%/}
+TMP_DIR=${T715_ANDROID_TMP:-/var/tmp}
+TMP_DIR=${TMP_DIR%/}
+ETC_DIR=${T715_ANDROID_ETC:-/etc/t715-android}
+ETC_DIR=${ETC_DIR%/}
+ASSUME_ROOT=${T715_ANDROID_ASSUME_ROOT:-0}
+PACMAN_LOCAL=${T715_ANDROID_PACMAN_LOCAL:-/var/lib/pacman/local}
+PACMAN_LOCAL=${PACMAN_LOCAL%/}
+DENSITY=${T715_ANDROID_DENSITY:-}
+LOW_RAM=${T715_ANDROID_LOW_RAM:-1}
+DISPLAY_SIZE=${T715_ANDROID_SIZE:-744x1000}
+DEFAULT_USER=${T715_ANDROID_USER:-alarm}
+
+# Heavy or unused Google-apps packages disabled by `trim` for user 0.
+# Overridable by $ETC_DIR/trim (one package per line, '#' comments).
+TRIM_PKGS_DEFAULT=(
+    com.google.android.googlequicksearchbox # Google app (~170 MB)
+    com.google.android.apps.messaging       # Messages
+    com.google.android.ims                  # Carrier Services (IMS)
+    com.google.android.dialer               # Phone
+    com.google.android.as                   # Android System Intelligence
+)
+
+# Known Mesa 26.0.8 libgallium_dri.so build in Waydroid's 32-bit ARM (armv7h)
+# vendor image that crashes surfaceflinger (use-after-free in
+# _mesa_hash_table_u64, a 32-bit-only bug).  File offset 0xd4f86a is the
+# `bl ralloc_set_destructor` in `_mesa_hash_table_u64_create`, replaced by
+# `nop.w` (`af f3 00 80`); this avoids the use-after-free at the cost that the
+# 8-byte keys of those tables leak.  Only ever applied on a 32-bit host
+# (HOST_64=0); on aarch64 the 64-bit vendor image has no such build.
+MESA_BAD_SHA=${T715_ANDROID_MESA_BAD_SHA:-a7523a1a41b54d0362df00b4db8195e9a909fc3df1a4eb7e8edb43d93d5836e7}
+MESA_FIXED_SHA=${T715_ANDROID_MESA_FIXED_SHA:-57ffc8aff962f5feb08c3d25f662da052026f3c7199b7b456857c8c8d1d9112b}
+MESA_PATCH_OFFSET=${T715_ANDROID_MESA_OFFSET:-0xd4f86a}
+MESA_OLD_BYTES="01f0eaff"
+MESA_NEW_BYTES="aff30080"
+
+PKG_TMP_DB=""
+PKG_TMP_CACHE=""
+MESA_MNT=""
+MESA_MOUNTED=0
+MESA_TMP_DIR=""
+
+cleanup_tmp() {
+    if [ "$MESA_MOUNTED" -eq 1 ] && [ -n "$MESA_MNT" ]; then
+        if umount "$MESA_MNT" >/dev/null 2>&1; then
+            MESA_MOUNTED=0
+        fi
+    fi
+    if [ "$MESA_MOUNTED" -eq 0 ] && [ -n "$MESA_MNT" ]; then
+        rm -rf "$MESA_MNT"
+        MESA_MNT=""
+    fi
+    if [ -n "$MESA_TMP_DIR" ]; then
+        rm -rf "$MESA_TMP_DIR"
+        MESA_TMP_DIR=""
+    fi
+    if [ -n "$PKG_TMP_DB" ]; then
+        rm -rf "$PKG_TMP_DB"
+        PKG_TMP_DB=""
+    fi
+    if [ -n "$PKG_TMP_CACHE" ]; then
+        rm -rf "$PKG_TMP_CACHE"
+        PKG_TMP_CACHE=""
+    fi
+}
+
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT
+trap 'cleanup_tmp; exit 143' TERM
+
+usage() {
+    printf 'usage: t715-android-setup packages\n'
+    printf '       t715-android-setup init [--gapps]\n'
+    printf '       t715-android-setup mesa-fix\n'
+    printf '       t715-android-setup configure\n'
+    printf '       t715-android-setup firewall\n'
+    printf '       t715-android-setup enable\n'
+    printf '       t715-android-setup share [USER]\n'
+    printf '       t715-android-setup google-id\n'
+    printf '       t715-android-setup trim [--undo]\n'
+    printf '       t715-android-setup optimize [PKG...]\n'
+    printf '       t715-android-setup all [--gapps]\n'
+    printf '       t715-android-setup status\n'
+    printf '       t715-android-setup --help\n'
+}
+
+require_root() {
+    if [ "$ASSUME_ROOT" = "1" ]; then
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        printf 't715-android-setup: must be run as root\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_packages() {
+    local pkgs=() pkg_count=0 f
+
+    if pacman -Q waydroid >/dev/null 2>&1; then
+        printf 'packages: waydroid is already installed, nothing to do\n'
+        return 0
+    fi
+
+    if [ ! -d "$PACMAN_LOCAL" ]; then
+        printf 'packages: pacman local database not found at %s\n' "$PACMAN_LOCAL" >&2
+        return 1
+    fi
+
+    if ! PKG_TMP_DB=$(mktemp -d "${TMP_DIR}/t715-android-db.XXXXXX"); then
+        PKG_TMP_DB=""
+        printf 'packages: failed to create temporary dbpath directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+    if ! PKG_TMP_CACHE=$(mktemp -d "${TMP_DIR}/t715-android-pkg.XXXXXX"); then
+        PKG_TMP_CACHE=""
+        cleanup_tmp
+        printf 'packages: failed to create temporary cachedir directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    if ! mkdir -p "$PKG_TMP_DB/local" || ! cp -a "$PACMAN_LOCAL/." "$PKG_TMP_DB/local/"; then
+        cleanup_tmp
+        printf 'packages: failed to copy pacman local database from %s\n' "$PACMAN_LOCAL" >&2
+        return 1
+    fi
+
+    if ! pacman -Sy --dbpath "$PKG_TMP_DB"; then
+        cleanup_tmp
+        printf 'packages: pacman -Sy with temporary dbpath failed\n' >&2
+        return 1
+    fi
+
+    if ! pacman -Sw --noconfirm --dbpath "$PKG_TMP_DB" --cachedir "$PKG_TMP_CACHE" waydroid; then
+        cleanup_tmp
+        printf 'packages: pacman -Sw waydroid failed\n' >&2
+        return 1
+    fi
+
+    for f in "$PKG_TMP_CACHE"/*.pkg.tar.*; do
+        [ -e "$f" ] || continue
+        case "$f" in
+            *.sig) continue ;;
+        esac
+        pkgs+=("$f")
+        pkg_count=$((pkg_count + 1))
+    done
+
+    if [ "$pkg_count" -eq 0 ]; then
+        cleanup_tmp
+        printf 'packages: no downloaded packages found in cache\n' >&2
+        return 1
+    fi
+
+    if ! pacman -U --noconfirm --needed "${pkgs[@]}"; then
+        cleanup_tmp
+        printf 'packages: pacman -U failed\n' >&2
+        return 1
+    fi
+
+    cleanup_tmp
+    return 0
+}
+
+cmd_init() {
+    local gapps=${1:-}
+
+    if [ ! -e "$DEV_DIR/binder" ]; then
+        printf 'init: %s/binder is missing: this kernel does not provide Android binder support\n' "$DEV_DIR" >&2
+        return 3
+    fi
+
+    if [ -f "$CFG_FILE" ]; then
+        printf 'init: %s already exists, nothing to do\n' "$CFG_FILE"
+        return 0
+    fi
+
+    if [ "$gapps" = "--gapps" ]; then
+        if ! waydroid init -s GAPPS; then
+            printf 'init: waydroid init -s GAPPS failed\n' >&2
+            return 1
+        fi
+    else
+        if ! waydroid init; then
+            printf 'init: waydroid init failed\n' >&2
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+cmd_mesa_fix() {
+    local vendor_lib overlay_lib tmp_lib vendor_sha overlay_sha patched_sha short_sha
+
+    overlay_lib="$OVERLAY_DIR/vendor/lib/libgallium_dri.so"
+
+    if [ "$HOST_64" -eq 1 ]; then
+        # The workaround patches a byte sequence of the 32-bit (armv7h)
+        # vendor image's libgallium_dri.so; the aarch64 vendor image
+        # (waydroid_arm64) has no such build (sizeof(void*) == 8).  Nothing
+        # to patch: drop any overlay file this step would own (left over
+        # from a 32-bit run) and succeed, so `all` skips it without failing.
+        if [ -e "$overlay_lib" ] || [ -L "$overlay_lib" ]; then
+            rm -f "$overlay_lib" 2>/dev/null || true
+        fi
+        printf 'mesa-fix: the Mesa workaround is for the 32-bit (armv7h) vendor image only, nothing to do on %s\n' "$HOST_ARCH"
+        return 0
+    fi
+
+    if [ ! -e "$VENDOR_IMG" ]; then
+        printf 'mesa-fix: %s does not exist (run init first)\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+
+    if ! MESA_MNT=$(mktemp -d "${TMP_DIR}/t715-android-mnt.XXXXXX"); then
+        MESA_MNT=""
+        printf 'mesa-fix: failed to create temporary mount directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    if ! mount -o ro,loop "$VENDOR_IMG" "$MESA_MNT"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to mount %s\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+    MESA_MOUNTED=1
+
+    vendor_lib="$MESA_MNT/lib/libgallium_dri.so"
+    if [ ! -f "$vendor_lib" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: lib/libgallium_dri.so not found in %s\n' "$VENDOR_IMG" >&2
+        return 1
+    fi
+
+    if ! vendor_sha=$(sha256sum "$vendor_lib"); then
+        cleanup_tmp
+        printf 'mesa-fix: failed to hash %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+    vendor_sha=${vendor_sha%%[[:space:]]*}
+    if [ -z "$vendor_sha" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: empty sha256 for %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+
+    if [ "$vendor_sha" != "$MESA_BAD_SHA" ]; then
+        short_sha=${vendor_sha:0:12}
+        if [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+            overlay_sha=${overlay_sha%%[[:space:]]*}
+            if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+                if ! rm -f "$overlay_lib"; then
+                    cleanup_tmp
+                    printf 'mesa-fix: failed to remove stale patched overlay %s\n' "$overlay_lib" >&2
+                    return 1
+                fi
+                printf 'mesa-fix: removed stale patched overlay %s\n' "$overlay_lib"
+            else
+                printf 'mesa-fix: warning: %s does not match known patched build, leaving it untouched\n' "$overlay_lib" >&2
+            fi
+        elif [ -e "$overlay_lib" ] || [ -L "$overlay_lib" ]; then
+            printf 'mesa-fix: warning: %s does not match known patched build, leaving it untouched\n' "$overlay_lib" >&2
+        fi
+        cleanup_tmp
+        printf 'mesa-fix: unknown Mesa build %s, nothing applied\n' "$short_sha"
+        return 0
+    fi
+
+    if [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+        overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+        overlay_sha=${overlay_sha%%[[:space:]]*}
+        if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+            cleanup_tmp
+            printf 'mesa-fix: already applied, nothing to do\n'
+            return 0
+        fi
+    fi
+
+    if ! MESA_TMP_DIR=$(mktemp -d "${TMP_DIR}/t715-android-mesa.XXXXXX"); then
+        MESA_TMP_DIR=""
+        cleanup_tmp
+        printf 'mesa-fix: failed to create temporary working directory under %s\n' "$TMP_DIR" >&2
+        return 1
+    fi
+
+    tmp_lib="$MESA_TMP_DIR/libgallium_dri.so"
+    if ! cp "$vendor_lib" "$tmp_lib" || ! chmod u+w "$tmp_lib"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to copy %s\n' "$vendor_lib" >&2
+        return 1
+    fi
+
+    if ! python3 - "$tmp_lib" "$MESA_PATCH_OFFSET" "$MESA_OLD_BYTES" "$MESA_NEW_BYTES" <<'PY'
+import sys
+
+path = sys.argv[1]
+offset = int(sys.argv[2], 0)
+old_bytes = bytes.fromhex(sys.argv[3])
+new_bytes = bytes.fromhex(sys.argv[4])
+
+if len(old_bytes) != len(new_bytes):
+    print("mesa-fix: old and new byte lengths differ", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, "r+b") as fh:
+    fh.seek(0, 2)
+    size = fh.tell()
+    if offset < 0 or offset + len(old_bytes) > size:
+        print(f"mesa-fix: offset 0x{offset:x} out of range (size {size})", file=sys.stderr)
+        sys.exit(1)
+    fh.seek(offset)
+    actual = fh.read(len(old_bytes))
+    if actual != old_bytes:
+        print(
+            f"mesa-fix: unexpected bytes at 0x{offset:x}: got {actual.hex()}, expected {old_bytes.hex()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    fh.seek(offset)
+    fh.write(new_bytes)
+PY
+    then
+        cleanup_tmp
+        return 1
+    fi
+
+    if ! patched_sha=$(sha256sum "$tmp_lib"); then
+        cleanup_tmp
+        printf 'mesa-fix: failed to hash patched library\n' >&2
+        return 1
+    fi
+    patched_sha=${patched_sha%%[[:space:]]*}
+    if [ "$patched_sha" != "$MESA_FIXED_SHA" ]; then
+        cleanup_tmp
+        printf 'mesa-fix: patched sha256 mismatch (got %s, expected %s)\n' "$patched_sha" "$MESA_FIXED_SHA" >&2
+        return 1
+    fi
+
+    if ! install -d -m 0755 "$OVERLAY_DIR/vendor/lib" || ! install -m 0644 "$tmp_lib" "$overlay_lib"; then
+        cleanup_tmp
+        printf 'mesa-fix: failed to install %s\n' "$overlay_lib" >&2
+        return 1
+    fi
+
+    cleanup_tmp
+    printf 'mesa-fix: applied\n'
+    return 0
+}
+
+find_panfrost_node() {
+    local node target drv
+    for node in "$SYSFS"/class/drm/renderD[0-9]*; do
+        [ -e "$node" ] || continue
+        target=$(readlink "$node/device/driver" 2>/dev/null) || continue
+        target=${target%/}
+        drv=${target##*/}
+        if [ "$drv" = "panfrost" ]; then
+            printf '/dev/dri/%s\n' "${node##*/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# sboot puts androidboot.mode=charger on the kernel command line when the
+# tablet starts with a cable in.  Linux ignores it, but Android's init reads
+# the same /proc/cmdline inside the container, fires its "charger" trigger
+# instead of "late-init" and stops there: no zygote, so no app ever opens
+# (seen 2026-11-21 after a forced restart on the charger).  An init .rc in
+# Waydroid's overlay chains the normal boot onto that trigger.  Silent when
+# the file is already in place; read at the container's next start.
+install_charger_rc() {
+    local dir="$OVERLAY_DIR/system/etc/init" tmp
+    local dst="$dir/t715-charger.rc"
+
+    tmp=$(mktemp "$TMP_DIR/t715-charger-rc.XXXXXX") || return 1
+    cat > "$tmp" <<'RC'
+# SM-T715 (t715-android-setup configure): the host kernel command line says
+# androidboot.mode=charger after a start with a cable in; boot Android anyway.
+on charger
+    trigger late-init
+RC
+    if [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$tmp" "$dst"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    if ! install -d -m 0755 "$dir" || ! install -m 0644 "$tmp" "$dst"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+cmd_configure() {
+    local drm_dev rc=0
+
+    if [ ! -f "$CFG_FILE" ]; then
+        printf 'configure: %s does not exist (run init first)\n' "$CFG_FILE" >&2
+        return 1
+    fi
+
+    if ! drm_dev=$(find_panfrost_node); then
+        printf 'configure: no panfrost DRM render node found under %s/class/drm\n' "$SYSFS" >&2
+        return 1
+    fi
+
+    if ! install_charger_rc; then
+        printf 'configure: failed to install %s/system/etc/init/t715-charger.rc\n' "$OVERLAY_DIR" >&2
+        return 1
+    fi
+
+    python3 - "$CFG_FILE" "$drm_dev" "$DENSITY" "$LOW_RAM" "$DISPLAY_SIZE" <<'PY' || rc=$?
+import configparser
+import io
+import os
+import sys
+import tempfile
+
+cfg_path = sys.argv[1]
+drm_device = sys.argv[2]
+density = sys.argv[3]
+low_ram = sys.argv[4]
+display_size = sys.argv[5]
+
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+with open(cfg_path, "r", encoding="utf-8") as fh:
+    cfg.read_file(fh)
+
+desired = [
+    ("waydroid", "drm_device", drm_device),
+    ("properties", "ro.opengles.version", "196609"),
+    ("properties", "persist.waydroid.multi_windows", "false"),
+    # Android's low memory killer in its pressure (PSI) mode. In the "minfree
+    # levels" mode Waydroid selects, lmkd subtracts both the shmem and the
+    # unevictable pages from the file cache; the GPU's and Wayland's buffers
+    # are both at once (950 MB seen), so it read the cache as empty and
+    # killed the home app in a loop: Android never finished booting.
+    ("properties", "ro.lmk.use_minfree_levels", "false"),
+]
+if low_ram != "0":
+    # Android's low-RAM mode. Measured on the tablet with the Google-apps
+    # image (2026-11-21): Android boots in 40 s instead of 73 s, zram swap in
+    # use drops from 740-920 MB to 449 MB, Settings cold start 1.5-1.7 s
+    # (was 1.7-2.7 s), Files 1.0-1.5 s; no crash seen. Opt out with
+    # T715_ANDROID_LOW_RAM=0.
+    desired.append(("properties", "ro.config.low_ram", "true"))
+if density:
+    desired.append(("properties", "ro.sf.lcd_density", density))
+# A fixed size for Android's display, in the compositor's logical pixels
+# (Waydroid multiplies by the output scale): the size of an app window under
+# the tablet's shell. Left to follow the window, Waydroid's composer re-plugs
+# the virtual display at every size change, and a call landing in the gap
+# kills surfaceflinger (DisplayDevice::getId, presentAndGetReleaseFences,
+# onComposerHalVsync on a null display), which restarts all of Android. With
+# the fixed size: no hotplug event and no restart over six open/close cycles
+# (2026-11-21). A smaller size is not upscaled. T715_ANDROID_SIZE=WxH
+# overrides, T715_ANDROID_SIZE=0 leaves the keys alone.
+if display_size not in ("", "0"):
+    w, sep, h = display_size.partition("x")
+    if not (sep and w.isdigit() and h.isdigit() and int(w) > 0 and int(h) > 0):
+        print("configure: T715_ANDROID_SIZE must be WxH or 0", file=sys.stderr)
+        sys.exit(2)
+    desired.append(("properties", "persist.waydroid.width", w))
+    desired.append(("properties", "persist.waydroid.height", h))
+
+changes = []
+for section, key, value in desired:
+    if not cfg.has_section(section):
+        cfg.add_section(section)
+    if cfg.get(section, key, fallback=None) != value:
+        cfg.set(section, key, value)
+        changes.append((section, key, value))
+
+if not changes:
+    print("nothing to change")
+    sys.exit(10)
+
+buf = io.StringIO()
+cfg.write(buf)
+content = buf.getvalue()
+
+parent = os.path.dirname(os.path.abspath(cfg_path))
+fd, tmp_path = tempfile.mkstemp(prefix=".waydroid.cfg.", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(content)
+    try:
+        st = os.stat(cfg_path)
+        os.chmod(tmp_path, st.st_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp_path, cfg_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+
+for section, key, value in changes:
+    print(f"[{section}] {key} = {value}")
+PY
+
+    if [ "$rc" -eq 10 ]; then
+        return 0
+    elif [ "$rc" -ne 0 ]; then
+        printf 'configure: failed to update %s\n' "$CFG_FILE" >&2
+        return 1
+    fi
+
+    if ! waydroid upgrade --offline; then
+        printf 'configure: waydroid upgrade --offline failed\n' >&2
+        return 1
+    fi
+
+    return 0
+}
+
+ufw_rule() {
+    local out rc=0
+    out=$(ufw "$@" 2>&1) || rc=$?
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+    fi
+    if [ "$rc" -ne 0 ]; then
+        case "$out" in
+            *Skipping*) return 0 ;;
+        esac
+        printf 'firewall: ufw %s failed\n' "$*" >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_firewall() {
+    local status_out
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        printf 'firewall: ufw is not installed, nothing to do\n'
+        return 0
+    fi
+
+    status_out=$(ufw status 2>/dev/null || true)
+    case "$status_out" in
+        "Status: active"*) ;;
+        *)
+            printf 'firewall: ufw is not active, nothing to do\n'
+            return 0
+            ;;
+    esac
+
+    ufw_rule allow in on waydroid0 to any port 53 || return 1
+    ufw_rule allow in on waydroid0 to any port 67 proto udp || return 1
+    ufw_rule route allow in on waydroid0 || return 1
+    ufw_rule route allow out on waydroid0 || return 1
+    return 0
+}
+
+cmd_enable() {
+    if ! systemctl enable --now waydroid-container.service; then
+        printf 'enable: failed to enable waydroid-container.service\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+cmd_share() {
+    local user=$1
+    local passwd_line="" uid="" gid="" home=""
+    local data_dir media_dir media0 link_path current_target
+    local dirs=() dir_count=0 d
+
+    if ! passwd_line=$(getent passwd "$user" 2>/dev/null) || [ -z "$passwd_line" ]; then
+        printf 'share: user %s does not exist\n' "$user" >&2
+        return 1
+    fi
+
+    IFS=: read -r _ _ uid gid _ home _ <<< "$passwd_line"
+    case "$uid" in
+        ""|*[!0-9]*)
+            printf 'share: invalid uid in passwd entry for %s\n' "$user" >&2
+            return 1
+            ;;
+    esac
+    case "$gid" in
+        ""|*[!0-9]*)
+            printf 'share: invalid gid in passwd entry for %s\n' "$user" >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$home" ]; then
+        printf 'share: empty home directory for %s\n' "$user" >&2
+        return 1
+    fi
+    home=${home%/}
+
+    data_dir="$home/.local/share/waydroid/data"
+    media_dir="$data_dir/media"
+    media0="$media_dir/0"
+
+    if [ ! -d "$media0" ]; then
+        printf 'share: %s does not exist (Android has not booted once yet)\n' "$media0" >&2
+        return 1
+    fi
+
+    if ! command -v setfacl >/dev/null 2>&1; then
+        printf 'share: setfacl is not installed (install package acl)\n' >&2
+        return 1
+    fi
+
+    for d in Download Pictures Documents DCIM Movies Music; do
+        if [ -d "$media0/$d" ]; then
+            dirs+=("$media0/$d")
+            dir_count=$((dir_count + 1))
+        fi
+    done
+
+    if [ "$dir_count" -eq 0 ]; then
+        printf 'share: none of the shared storage directories exist under %s\n' "$media0" >&2
+        return 1
+    fi
+
+    if ! setfacl -m "u:${uid}:x" "$data_dir" "$media_dir"; then
+        printf 'share: setfacl failed on %s and %s\n' "$data_dir" "$media_dir" >&2
+        return 1
+    fi
+    if ! setfacl -m "u:${uid}:rx" "$media0"; then
+        printf 'share: setfacl failed on %s\n' "$media0" >&2
+        return 1
+    fi
+    if ! setfacl -R -m "u:${uid}:rwX" "${dirs[@]}"; then
+        printf 'share: setfacl -R failed on shared directories\n' >&2
+        return 1
+    fi
+    if ! setfacl -R -d -m "u:${uid}:rwX,g:1023:rwX,m::rwx" "${dirs[@]}"; then
+        printf 'share: setfacl -R -d failed on shared directories\n' >&2
+        return 1
+    fi
+
+    for d in Download Pictures Documents DCIM Movies Music; do
+        if [ -d "$media0/$d" ]; then
+            printf 'share: shared %s\n' "$media0/$d"
+        else
+            printf 'share: skipping missing %s\n' "$media0/$d"
+        fi
+    done
+
+    link_path="$home/Android"
+    if [ -L "$link_path" ]; then
+        current_target=$(readlink "$link_path" 2>/dev/null || true)
+        if [ "$current_target" = "$media0" ]; then
+            printf 'share: %s already links to %s\n' "$link_path" "$media0"
+        else
+            printf 'share: warning: %s already exists (links to %s), leaving it untouched\n' "$link_path" "$current_target" >&2
+        fi
+    elif [ -e "$link_path" ]; then
+        printf 'share: warning: %s already exists and is not a symlink to %s, leaving it untouched\n' "$link_path" "$media0" >&2
+    else
+        if ! ln -s "$media0" "$link_path"; then
+            printf 'share: failed to create symlink %s -> %s\n' "$link_path" "$media0" >&2
+            return 1
+        fi
+        if ! chown -h "${uid}:${gid}" "$link_path"; then
+            printf 'share: failed to chown symlink %s to %s:%s\n' "$link_path" "$uid" "$gid" >&2
+            return 1
+        fi
+        printf 'share: linked %s -> %s\n' "$link_path" "$media0"
+    fi
+
+    return 0
+}
+
+cmd_google_id() {
+    local out="" rc=0 id=""
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'google-id: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    out=$(timeout 30 waydroid shell -- sh -c \
+        'ANDROID_RUNTIME_ROOT=/apex/com.android.runtime ANDROID_DATA=/data ANDROID_TZDATA_ROOT=/apex/com.android.tzdata ANDROID_I18N_ROOT=/apex/com.android.i18n sqlite3 /data/data/com.google.android.gsf/databases/gservices.db "select value from main where name = \"android_id\";"' \
+        2>/dev/null) || rc=$?
+
+    if [ "$rc" -eq 124 ]; then
+        printf 'google-id: timed out after 30 s querying waydroid shell\n' >&2
+        return 1
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        printf 'google-id: Google services have not created the Android ID yet (start the session, wait a few minutes, and retry)\n' >&2
+        return 1
+    fi
+
+    id=${out%$'\r'}
+    case "$id" in
+        ""|*[!0-9]*)
+            printf 'google-id: Google services have not created the Android ID yet (start the session, wait a few minutes, and retry)\n' >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$id"
+    printf 'Register this ID at: https://www.google.com/android/uncertified\n' >&2
+    printf 'Then restart Android: t715-android stop, then t715-android start\n' >&2
+    return 0
+}
+
+parse_trim_file() {
+    awk '{
+        sub(/\r$/, "")
+        sub(/#.*/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        if ($0 != "") print $0
+    }' "$1"
+}
+
+cmd_trim() {
+    local mode=${1:-}
+    local target_pkgs=() target_count=0
+    local matched_pkgs=() matched_count=0
+    local pm_out="" out="" rc=0 nl line pkg installed_list seen_list
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'trim: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    if [ -f "$ETC_DIR/trim" ]; then
+        while IFS= read -r pkg; do
+            pkg=${pkg%$'\r'}
+            [ -n "$pkg" ] || continue
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done < <(parse_trim_file "$ETC_DIR/trim")
+    else
+        for pkg in "${TRIM_PKGS_DEFAULT[@]}"; do
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done
+    fi
+
+    pm_out=$(timeout 30 waydroid shell -- pm list packages 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        printf 'trim: timed out after 30 s querying waydroid shell\n' >&2
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf 'trim: waydroid shell pm list packages failed (exit %d)\n' "$rc" >&2
+        return 1
+    fi
+
+    nl=$'\n'
+    installed_list=$nl
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        case "$line" in
+            package:*)
+                pkg=${line#package:}
+                pkg=${pkg%%[[:space:]]*}
+                [ -n "$pkg" ] && installed_list="${installed_list}${pkg}${nl}"
+                ;;
+        esac
+    done <<< "$pm_out"
+
+    seen_list=$nl
+    if [ "$target_count" -gt 0 ]; then
+        for pkg in "${target_pkgs[@]}"; do
+            case "$seen_list" in
+                *"${nl}${pkg}${nl}"*) continue ;;
+            esac
+            seen_list="${seen_list}${pkg}${nl}"
+            case "$installed_list" in
+                *"${nl}${pkg}${nl}"*)
+                    matched_pkgs+=("$pkg")
+                    matched_count=$((matched_count + 1))
+                    ;;
+            esac
+        done
+    fi
+
+    if [ "$matched_count" -eq 0 ]; then
+        printf 'trim: nothing to trim\n'
+        return 0
+    fi
+
+    for pkg in "${matched_pkgs[@]}"; do
+        rc=0
+        if [ "$mode" = "--undo" ]; then
+            out=$(timeout 30 waydroid shell -- pm enable "$pkg" 2>&1) || rc=$?
+            if [ "$rc" -eq 124 ]; then
+                printf 'trim: timed out after 30 s enabling %s\n' "$pkg" >&2
+                return 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+                printf 'trim: failed to enable %s (exit %d)%s\n' "$pkg" "$rc" "${out:+: $out}" >&2
+                return 1
+            fi
+            printf 'trim: enabled %s\n' "$pkg"
+        else
+            out=$(timeout 30 waydroid shell -- pm disable-user --user 0 "$pkg" 2>&1) || rc=$?
+            if [ "$rc" -eq 124 ]; then
+                printf 'trim: timed out after 30 s disabling %s\n' "$pkg" >&2
+                return 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+                printf 'trim: failed to disable %s (exit %d)%s\n' "$pkg" "$rc" "${out:+: $out}" >&2
+                return 1
+            fi
+            printf 'trim: disabled %s\n' "$pkg"
+        fi
+    done
+
+    rc=0
+    if [ "$mode" = "--undo" ]; then
+        out=$(timeout 30 waydroid shell -- settings delete global activity_manager_constants 2>&1) || rc=$?
+    else
+        out=$(timeout 30 waydroid shell -- settings put global activity_manager_constants max_cached_processes=6 2>&1) || rc=$?
+    fi
+    if [ "$rc" -eq 124 ]; then
+        printf 'trim: timed out after 30 s updating activity_manager_constants\n' >&2
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf 'trim: failed to update activity_manager_constants (exit %d)%s\n' "$rc" "${out:+: $out}" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+cmd_optimize() {
+    local target_pkgs=() target_count=0
+    local dexopt_out="" parsed_pkgs="" out="" detail="" rc=0 pkg start_s elapsed failed=0
+
+    if ! systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        printf 'optimize: waydroid-container.service is not active (start it or run t715-android-setup enable first)\n' >&2
+        return 1
+    fi
+
+    if [ $# -gt 0 ]; then
+        for pkg in "$@"; do
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done
+    else
+        dexopt_out=$(timeout 30 waydroid shell -- dumpsys package dexopt 2>/dev/null) || rc=$?
+        if [ "$rc" -eq 124 ]; then
+            printf 'optimize: timed out after 30 s querying dumpsys package dexopt\n' >&2
+            return 1
+        fi
+        if [ "$rc" -ne 0 ]; then
+            printf 'optimize: waydroid shell dumpsys package dexopt failed (exit %d)\n' "$rc" >&2
+            return 1
+        fi
+
+        if ! parsed_pkgs=$(printf '%s\n' "$dexopt_out" | python3 -c '
+import re
+import sys
+
+GOOD = {"speed", "speed-profile", "everything"}
+pkg_re = re.compile(r"^\s+\[([A-Za-z0-9_.-]+)\]\s*$")
+status_re = re.compile(r"\[status=([^\]]+)\]")
+
+in_dexopt = True
+cur_pkg = None
+order = []
+statuses = {}
+
+for raw in sys.stdin:
+    line = raw.rstrip("\r\n")
+    if line and not line[0].isspace():
+        if line.strip() == "Dexopt state:":
+            in_dexopt = True
+        else:
+            in_dexopt = False
+        cur_pkg = None
+        continue
+    if not in_dexopt:
+        continue
+    m = pkg_re.match(line)
+    if m:
+        cur_pkg = m.group(1)
+        if cur_pkg not in statuses:
+            statuses[cur_pkg] = []
+            order.append(cur_pkg)
+        continue
+    if cur_pkg is not None:
+        for sm in status_re.finditer(line):
+            statuses[cur_pkg].append(sm.group(1).strip())
+
+for pkg in order:
+    st = statuses[pkg]
+    if st and any(s not in GOOD for s in st):
+        print(pkg)
+'
+        ); then
+            printf 'optimize: failed to parse dumpsys package dexopt output\n' >&2
+            return 1
+        fi
+
+        while IFS= read -r pkg; do
+            pkg=${pkg%$'\r'}
+            [ -n "$pkg" ] || continue
+            target_pkgs+=("$pkg")
+            target_count=$((target_count + 1))
+        done <<< "$parsed_pkgs"
+    fi
+
+    if [ "$target_count" -eq 0 ]; then
+        printf 'optimize: 0 packages to compile\n'
+        return 0
+    fi
+
+    if [ "$target_count" -eq 1 ]; then
+        printf 'optimize: compiling 1 package\n'
+    else
+        printf 'optimize: compiling %d packages\n' "$target_count"
+    fi
+
+    for pkg in "${target_pkgs[@]}"; do
+        start_s=$SECONDS
+        rc=0
+        out=$(timeout 900 waydroid shell -- cmd package compile -m speed -f "$pkg" 2>&1) || rc=$?
+        elapsed=$((SECONDS - start_s))
+        detail=$(printf '%s' "$out" | tr '\r\n' '  ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+        if [ "$rc" -eq 124 ]; then
+            printf 'optimize: %s timed out after 900 s (%d s)\n' "$pkg" "$elapsed" >&2
+            failed=$((failed + 1))
+        elif [ "$rc" -ne 0 ]; then
+            printf 'optimize: %s failed (exit %d)%s (%d s)\n' "$pkg" "$rc" "${detail:+: $detail}" "$elapsed" >&2
+            failed=$((failed + 1))
+        else
+            case "$detail" in
+                Failure*|Error:*)
+                    printf 'optimize: %s failed: %s (%d s)\n' "$pkg" "$detail" "$elapsed" >&2
+                    failed=$((failed + 1))
+                    ;;
+                *)
+                    printf 'optimize: %s Success (%d s)\n' "$pkg" "$elapsed"
+                    ;;
+            esac
+        fi
+    done
+
+    if [ "$failed" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+cmd_all() {
+    local gapps=${1:-}
+    cmd_packages || return $?
+    cmd_init "$gapps" || return $?
+    cmd_mesa_fix || return $?
+    cmd_configure || return $?
+    cmd_firewall || return $?
+    cmd_enable || return $?
+    return 0
+}
+
+cmd_status() {
+    local kernel="no" package="none" initialised="no" gpu="" gles="" container="inactive" mesa="none"
+    local pkg_line pkg_ver line overlay_lib overlay_sha
+
+    if [ -e "$DEV_DIR/binder" ]; then
+        kernel="yes"
+    fi
+
+    if pkg_line=$(pacman -Q waydroid 2>/dev/null); then
+        read -r _ pkg_ver _ <<< "$pkg_line"
+        if [ -n "${pkg_ver:-}" ]; then
+            package=$pkg_ver
+        fi
+    fi
+
+    if [ -f "$CFG_FILE" ]; then
+        initialised="yes"
+        while IFS= read -r line; do
+            case "$line" in
+                gpu=*) gpu=${line#gpu=} ;;
+                gles=*) gles=${line#gles=} ;;
+            esac
+        done < <(python3 - "$CFG_FILE" <<'PY' 2>/dev/null
+import configparser
+import sys
+
+cfg = configparser.ConfigParser(interpolation=None)
+cfg.optionxform = str
+cfg.read(sys.argv[1], encoding="utf-8")
+print("gpu=" + cfg.get("waydroid", "drm_device", fallback=""))
+print("gles=" + cfg.get("properties", "ro.opengles.version", fallback=""))
+PY
+        )
+
+        overlay_lib="$OVERLAY_DIR/vendor/lib/libgallium_dri.so"
+        if [ ! -e "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            mesa="vendor"
+        elif [ -f "$overlay_lib" ] && [ ! -L "$overlay_lib" ]; then
+            overlay_sha=$(sha256sum "$overlay_lib" 2>/dev/null || true)
+            overlay_sha=${overlay_sha%%[[:space:]]*}
+            if [ "$overlay_sha" = "$MESA_FIXED_SHA" ]; then
+                mesa="fixed"
+            else
+                mesa="unknown"
+            fi
+        else
+            mesa="unknown"
+        fi
+    fi
+
+    if systemctl is-active waydroid-container.service >/dev/null 2>&1; then
+        container="active"
+    fi
+
+    printf 'kernel=%s\n' "$kernel"
+    printf 'package=%s\n' "$package"
+    printf 'initialised=%s\n' "$initialised"
+    printf 'gpu=%s\n' "$gpu"
+    printf 'gles=%s\n' "$gles"
+    printf 'container=%s\n' "$container"
+    printf 'mesa=%s\n' "$mesa"
+    return 0
+}
+
+case ${1:-} in
+    --help)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        usage
+        exit 0
+        ;;
+    status)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        cmd_status
+        exit $?
+        ;;
+    packages)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_packages
+        exit $?
+        ;;
+    init)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--gapps" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_init "${2:-}"
+        exit $?
+        ;;
+    mesa-fix)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_mesa_fix
+        exit $?
+        ;;
+    configure)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_configure
+        exit $?
+        ;;
+    firewall)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_firewall
+        exit $?
+        ;;
+    enable)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_enable
+        exit $?
+        ;;
+    share)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ]; then
+            case "$2" in
+                ""|-*)
+                    usage >&2
+                    exit 2
+                    ;;
+            esac
+        fi
+        require_root || exit 1
+        cmd_share "${2:-$DEFAULT_USER}"
+        exit $?
+        ;;
+    google-id)
+        if [ $# -ne 1 ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_google_id
+        exit $?
+        ;;
+    trim)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--undo" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_trim "${2:-}"
+        exit $?
+        ;;
+    optimize)
+        shift
+        if [ $# -gt 0 ]; then
+            for _arg in "$@"; do
+                case "$_arg" in
+                    ""|-*)
+                        usage >&2
+                        exit 2
+                        ;;
+                esac
+            done
+        fi
+        require_root || exit 1
+        if [ $# -gt 0 ]; then
+            cmd_optimize "$@"
+        else
+            cmd_optimize
+        fi
+        exit $?
+        ;;
+    all)
+        if [ $# -gt 2 ]; then
+            usage >&2
+            exit 2
+        fi
+        if [ $# -eq 2 ] && [ "$2" != "--gapps" ]; then
+            usage >&2
+            exit 2
+        fi
+        require_root || exit 1
+        cmd_all "${2:-}"
+        exit $?
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

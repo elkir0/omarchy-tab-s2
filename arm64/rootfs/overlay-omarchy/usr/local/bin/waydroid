@@ -1,0 +1,109 @@
+#!/bin/sh
+# waydroid: fast-path launcher wrapper for Waydroid on the SM-T715.
+#
+# `waydroid app launch PKG` (the Exec= line of every `waydroid.<package>.desktop`
+# file, rewritten by Waydroid at every boot) starts a Python process: measured
+# on the tablet (2026-11-21), ~1.1 s with all cores online, ~2.3 s with the big
+# cores offline, and more under memory pressure — before Android even gets the
+# launch request. Routing launches through t715-android-launchd.service (which
+# keeps Waydroid's Python modules loaded and forks per request) cut
+# request-to-window time for Clock (stopped first, three pairs) from
+# 3.5 / 1.9 / 1.4 s to 0.93 / 0.72 / 0.67 s, and for Files from 2.45 s to
+# 1.07 s.
+#
+# Because /usr/local/bin precedes /usr/bin in the session PATH, desktop entries
+# reach this wrapper automatically. When not root, the arguments are one of the
+# three accepted forms (`app launch PKG`, `app intent ACTION URI`,
+# `show-full-ui`), the daemon's pid file names a live process, and the FIFO
+# exists, this script writes the shell-quoted request line to
+# $XDG_RUNTIME_DIR/t715-android/launch.fifo (bounded by `timeout 2` so it can
+# never hang) and exits 0. In every other case, and when the write fails, it
+# execs /usr/bin/waydroid directly and never loops onto itself.
+#
+# Removing /usr/local/bin/waydroid restores stock Waydroid behaviour.
+# Test hook: T715_ANDROID_REAL_WAYDROID (default: /usr/bin/waydroid).
+
+REAL_WAYDROID=${T715_ANDROID_REAL_WAYDROID:-/usr/bin/waydroid}
+
+if [ "$(id -u)" -eq 0 ]; then
+    exec "$REAL_WAYDROID" "$@"
+fi
+
+accepted=0
+case $# in
+    1)
+        [ "$1" = "show-full-ui" ] && accepted=1
+        ;;
+    3)
+        if [ "$1" = "app" ] && [ "$2" = "launch" ]; then
+            case "$3" in
+                ""|-*) ;;
+                *) accepted=1 ;;
+            esac
+        fi
+        ;;
+    4)
+        if [ "$1" = "app" ] && [ "$2" = "intent" ]; then
+            case "$3" in
+                ""|-*) ;;
+                *) [ -n "$4" ] && accepted=1 ;;
+            esac
+        fi
+        ;;
+esac
+
+[ "$accepted" -eq 1 ] || exec "$REAL_WAYDROID" "$@"
+
+# The FIFO protocol is line-based: fall back if any argument has a newline.
+nl='
+'
+for arg in "$@"; do
+    case "$arg" in
+        *"$nl"*) exec "$REAL_WAYDROID" "$@" ;;
+    esac
+done
+
+[ -n "${XDG_RUNTIME_DIR:-}" ] || exec "$REAL_WAYDROID" "$@"
+run_dir="$XDG_RUNTIME_DIR/t715-android"
+pid_file="$run_dir/launchd.pid"
+fifo="$run_dir/launch.fifo"
+
+[ -r "$pid_file" ] && [ -p "$fifo" ] && [ -w "$fifo" ] || exec "$REAL_WAYDROID" "$@"
+
+pid=""
+IFS= read -r pid < "$pid_file" 2>/dev/null || exec "$REAL_WAYDROID" "$@"
+case "$pid" in
+    ""|*[!0-9]*) exec "$REAL_WAYDROID" "$@" ;;
+esac
+kill -0 "$pid" 2>/dev/null || exec "$REAL_WAYDROID" "$@"
+
+# Shell-quote each argument so the daemon's shlex.split recovers it verbatim.
+sq="'"
+line=""
+for arg in "$@"; do
+    rest=$arg
+    quoted="'"
+    while :; do
+        case "$rest" in
+            *"$sq"*)
+                quoted="${quoted}${rest%%"$sq"*}'\\''"
+                rest=${rest#*"$sq"}
+                ;;
+            *)
+                quoted="${quoted}${rest}'"
+                break
+                ;;
+        esac
+    done
+    if [ -z "$line" ]; then
+        line=$quoted
+    else
+        line="$line $quoted"
+    fi
+done
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout 2 sh -c 'printf "%s\n" "$1" > "$2"' _ "$line" "$fifo" 2>/dev/null && exit 0
+fi
+
+exec "$REAL_WAYDROID" "$@"

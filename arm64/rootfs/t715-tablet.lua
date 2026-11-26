@@ -69,7 +69,7 @@ o.launch_on_start("bash -c 'omarchy-toggle-enabled lock-on-start || exit 0; "
 -- A fresh tablet (no name and email, or still the image's placeholder password):
 -- one notification offers omamobile's onboarding (phone.lua starts it the same
 -- way): name and email, a real PIN or password, the AI apps, voice input's
--- language and the default coding agent (omamobile-shell 0.2.147-3.1, its patch
+-- language and the default coding agent (omamobile-shell 0.2.147-3.2, its patch
 -- 0015). With a shell that has no onboarding, nothing happens.
 o.launch_on_start("bash -c 'command -v omamobile-onboarding >/dev/null || exit 0; exec omamobile-onboarding --nudge'")
 
