@@ -7,7 +7,7 @@ of its Exynos 5433, on mainline Linux 6.12, with **AI built in**: Claude Code on
 in the search bar, Claude Desktop and ChatGPT Desktop, dictation in your own language that never
 leaves the tablet, and local models with Ollama.
 
-**2.1.2.** Download, flash once, and the tablet installs itself: [the guide](docs/INSTALL-ARM64.md).
+**2.1.3.** Download, flash once, and the tablet installs itself: [the guide](docs/INSTALL-ARM64.md).
 It is the daily system of the reference tablet, a Galaxy Tab S2 8.0 LTE (SM-T715), since
 2026-11-25.
 
@@ -89,7 +89,7 @@ models are not covered.
 
 | Route | For | How |
 |---|---|---|
-| **Download, flash, it installs** | anyone with the tablet | **2.1.2**: copy `omarchy-arm64.img` to a microSD card, flash the installer once with Odin or Heimdall, and the tablet installs itself, then starts Omarchy's first-run setup. [The guide](docs/INSTALL-ARM64.md) |
+| **Download, flash, it installs** | anyone with the tablet | **2.1.3**: copy `omarchy-arm64.img` to a microSD card, flash the installer once with Odin or Heimdall, and the tablet installs itself, then starts Omarchy's first-run setup. [The guide](docs/INSTALL-ARM64.md) |
 | **The long route** | power users | every step by hand from a computer, each with its way back: [GO-ARM64.md](https://github.com/elkir0/bnuuyloader/blob/main/t715/docs/GO-ARM64.md) |
 
 Already on 2.0.0? [Reinstall from it](docs/INSTALL-ARM64.md#8-from-200-the-reinstall): the old

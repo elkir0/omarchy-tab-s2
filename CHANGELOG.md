@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.1.3, pre-release
+
+The installer refused every tablet flashed with the stock firmware through Odin, as the guide asks.
+
+- **Two stock PARAMs of T715XXU2CRH1.** Before it writes the loader, the installer checks that
+  PARAM holds the stock `T715XXU2CRH1` image. It knew one: the reference tablet's, which reached
+  that firmware over the air and kept PARAM's pictures of 2016. Odin writes the firmware's own
+  `param.bin`, from the BL file, with pictures of 2018. That PARAM has the same 29 pictures in the
+  same order, but a different boot logo (`logo.jpg`, 92426 bytes, not 96953) and other dates in
+  the archive's headers. 2.1.2 refused it, and its screen said
+  `PARAM: logo.jpg is not the stock one (92426 bytes, stock: 96953)`. The installer now knows
+  both, each with the loader forged from it. The two loaders differ only in the dates and
+  checksums of the archive's headers, never in a picture or in the loader's code. The loader of
+  one PARAM is never accepted for the other.
+- **The report of a refused PARAM** now compares its pictures with the firmware's own
+  `param.bin` (`boot/golden/stock.members`).
+- Nothing else changes. The image is 2.1.2's.
+
+Tested:
+- **The installer's test suite**, 429 checks in the container (403 in 2.1.2), with new scenarios
+  for the second stock PARAM: a fresh install, the loader's hand-back, the rescue, and the same
+  PARAM with older bytes after its archive. Two golden directories whose loaders do not pair are
+  refused. The build refuses sum files of different lengths, or with a line that is not a sum.
+- **A deliberate fault:** with the pairing made too loose on purpose, 5 checks fail.
+- **Real PARAMs, on a computer, in the installer's own busybox:** the reference tablet's PARAM and
+  the firmware's `param.bin` (`T715XXU2CRH1`, LUX, downloaded from Samsung's servers). Each is
+  forged into its own loader, and so is the same `param.bin` with older bytes after its archive.
+
+Not tried: the loader forged from the Odin PARAM on a tablet (it differs from the tested one only
+in the archive's header dates), and a fresh install of 2.1.3.
+
 ## 2.1.2, pre-release
 
 The installer's PARAM check: a tablet flashed with the stock firmware could be refused there, with

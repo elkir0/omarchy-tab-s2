@@ -261,7 +261,7 @@ Rules:
 
 ### The installer of the 64-bit system (`t715.golden`)
 
-Built with `--golden boot/golden` (which turns the knob on), this initramfs is the 2.1.2
+Built with `--golden boot/golden` (which turns the knob on), this initramfs is the 2.1.3
 release's installer (2.0.0's, plus the reinstall below), in BOOT and RECOVERY:
 [docs/INSTALL-ARM64.md](../docs/INSTALL-ARM64.md) is
 the user's guide, and its section 7 the short account. The code is the part of `initramfs/init`
