@@ -1,7 +1,7 @@
 # Installing Omarchy in 64 bits on the Samsung Galaxy Tab S2
 
 This guide takes a Samsung Galaxy Tab S2 8.0 LTE (SM-T715) from stock Android to Omarchy 4.5 in
-64 bits, with the 2.1.3 release: you copy one image to a microSD card, flash one package with
+64 bits, with the 2.1.4 release: you copy one image to a microSD card, flash one package with
 Odin, and the tablet installs itself. No command to type on the tablet, nothing to build.
 
 It is an unofficial port, not affiliated with Omarchy, Omarchy Mobile or Samsung. How it works,
@@ -40,13 +40,13 @@ for whoever wants to know: [section 7](#7-what-the-installer-does) here, then
 
 ## 2. Download and check
 
-From the [2.1.3 release](https://github.com/elkir0/omarchy-tab-s2/releases):
+From the [2.1.4 release](https://github.com/elkir0/omarchy-tab-s2/releases):
 
 | File | What it is |
 |---|---|
 | `omarchy-arm64.img.xz` | the 64-bit Omarchy system, compressed (unpacked: `omarchy-arm64.img`) |
 | `omarchy-arm64.img.sha256` | the image's checksum: the installer refuses an image without it |
-| `omarchy-tab-s2-2.1.3-AP.tar.md5` | the installer, for Odin's AP slot (it holds `boot.img` and `recovery.img`) |
+| `omarchy-tab-s2-2.1.4-AP.tar.md5` | the installer, for Odin's AP slot (it holds `boot.img` and `recovery.img`) |
 | `boot.img`, `recovery.img` | the same installer, for Heimdall |
 | `SHA256SUMS` | the checksum of every file |
 
@@ -86,7 +86,7 @@ storage (for example your `~/.ssh/id_ed25519.pub`). Without it, SSH stays closed
 1. Turn the tablet off. Hold **Volume down + Home + Power** until the warning screen, then
    **Volume up**: download mode.
 2. Connect the USB cable.
-3. **Odin**: put `omarchy-tab-s2-2.1.3-AP.tar.md5` in the **AP** slot and press *Start*.
+3. **Odin**: put `omarchy-tab-s2-2.1.4-AP.tar.md5` in the **AP** slot and press *Start*.
    **Heimdall**: `heimdall flash --BOOT boot.img --RECOVERY recovery.img`.
 4. When Odin says PASS, or Heimdall has finished, the tablet restarts by itself into the
    installer. If it stays in download mode, hold **Volume down + Power** until the screen goes
@@ -97,7 +97,7 @@ storage (for example your `~/.ssh/id_ed25519.pub`). Without it, SSH stays closed
 
 The screen shows, in white text on black:
 
-1. `Omarchy for the Galaxy Tab S2, 64 bits: installer 2.1.3`;
+1. `Omarchy for the Galaxy Tab S2, 64 bits: installer 2.1.4`;
 2. `Checking the image...` (about two minutes);
 3. `Installing Omarchy: N%` (about four minutes);
 4. `Writing the loader...`, then `Omarchy is installed. Restarting into it...`.

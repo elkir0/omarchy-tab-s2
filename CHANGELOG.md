@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.1.4, pre-release
+
+A tablet whose battery ran out looped for good, even on a wall charger.
+
+- **A charger mode in the installer.** Plug a tablet in while it is off, and S-Boot starts the BOOT
+  partition in its charger mode (`androidboot.mode=charger`), not the loader. BOOT holds the
+  installer, which ignored that mode.
+  - **What happened before 2.1.4:** the installer took that start for the loader handing back a
+    failed boot, waited 30 s and restarted into Omarchy. Omarchy draws more at boot than an empty
+    battery can supply, with Waydroid starting along. The boot ended abruptly, or in UPower's
+    suspend at 2 %. Then S-Boot's charger mode came back, and so on.
+  - **What it does now:** with the battery below 10 %, the installer charges first. It takes cores
+    1 to 7 offline. Its 32-bit kernel has no idle states, so eight cores ate what the charger
+    brought.
+  - **On screen:** the level, the battery's current and temperature, and the charger's input
+    limit (1750 mA on a wall charger, 450 mA on a computer's port).
+  - **Then:** it restarts into Omarchy at 10 %, and switches off if the charger is unplugged.
+  - **Knobs:** `t715.chargemin` (default 10) and `t715.chargepoll` (default 30 s).
+- Nothing else changes. The image is 2.1.2's, as in 2.1.3.
+
+Tested:
+- **The installer's test suite:** 476 checks in the container (429 in 2.1.3). New scenarios:
+  charging up to the threshold, with the cores taken offline and the values on screen; the
+  charger unplugged; a battery already charged; and the three cases where the charger mode does
+  not run.
+- **On the reference tablet, after a real full discharge:**
+  - Flashed into BOOT and RECOVERY, the installer came up in S-Boot's charger mode at 0 %.
+  - It charged on the wall charger: input limit 1750 mA, +632 mA into the battery at 35.4 °C.
+  - It restarted by itself into Omarchy at 10 %.
+  - Before the cores went offline, the same installer charged nothing: about 1 % in 15 min, then
+    stuck.
+
+Not tried:
+- The unplugged-charger switch-off, on the tablet.
+- A fresh install of 2.1.4.
+
 ## 2.1.3, pre-release
 
 The installer refused every tablet flashed with the stock firmware through Odin, as the guide asks.
