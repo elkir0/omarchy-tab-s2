@@ -9,12 +9,18 @@ Samsung's firmware and that tablet's data, so it is never published, and this sc
 nothing. It does what the installer's golden_forge does (boot/initramfs/init): PARAM's first
 EXTENT bytes are a tar archive of the pictures S-Boot shows; logo.jpg's data is replaced by this
 directory's logo.jpg (the loader), the members after it move, the archive is padded with zeros to
-EXTENT. Then it says whether the stock part is the one stock.sha256 names and whether the result
-is the one loader.sha256 names: the two checks the installer makes before it writes anything.
-The stock part is the one stock.sha256 names when its first EXTENT bytes are, or when the archive
-is once the bytes after its end are taken as zeros: S-Boot reads the archive only, and the
+EXTENT. Then it says whether the stock part is one of the stock PARAMs the installer knows, and
+whether the result is the loader of the same line: the two checks the installer makes before it
+writes anything.
+
+The installer knows one stock PARAM per line of stock.sha256 (the firmware T715XXU2CRH1 leaves
+PARAM in two states), and loader.sha256 names the loader forged from it on the same line: the
+loader of line N is forged from the stock PARAM of line N, never from another. The stock part is
+a stock PARAM of line N when its first EXTENT bytes have that line's sha256, or when the archive
+has it once the bytes after its end are taken as zeros: S-Boot reads the archive only, and the
 installer accepts the second case too (golden_archive), since a flash of the firmware writes the
-archive and may leave older bytes after it.
+archive and may leave older bytes after it. The result must then have the sha256 on line N of
+loader.sha256; the loader of another line is refused as any other result is.
 
 --members prints the archive's members, one line each, "SHA256 SIZE NAME": how stock.members was
 made, the list the installer compares a PARAM it does not know with, to say on screen what
@@ -32,7 +38,29 @@ HERE = Path(__file__).resolve().parent
 
 
 def word(name: str) -> str:
+    """The first word of a file of one word (extent)."""
     return (HERE / name).read_text().split()[0]
+
+
+def sums(name: str) -> list[tuple[str, str]]:
+    """The lines of stock.sha256 or loader.sha256: (sha256, label) for each, in order.  The
+    label is the free text after the sum.  Lines of blanks only are skipped, as the installer
+    skips them (its golden_words), so that line N of one file pairs with line N of the other."""
+    out = []
+    for line in (HERE / name).read_text().splitlines():
+        fields = line.split(None, 1)
+        if fields:
+            out.append((fields[0], fields[1].strip() if len(fields) > 1 else ""))
+    return out
+
+
+def line_of(lines: list[tuple[str, str]], digest: str) -> int:
+    """The number (from 1) of the line whose sha256 is DIGEST, 0 when none is: the installer's
+    golden_line_of."""
+    for n, (sum_, _) in enumerate(lines, start=1):
+        if sum_ == digest:
+            return n
+    return 0
 
 
 def forge(stock: bytes, logo: bytes, extent: int) -> bytes:
@@ -96,26 +124,47 @@ def main() -> int:
         for name, size, digest in members(Path(sys.argv[2]).read_bytes()[:extent], extent)[0]:
             print(f"{digest} {size} {name}")
         return 0
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) not in (2, 3) or sys.argv[1].startswith("-"):
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
     extent = int(word("extent"))
+    stock_sums, loader_sums = sums("stock.sha256"), sums("loader.sha256")
+    if len(stock_sums) != len(loader_sums) or not stock_sums:
+        raise SystemExit("stock.sha256 and loader.sha256 do not name stock PARAMs and loaders in pairs")
     stock = Path(sys.argv[1]).read_bytes()
     if len(stock) < extent:
         raise SystemExit(f"{sys.argv[1]} is shorter than {extent} bytes")
     logo = (HERE / "logo.jpg").read_bytes()
+
+    def known(n: int) -> str:
+        """How the installer's log names a line: its number and its label."""
+        label = stock_sums[n - 1][1]
+        return f"stock line {n}" + (f" ({label})" if label else "")
+
     stock_sum = hashlib.sha256(stock[:extent]).hexdigest()
-    stock_ok = stock_sum == word("stock.sha256")
-    print(f"stock part: {stock_sum[:16]}...: {'the one this installer knows' if stock_ok else 'NOT the one this installer knows'}")
+    line = line_of(stock_sums, stock_sum)
+    stock_ok = line != 0
+    verdict = lambda ok: "one this installer knows" if ok else "NOT one this installer knows"
+    print(f"stock part: {stock_sum[:16]}...: {verdict(stock_ok)}" + (f", {known(line)}" if stock_ok else ""))
     if not stock_ok:
         arch_sum, end, nonzero = archive_sum(stock, extent)
-        stock_ok = arch_sum == word("stock.sha256")
+        line = line_of(stock_sums, arch_sum)
+        stock_ok = line != 0
         print(f"its archive: {arch_sum[:16]}... (ends at byte {end}, {nonzero} bytes after it not zero): "
-              f"{'the one this installer knows' if stock_ok else 'NOT the one this installer knows'}")
+              f"{verdict(stock_ok)}" + (f", {known(line)}" if stock_ok else ""))
     result = forge(stock, logo, extent)
     result_sum = hashlib.sha256(result).hexdigest()
-    result_ok = result_sum == word("loader.sha256")
-    print(f"forged:     {result_sum[:16]}...: {'the loader' if result_ok else 'NOT the loader'}")
+    # the loader of the same line only: another line's is refused like any other result
+    want = loader_sums[line - 1][0] if stock_ok else None
+    result_ok = stock_ok and result_sum == want
+    if result_ok:
+        print(f"forged:     {result_sum[:16]}...: the loader of {known(line)}")
+    elif stock_ok and line_of(loader_sums, result_sum):
+        other = line_of(loader_sums, result_sum)
+        print(f"forged:     {result_sum[:16]}...: NOT the loader of {known(line)}, "
+              f"but the loader of stock line {other}: cross-paired, the installer writes nothing")
+    else:
+        print(f"forged:     {result_sum[:16]}...: NOT the loader this installer was built for")
     ok = stock_ok and result_ok
     if len(sys.argv) == 3:
         built = Path(sys.argv[2]).read_bytes()[:extent]

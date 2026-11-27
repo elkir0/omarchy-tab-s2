@@ -42,8 +42,10 @@
 #                          option): logo.jpg, the loader's forged logo that
 #                          /init puts in the tablet's own PARAM in place of
 #                          Samsung's; stock.sha256 and loader.sha256, those of
-#                          PARAM's first EXTENT bytes before and after;
-#                          stock.members, the stock archive's members
+#                          PARAM's first EXTENT bytes before and after, one
+#                          line per stock PARAM the installer knows (the two
+#                          of T715XXU2CRH1), paired by line number;
+#                          stock.members, the members of one stock archive
 #                          (sha256, size, name each), to say on screen how
 #                          a PARAM it does not know differs;
 #                          extent; bootloader, the one bootloader the loader
@@ -187,7 +189,8 @@ fi
 # --golden DIR: DIR holds logo.jpg (the loader's logo, as the loader's build
 # writes it next to its PARAM image), stock.sha256 and loader.sha256 (the
 # sha256 of PARAM's first EXTENT bytes as the firmware ships them, and once
-# logo.jpg replaces Samsung's: the installer writes nothing else), extent,
+# logo.jpg replaces Samsung's: the installer writes nothing else; one line per
+# stock PARAM the installer knows, paired by line number), extent,
 # bootloader and release (one word each).  Checked here, packed as they are.
 GDIR="$(mktemp -d)"
 GOLDEN_NOTE=""
@@ -197,9 +200,27 @@ if [[ -n "$GOLDEN" ]]; then
     [[ -s "$GOLDEN/$f" ]] || die "--golden: $GOLDEN/$f is missing or empty"
     cp "$GOLDEN/$f" "$GDIR/$f"
   done
-  for f in stock.sha256 loader.sha256; do
-    [[ "$(head -n 1 "$GDIR/$f" | cut -d' ' -f1)" =~ ^[0-9a-f]{64}$ ]] || die "--golden: $f is not a lower-case sha256"
-  done
+  # golden_lines FILE: how many lines of FILE hold a word, when every one of
+  # them is a lower-case sha256 (a label may follow); "bad N" when line N is
+  # not.  Lines of blanks only are not counted, as the installer counts them.
+  golden_lines() {
+    local n=0 l w
+    while IFS= read -r l || [[ -n "$l" ]]; do
+      w="${l#"${l%%[![:space:]]*}"}"
+      w="${w%%[[:space:]]*}"
+      [[ -n "$w" ]] || continue
+      n=$((n + 1))
+      [[ "$w" =~ ^[0-9a-f]{64}$ ]] || { echo "bad $n"; return 0; }
+    done <"$1"
+    echo "$n"
+  }
+  # (not "local": this is not inside a function)
+  gs="$(golden_lines "$GDIR/stock.sha256")"
+  gl="$(golden_lines "$GDIR/loader.sha256")"
+  [[ "$gs" != bad* ]] || die "--golden: stock.sha256: line ${gs#bad } does not start with a lower-case sha256"
+  [[ "$gl" != bad* ]] || die "--golden: loader.sha256: line ${gl#bad } does not start with a lower-case sha256"
+  [[ "$gs" -ge 1 && "$gs" = "$gl" ]] \
+    || die "--golden: stock.sha256 has $gs stock PARAM(s) and loader.sha256 $gl: one loader per stock PARAM, on the same line"
   [[ "$(head -n 1 "$GDIR/extent")" =~ ^[1-9][0-9]*$ ]] || die "--golden: extent is not a number of bytes"
   if grep -q -v -E '^[0-9a-f]{64} [0-9]+ [A-Za-z0-9._-]+$' "$GDIR/stock.members"; then
     die "--golden: stock.members has a line that is not \"SHA256 SIZE NAME\""
@@ -208,7 +229,7 @@ if [[ -n "$GOLDEN" ]]; then
   [[ "$(head -n 1 "$GDIR/release")" =~ ^[0-9A-Za-z.+-]+$ ]] || die "--golden: release is not a version"
   [[ "$(head -c 2 "$GDIR/logo.jpg" | od -An -tx1 | tr -d ' ')" == ffd8 ]] || die "--golden: logo.jpg is not a JPEG"
   [[ $(wc -c <"$GDIR/logo.jpg") -le 1048576 ]] || die "--golden: logo.jpg is over 1 MiB"
-  GOLDEN_NOTE=", golden: installer $(head -n 1 "$GDIR/release") for $(head -n 1 "$GDIR/bootloader"), loader sha256:$(head -c 12 "$GDIR/loader.sha256")"
+  GOLDEN_NOTE=", golden: installer $(head -n 1 "$GDIR/release") for $(head -n 1 "$GDIR/bootloader"), $gs stock PARAM(s), loader sha256:$(head -c 12 "$GDIR/loader.sha256")"
   case " $KNOBS " in
   *" t715.golden="*) ;;
   *) KNOBS="${KNOBS:+$KNOBS }t715.golden=1" ;;

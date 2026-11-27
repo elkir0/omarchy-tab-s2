@@ -1835,9 +1835,9 @@ load_modules() {
 # storage (USERDATA/media/0/linux) or of a microSD card (linux/ or its top):
 #   1. checks, before any write: S-Boot's version (the loader is made for
 #      one bootloader's addresses), PARAM's first EXTENT bytes are the stock
-#      image this installer knows, the battery, the image's checksum (the
-#      sidecar is required), the image (an aarch64 root carrying
-#      usr/lib/t715-golden/kernel.slot);
+#      image, one of those this installer knows (stock.sha256), the battery,
+#      the image's checksum (the sidecar is required), the image (an aarch64
+#      root carrying usr/lib/t715-golden/kernel.slot);
 #   2. the image's tree into USERDATA/omarchy-arm64 (the arm64 kernel's
 #      t715.persist), through USERDATA/.omarchy-arm64.t715-seed, by busybox
 #      tar: owners, modes, links and hard links.  tar carries no extended
@@ -1856,7 +1856,7 @@ load_modules() {
 #      and the root's /var/lib/t715/PARAM-stock.img, this rescue's), the
 #      loader forged from it (golden_forge: Samsung's logo.jpg replaced by
 #      the loader's, lib/t715-golden/logo.jpg), refused unless it is exactly
-#      the image loader.sha256 names, written over those first EXTENT bytes
+#      the loader of the same line of loader.sha256, written over those first EXTENT bytes
 #      only (S-Boot keeps data of its own after them), read back;
 #   5. the root's .t715-golden marker, the log next to the image, restart:
 #      the loader starts the 64-bit kernel of the slot, which boots the root.
@@ -1874,6 +1874,15 @@ load_modules() {
 # else in PARAM (another loader) and the root's saved stock image, the loader
 # is forged again from it and written back (the rescue).  Every refusal
 # writes nothing and waits on screen.
+#
+# The firmware T715XXU2CRH1 leaves PARAM in two states, and this installer
+# knows two of them (stock.sha256, loader.sha256: one line per state, paired by line
+# number; golden_sums_ok checks that).  A tablet updated over the air keeps
+# the pictures of 2016; one flashed with Odin gets the firmware's own
+# param.bin, pictures of 2018.  The two archives hold the same members in the
+# same order and differ in logo.jpg's data and in the headers' dates, so the
+# loaders forged from them differ too, in the same fields: the loader of
+# stock line N is loader line N, never another line.
 GOLDEN_DIR=/lib/t715-golden         # logo.jpg, stock.sha256, loader.sha256, extent, bootloader, release
 GOLDEN_NAME=omarchy-arm64           # the root's directory on USERDATA
 GOLDEN_IMG_NAME=omarchy-arm64.img   # the image, in a folder "linux"
@@ -1902,9 +1911,123 @@ SLOT_B=262144
 SLOT_SECTORS=131072
 CACHE_FS_KIB=65536
 
-# golden_val NAME: the first word of $GOLDEN_DIR/NAME.
+# golden_val NAME: the first word of $GOLDEN_DIR/NAME.  For the files of one
+# word (extent, bootloader, release).  stock.sha256 and loader.sha256 hold one
+# line per stock PARAM this installer knows, paired by line number (the loader
+# of line N is forged from the stock PARAM of line N); they are read by
+# golden_stock_line, golden_is_loader and golden_loader_for, never by this one.
 golden_val() {
     sed -n '1{s/[[:space:]].*//;p;}' "$GOLDEN_DIR/$1" 2>/dev/null
+}
+
+# golden_words NAME: the first word of every line of $GOLDEN_DIR/NAME that
+# holds one, one per line, in the file's order.  Lines of blanks only are
+# skipped, so that line N of stock.sha256 and line N of loader.sha256 are the
+# pair they are written as, wherever a blank line stands: every reader of the
+# two sha256 files counts the lines this way, and only this way.
+golden_words() {
+    # strip the leading blanks, drop what is then empty, keep the first word
+    sed -n 's/^[[:space:]]*//;/^$/d;s/[[:space:]].*//;p' "$GOLDEN_DIR/$1" 2>/dev/null
+}
+
+# golden_sum_at NAME N: the first word of line N of $GOLDEN_DIR/NAME, nothing
+# when there is no such line or its first word is not a lower-case sha256.
+# N must be a number: anything else gives nothing (an empty N would else mean
+# every line).  The shape of the sum is checked here, by the shell.
+golden_sum_at() {
+    case $2 in
+    '' | *[!0-9]*) return 0 ;;
+    esac
+    _gsa_w=$(golden_words "$1" | sed -n "${2}p")
+    # a lower-case sha256: 64 characters, none but 0-9a-f
+    case $_gsa_w in
+    *[!0-9a-f]*) return 0 ;;
+    esac
+    [ "${#_gsa_w}" = 64 ] || return 0
+    printf '%s\n' "$_gsa_w"
+}
+
+# golden_line_of NAME SUM: N when SUM is the first word of line N of
+# $GOLDEN_DIR/NAME (the same count as golden_sum_at), nothing when no line's is.
+golden_line_of() {
+    case $2 in
+    *[!0-9a-f]* | '') return 0 ;;
+    esac
+    golden_words "$1" | awk -v s="$2" '$0 == s { print NR; exit }'
+}
+
+# golden_label_at NAME N: what follows the sum on line N of $GOLDEN_DIR/NAME
+# (the same count again), nothing when there is none.  N as in golden_sum_at.
+# The line is taken before its sum is cut: a line without a label still is a
+# line, and gives nothing.
+golden_label_at() {
+    case $2 in
+    '' | *[!0-9]*) return 0 ;;
+    esac
+    sed -n '/^[[:space:]]*$/d;s/^[[:space:]]*//;p' "$GOLDEN_DIR/$1" 2>/dev/null |
+        sed -n "${2}{s/^[^[:space:]]*[[:space:]]*//;p;}"
+}
+
+# golden_named NAME N: how the log names line N of $GOLDEN_DIR/NAME: "line
+# N (label)" when the line has a label, "line N" when it has none.
+golden_named() {
+    _gn_label=$(golden_label_at "$1" "$2")
+    if [ -n "$_gn_label" ]; then
+        printf 'line %s (%s)' "$2" "$_gn_label"
+    else
+        printf 'line %s' "$2"
+    fi
+}
+
+# golden_stock_line SUM: N when SUM is the first word of line N of
+# stock.sha256, nothing otherwise.
+golden_stock_line() {
+    golden_line_of stock.sha256 "$1"
+}
+
+# golden_is_loader SUM: true when SUM is the first word of a line of
+# loader.sha256.
+golden_is_loader() {
+    [ -n "$(golden_line_of loader.sha256 "$1")" ]
+}
+
+# golden_loader_for N: the first word of line N of loader.sha256, the loader
+# forged from the stock PARAM of line N of stock.sha256.
+golden_loader_for() {
+    golden_sum_at loader.sha256 "$1"
+}
+
+# golden_sum_file NAME: how many lines of $GOLDEN_DIR/NAME hold a word, when
+# every one of them starts with a lower-case sha256 (a label may follow it,
+# separated by blanks; empty lines are allowed and not counted); nothing when
+# one does not, or the file cannot be read.  golden_sum_at reads the lines
+# back the same way, first word by first word.
+golden_sum_file() {
+    _gsf_n=0
+    {
+        while IFS= read -r _gsf_l || [ -n "$_gsf_l" ]; do
+            # the first word: what leads the line once its blanks are gone, up
+            # to the next blank (the label, if any, follows it)
+            _gsf_w=${_gsf_l#"${_gsf_l%%[![:space:]]*}"}
+            _gsf_w=${_gsf_w%%[[:space:]]*}
+            [ -n "$_gsf_w" ] || continue
+            case $_gsf_w in
+            *[!0-9a-f]*) return 0 ;;
+            esac
+            [ "${#_gsf_w}" = 64 ] || return 0
+            _gsf_n=$((_gsf_n + 1))
+        done
+    } 2>/dev/null <"$GOLDEN_DIR/$1" || return 0
+    printf '%s\n' "$_gsf_n"
+}
+
+# golden_sums_ok: stock.sha256 and loader.sha256 name stock PARAMs and loaders
+# in pairs: both are such lists (golden_sum_file), with as many lines, at
+# least one.  A file that is not such a list gives no number, which counts as
+# no line.
+golden_sums_ok() {
+    _gso_n=$(golden_sum_file stock.sha256)
+    [ "${_gso_n:-0}" -ge 1 ] && [ "$_gso_n" = "$(golden_sum_file loader.sha256)" ]
 }
 
 # part_dev NAME: /dev/X of the one partition of the eMMC named NAME.
@@ -2086,8 +2209,8 @@ golden_members() {
 # there), GA_TAIL how many bytes after the end are not zero.  GA_END and
 # GA_SUM are empty when the archive cannot be read.  A flash of the stock
 # firmware writes its archive and may leave older bytes after it: the stock
-# archive with such bytes is still the stock image (GA_SUM is stock.sha256),
-# and the loader, forged from the members alone, has zeros there.
+# archive with such bytes is still a stock image (GA_SUM is a line of
+# stock.sha256), and the loader, forged from the members alone, has zeros there.
 golden_archive() {
     GA_END=
     GA_SUM=
@@ -2104,11 +2227,12 @@ golden_archive() {
 }
 
 # golden_param_report: after golden_archive "$PARAM_DEV", on screen and in
-# the log, how PARAM's archive differs from the stock one (stock.members):
-# the pictures that differ, are missing or are not in it, and the bytes
-# after its end, so that a photo of the screen says what this tablet's
-# PARAM holds.  Names and sizes of Samsung's pictures only: nothing of the
-# tablet's own (S-Boot keeps that after EXTENT, never read here).
+# the log, how PARAM's archive differs from a stock one (stock.members: the
+# members of one of them, the firmware's own param.bin): the pictures that
+# differ, are missing or are not in it, and the bytes after its end, so that a photo of
+# the screen says what this tablet's PARAM holds.  Names and sizes of
+# Samsung's pictures only: nothing of the tablet's own (S-Boot keeps that
+# after EXTENT, never read here).
 golden_param_report() {
     while read -r _rp_sum _rp_size _rp_name; do
         case $_rp_sum in
@@ -2165,40 +2289,68 @@ golden_param_report() {
 }
 
 # golden_write_param IMG: IMG (EXTENT bytes, checked by the caller) over
-# PARAM's first EXTENT bytes, read back against loader.sha256.
+# PARAM's first EXTENT bytes, read back: they must be IMG's sha256, and that
+# must be a line of loader.sha256 (any of them: which one is the caller's
+# choice, golden_forge_checked's).
 golden_write_param() {
+    _gw_want=$(head -c "$EXTENT" "$1" 2>/dev/null | sha256sum | cut -d' ' -f1)
+    # never write what is not a loader this installer knows, whatever the caller checked
+    if ! golden_is_loader "$_gw_want"; then
+        err "golden: $1 is $_gw_want, not a loader this installer knows: nothing written"
+        return 1
+    fi
     make_rw "$PARAM_DEV" || return 1
     if ! dd if="$1" of="$PARAM_DEV" bs=512 count=$((EXTENT / 512)) conv=notrunc,fsync 2>/dev/null; then
         err "golden: the write to PARAM ($PARAM_DEV) failed"
     fi
     sync
     _gw_sum=$(golden_param_sum)
-    if [ "$_gw_sum" != "$(golden_val loader.sha256)" ]; then
-        err "golden: PARAM reads back $_gw_sum after the write, not the loader"
+    if [ "$_gw_sum" != "$_gw_want" ]; then
+        err "golden: PARAM reads back $_gw_sum after the write, not the loader written ($_gw_want)"
         return 1
     fi
-    log "golden: PARAM holds the loader (sha256 ${_gw_sum%"${_gw_sum#????????????}"}...)"
+    _gw_line=$(golden_line_of loader.sha256 "$_gw_sum")
+    if [ -z "$_gw_line" ]; then
+        err "golden: PARAM reads back $_gw_sum after the write, which is not a loader this installer knows"
+        return 1
+    fi
+    log "golden: PARAM holds the loader (sha256 ${_gw_sum%"${_gw_sum#????????????}"}...), $(golden_named loader.sha256 "$_gw_line")"
 }
 
 # golden_forge_checked STOCK: the loader forged from STOCK into
-# $RUNDIR/param-loader.img, refused unless it is the one loader.sha256 names.
+# $RUNDIR/param-loader.img, refused unless STOCK is a stock PARAM this
+# installer knows and the forged image is the loader of the same line.
 golden_forge_checked() {
     _gc_stock=$(head -c "$EXTENT" "$1" | sha256sum | cut -d' ' -f1)
-    if [ "$_gc_stock" != "$(golden_val stock.sha256)" ]; then
+    _gc_line=$(golden_stock_line "$_gc_stock")
+    if [ -z "$_gc_line" ]; then
         golden_archive "$1"
-        if [ -z "$GA_SUM" ] || [ "$GA_SUM" != "$(golden_val stock.sha256)" ]; then
-            err "golden: $1 is not the stock PARAM this installer knows ($_gc_stock)"
+        _gc_line=$(golden_stock_line "${GA_SUM:-}")
+        if [ -z "$_gc_line" ]; then
+            err "golden: $1 is not a stock PARAM this installer knows ($_gc_stock)"
             return 1
         fi
+        log "golden: $1 is a stock archive this installer knows, $(golden_named stock.sha256 "$_gc_line")"
         log "golden: $1 holds the stock archive, and $GA_TAIL bytes after its end (byte $GA_END) that are not zero: the loader has zeros there"
+    else
+        log "golden: $1 is a stock PARAM this installer knows, $(golden_named stock.sha256 "$_gc_line")"
     fi
     golden_forge "$1" "$RUNDIR/param-loader.img" || return 1
     _gc_sum=$(sha256sum "$RUNDIR/param-loader.img" | cut -d' ' -f1)
-    if [ "$_gc_sum" != "$(golden_val loader.sha256)" ]; then
-        err "golden: the loader forged from the stock PARAM is $_gc_sum, not the one this installer was built for: nothing written"
+    _gc_want=$(golden_loader_for "$_gc_line")
+    if [ -z "$_gc_want" ]; then
+        err "golden: $GOLDEN_DIR has no loader for line $_gc_line of stock.sha256: nothing written"
         return 1
     fi
-    log "golden: the loader forged from the stock PARAM is the expected one"
+    if [ "$_gc_sum" != "$_gc_want" ]; then
+        if golden_is_loader "$_gc_sum"; then
+            err "golden: the loader forged from the stock PARAM of $(golden_named stock.sha256 "$_gc_line") is the loader of another stock PARAM ($_gc_sum): nothing written"
+        else
+            err "golden: the loader forged from the stock PARAM is $_gc_sum, not the one this installer was built for: nothing written"
+        fi
+        return 1
+    fi
+    log "golden: the loader forged from the stock PARAM is the expected one, $(golden_named loader.sha256 "$_gc_line")"
 }
 
 # golden_battery: wait for GOLDEN_MIN_BATTERY % (an install takes about a
@@ -2788,6 +2940,11 @@ golden_main() {
             return 1
         fi
     done
+    if ! golden_sums_ok; then
+        err "golden: stock.sha256 and loader.sha256 do not name stock PARAMs and loaders in pairs"
+        FAIL_REASON="This installer is incomplete. Nothing was written."
+        return 1
+    fi
     say "Omarchy for the Galaxy Tab S2, 64 bits: installer $(golden_val release)"
     log "golden: installer $(golden_val release), bootloader ${SBOOT_VERSION:-not given}"
     if ! PARAM_DEV=$(part_dev PARAM); then
@@ -2802,7 +2959,9 @@ golden_main() {
         return 1
     }
     _gm_root=$UD_MNT/$GOLDEN_NAME
-    if [ "$_gm_sum" = "$(golden_val loader.sha256)" ]; then
+    _gm_line=$(golden_line_of loader.sha256 "$_gm_sum")
+    if [ -n "$_gm_line" ]; then
+        log "golden: PARAM's first $EXTENT bytes are a loader this installer knows, $(golden_named loader.sha256 "$_gm_line")"
         if [ -f "$_gm_root/$GOLDEN_MARK" ]; then
             if [ -f "$UD_MNT/$GOLDEN_REINSTALL" ]; then
                 golden_reinstall || golden_save_log
@@ -2817,13 +2976,17 @@ golden_main() {
         golden_install 0 || golden_save_log
         return 1
     fi
-    if [ "$_gm_sum" = "$(golden_val stock.sha256)" ]; then
+    _gm_line=$(golden_stock_line "$_gm_sum")
+    if [ -n "$_gm_line" ]; then
+        log "golden: PARAM is a stock image this installer knows, $(golden_named stock.sha256 "$_gm_line")"
         log "golden: PARAM is the stock image: installing"
         golden_install 1 || golden_save_log
         return 1
     fi
     golden_archive "$PARAM_DEV"
-    if [ -n "$GA_SUM" ] && [ "$GA_SUM" = "$(golden_val stock.sha256)" ]; then
+    _gm_line=$(golden_stock_line "${GA_SUM:-}")
+    if [ -n "$_gm_line" ]; then
+        log "golden: PARAM holds a stock archive this installer knows, $(golden_named stock.sha256 "$_gm_line")"
         log "golden: PARAM holds the stock archive, and $GA_TAIL bytes after its end (byte $GA_END) that are not zero, left by an earlier write: the stock image all the same, installing"
         say "PARAM holds the stock pictures, then $GA_TAIL bytes S-Boot does not read: the loader puts zeros there."
         golden_install 1 || golden_save_log

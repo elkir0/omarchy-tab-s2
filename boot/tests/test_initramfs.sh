@@ -861,10 +861,18 @@ gcache_blocks() {
   dd if="$(g_cache_dev)" of="$W/cache-sb" bs=1024 skip=1 count=1 status=none
   echo "$(od -An -tu4 -j 4 -N 4 "$W/cache-sb" | tr -d ' ') $(od -An -tu4 -j 24 -N 4 "$W/cache-sb" | tr -d ' ')"
 }
-# gparam_loader_sum: the sha256 the fixtures' loader.sha256 names.
-gparam_loader_sum() { head -n 1 "$GF/golden/loader.sha256" | cut -d' ' -f1; }
-# gparam_stock_sum: the sha256 the fixtures' stock.sha256 names.
-gparam_stock_sum() { head -n 1 "$GF/golden/stock.sha256" | cut -d' ' -f1; }
+# gparam_loader_sum: the sha256 the fixtures' loader.sha256 names on line 1
+# (the loader forged from param-stock.img).
+gparam_loader_sum() { gparam_line loader.sha256 1; }
+# gparam_stock_sum: the sha256 the fixtures' stock.sha256 names on line 1
+# (param-stock.img).
+gparam_stock_sum() { gparam_line stock.sha256 1; }
+# gparam_line FILE N: the sha256 on line N of one of the fixtures' two sha256
+# files (one line per stock PARAM, paired by line number: the loader of line
+# N is forged from the stock PARAM of line N).
+gparam_line() { sed -n "${2}p" "$GF/golden/$1" | cut -d' ' -f1; }
+# gparam_head_is IMG: PARAM's first GEXTENT bytes are IMG's.
+gparam_head_is() { [ "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)" = "$(head -c "$GEXTENT" "$1" | sha256sum | cut -d' ' -f1)" ]; }
 # garchive_end: where the stock archive ends (the fixtures' stock.end).
 garchive_end() { cat "$GF/stock.end"; }
 # gtail_len: the length of the non-zero run after the stock archive's end in
@@ -1369,6 +1377,211 @@ scenario_golden_rescue_tail() {
   [[ $rc -eq 99 ]] || show_log gresctail
   detach_inner_loops
   ip link del usb0 2>/dev/null || true
+}
+
+# --- the second stock PARAM of the firmware (the fixtures' line 2: the BL's
+# --- param.bin as Odin flashes it, and the loader forged from it): every
+# --- state the installer has must take it exactly as it takes line 1's.
+
+# scenario_golden_stock_b: a fresh install from the second stock PARAM.  As
+# scenario_golden_fresh, with line 2's pair: installed, PARAM's first EXTENT
+# bytes are loader B's, the S-Boot data after them untouched.
+scenario_golden_stock_b() {
+  echo "--- scenario: golden, fresh install from the second stock PARAM (the one Odin flashes)"
+  greset_all
+  gset_param "$GF/param-stock-b.img"
+  grun gfreshb
+  local rc=$GRC
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the stock image, by its line and label" \
+    log_has gfreshb "golden: PARAM is a stock image this installer knows, line 2 (the stock PARAM flashed with Odin (param-stock-b.img))"
+  check "logged: the stock image, installing" log_has gfreshb "golden: PARAM is the stock image: installing"
+  check "the loader forged as expected, the one of the same line" \
+    log_has gfreshb "golden: the loader forged from the stock PARAM is the expected one, line 2 (the loader forged from line 2 of stock.sha256)"
+  check "PARAM holds loader B" log_has gfreshb "golden: PARAM holds the loader (sha256"
+  check "and not loader A's" bash -c "! cmp -s <(head -c $GEXTENT '$(g_param_dev)') <(head -c $GEXTENT '$GF/param-loader.img')"
+  check "said on screen: installed, restarting" log_has gfreshb "t715-say: Omarchy is installed. Restarting into it..."
+  check "PARAM's first $GEXTENT bytes are loader B's (param-loader-b.img)" \
+    gparam_head_is "$GF/param-loader-b.img"
+  check "PARAM's first $GEXTENT bytes hash to loader.sha256 line 2" \
+    test "$(gparam_line loader.sha256 2)" = "$(head -c "$GEXTENT" "$(g_param_dev)" | sha256sum | cut -d' ' -f1)"
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$GF/param-stock-b.img")
+  check "slot A (sector 131072) is a valid header of generation 1" test "$(gslot_gen "$(g_cache_dev)" 131072)" = 1
+  check "the root's tree: owners, setuid, symlink, hard links, long path, NVRAM, markers" \
+    gwith_userdata sh "$W/gcheck-tree.sh" "$W/gud"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "PARAM-stock-backup.img is the whole second stock PARAM, with its sidecar" gwith_userdata sh -c '
+    cmp -s "$1/media/0/linux/PARAM-stock-backup.img" "$2/param-stock-b.img"
+    [ "$(cat "$1/media/0/linux/PARAM-stock-backup.img.sha256")" = "$(sha256sum "$2/param-stock-b.img" | cut -d" " -f1)  PARAM-stock-backup.img" ]
+  ' sh "$W/gud" "$GF"
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "the root's saved PARAM is the second stock image, mode 0600" gwith_userdata sh -c '
+    cmp -s "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img" "$2/param-stock-b.img"
+    [ "$(stat -c %a "$1/omarchy-arm64/var/lib/t715/PARAM-stock.img")" = 600 ]
+  ' sh "$W/gud" "$GF"
+  [[ $rc -eq 99 ]] || show_log gfreshb
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_handback_b: loader B in PARAM with an installed, marked
+# root: the hand-back, as with loader A, not the rescue.
+scenario_golden_handback_b() {
+  echo "--- scenario: golden, loader B in PARAM, root installed: the hand-back"
+  greset_all
+  gplant_root golden "$GF/param-stock-b.img"
+  gset_param "$GF/param-loader-b.img"
+  local before after
+  before=$(gdisk_sums)
+  grun ghandb
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: PARAM holds a loader this installer knows, line 2's" \
+    log_has ghandb "golden: PARAM's first $GEXTENT bytes are a loader this installer knows, line 2 (the loader forged from line 2 of stock.sha256)"
+  check "logged: the loader handed this start back" log_has ghandb "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "not the rescue (nothing forged)" sh -c "! grep -q 'Rescue' '$W/ghandb.log'"
+  check "said on screen: did not finish starting last time" log_has ghandb "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log ghandb
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_rescue_b: the rescue with the second stock PARAM: PARAM
+# holds neither stock image nor a loader, and the root's saved stock PARAM is
+# param-stock-b.img: loader B is written back, not loader A.
+scenario_golden_rescue_b() {
+  echo "--- scenario: golden, rescue from the second stock PARAM (loader B written back)"
+  greset_all
+  gplant_root golden "$GF/param-stock-b.img"
+  gset_param "$W/param-golden-changed.img"
+  grun grescb
+  local rc=$GRC
+  check "restart after the loader is back (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: neither the stock image nor the loader" log_has grescb "neither the stock image nor the loader"
+  check "said on screen: writing the loader back" log_has grescb "t715-say: Rescue: PARAM does not hold Omarchy's loader. Writing it back."
+  check "logged: the saved stock PARAM, by its line and label" \
+    log_has grescb "PARAM-stock.img is a stock PARAM this installer knows, line 2 (the stock PARAM flashed with Odin (param-stock-b.img))"
+  check "the loader forged as expected, the one of the same line" \
+    log_has grescb "golden: the loader forged from the stock PARAM is the expected one, line 2 (the loader forged from line 2 of stock.sha256)"
+  check "said on screen: back in PARAM, restarting" log_has grescb "t715-say: Rescue: the loader is back in PARAM. Restarting."
+  check "PARAM's first $GEXTENT bytes are loader B's now" gparam_head_is "$GF/param-loader-b.img"
+  check "not loader A" bash -c "! cmp -s <(head -c $GEXTENT '$(g_param_dev)') <(head -c $GEXTENT '$GF/param-loader.img')"
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$W/param-golden-changed.img")
+  [[ $rc -eq 99 ]] || show_log grescb
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_param_tail_b: as scenario_golden_param_tail, with the
+# second stock PARAM: its archive followed by leftover bytes after its end is
+# installed too.
+scenario_golden_param_tail_b() {
+  echo "--- scenario: golden, the second stock PARAM's archive with leftover bytes after its end: installed, exit 99"
+  greset_all
+  gset_param "$GF/param-golden-tail-b.img"
+  grun gtailb
+  local rc=$GRC
+  local gend gtail
+  gend=$(cat "$GF/stock-b.end")
+  gtail=$(gtail_len)
+  check "restart after the install (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: a stock archive this installer knows, line 2's" \
+    log_has gtailb "golden: PARAM holds a stock archive this installer knows, line 2 (the stock PARAM flashed with Odin (param-stock-b.img))"
+  check "logged: the stock archive with the leftover bytes, installing" \
+    log_has gtailb "golden: PARAM holds the stock archive, and $gtail bytes after its end (byte $gend) that are not zero, left by an earlier write: the stock image all the same, installing"
+  check "said on screen: the leftover bytes, the loader puts zeros there" \
+    log_has gtailb "t715-say: PARAM holds the stock pictures, then $gtail bytes S-Boot does not read: the loader puts zeros there."
+  check "the loader forged as expected, the one of the same line" \
+    log_has gtailb "golden: the loader forged from the stock PARAM is the expected one, line 2 (the loader forged from line 2 of stock.sha256)"
+  check "PARAM's first $GEXTENT bytes are loader B's" gparam_head_is "$GF/param-loader-b.img"
+  check "the loader has zeros where the leftover bytes were" \
+    cmp -s <(dd if="$(g_param_dev)" bs=1 skip=1048576 count="$gtail" status=none) <(head -c "$gtail" /dev/zero)
+  check "PARAM's bytes after the loader's part are unchanged" \
+    cmp -s <(dd if="$(g_param_dev)" bs=512 skip=14336 count=2048 status=none) <(tail -c +7340033 "$GF/param-golden-tail-b.img")
+  # shellcheck disable=SC2016  # expanded by the sh -c script
+  check "PARAM-stock-backup.img is the raw PARAM, leftover bytes included, with its sidecar" gwith_userdata sh -c '
+    cmp -s "$1/media/0/linux/PARAM-stock-backup.img" "$2/param-golden-tail-b.img"
+    [ "$(cat "$1/media/0/linux/PARAM-stock-backup.img.sha256")" = "$(sha256sum "$2/param-golden-tail-b.img" | cut -d" " -f1)  PARAM-stock-backup.img" ]
+  ' sh "$W/gud" "$GF"
+  [[ $rc -eq 99 ]] || show_log gtailb
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# scenario_golden_cross_pair: golden directories whose loader.sha256 does not
+# pair.  In golden-cross, its line 2 names the loader forged from line 1's
+# stock PARAM, so the second stock PARAM's loader is named nowhere; in
+# golden-swapped, the two loaders are on each other's line.  The init's own
+# golden_forge_checked, sourced as scenario_golden_forge_python does, must
+# refuse the second stock PARAM in both, each with its own message, and
+# still forge the first pair's loader; with the fixtures' own directory, the
+# second stock PARAM gives loader B.  Needs no disk, only the initramfs'
+# functions: GOLDEN_DIR is pointed at each directory in turn.
+scenario_golden_cross_pair() {
+  echo "--- scenario: golden, loader.sha256 that does not pair (cross-paired, swapped): refused"
+  cat >"$W/gcross.sh" <<'EOF'
+log() { echo "log: $*"; }; err() { echo "err: $*" >&2; return 0; }; warn() { :; }
+. /work/golden-fns.sh
+RUNDIR=/work/golden-run; mkdir -p "$RUNDIR"
+for g in golden golden-cross golden-swapped; do
+  GOLDEN_DIR="/t/golden-fixtures/$g"
+  EXTENT=$(golden_val extent)
+  echo "sums $g $(golden_sums_ok && echo ok || echo bad)"
+  for s in param-stock.img param-stock-b.img; do
+    rm -f "$RUNDIR/param-loader.img"
+    if golden_forge_checked "/t/golden-fixtures/$s" >"$RUNDIR/out.txt" 2>"$RUNDIR/err.txt"; then r=accepted; else r=refused; fi
+    got=$(sha256sum "$RUNDIR/param-loader.img" 2>/dev/null | cut -d' ' -f1)
+    a=$(sed -n 1p /t/golden-fixtures/golden/loader.sha256 | cut -d' ' -f1)
+    b=$(sed -n 2p /t/golden-fixtures/golden/loader.sha256 | cut -d' ' -f1)
+    case $got in "$a") which=loader-A ;; "$b") which=loader-B ;; ?*) which=other ;; *) which=none ;; esac
+    echo "forge $g $s $r $which"
+    sed "s|^|err $g $s |" "$RUNDIR/err.txt"
+    sed "s|^|log $g $s |" "$RUNDIR/out.txt"
+  done
+done
+EOF
+  "$W/root-gfns/bin/busybox" sh "$W/gcross.sh" >"$W/gcross.out" 2>&1
+  sed 's/^/        | /' "$W/gcross.out"
+  local l1 l2 l1x l2x l1s l2s
+  l1=$(gparam_line loader.sha256 1); l2=$(gparam_line loader.sha256 2)
+  # what the two wrong directories name, on each line
+  l1x=$(sed -n 1p "$GF/golden-cross/loader.sha256" | cut -d' ' -f1)
+  l2x=$(sed -n 2p "$GF/golden-cross/loader.sha256" | cut -d' ' -f1)
+  l1s=$(sed -n 1p "$GF/golden-swapped/loader.sha256" | cut -d' ' -f1)
+  l2s=$(sed -n 2p "$GF/golden-swapped/loader.sha256" | cut -d' ' -f1)
+  check "the wrong directories are lists of sums in pairs (well formed for the presence check)" \
+    sh -c "grep -qx 'sums golden-cross ok' '$W/gcross.out' && grep -qx 'sums golden-swapped ok' '$W/gcross.out'"
+  check "the presence check counts lines, so the pairing itself is checked when forging" \
+    test "$l1x$l2x" = "$l1$l1" -a "$l1s$l2s" = "$l2$l1"
+  # --- the right directory
+  check "golden: the first stock PARAM gives loader A" grep -qx "forge golden param-stock.img accepted loader-A" "$W/gcross.out"
+  check "golden: the second stock PARAM gives loader B" grep -qx "forge golden param-stock-b.img accepted loader-B" "$W/gcross.out"
+  # --- golden-cross: loader A on both lines.  "forge ... refused loader-B":
+  # the forge ran (its output, loader B, stays in RUNDIR), and was refused,
+  # so nothing would be written.
+  check "golden-cross: the first stock PARAM still gives loader A" grep -qx "forge golden-cross param-stock.img accepted loader-A" "$W/gcross.out"
+  check "golden-cross: the second stock PARAM is refused" grep -qx "forge golden-cross param-stock-b.img refused loader-B" "$W/gcross.out"
+  check "golden-cross: said so: not the loader this installer was built for" \
+    grep -qF -- "err golden-cross param-stock-b.img err: golden: the loader forged from the stock PARAM is $l2, not the one this installer was built for: nothing written" "$W/gcross.out"
+  check "golden-cross: the stock PARAM itself was known (line 2)" \
+    grep -qF -- "log golden-cross param-stock-b.img log: golden: /t/golden-fixtures/param-stock-b.img is a stock PARAM this installer knows, line 2 (the stock PARAM flashed with Odin (param-stock-b.img))" "$W/gcross.out"
+  # --- golden-swapped: the loaders on each other's line; each stock PARAM
+  # forges its own loader, which the directory puts on the other line
+  check "golden-swapped: the second stock PARAM is refused" grep -qx "forge golden-swapped param-stock-b.img refused loader-B" "$W/gcross.out"
+  check "golden-swapped: said so: the loader of another stock PARAM" \
+    grep -qF -- "err golden-swapped param-stock-b.img err: golden: the loader forged from the stock PARAM of line 2 (the stock PARAM flashed with Odin (param-stock-b.img)) is the loader of another stock PARAM ($l2): nothing written" "$W/gcross.out"
+  check "golden-swapped: the first stock PARAM is refused too (loader B is not its loader)" \
+    grep -qx "forge golden-swapped param-stock.img refused loader-A" "$W/gcross.out"
+  check "golden-swapped: said so for the first" \
+    grep -qF -- "err golden-swapped param-stock.img err: golden: the loader forged from the stock PARAM of line 1 (the stock PARAM reached over the air (param-stock.img)) is the loader of another stock PARAM ($l1): nothing written" "$W/gcross.out"
+  # the expected-one line goes with an accepted forge, and only with one:
+  # three of the six (golden's two, golden-cross's first)
+  check "the expected-one line was logged once per accepted forge, never for a refused one" \
+    sh -c "[ \"\$(grep -c 'the expected one' '$W/gcross.out')\" -eq 3 ]"
 }
 
 scenario_golden_wrong_bootloader() {
@@ -2139,6 +2352,7 @@ in_container() {
   make_golden_fixtures
   scenario_golden_forge_python
   scenario_golden_members_python
+  scenario_golden_cross_pair
   if attach_disk "$W/disk-golden.img" 4; then
     ok "the golden synthetic disk on $OUTER, ${OUTER#/dev/}p4 named USERDATA"
   else
@@ -2150,8 +2364,12 @@ in_container() {
   scenario_golden_rescue
   scenario_golden_unknown_param
   scenario_golden_param_tail
+  scenario_golden_param_tail_b
   scenario_golden_param_other
   scenario_golden_rescue_tail
+  scenario_golden_stock_b
+  scenario_golden_handback_b
+  scenario_golden_rescue_b
   scenario_golden_wrong_bootloader
   scenario_golden_no_sidecar
   scenario_golden_bad_sidecar
@@ -2293,7 +2511,7 @@ command -v python3 >/dev/null 2>&1 || { echo "  FAIL  python3 is needed to build
 cat >"$TMP/gen_golden_fixtures.py" <<'PY'
 #!/usr/bin/env python3
 """Build the synthetic fixtures of the golden installer's tests."""
-import hashlib, importlib.util, io, sys, tarfile
+import hashlib, importlib.util, io, os, shutil, sys, tarfile
 from pathlib import Path
 
 out = Path(sys.argv[1])
@@ -2318,12 +2536,13 @@ pictures = [
     ("lpm.jpg", b"\xff\xd8" + bytes((i * 3 + 1) & 0xFF for i in range(1024))),
     ("warning.jpg", b"\xff\xd8" + bytes((i * 5 + 2) & 0xFF for i in range(1536))),
 ]
-def ustar(members):
+def ustar(members, mtime=0):
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
         for name, data in members:
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
+            ti.mtime = mtime            # 0 (TarInfo's default) for the first stock PARAM: its bytes stay as they were
             tf.addfile(ti, io.BytesIO(data))
     return buf.getvalue()
 stock = ustar(pictures)
@@ -2335,6 +2554,21 @@ assert len(marker) == DISK - EXTENT and marker.strip(b"\0")
 stock_full = stock + marker
 (out / "param-stock.img").write_bytes(stock_full)
 
+# The second stock PARAM of the firmware (T715XXU2CRH1 as Odin flashes it: the
+# BL's param.bin), the way the two differ on a tablet: the same members in the
+# same order and the same data, but another logo.jpg (other data, another
+# size, not a multiple of 512 either) and another date in every header.  Only
+# the dates differ here in the headers; the forged loaders differ in the same
+# fields (logo.jpg's data, size and checksum, and the mtime of each header).
+logo_b = b"\xff\xd8" + bytes(((i * 29 + 17) & 0xFF) for i in range(5113))
+pictures_b = [(name, logo_b if name == "logo.jpg" else data) for name, data in pictures]
+stock_b = ustar(pictures_b, mtime=1533235200)        # 2018-08-03, a date of the firmware's own
+assert len(stock_b) <= EXTENT, len(stock_b)
+assert len(logo_b) % 512 != 0 and logo_b != pictures[2][1]
+stock_b = stock_b + bytes(EXTENT - len(stock_b))
+stock_b_full = stock_b + marker
+(out / "param-stock-b.img").write_bytes(stock_b_full)
+
 # the stock archive's members, as the build's --golden wants them (what
 # check-param.py --members prints), and where the archive ends: the tests
 # read both, instead of trusting this script's arithmetic
@@ -2342,6 +2576,8 @@ stock_members, archive_end = cp.members(stock, EXTENT)
 (out / "golden" / "stock.members").write_text(
     "".join(f"{digest} {size} {name}\n" for name, size, digest in stock_members))
 (out / "stock.end").write_text(f"{archive_end}\n")
+_, archive_end_b = cp.members(stock_b, EXTENT)
+(out / "stock-b.end").write_text(f"{archive_end_b}\n")
 
 # a PARAM whose archive is the stock one, but with a run of non-zero bytes
 # after the archive's end (an earlier write left them there; S-Boot reads
@@ -2352,6 +2588,10 @@ tail = bytearray(stock_full)
 tail[1048576:1048576 + len(tail_run)] = tail_run
 (out / "param-golden-tail.img").write_bytes(bytes(tail))
 (out / "tail-run.bin").write_bytes(tail_run)
+# the same for the second stock PARAM
+tail_b = bytearray(stock_b_full)
+tail_b[1048576:1048576 + len(tail_run)] = tail_run
+(out / "param-golden-tail-b.img").write_bytes(bytes(tail_b))
 
 # a PARAM whose archive is not the stock one: no lpm.jpg, no warning.jpg,
 # one extra custom.jpg
@@ -2367,14 +2607,43 @@ other_members, _ = cp.members(other, EXTENT)
     "".join(f"{digest} {size} {name}\n" for name, size, digest in other_members))
 
 (out / "golden" / "extent").write_text(f"{EXTENT}\n")
-(out / "golden" / "stock.sha256").write_text(
-    hashlib.sha256(stock_full[:EXTENT]).hexdigest() + "  param-stock.img\n")
+# stock.sha256 and loader.sha256: one line per stock PARAM, paired by line
+# number.  Line 1 is the pair there has always been; line 2 is the firmware's
+# own param.bin and the loader forged from it.
+stock_a_sum = hashlib.sha256(stock_full[:EXTENT]).hexdigest()
+stock_b_sum = hashlib.sha256(stock_b_full[:EXTENT]).hexdigest()
 forged = cp.forge(stock_full[:EXTENT], logo, EXTENT)
+forged_b = cp.forge(stock_b_full[:EXTENT], logo, EXTENT)
+loader_a_sum = hashlib.sha256(forged).hexdigest()
+loader_b_sum = hashlib.sha256(forged_b).hexdigest()
+assert stock_a_sum != stock_b_sum and loader_a_sum != loader_b_sum
+(out / "golden" / "stock.sha256").write_text(
+    f"{stock_a_sum}  the stock PARAM reached over the air (param-stock.img)\n"
+    f"{stock_b_sum}  the stock PARAM flashed with Odin (param-stock-b.img)\n")
 (out / "golden" / "loader.sha256").write_text(
-    hashlib.sha256(forged).hexdigest() + "  param-loader.img\n")
+    f"{loader_a_sum}  the loader forged from line 1 of stock.sha256\n"
+    f"{loader_b_sum}  the loader forged from line 2 of stock.sha256\n")
 (out / "golden" / "bootloader").write_text("T715XXU2CRH1\n")
 (out / "golden" / "release").write_text("9.9.9-test\n")
 (out / "param-loader.img").write_bytes(forged + marker)
+(out / "param-loader-b.img").write_bytes(forged_b + marker)
+
+# Two golden directories whose pairing is wrong, for the tests of the refusal
+# (the init's own golden_forge_checked, and check-param.py's command line):
+#   golden-cross:  line 2 of loader.sha256 names the loader forged from line
+#                  1's stock PARAM, so the loader of line 2 is named nowhere.
+#   golden-swapped: the two loaders are on each other's line, so the loader
+#                  forged from each stock PARAM is the one of another line.
+for name, l1, l2 in (
+        ("golden-cross", loader_a_sum, loader_a_sum),
+        ("golden-swapped", loader_b_sum, loader_a_sum)):
+    wrong = out / name
+    wrong.mkdir()
+    for f in os.listdir(out / "golden"):
+        shutil.copy2(out / "golden" / f, wrong / f)
+    (wrong / "loader.sha256").write_text(
+        f"{l1}  line 1 of a loader.sha256 that does not pair\n"
+        f"{l2}  line 2 of a loader.sha256 that does not pair\n")
 
 # the kernel's slot carried by the root image
 def fnv1a64(b):
@@ -2439,6 +2708,104 @@ for f in lib/t715-golden/logo.jpg lib/t715-golden/stock.sha256 lib/t715-golden/l
   if grep -q " $f\$" "$TMP/g/initramfs.manifest.txt"; then echo "  PASS  the archive has $f"
   else echo "  FAIL  the archive lacks $f"; HFAIL=$((HFAIL + 1)); fi
 done
+# Both sha256 files go in whole: line 2 is the second stock PARAM's pair.
+# (The build unpacks its cpio in Docker; the archive is read here.)
+mkdir -p "$TMP/g-cpio"
+gzip -dc "$TMP/g/initramfs.cpio.gz" >"$TMP/g-cpio/initramfs.cpio"
+for f in stock.sha256 loader.sha256; do
+  if python3 -I "$ROOT/boot/cpio_newc.py" extract-file "$TMP/g-cpio/initramfs.cpio" "lib/t715-golden/$f" 2>/dev/null | cmp -s - "$TMP/golden-fixtures/golden/$f"; then
+    echo "  PASS  the archive's $f is the fixture's, both its lines"
+  else echo "  FAIL  the archive's $f is not the fixture's whole"; HFAIL=$((HFAIL + 1)); fi
+done
+
+echo "=== 1d. build refusals: --golden with sha256 files that do not pair"
+# Copies of the fixtures' golden directory, one file changed each.  A refusal
+# must be the check's own: the build's message is looked at, so that a build
+# that fails for another reason does not pass for this one.
+grefused() {  # DESCRIPTION FILE CONTENT EXPECTED_MESSAGE
+  local d="$TMP/golden-bad" rc=0 out
+  rm -rf "$d" && cp -R "$TMP/golden-fixtures/golden" "$d"
+  printf '%b' "$3" >"$d/$2"
+  out=$(bash "$ROOT/boot/build-initramfs.sh" --out "$TMP/x-golden" --golden "$d" 2>&1) || rc=$?
+  if [[ $rc -eq 0 ]]; then echo "  FAIL  $1: built"; HFAIL=$((HFAIL + 1))
+  elif grep -qF -- "error: $4" <<<"$out"; then echo "  PASS  $1: refused"
+  else echo "  FAIL  $1: refused for another reason:"; echo "        ${out//$'\n'/$'\n'        }"; HFAIL=$((HFAIL + 1)); fi
+}
+A=$(sed -n 1p "$TMP/golden-fixtures/golden/stock.sha256" | cut -d' ' -f1)
+B=$(sed -n 2p "$TMP/golden-fixtures/golden/stock.sha256" | cut -d' ' -f1)
+C=$(sed -n 1p "$TMP/golden-fixtures/golden/loader.sha256" | cut -d' ' -f1)
+grefused "--golden: two stock lines, one loader line" loader.sha256 "$C  one loader only\n" \
+  "--golden: stock.sha256 has 2 stock PARAM(s) and loader.sha256 1: one loader per stock PARAM, on the same line"
+grefused "--golden: one stock line, two loader lines" stock.sha256 "$A  one stock PARAM only\n" \
+  "--golden: stock.sha256 has 1 stock PARAM(s) and loader.sha256 2: one loader per stock PARAM, on the same line"
+grefused "--golden: stock.sha256 with a line that is not a sha256" stock.sha256 "$A  line 1\nnot-a-sum  line 2\n" \
+  "--golden: stock.sha256: line 2 does not start with a lower-case sha256"
+grefused "--golden: loader.sha256 with a line that is not a sha256" loader.sha256 "$C  line 1\nnot-a-sum  line 2\n" \
+  "--golden: loader.sha256: line 2 does not start with a lower-case sha256"
+grefused "--golden: a sum of 63 characters" loader.sha256 "$C  line 1\n${C:1}  line 2\n" \
+  "--golden: loader.sha256: line 2 does not start with a lower-case sha256"
+grefused "--golden: an upper-case sha256" stock.sha256 "$A  line 1\n$(printf '%s' "$B" | tr 'a-f' 'A-F')  line 2\n" \
+  "--golden: stock.sha256: line 2 does not start with a lower-case sha256"
+grefused "--golden: no stock PARAM at all" stock.sha256 "" \
+  "--golden: $TMP/golden-bad/stock.sha256 is missing or empty"
+echo "=== 1e. check-param.py: both stock PARAMs, and the directories that do not pair"
+# The checker reads the golden files of its own directory: a copy of it is put
+# in each one.  What it says is compared with the fixtures' own sums.
+gcheck() {  # DESCRIPTION GOLDEN_DIR PARAM_IMG EXPECTED_EXIT [-loader IMG] EXPECTED_TEXT...
+  local d=$1 g=$2 img=$3 xrc=$4 rc=0 out loader=()
+  shift 4
+  if [[ ${1:-} == -loader ]]; then loader=("$2"); shift 2; fi
+  cp "$ROOT/boot/golden/check-param.py" "$g/check-param.py"
+  out=$(python3 -I "$g/check-param.py" "$img" ${loader[@]+"${loader[@]}"} 2>&1) || rc=$?
+  # its output, indented under the failure line
+  if [[ $rc -ne $xrc ]]; then echo "  FAIL  $d: exit $rc, wanted $xrc"; echo "        ${out//$'\n'/$'\n'        }"; HFAIL=$((HFAIL + 1)); return; fi
+  local t
+  for t in "$@"; do
+    if ! grep -qF -- "$t" <<<"$out"; then
+      echo "  FAIL  $d: its output lacks: $t"; echo "        ${out//$'\n'/$'\n'        }"; HFAIL=$((HFAIL + 1)); return
+    fi
+  done
+  echo "  PASS  $d"
+}
+GFXT="$TMP/golden-fixtures"
+A=$(sed -n 1p "$GFXT/golden/stock.sha256" | cut -d' ' -f1)
+B=$(sed -n 2p "$GFXT/golden/stock.sha256" | cut -d' ' -f1)
+LA=$(sed -n 1p "$GFXT/golden/loader.sha256" | cut -d' ' -f1)
+LB=$(sed -n 2p "$GFXT/golden/loader.sha256" | cut -d' ' -f1)
+# the four sums the CLI prints are cut to 16 characters: the tests give them the same cut
+gcheck "check-param.py: the first stock PARAM is stock line 1, and gives its loader" \
+  "$GFXT/golden" "$GFXT/param-stock.img" 0 \
+  "stock part: ${A:0:16}...: one this installer knows, stock line 1 (the stock PARAM reached over the air (param-stock.img))" \
+  "forged:     ${LA:0:16}...: the loader of stock line 1"
+gcheck "check-param.py: the second stock PARAM is stock line 2, and gives its own loader" \
+  "$GFXT/golden" "$GFXT/param-stock-b.img" 0 \
+  "stock part: ${B:0:16}...: one this installer knows, stock line 2 (the stock PARAM flashed with Odin (param-stock-b.img))" \
+  "forged:     ${LB:0:16}...: the loader of stock line 2"
+gcheck "check-param.py: the second stock PARAM with leftover bytes is known by its archive" \
+  "$GFXT/golden" "$GFXT/param-golden-tail-b.img" 0 \
+  "its archive: ${B:0:16}... (ends at byte $(cat "$GFXT/stock-b.end"), $(wc -c <"$GFXT/tail-run.bin" | tr -d ' ') bytes after it not zero): one this installer knows, stock line 2"
+gcheck "check-param.py: a cross-paired loader.sha256 refuses the second stock PARAM" \
+  "$GFXT/golden-cross" "$GFXT/param-stock-b.img" 1 \
+  "forged:     ${LB:0:16}...: NOT the loader this installer was built for" "the installer would write nothing"
+gcheck "check-param.py: a cross-paired loader.sha256 still takes the first pair" \
+  "$GFXT/golden-cross" "$GFXT/param-stock.img" 0 "the installer would write the loader"
+gcheck "check-param.py: a swapped loader.sha256 refuses the second stock PARAM as another line's loader" \
+  "$GFXT/golden-swapped" "$GFXT/param-stock-b.img" 1 \
+  "NOT the loader of stock line 2" "but the loader of stock line 1: cross-paired"
+gcheck "check-param.py: a swapped loader.sha256 refuses the first stock PARAM too" \
+  "$GFXT/golden-swapped" "$GFXT/param-stock.img" 1 \
+  "NOT the loader of stock line 1" "but the loader of stock line 2: cross-paired"
+# the loader's own image, as when this directory's files were checked
+gcheck "check-param.py: with the loader's own image of the second pair: the same bytes" \
+  "$GFXT/golden" "$GFXT/param-stock-b.img" 0 -loader "$GFXT/param-loader-b.img" \
+  "the loader's own image: the same bytes" "the installer would write the loader"
+gcheck "check-param.py: with the first pair's loader image for the second stock PARAM: different" \
+  "$GFXT/golden" "$GFXT/param-stock-b.img" 1 -loader "$GFXT/param-loader.img" \
+  "the loader's own image: DIFFERENT bytes" "the installer would write nothing"
+# --members, the way stock.members was made
+if diff <(python3 -I "$ROOT/boot/golden/check-param.py" --members "$GFXT/param-stock.img") "$GFXT/golden/stock.members" >/dev/null; then
+  echo "  PASS  check-param.py --members lists the stock members (stock.members)"
+else echo "  FAIL  check-param.py --members differs from stock.members"; HFAIL=$((HFAIL + 1)); fi
 
 echo "=== 2. shellcheck"
 if docker run --rm --platform linux/arm64 \

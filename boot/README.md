@@ -3,7 +3,7 @@
 | Path | What |
 |---|---|
 | `initramfs/init` | the initramfs's `/init` (busybox sh, PID 1): image mode, persistent root, knobs, debug shell; the installer of the 64-bit system and its rescue (`t715.golden`) |
-| `golden/` | what the installer writes into PARAM: the loader's logo (`logo.jpg`), the sha256 of PARAM's first `extent` bytes before (`stock.sha256`) and after (`loader.sha256`), the stock archive's members (`stock.members`: sha256, size and name of each picture, to say on screen how an unknown PARAM differs), the one `bootloader` it is made for, the `release`; `check-param.py` checks a PARAM dump against them on a computer (`--members` lists a dump's members) |
+| `golden/` | what the installer writes into PARAM: the loader's logo (`logo.jpg`), the sha256 of PARAM's first `extent` bytes before (`stock.sha256`) and after (`loader.sha256`), one line each per stock PARAM the installer knows, paired by line number, the members of a stock archive (`stock.members`: sha256, size and name of each picture, to say on screen how an unknown PARAM differs), the one `bootloader` it is made for, the `release`; `check-param.py` checks a PARAM dump against them on a computer (`--members` lists a dump's members) |
 | `build-initramfs.sh` | builds the initramfs (busybox, static e2fsck, the kernel's modules, knobs; with `--paramrescue`, the loader the rescue puts back), reproducibly, in Docker |
 | `pack-test-recovery.sh` | packs kernel, DTB and initramfs into a RECOVERY image, or a BOOT image with `--boot` |
 | `samsung_bootimg.py` | Samsung boot image and DTBH reader/writer |
@@ -269,11 +269,11 @@ headed "Golden"; in order:
 
 | Step | Function | What |
 |---|---|---|
-| state | `golden_main` | PARAM's first `extent` bytes: the stock image (`stock.sha256`) → install; the stock archive followed by bytes that are not zero (`golden_archive`: the sha256 with those bytes as zeros is `stock.sha256`; a flash of the firmware writes the archive and may leave older bytes after it) → the same install, the loader having zeros there; the loader (`loader.sha256`) and the root marked `.t715-golden` → the loader handed this start back: say so, restart after `t715.failwait`; the loader without the root → install it (PARAM is left alone); the loader with the root and a `reinstall` file in `linux/` → the reinstall (below); anything else with the root's saved stock PARAM → forge and write the loader again (the rescue); anything else → refuse, after `golden_param_report` has said on screen which pictures differ from `stock.members`, are missing or are not in it, and whether bytes after the archive are not zero |
+| state | `golden_main` | PARAM's first `extent` bytes: a stock image the installer knows (a line of `stock.sha256`: `golden_stock_line` says which, and the log names it) → install; a stock archive followed by bytes that are not zero (`golden_archive`: the sha256 with those bytes as zeros is a line of `stock.sha256`; a flash of the firmware writes the archive and may leave older bytes after it) → the same install, the loader having zeros there; a loader the installer knows (a line of `loader.sha256`: `golden_is_loader`) and the root marked `.t715-golden` → the loader handed this start back: say so, restart after `t715.failwait`; that loader without the root → install it (PARAM is left alone); the loader with the root and a `reinstall` file in `linux/` → the reinstall (below); anything else with the root's saved stock PARAM → forge and write the loader again (the rescue); anything else → refuse, after `golden_param_report` has said on screen which pictures differ from `stock.members`, are missing or are not in it, and whether bytes after the archive are not zero. `golden_sums_ok` refuses, as an incomplete installer, a line of `stock.sha256` or `loader.sha256` that is not a lower-case sha256, and two files with different numbers of lines |
 | checks | `golden_install` | `androidboot.bootloader` from S-Boot's command line is `bootloader`; the image `omarchy-arm64.img` in `linux/` of the internal storage (`media/0/linux`) or of a microSD card, its sidecar `.sha256` (required); the battery (30 %); the image is aarch64 and carries `usr/lib/t715-golden/kernel.slot`; the chip's ASV fuse word is logged |
 | root | `golden_seed` | the image's tree into `USERDATA/.omarchy-arm64.t715-seed` with busybox `tar` (the arm64 image's `cp` cannot run on this 32-bit kernel; tar carries no extended attribute: the release lists the image's file capabilities, which the image's `t715-golden-caps.service` sets again at the first boot, and checks it holds no other but the ACLs systemd-tmpfiles sets), the entries counted on both sides, `import_device_files`, the `.t715-persist` marker, renamed `omarchy-arm64` |
 | kernel | `golden_slot`, `golden_cache_fs` | with no slot of ours in CACHE, a 64 MiB file system (`mke2fs`) in front of the slots; the slot written to the one not in use with the next generation (its header's generation and FNV-1a 64 made here, `slot_gen` reads them back), the whole slot read back |
-| loader | `golden_param`, `golden_forge`, `golden_write_param` | PARAM copied whole to `media/0/linux/PARAM-stock-backup.img` and the root's `var/lib/t715/PARAM-stock.img`, EFS (read only) to `media/0/linux/EFS-backup.img`; the loader forged from the copy (Samsung's `logo.jpg` replaced by `golden/logo.jpg`, the members after it moved, zeros to `extent`), refused unless the copy is the stock image (or its archive is, `golden_archive`) and the result's sha256 is `loader.sha256`; written over the first `extent` bytes only, read back |
+| loader | `golden_param`, `golden_forge_checked`, `golden_forge`, `golden_write_param` | PARAM copied whole to `media/0/linux/PARAM-stock-backup.img` and the root's `var/lib/t715/PARAM-stock.img`, EFS (read only) to `media/0/linux/EFS-backup.img`; the loader forged from the copy (Samsung's `logo.jpg` replaced by `golden/logo.jpg`, the members after it moved, zeros to `extent`), refused unless the copy is a stock image the installer knows (or its archive is, `golden_archive`) and the result's sha256 is on the same line of `loader.sha256` (`golden_loader_for`: the loader of another line is refused too, with its own message); written over the first `extent` bytes only, read back as the image written, which must be a line of `loader.sha256` |
 | end | `golden_finish` | the root's `.t715-golden`, the log to `media/0/linux/omarchy-arm64-install.log`, restart |
 
 Each step done already is skipped at the next start; PARAM is the last write. Every refusal
@@ -299,13 +299,19 @@ is in place, `omarchy-arm64.previous` is renamed back and the tablet restarts in
 `golden/logo.jpg` is the logo of the loader `kboot7-cas3` (elkir0/bnuuyloader: its `t715/loader`
 builds it, `t715/docs/SPLASH.md` tells that image; `check-param.py STOCK kboot7-cas3.param` says
 the same bytes): the loader's code and its boot screen, our bytes only (no metadata; its only runs in common with Samsung's partitions are the JPEG
-standard's Huffman tables and AArch64 no-op padding). `stock.sha256` is that of the archive part
-of `T715XXU2CRH1`'s PARAM, Samsung's pictures and two default settings, taken on the reference
-tablet and expected on every tablet of that firmware. Bytes after the archive's end, which S-Boot
-does not read, are not counted (a second tablet's PARAM was refused in 2.0.0 for a reason not yet
-known: older bytes left there is the likeliest). A tablet whose archive differs is refused, not
-guessed at, and the screen says which pictures differ from `stock.members` (made with
-`check-param.py --members` from the reference tablet's PARAM).
+standard's Huffman tables and AArch64 no-op padding). `stock.sha256` names the archive part of
+`T715XXU2CRH1`'s PARAM, Samsung's pictures and two default settings. The installer knows two of
+them, one per line, because that firmware leaves PARAM in two states. A tablet updated over the
+air keeps the pictures of 2016 (line 1, taken on the reference tablet). A tablet flashed with
+Odin gets the firmware's own `param.bin` from the BL, with pictures of 2018 (line 2). The two
+archives hold the same pictures' names in the same order and differ only in the boot logo
+(`logo.jpg`) and in the dates of the tar headers. `loader.sha256` has a line for each: the loader
+forged from the stock PARAM of line N is on line N, never on another. Bytes after the archive's
+end, which S-Boot does not read, are not counted either. Until 2.1.3 the installer knew line 1
+only, and refused every tablet flashed with Odin: the screen of 2.1.2 said `logo.jpg is not the
+stock one (92426 bytes, stock: 96953)`. A tablet whose archive is
+neither is refused, not guessed at, and the screen says which pictures differ from
+`stock.members` (made with `check-param.py --members` from the firmware's `param.bin`: line 2's).
 
 ### On-screen messages
 
