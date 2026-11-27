@@ -132,6 +132,10 @@ on the internal storage. Hold **Volume down + Power** to restart.
 | `Battery at N %` | under 30 % | plug the charger in: the install starts by itself at 30 % |
 | `Note: this chip's voltage fuses differ from the reference tablet's` | your chip's ASV fuse word is not the reference tablet's (`0x33010008`); the install goes on | report it with the install log: the CPU's voltage tables are the reference chip's ([ARM64.md](ARM64.md)) |
 | `Omarchy did not finish starting last time. The tablet restarts and tries again.` | the 64-bit system did not come up: the loader hands two starts back to the installer, then tries again | nothing, at first. If it never comes up, report it with the install log |
+| `Charging: N %. Omarchy starts at M %.`, then `Unplug the charger to switch off.` | the tablet was started on a charger with a low battery (S-Boot's charger mode): the installer stays here and charges, instead of starting a system that would drain the empty battery | nothing: it restarts into Omarchy by itself at M %, and switches off if you unplug the charger |
+| `Battery at N %, charger connected: starting Omarchy.` | the same start on a charger, with the battery already at M % or more | nothing: Omarchy starts |
+| `Charged to N %: starting Omarchy.` | the charge reached M % | nothing: Omarchy starts |
+| `Charger unplugged: switching off.` | the charger was unplugged during the charge | nothing: the tablet is off. Plug the charger back in and start it |
 | `Rescue: PARAM does not hold Omarchy's loader. Writing it back.` | something changed PARAM | nothing: the installer puts its loader back and restarts |
 | A black screen and nothing, at every start | the loader hangs before it can hand back | download mode, then flash `linux/PARAM-stock-backup.img` back to PARAM with Heimdall (`heimdall flash --PARAM PARAM-stock-backup.img`), then the stock firmware |
 
@@ -176,7 +180,14 @@ each step only once:
 
 From then on the installer in BOOT and RECOVERY is the system's rescue: if the 64-bit system does
 not come up, the loader hands the next starts back to it, which says so and restarts; if PARAM
-ever loses the loader, it forges it again from the saved copy. To check on a computer what the
+ever loses the loader, it forges it again from the saved copy.
+
+A start that S-Boot makes in its charger mode (`androidboot.mode=charger`, the tablet plugged in
+while off) can come here too. Since 2.1.4, with the battery below 10 %, the installer charges first
+instead of starting Omarchy, which would drain the battery again. It shows the level, restarts into Omarchy at 10 %, and switches off if the
+charger is unplugged.
+
+To check on a computer what the
 installer would write from a PARAM you dumped yourself:
 `python3 boot/golden/check-param.py PARAM.img`.
 

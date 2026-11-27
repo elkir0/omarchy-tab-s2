@@ -96,6 +96,13 @@
 #   t715.golden=1        the installer of the 64-bit system, and its rescue
 #                        once it is installed (see "Golden" below; on by
 #                        default in a build with --golden); default 0
+#   t715.chargemin=N     in S-Boot's charger mode (androidboot.mode=charger:
+#                        the tablet was started on a charger with an empty
+#                        battery), with the loader in PARAM and the root
+#                        installed: stay in the initramfs and charge up to
+#                        N %, then restart into Omarchy (10; 0: off)
+#   t715.chargepoll=SECS  seconds between two battery reads in the charger
+#                        mode (30)
 #
 # Persistent root (a tablet that keeps no Android): instead of steps 3-4,
 # USERDATA is checked (e2fsck -p, /sbin/e2fsck), mounted read-write
@@ -175,6 +182,9 @@ FAILREBOOT=1        # 0: wait on screen after a failure instead of rebooting
 PARAMRESCUE=0       # 1: put the loader known to work back in PARAM when it is not there
 GOLDEN=0            # 1: the installer of the 64-bit system (golden_main)
 SBOOT_VERSION=      # androidboot.bootloader: the bootloader's version, from S-Boot's own command line
+SBOOT_MODE=         # androidboot.mode: S-Boot's boot mode, "charger" when it started the tablet on a charger
+CHARGEMIN=10        # t715.chargemin: the level the charger mode charges up to before starting Omarchy (0: off)
+CHARGEPOLL=30       # t715.chargepoll: seconds between two battery reads in the charger mode
 
 # --- paths
 RUNDIR=/run/t715
@@ -192,6 +202,10 @@ PERSIST_MARK=.t715-persist  # marks a directory of USERDATA as a persistent root
 CONTINUE_FLAG=/tmp/t715-continue
 STAY_FLAG=/tmp/t715-stay
 SCREEN=/dev/tty0        # the VT say () writes to (t715.quiet cannot mute it)
+POWER_SUPPLY_DIR=/sys/class/power_supply
+[ -z "$TEST" ] || POWER_SUPPLY_DIR=${T715_TEST_POWER_SUPPLY:-/sys/class/power_supply}   # host-test: the test's fake tree
+CPU_SYSFS_DIR=/sys/devices/system/cpu
+[ -z "$TEST" ] || CPU_SYSFS_DIR=${T715_TEST_CPU_DIR:-/nonexistent-cpu}   # host-test: never the host's cores
 
 # --- state
 NET_UP=
@@ -403,9 +417,27 @@ parse_knobs() {
         t715.golden=0 | t715.golden=1)
             GOLDEN=${_pk#*=}
             ;;
+        t715.chargemin=*)
+            if _pk_v=$(uint "${_pk#*=}") && [ "$_pk_v" -le 100 ]; then
+                CHARGEMIN=$_pk_v
+            else
+                warn "$_pk_src: ignoring invalid '$_pk' (a percentage, 0-100, expected)"
+            fi
+            ;;
+        t715.chargepoll=*)
+            if _pk_v=$(uint "${_pk#*=}") && [ "$_pk_v" -ge 1 ]; then
+                CHARGEPOLL=$_pk_v
+            else
+                warn "$_pk_src: ignoring invalid '$_pk' (at least 1 second expected)"
+            fi
+            ;;
         androidboot.bootloader=*)
             # S-Boot's own word: the firmware version, no identifier
             SBOOT_VERSION=${_pk#*=}
+            ;;
+        androidboot.mode=*)
+            # S-Boot's own word: "charger" when it started the tablet on a charger
+            SBOOT_MODE=${_pk#*=}
             ;;
         t715.persist=*)
             _pk_v=${_pk#*=}
@@ -438,7 +470,7 @@ read_knobs() {
         warn "kernel command line is ${#_rk_cmdline} bytes (limit 1023): t715.* knobs at its end may have been cut off"
     fi
     parse_knobs "$_rk_cmdline" "cmdline"
-    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE golden=$GOLDEN"
+    log "knobs: rootimg=$ROOTIMG shell=$SHELL_MODE failwait=${FAILWAIT}s rootwait=${ROOTWAIT}s usbfn=$USBFN returnafter=${RETURNAFTER}s persist=${PERSIST:-none} quiet=$QUIET telnet=$TELNET failreboot=$FAILREBOOT crashlog=$CRASHLOG paramrescue=$PARAMRESCUE golden=$GOLDEN chargemin=$CHARGEMIN chargepoll=${CHARGEPOLL}s"
 }
 
 # ---------------------------------------------------------------------------
@@ -1607,6 +1639,20 @@ do_reboot() {
     done
 }
 
+# do_poweroff: the charger mode's end when the charger is unplugged: log,
+# sync, then poweroff -f in a loop like do_reboot.  Host-test: exit 96.
+do_poweroff() {
+    log "switching off (poweroff -f)"
+    if [ -n "$TEST" ]; then
+        exit 96
+    fi
+    sync
+    while :; do
+        poweroff -f
+        sleep 5
+    done
+}
+
 # param_rescue: t715.paramrescue, for a tablet whose only system is started
 # by a loader in PARAM (bnuuyloader: it starts the arm64 kernel of a slot of
 # CACHE) and that keeps no other.  S-Boot boots this kernel (BOOT) when the
@@ -1865,7 +1911,11 @@ load_modules() {
 # then every start comes back here, the stock way.
 # With the loader in PARAM and the root installed, a start here is the
 # loader's hand-back: the reason goes on screen and the board restarts after
-# t715.failwait seconds, which gives the loader its next try -- unless a file
+# t715.failwait seconds, which gives the loader its next try.  In S-Boot's
+# charger mode (androidboot.mode=charger: the tablet was started on a
+# charger with an empty battery) the start is held here instead, to charge
+# up to t715.chargemin % first (golden_charge), and restarts into Omarchy at
+# that level -- unless a file
 # linux/reinstall in the internal storage asks for a reinstall (an upgrade
 # from an earlier release, reached through the loader's hand-back): then, once the image is
 # found and checked, the installed root is renamed omarchy-arm64.previous
@@ -2379,6 +2429,171 @@ golden_battery() {
         fi
         say "Battery at $_gb_c %. Plug the charger in: the install starts at $GOLDEN_MIN_BATTERY %."
         sleep 60
+    done
+}
+
+# golden_battery_dir: the first supply of type Battery under
+# $POWER_SUPPLY_DIR that has a readable numeric capacity, as a directory.
+golden_battery_dir() {
+    for _gch_s in "$POWER_SUPPLY_DIR"/*; do
+        [ -r "$_gch_s/type" ] || continue
+        [ "$(cat "$_gch_s/type" 2>/dev/null)" = Battery ] || continue
+        case $(cat "$_gch_s/capacity" 2>/dev/null) in
+        '' | *[!0-9]*) continue ;;
+        esac
+        printf '%s\n' "$_gch_s"
+        return 0
+    done
+    return 1
+}
+
+# golden_capacity: the battery's capacity, digits only, or nothing.
+golden_capacity() {
+    _gch_b=$(golden_battery_dir) || return 1
+    _gch_c=$(cat "$_gch_b/capacity" 2>/dev/null)
+    _gch_c=$(uint "$_gch_c") || return 1
+    printf '%s\n' "$_gch_c"
+}
+
+# golden_charger_online: true when any supply of type Mains or USB under
+# $POWER_SUPPLY_DIR has online = 1.  The battery's own status is never read
+# for this: it says "Not charging" while the charger is online
+# (docs/hardware/BATTERY.md).
+golden_charger_online() {
+    for _gch_s in "$POWER_SUPPLY_DIR"/*; do
+        [ -r "$_gch_s/type" ] || continue
+        case $(cat "$_gch_s/type" 2>/dev/null) in
+        Mains | USB) ;;
+        *) continue ;;
+        esac
+        if [ "$(cat "$_gch_s/online" 2>/dev/null)" = 1 ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# golden_milli MICRO: a sysfs value in micro-units (uA, uV) as a whole
+# number of milli-units, "?" when it is not a number.
+golden_milli() {
+    case $1 in
+    '' | - | *[!0-9-]* | ?*-*) printf '?' ;;
+    *) printf '%s' "$(($1 / 1000))" ;;
+    esac
+}
+
+# golden_tenths TENTHS: a temperature in tenths of a degree as "31.5", "?"
+# when it is not a number.
+golden_tenths() {
+    case $1 in
+    '' | - | *[!0-9-]* | ?*-*) printf '?' ;;
+    -*) printf '%s' "$1" ;;
+    *) printf '%s.%s' "$(($1 / 10))" "$(($1 % 10))" ;;
+    esac
+}
+
+# golden_charge_cpus: the charger mode runs on one core.  This kernel has
+# no cpuidle and the initramfs loads no cpufreq driver, so eight idle cores
+# at the frequency S-Boot left draw what the charger brings: cores 1 to 7
+# go offline, as the 32-bit system's suspend takes them offline (CPU
+# hotplug).  The restart at the end brings them back.  A core that will not
+# go offline is logged and left as it is.
+golden_charge_cpus() {
+    _gcc_n=0
+    for _gcc in 1 2 3 4 5 6 7; do
+        _gcc_f=$CPU_SYSFS_DIR/cpu$_gcc/online
+        [ -w "$_gcc_f" ] || continue
+        [ "$(cat "$_gcc_f" 2>/dev/null)" = 1 ] || continue
+        if echo 0 >"$_gcc_f" 2>/dev/null; then
+            _gcc_n=$((_gcc_n + 1))
+        else
+            warn "golden: charger mode: cpu$_gcc would not go offline"
+        fi
+    done
+    log "golden: charger mode: $_gcc_n core(s) taken offline, cpu0 charges alone"
+}
+
+# golden_charge: S-Boot's charger mode (androidboot.mode=charger: the tablet
+# was started on a charger with an empty battery), with the loader in PARAM
+# and the root installed: instead of handing the start back and rebooting
+# into a system that drains the empty battery, stay in the initramfs and let
+# this 32-bit kernel's charger driver charge.  It runs only when all of
+# these hold: SBOOT_MODE is charger, CHARGEMIN is above 0, a battery capacity
+# can be read, and a Mains/USB supply exists; otherwise the log says why and
+# the hand-back follows unchanged.  When it runs: at CHARGEMIN % or above, it
+# restarts into Omarchy at once; below, it reads the battery every
+# CHARGEPOLL seconds and shows the level on screen, restarts into Omarchy at
+# CHARGEMIN %, switches off when the charger has been offline on two
+# consecutive reads, and falls back to the hand-back when the capacity cannot
+# be read any more.  Nothing is written to any partition.
+golden_charge() {
+    if [ "$SBOOT_MODE" != charger ]; then
+        log "golden: androidboot.mode is '${SBOOT_MODE:-not given}', not charger: no charging here"
+        return 0
+    fi
+    if [ "$CHARGEMIN" -le 0 ]; then
+        log "golden: t715.chargemin=0, the charger mode is off"
+        return 0
+    fi
+    if ! _gch_c=$(golden_capacity); then
+        log "golden: no battery capacity can be read in $POWER_SUPPLY_DIR: no charging here"
+        return 0
+    fi
+    _gch_ac=
+    for _gch_s in "$POWER_SUPPLY_DIR"/*; do
+        [ -r "$_gch_s/type" ] || continue
+        case $(cat "$_gch_s/type" 2>/dev/null) in
+        Mains | USB) _gch_ac=$_gch_s; break ;;
+        esac
+    done
+    if [ -z "$_gch_ac" ]; then
+        log "golden: no Mains or USB supply in $POWER_SUPPLY_DIR: no charging here"
+        return 0
+    fi
+    if [ "$_gch_c" -ge "$CHARGEMIN" ]; then
+        say "Battery at $_gch_c %, charger connected: starting Omarchy."
+        log "golden: charger mode: the battery is at $_gch_c %, at or above t715.chargemin=$CHARGEMIN: starting Omarchy"
+        do_reboot
+    fi
+    log "golden: charger mode: charging from $_gch_c % up to $CHARGEMIN % (t715.chargemin), a read every $CHARGEPOLL s (t715.chargepoll)"
+    golden_charge_cpus
+    _gch_off=0
+    # The first read is shown at once, then one every CHARGEPOLL seconds.
+    while :; do
+        if ! _gch_c=$(golden_capacity); then
+            log "golden: charger mode: the battery capacity cannot be read any more, the hand-back follows"
+            return 0
+        fi
+        _gch_b=$(golden_battery_dir)
+        _gch_v=$(cat "$_gch_b/voltage_now" 2>/dev/null)
+        _gch_i=$(cat "$_gch_b/current_now" 2>/dev/null)
+        _gch_t=$(cat "$_gch_b/temp" 2>/dev/null)
+        _gch_l=$(cat "$_gch_ac/input_current_limit" 2>/dev/null)
+        if golden_charger_online; then
+            _gch_on=1
+            _gch_off=0
+        else
+            _gch_on=0
+            _gch_off=$((_gch_off + 1))
+        fi
+        if [ -z "$TEST" ] && [ -c "$SCREEN" ]; then
+            printf '\033[2J\033[H' >"$SCREEN" 2>/dev/null || true
+        fi
+        say "Charging: $_gch_c %. Omarchy starts at $CHARGEMIN %."
+        say "Battery: $(golden_milli "$_gch_i") mA, $(golden_tenths "$_gch_t") C. Charger limit: $(golden_milli "$_gch_l") mA."
+        say "Unplug the charger to switch off."
+        log "golden: charger mode: capacity $_gch_c %, voltage ${_gch_v:-?} uV, current ${_gch_i:-?} uA, temp ${_gch_t:-?} tenths of a degree, input limit ${_gch_l:-?} uA, charger online $_gch_on"
+        if [ "$_gch_c" -ge "$CHARGEMIN" ]; then
+            say "Charged to $_gch_c %: starting Omarchy."
+            log "golden: charger mode: charged to $_gch_c %, at or above t715.chargemin=$CHARGEMIN: starting Omarchy"
+            do_reboot
+        fi
+        if [ "$_gch_off" -ge 2 ]; then
+            say "Charger unplugged: switching off."
+            log "golden: charger mode: the charger has been offline on two consecutive reads: switching off"
+            do_poweroff
+        fi
+        sleep "$CHARGEPOLL"
     done
 }
 
@@ -2946,7 +3161,7 @@ golden_main() {
         return 1
     fi
     say "Omarchy for the Galaxy Tab S2, 64 bits: installer $(golden_val release)"
-    log "golden: installer $(golden_val release), bootloader ${SBOOT_VERSION:-not given}"
+    log "golden: installer $(golden_val release), bootloader ${SBOOT_VERSION:-not given}, mode ${SBOOT_MODE:-not given}"
     if ! PARAM_DEV=$(part_dev PARAM); then
         err "golden: no single partition named PARAM"
         FAIL_REASON="The tablet's partitions look unusual (no PARAM). Nothing was written."
@@ -2967,6 +3182,9 @@ golden_main() {
                 golden_reinstall || golden_save_log
                 return 1
             fi
+            # S-Boot's charger mode with the root installed: charge first,
+            # the hand-back only when it does not run or gives up.
+            golden_charge
             log "golden: the loader is in PARAM and USERDATA/$GOLDEN_NAME is installed: the loader handed this start back"
             FAILREBOOT=1
             FAIL_REASON="Omarchy did not finish starting last time. The tablet restarts and tries again."

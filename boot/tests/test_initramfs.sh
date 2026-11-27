@@ -87,6 +87,18 @@
 #     forge).  All the golden fixtures are synthetic, generated on the host
 #     with python3.
 #
+#     The charger mode (androidboot.mode=charger, the loader in PARAM, the
+#     root installed): a fake /sys/class/power_supply tree is built inside
+#     the chroot (a Battery supply and a Mains one), a background writer
+#     changes its capacity and online while the init runs.  Scenarios: the
+#     battery charges up to t715.chargemin and the tablet restarts into
+#     Omarchy (exit 99), the charger is unplugged and the tablet switches
+#     off (exit 96), the battery is already at t715.chargemin (exit 99 at
+#     once), and the three cases where the charger mode does not run (no
+#     androidboot.mode=charger, t715.chargemin=0, no battery): the old
+#     hand-back, nothing written.  Invalid t715.chargemin/t715.chargepoll
+#     values are warned about and ignored, as in the badpath scenario.
+#
 # Usage: bash boot/tests/test_initramfs.sh
 # (internal: --in-container CPIO_GZ, run inside the test container)
 set -euo pipefail
@@ -162,8 +174,15 @@ prepare_boot() {
 }
 # run_init NAME CMDLINE: run the unpacked /init as PID 1 of new PID + mount
 # namespaces, chrooted (output in $W/NAME.log, its exit status returned).
+# T715_TEST_POWER_SUPPLY, when a scenario sets it, is passed through: the
+# init then reads the power supplies of that directory (inside the chroot)
+# instead of /sys/class/power_supply.
 run_init() {
+  local -a ps=()
+  if [[ -n "${T715_TEST_POWER_SUPPLY:-}" ]]; then ps=(T715_TEST_POWER_SUPPLY="$T715_TEST_POWER_SUPPLY"); fi
+  if [[ -n "${T715_TEST_CPU_DIR:-}" ]]; then ps+=(T715_TEST_CPU_DIR="$T715_TEST_CPU_DIR"); fi
   env -i HOME=/ TERM=linux T715_INITRAMFS_TEST=host-test T715_TEST_CMDLINE="$2" \
+    ${ps[@]+"${ps[@]}"} \
     /usr/bin/unshare --pid --mount --propagation private --kill-child \
     /usr/sbin/chroot "$W/root-$1" /init >"$W/$1.log" 2>&1
 }
@@ -483,10 +502,14 @@ scenario_badpath() {
   echo "--- scenario: invalid t715.rootimg"
   prepare_boot badpath
   local rc=0
-  run_init badpath "t715.rootimg=media/../../etc/passwd t715.failwait=1 t715.modblacklist=../x" || rc=$?
+  run_init badpath "t715.rootimg=media/../../etc/passwd t715.failwait=1 t715.modblacklist=../x t715.chargemin=abc t715.chargemin=101 t715.chargepoll=0" || rc=$?
   check "rebooted (exit 99, got $rc)" test "$rc" -eq 99
   check "path refused" log_has badpath "ERROR: invalid t715.rootimg"
   check "invalid t715.modblacklist ignored" log_has badpath "ignoring invalid 't715.modblacklist=../x'"
+  check "invalid t715.chargemin=abc ignored" log_has badpath "ignoring invalid 't715.chargemin=abc'"
+  check "invalid t715.chargemin=101 ignored" log_has badpath "ignoring invalid 't715.chargemin=101'"
+  check "invalid t715.chargepoll=0 ignored" log_has badpath "ignoring invalid 't715.chargepoll=0'"
+  check "chargemin and chargepoll logged at their defaults" log_has badpath "chargemin=10 chargepoll=30s"
   check "USERDATA never mounted" sh -c "! grep -q 'mounted ro,noload' '$W/badpath.log'"
   [[ $rc -eq 99 ]] || show_log badpath
   ip link del usb0 2>/dev/null || true
@@ -1049,6 +1072,54 @@ grun() {
   run_init "$name" "$GOLD_CMD${1:+ $*}" || GRC=$?
 }
 
+# gmake_power NAME [nobattery]: a fake /sys/class/power_supply inside
+# root-NAME's chroot (the init runs chrooted there): battery/ with type
+# Battery, capacity, voltage_now, current_now and temp, and ac/ with type
+# Mains and online (with nobattery, only ac/).  T715_TEST_POWER_SUPPLY points
+# the init at it, as /t715-power inside the chroot.
+gmake_power() {
+  local p="$W/root-$1/t715-power"
+  mkdir -p "$p/ac"
+  echo Mains >"$p/ac/type"
+  echo 1 >"$p/ac/online"
+  echo 450000 >"$p/ac/input_current_limit"
+  # the cores the charger mode takes offline: cpu1..cpu7, online; cpu0 has no file
+  local c
+  for c in 1 2 3 4 5 6 7; do
+    mkdir -p "$W/root-$1/t715-cpu/cpu$c"
+    echo 1 >"$W/root-$1/t715-cpu/cpu$c/online"
+  done
+  mkdir -p "$W/root-$1/t715-cpu/cpu0"
+  T715_TEST_CPU_DIR=/t715-cpu
+  if [[ ${2:-} != nobattery ]]; then
+    mkdir -p "$p/battery"
+    echo Battery >"$p/battery/type"
+    echo 4 >"$p/battery/capacity"
+    echo 4000000 >"$p/battery/voltage_now"
+    echo 500000 >"$p/battery/current_now"
+    echo 300 >"$p/battery/temp"
+  fi
+  T715_TEST_POWER_SUPPLY=/t715-power
+}
+# gpower_write NAME SUPPLY/FIELD VALUE: change one file of the fake tree of
+# root-NAME (from the host side; the init sees the same tmpfs).
+gpower_write() { printf '%s\n' "$3" >"$W/root-$1/t715-power/$2"; }
+# gpower_writer NAME SNIPPET: run SNIPPET in the background while the init
+# runs, so it can change the fake tree (the snippet uses gpower_write and
+# log_has); its PID lands in GPOWER_PID.  gpower_stop kills it at the end of
+# the scenario.
+gpower_writer() {
+  ( set +e; eval "$2" ) &
+  GPOWER_PID=$!
+}
+gpower_stop() {
+  if [[ -n "${GPOWER_PID:-}" ]]; then
+    kill "$GPOWER_PID" 2>/dev/null || true
+    wait "$GPOWER_PID" 2>/dev/null || true
+  fi
+  GPOWER_PID=
+}
+
 # scenario 11 first: it needs no disk, only the golden initramfs' functions.
 # gcheck_nothing_written BEFORE AFTER: the refusal wrote nothing.
 gcheck_nothing_written() {
@@ -1217,6 +1288,189 @@ scenario_golden_handback() {
   check "rebooting-in-N said on screen" log_has ghand "t715-say: rebooting in 2 seconds"
   gcheck_nothing_written "$before" "$after"
   [[ $rc -eq 99 ]] || show_log ghand
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+# The charger mode (androidboot.mode=charger, the loader in PARAM, the root
+# installed): the six scenarios below.  Each plants the same state as
+# scenario_golden_handback, builds a fake power-supply tree in the chroot
+# (gmake_power) and, when the level or the charger must change while the
+# init runs, a background writer (gpower_writer).
+
+scenario_golden_charge_up() {
+  echo "--- scenario: golden, charger mode, the battery charges from 4 % up to t715.chargemin (exit 99)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gchg
+  gmake_power gchg
+  # the capacity rises once the init has shown its first read
+  # shellcheck disable=SC2016  # expanded by eval in the writer's subshell
+  gpower_writer gchg '
+    gpower_write gchg battery/capacity 4
+    for i in $(seq 1 120); do log_has gchg "Charging: 4 %" && break; sleep 0.5; done
+    for c in 6 8 12; do gpower_write gchg battery/capacity "$c"; sleep 2; done
+    gpower_write gchg battery/capacity 12
+    sleep 120
+  '
+  GRC=0
+  run_init gchg "$GOLD_CMD androidboot.mode=charger t715.chargepoll=1" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart into Omarchy once charged (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged: the mode next to the bootloader" log_has gchg "bootloader T715XXU2CRH1, mode charger"
+  check "knobs logged with chargemin and chargepoll" log_has gchg "chargemin=10 chargepoll=1s"
+  check "logged: the charge loop starts at 4 %" log_has gchg "golden: charger mode: charging from 4 % up to 10 % (t715.chargemin), a read every 1 s (t715.chargepoll)"
+  check "said on screen: Charging: 4 %" log_has gchg "t715-say: Charging: 4 %"
+  check "said on screen: Unplug the charger to switch off." log_has gchg "t715-say: Unplug the charger to switch off."
+  check "each read logged with the battery's values" log_has gchg "capacity 4 %, voltage 4000000 uV, current 500000 uA, temp 300 tenths of a degree, input limit 450000 uA, charger online 1"
+  check "said on screen: the current, the temperature and the charger's limit" log_has gchg "t715-say: Battery: 500 mA, 30.0 C. Charger limit: 450 mA."
+  check "logged: cores 1 to 7 taken offline" log_has gchg "golden: charger mode: 7 core(s) taken offline, cpu0 charges alone"
+  check "cores 1 to 7 are offline" sh -c "for c in 1 2 3 4 5 6 7; do [ \"\$(cat '$W/root-gchg/t715-cpu/cpu'\$c/online)\" = 0 ] || exit 1; done"
+  check "said on screen: Charged to 12 %" log_has gchg "t715-say: Charged to 12 %: starting Omarchy."
+  check "no hand-back text" sh -c "! grep -q 'did not finish starting last time' '$W/gchg.log'"
+  check "no failwait" sh -c "! grep -q 'rebooting in' '$W/gchg.log'"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log gchg
+  gpower_stop
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_charge_unplug() {
+  echo "--- scenario: golden, charger mode, the charger is unplugged (exit 96)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gplug
+  gmake_power gplug
+  # the charger goes offline once the init has shown its first read
+  # shellcheck disable=SC2016  # expanded by eval in the writer's subshell
+  gpower_writer gplug '
+    for i in $(seq 1 120); do log_has gplug "Charging: 4 %" && break; sleep 0.5; done
+    gpower_write gplug ac/online 0
+    sleep 120
+  '
+  GRC=0
+  run_init gplug "$GOLD_CMD androidboot.mode=charger t715.chargepoll=1" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "switch off (exit 96, got $rc)" test "$rc" -eq 96
+  check "said on screen: Charging: 4 %" log_has gplug "t715-say: Charging: 4 %"
+  check "the offline reads logged" log_has gplug "charger online 0"
+  check "said on screen: Charger unplugged: switching off." log_has gplug "t715-say: Charger unplugged: switching off."
+  check "poweroff logged" log_has gplug "switching off (poweroff -f)"
+  check "no hand-back text" sh -c "! grep -q 'did not finish starting last time' '$W/gplug.log'"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 96 ]] || show_log gplug
+  gpower_stop
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_charge_full() {
+  echo "--- scenario: golden, charger mode, the battery is already at t715.chargemin (exit 99 at once)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gfull
+  gmake_power gfull
+  gpower_write gfull battery/capacity 50
+  GRC=0
+  run_init gfull "$GOLD_CMD androidboot.mode=charger" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart into Omarchy at once (exit 99, got $rc)" test "$rc" -eq 99
+  check "said on screen: Battery at 50 %, charger connected: starting Omarchy." \
+    log_has gfull "t715-say: Battery at 50 %, charger connected: starting Omarchy."
+  check "no charge loop" sh -c "! grep -q 'Charging:' '$W/gfull.log'"
+  check "no hand-back text" sh -c "! grep -q 'did not finish starting last time' '$W/gfull.log'"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log gfull
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_charge_mode_off() {
+  echo "--- scenario: golden, the loader's hand-back without androidboot.mode=charger (exit 99 after t715.failwait)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gnocharger
+  gmake_power gnocharger
+  GRC=0
+  run_init gnocharger "$GOLD_CMD t715.chargepoll=1" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged why the charger mode was skipped" log_has gnocharger "androidboot.mode is 'not given', not charger: no charging here"
+  check "logged: the loader handed this start back" log_has gnocharger "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "said on screen: did not finish starting last time" log_has gnocharger "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
+  check "rebooting-in-N said on screen" log_has gnocharger "t715-say: rebooting in 2 seconds"
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log gnocharger
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_charge_min_off() {
+  echo "--- scenario: golden, charger mode with t715.chargemin=0: the old hand-back (exit 99 after t715.failwait)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gcm0
+  gmake_power gcm0
+  GRC=0
+  run_init gcm0 "$GOLD_CMD androidboot.mode=charger t715.chargemin=0" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "knobs logged with chargemin=0" log_has gcm0 "chargemin=0 chargepoll=30s"
+  check "logged why the charger mode was skipped" log_has gcm0 "golden: t715.chargemin=0, the charger mode is off"
+  check "logged: the loader handed this start back" log_has gcm0 "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "said on screen: did not finish starting last time" log_has gcm0 "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log gcm0
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
+  detach_inner_loops
+  ip link del usb0 2>/dev/null || true
+}
+
+scenario_golden_charge_nobattery() {
+  echo "--- scenario: golden, charger mode with no battery in the power supplies: the old hand-back (exit 99 after t715.failwait)"
+  greset_all
+  gplant_root golden
+  gset_param "$GF/param-loader.img"
+  local before after
+  before=$(gdisk_sums)
+  prepare_golden_boot gnobat
+  gmake_power gnobat nobattery
+  GRC=0
+  run_init gnobat "$GOLD_CMD androidboot.mode=charger" || GRC=$?
+  local rc=$GRC
+  after=$(gdisk_sums)
+  check "restart after t715.failwait (exit 99, got $rc)" test "$rc" -eq 99
+  check "logged why the charger mode was skipped" log_has gnobat "no battery capacity can be read in /t715-power: no charging here"
+  check "logged: the loader handed this start back" log_has gnobat "the loader is in PARAM and USERDATA/omarchy-arm64 is installed: the loader handed this start back"
+  check "said on screen: did not finish starting last time" log_has gnobat "t715-say: Omarchy did not finish starting last time. The tablet restarts and tries again."
+  gcheck_nothing_written "$before" "$after"
+  [[ $rc -eq 99 ]] || show_log gnobat
+  unset T715_TEST_POWER_SUPPLY T715_TEST_CPU_DIR
   detach_inner_loops
   ip link del usb0 2>/dev/null || true
 }
@@ -2361,6 +2615,12 @@ in_container() {
   scenario_golden_fresh
   scenario_golden_resume
   scenario_golden_handback
+  scenario_golden_charge_up
+  scenario_golden_charge_unplug
+  scenario_golden_charge_full
+  scenario_golden_charge_mode_off
+  scenario_golden_charge_min_off
+  scenario_golden_charge_nobattery
   scenario_golden_rescue
   scenario_golden_unknown_param
   scenario_golden_param_tail
