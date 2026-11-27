@@ -353,8 +353,10 @@ bash "$ROOT/image/tools/pack-odin" --out "$REL/omarchy-tab-s2-$VERSION-AP.tar.md
   echo "== The installer (boot.img, recovery.img)"
   echo "  32-bit kernel: $(basename "$IKERNEL"), zImage sha256 $(sha "$IKERNEL/zImage")"
   grep -h '^>>> init sha256' "$WORK/initramfs.log" | sed 's/^>>> /  initramfs: /'
-  echo "  loader: boot/golden (bootloader $(cat "$ROOT/boot/golden/bootloader"), PARAM's first $(cat "$ROOT/boot/golden/extent") bytes:"
-  echo "    stock $(cat "$ROOT/boot/golden/stock.sha256"), loader $(cat "$ROOT/boot/golden/loader.sha256"))"
+  echo "  loader: boot/golden (bootloader $(cat "$ROOT/boot/golden/bootloader"), PARAM's first $(cat "$ROOT/boot/golden/extent") bytes),"
+  echo "  one pair per stock PARAM the installer knows (stock.sha256 and loader.sha256, line by line):"
+  paste -d '\n' <(grep -v '^[[:space:]]*$' "$ROOT/boot/golden/stock.sha256" | sed 's/^/    stock  /') \
+    <(grep -v '^[[:space:]]*$' "$ROOT/boot/golden/loader.sha256" | sed 's/^/    loader /')
   [[ -z "$IKNOBS" ]] || echo "  TEST KNOBS ADDED: $IKNOBS (not a release to publish)"
   echo
   cat "$WORK/build-part.txt"
